@@ -25,7 +25,7 @@ CI is configured to run tests/linting on macOS, Linux, and Windows.
 
 This crate does **not** perform semantic mining/retrieval scoring by itself; instead, it gives you deterministic, metadata-driven sampling primitives you can feed into your downstream mining/retrieval stack.
 
-### Metadata-driven use (how to use it)
+### Metadata-driven sampling flow
 
 Use `triplets` to build deterministic training batches that carry metadata context:
 
@@ -36,7 +36,7 @@ Use `triplets` to build deterministic training batches that carry metadata conte
 
 This gives you metadata-aware sampling orchestration, while semantic retrieval/mining logic stays in your downstream pipeline.
 
-### KVP data decorator (how it works)
+### KVP data decorator
 
 - Each `DataRecord` can carry an optional `meta_prefix` sampler (`KvpPrefixSampler`).
 - At sample time, the sampler can prepend a header line to chunk text, formatted like: `meta: key=value | key2=value2`.
