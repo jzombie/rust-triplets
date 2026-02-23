@@ -10,29 +10,38 @@ Composable Rust crate for deterministic multi-source sampling and split persiste
 
 CI is configured to run tests/linting on macOS, Linux, and Windows.
 
-## At a glance
+## High-level features
 
-`triplets` is for building reproducible ML/AI training batches from multiple data sources.
+- **Automatic deterministic splits** (train/validation/test) from record IDs + seed.
+- **Runtime batch sampling** via `next_triplet_batch`, `next_pair_batch`, and `next_text_batch`.
+- **Resume support** via `persist_state()` and split-store persistence.
+- **Source-agnostic backends** (`DataSource` or `IndexableSource` + `IndexableAdapter`).
+- **Bounded ingestion** windows instead of loading full corpora into memory.
+- **Per-call source threading**: during refresh, each source is fetched on its own short-lived thread, then merged deterministically for batch assembly.
+- **Streaming-friendly**: sources can be finite or unbounded.
 
-Compared with a static prebuilt dataset, it lets you sample at runtime while preserving deterministic behavior.
+This crate does **not** perform semantic mining/retrieval scoring by itself; instead, it gives you deterministic, metadata-driven sampling primitives you can feed into your downstream mining/retrieval stack.
 
-Threading model: source refresh work is parallelized per sampling call, while batch assembly remains serialized and deterministic.
+### Metadata-driven use (how to use it)
 
-## Core capabilities
+Use `triplets` to build deterministic training batches that carry metadata context:
 
-- **Source-agnostic sampling:** implement `DataSource` for filesystem, APIs, DBs, streams, etc.
-- **Runtime example generation:** produce triplet/pair/text batches from recipe selectors.
-- **Deterministic split assignment:** stable train/validation/test assignment from record IDs + seed.
-- **Resume support:** persist sampler/split state and continue after restart.
-- **Bounded ingestion:** refresh in controlled windows instead of loading full corpora into memory.
-- **Per-source progression:** each source has its own cursor; sources do not need to advance in lockstep.
-- **Per-call concurrency:** source refreshes run in parallel within a sampling call, then merge before batch assembly.
+- Put structural tags in `DataRecord.taxonomy` (source/date/category/etc.) for filtering and analysis.
+- Use recipes/selectors to choose which sections become anchor/positive/negative text.
+- Attach optional KVP metadata prefixes (below) so sampled text can include lightweight context headers.
+- Keep split assignment deterministic while changing recipe or weighting behavior at runtime.
 
-## Not included
+This gives you metadata-aware sampling orchestration, while semantic retrieval/mining logic stays in your downstream pipeline.
 
-- This crate does **not** do semantic mining/retrieval scoring by itself.
-- This crate does **not** guarantee semantic hardness beyond your recipes and source metadata design.
-- Sources can be finite or unbounded; infinite streaming is supported but not required.
+### KVP data decorator (how it works)
+
+- Each `DataRecord` can carry an optional `meta_prefix` sampler (`KvpPrefixSampler`).
+- At sample time, the sampler can prepend a header line to chunk text, formatted like: `meta: key=value | key2=value2`.
+- `KvpField` supports multiple value renderings per key and optional per-field presence probability.
+- `KvpPrefixSampler` supports variant selection and overall dropout (emit prefix sometimes, or always).
+- This is designed to give the model useful context signals (date/source/category/etc.) without making a single rigid header pattern easy to memorize.
+- Multi-render values, per-field presence control, field-order variation, and prefix dropout reduce shortcut learning and encourage reliance on the underlying content.
+- KVP prefixes decorate sampled text; they do not change deterministic split assignment.
 
 ## Getting started
 
