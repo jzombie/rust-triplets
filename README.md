@@ -286,8 +286,8 @@ See [LICENSE-APACHE](./LICENSE-APACHE) and [LICENSE-MIT](./LICENSE-MIT) for deta
 [rust-src-page]: https://www.rust-lang.org/
 [rust-logo]: https://img.shields.io/badge/Made%20with-Rust-black
 
-[crates-page]: https://crates.io/crates/rust-triplets
-[crates-badge]: https://img.shields.io/crates/v/rust-triplets.svg
+[crates-page]: https://crates.io/crates/triplets
+[crates-badge]: https://img.shields.io/crates/v/triplets.svg
 
 [mit-license-page]: ./LICENSE-MIT
 [mit-license-badge]: https://img.shields.io/badge/license-MIT-blue.svg
