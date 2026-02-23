@@ -1025,7 +1025,12 @@ mod tests {
         let loaded_meta = store.load_epoch_meta().unwrap();
         assert_eq!(loaded_meta.get(&SplitLabel::Test).unwrap().offset, 2);
 
-        assert!(store.load_epoch_hashes(SplitLabel::Train).unwrap().is_none());
+        assert!(
+            store
+                .load_epoch_hashes(SplitLabel::Train)
+                .unwrap()
+                .is_none()
+        );
         store
             .store_epoch_hashes(
                 SplitLabel::Train,
