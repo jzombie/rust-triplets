@@ -24,6 +24,7 @@ use crate::{
 type DynSource = Box<dyn DataSource + 'static>;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
+/// CLI split selector mapped onto `SplitLabel`.
 enum SplitArg {
     Train,
     Validation,
@@ -48,6 +49,7 @@ impl From<SplitArg> for SplitLabel {
     long_about = "Estimate record, pair, triplet, and text-sample capacity using source-reported counts only (no data refresh).",
     after_help = "Source roots are optional and resolved in order by explicit arg, environment variables, then project defaults."
 )]
+/// CLI arguments for metadata-only capacity estimation.
 struct EstimateCapacityCli {
     #[arg(
         long,
@@ -135,6 +137,7 @@ struct MultiSourceDemoCli {
 }
 
 #[derive(Debug, Clone)]
+/// Source-level inventory used by capacity estimation output.
 struct SourceInventory {
     source_id: String,
     reported_records: u128,
@@ -830,6 +833,7 @@ mod tests {
     use crate::source::{SourceCursor, SourceSnapshot};
     use chrono::Utc;
 
+    /// Minimal in-memory `DataSource` test double for example app tests.
     struct TestSource {
         id: String,
         count: Option<u128>,

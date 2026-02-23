@@ -337,6 +337,7 @@ mod tests {
     use crate::data::{QualityScore, RecordSection, SectionRole};
     use crate::types::RecordId;
 
+    /// Minimal `IndexableSource` test fixture.
     struct IndexableStub {
         id: SourceId,
         count: usize,

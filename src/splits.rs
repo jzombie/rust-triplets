@@ -276,6 +276,7 @@ impl SamplerStateStore for DeterministicSplitStore {
 }
 
 #[derive(Clone, Copy, Debug, bitcode::Encode, bitcode::Decode)]
+/// Versioned metadata header persisted in file-backed split stores.
 struct StoreMeta {
     version: u8,
     seed: u64,

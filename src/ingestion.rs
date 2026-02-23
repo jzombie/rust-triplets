@@ -18,6 +18,7 @@ pub struct RecordCache {
     notifier: Arc<(Mutex<CacheStats>, Condvar)>,
 }
 
+/// Internal mutable cache storage guarded by `RecordCache` locks.
 struct RecordCacheInner {
     records: IndexMap<RecordId, CachedRecord>,
     order: VecDeque<RecordId>,
@@ -25,12 +26,14 @@ struct RecordCacheInner {
     next_version: u64,
 }
 
+/// Internal cache entry with monotonic version tracking.
 struct CachedRecord {
     record: DataRecord,
     version: u64,
 }
 
 #[derive(Default)]
+/// Internal ingest notification counters.
 struct CacheStats {
     ingests: u64,
 }
@@ -524,6 +527,7 @@ impl IngestionManager {
     }
 }
 
+/// Per-source ingestion runtime state.
 struct SourceState {
     source: Box<dyn DataSource + 'static>,
     cursor: Option<SourceCursor>,

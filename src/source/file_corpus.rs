@@ -23,6 +23,7 @@ use tracing::{debug, warn};
 use walkdir::WalkDir;
 
 #[derive(bitcode::Encode, bitcode::Decode)]
+/// Persisted metadata for the temporary file index store.
 struct FileIndexMeta {
     root: String,
     follow_links: bool,
