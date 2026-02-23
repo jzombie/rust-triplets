@@ -123,7 +123,7 @@ Step-by-step:
 1. Build config + open the split store.
 2. Register sources.
 3. Call one of **`sampler.next_triplet_batch(split)`**, **`sampler.next_pair_batch(split)`**, or **`sampler.next_text_batch(split)`**.
-4. Call **`sampler.persist_state()`** when you want to save progress (typically at the end of an epoch, or at explicit checkpoint boundaries).
+4. Call **`sampler.persist_state()`** when you want to write persisted sampler/split state (typically at the end of an epoch or at explicit checkpoint boundaries). **Do not call this every step.** Very frequent writes can create high I/O overhead and, at very large write counts (for example, tens of millions), can also adversely affect split-store initialization time.
 5. Optionally call **`sampler.set_epoch(n)`** for explicit epoch replay/order.
 
 Operational notes:
