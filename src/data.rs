@@ -204,3 +204,104 @@ impl TextBatch {
         self.samples.is_empty()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+
+    fn sample_chunk(id: &str) -> RecordChunk {
+        RecordChunk {
+            record_id: id.to_string(),
+            section_idx: 0,
+            view: ChunkView::SummaryFallback {
+                strategy: "test".to_string(),
+                weight: 1.0,
+            },
+            text: "text".to_string(),
+            tokens_estimate: 4,
+            quality: QualityScore::default(),
+        }
+    }
+
+    #[test]
+    fn quality_score_defaults_to_full_trust() {
+        let quality = QualityScore::default();
+        assert!((quality.trust - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn batch_is_empty_helpers_match_contents() {
+        let empty_pairs = SampleBatch { pairs: Vec::new() };
+        assert!(empty_pairs.is_empty());
+
+        let non_empty_pairs = SampleBatch {
+            pairs: vec![SamplePair {
+                recipe: "r".to_string(),
+                anchor: sample_chunk("a"),
+                positive: sample_chunk("b"),
+                weight: 1.0,
+                instruction: None,
+                label: PairLabel::Positive,
+                reason: Some("test".to_string()),
+            }],
+        };
+        assert!(!non_empty_pairs.is_empty());
+
+        let empty_triplets = TripletBatch {
+            triplets: Vec::new(),
+        };
+        assert!(empty_triplets.is_empty());
+
+        let non_empty_triplets = TripletBatch {
+            triplets: vec![SampleTriplet {
+                recipe: "r".to_string(),
+                anchor: sample_chunk("a"),
+                positive: sample_chunk("b"),
+                negative: sample_chunk("c"),
+                weight: 1.0,
+                instruction: Some("hint".to_string()),
+            }],
+        };
+        assert!(!non_empty_triplets.is_empty());
+
+        let empty_text = TextBatch {
+            samples: Vec::new(),
+        };
+        assert!(empty_text.is_empty());
+
+        let non_empty_text = TextBatch {
+            samples: vec![TextSample {
+                recipe: "r".to_string(),
+                chunk: sample_chunk("t"),
+                weight: 1.0,
+                instruction: None,
+            }],
+        };
+        assert!(!non_empty_text.is_empty());
+    }
+
+    #[test]
+    fn data_record_roundtrip_basics_are_constructible() {
+        let now = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let record = DataRecord {
+            id: "source_a::1".to_string(),
+            source: "source_a".to_string(),
+            created_at: now,
+            updated_at: now,
+            quality: QualityScore { trust: 0.9 },
+            taxonomy: vec!["topic:news".to_string()],
+            sections: vec![RecordSection {
+                role: SectionRole::Anchor,
+                heading: Some("headline".to_string()),
+                text: "body".to_string(),
+                sentences: vec!["body".to_string()],
+            }],
+            meta_prefix: None,
+        };
+
+        assert_eq!(record.source, "source_a");
+        assert_eq!(record.sections.len(), 1);
+        assert!(matches!(record.sections[0].role, SectionRole::Anchor));
+    }
+}

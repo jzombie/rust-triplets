@@ -829,6 +829,7 @@ fn extract_source(record_id: &str) -> SourceId {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DeterministicSplitStore;
     use crate::data::SectionRole;
     use crate::source::{SourceCursor, SourceSnapshot};
     use chrono::Utc;
@@ -1001,5 +1002,96 @@ mod tests {
 
             assert!(result.is_ok());
         }
+    }
+
+    #[test]
+    fn print_helpers_and_extract_source_cover_paths() {
+        let split = SplitRatios::default();
+        let store = DeterministicSplitStore::new(split, 42).unwrap();
+        let strategy = ChunkingStrategy::default();
+
+        let anchor = RecordChunk {
+            record_id: "source_a::rec1".to_string(),
+            section_idx: 0,
+            view: ChunkView::Window {
+                index: 1,
+                overlap: 2,
+                span: 12,
+                start_ratio: 0.25,
+            },
+            text: "anchor text".to_string(),
+            tokens_estimate: 8,
+            quality: crate::data::QualityScore { trust: 0.9 },
+        };
+        let positive = RecordChunk {
+            record_id: "source_a::rec2".to_string(),
+            section_idx: 1,
+            view: ChunkView::SummaryFallback {
+                strategy: "summary".to_string(),
+                weight: 0.7,
+            },
+            text: "positive text".to_string(),
+            tokens_estimate: 6,
+            quality: crate::data::QualityScore { trust: 0.8 },
+        };
+        let negative = RecordChunk {
+            record_id: "source_b::rec3".to_string(),
+            section_idx: 2,
+            view: ChunkView::Window {
+                index: 0,
+                overlap: 0,
+                span: 16,
+                start_ratio: 0.0,
+            },
+            text: "negative text".to_string(),
+            tokens_estimate: 7,
+            quality: crate::data::QualityScore { trust: 0.5 },
+        };
+
+        let triplet_batch = TripletBatch {
+            triplets: vec![crate::SampleTriplet {
+                recipe: "triplet_recipe".to_string(),
+                anchor: anchor.clone(),
+                positive: positive.clone(),
+                negative: negative.clone(),
+                weight: 1.0,
+                instruction: Some("triplet instruction".to_string()),
+            }],
+        };
+        print_triplet_batch(&strategy, &triplet_batch, &store);
+
+        let pair_batch = SampleBatch {
+            pairs: vec![crate::SamplePair {
+                recipe: "pair_recipe".to_string(),
+                anchor: anchor.clone(),
+                positive: positive.clone(),
+                weight: 1.0,
+                instruction: None,
+                label: crate::PairLabel::Positive,
+                reason: Some("same topic".to_string()),
+            }],
+        };
+        print_pair_batch(&strategy, &pair_batch, &store);
+
+        let text_batch = TextBatch {
+            samples: vec![crate::TextSample {
+                recipe: "text_recipe".to_string(),
+                chunk: negative,
+                weight: 0.8,
+                instruction: Some("text instruction".to_string()),
+            }],
+        };
+        print_text_batch(&strategy, &text_batch, &store);
+
+        let recipes = vec![TextRecipe {
+            name: "recipe_name".into(),
+            selector: crate::config::Selector::Role(SectionRole::Context),
+            instruction: Some("instruction".into()),
+            weight: 1.0,
+        }];
+        print_text_recipes(&recipes);
+
+        assert_eq!(extract_source("source_a::record"), "source_a");
+        assert_eq!(extract_source("record-without-delimiter"), "unknown");
     }
 }

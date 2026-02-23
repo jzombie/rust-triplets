@@ -74,4 +74,13 @@ mod tests {
         uniq.dedup();
         assert_eq!(uniq.len(), values.len());
     }
+
+    #[test]
+    fn metadata_key_new_and_as_str_work() {
+        const CUSTOM: MetadataKey = MetadataKey::new("custom");
+        assert_eq!(CUSTOM.as_str(), "custom");
+        assert_eq!(CUSTOM.encode(42), "custom=42");
+        assert_eq!(CUSTOM.strip("custom=42"), Some("42"));
+        assert_eq!(CUSTOM.strip("custom42"), None);
+    }
 }

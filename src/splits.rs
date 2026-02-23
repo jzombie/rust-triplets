@@ -863,4 +863,212 @@ mod tests {
             vec![("source_a".to_string(), 9)]
         );
     }
+
+    #[test]
+    fn split_keys_and_labels_cover_helper_paths() {
+        let key = split_key(&"abc".to_string());
+        assert!(key.starts_with(SPLIT_PREFIX));
+
+        assert!(matches!(decode_label(b"0"), Ok(SplitLabel::Train)));
+        assert!(matches!(decode_label(b"1"), Ok(SplitLabel::Validation)));
+        assert!(matches!(decode_label(b"2"), Ok(SplitLabel::Test)));
+        assert!(decode_label(b"x").is_err());
+
+        let epoch_meta_train = epoch_meta_key(SplitLabel::Train);
+        let epoch_hashes_test = epoch_hashes_key(SplitLabel::Test);
+        assert!(epoch_meta_train.starts_with(EPOCH_META_PREFIX));
+        assert!(epoch_hashes_test.starts_with(EPOCH_HASHES_PREFIX));
+    }
+
+    #[test]
+    fn encode_decode_store_meta_roundtrip_and_corrupt_prefix_error() {
+        let meta = StoreMeta {
+            version: STORE_VERSION,
+            seed: 55,
+            ratios: SplitRatios::default(),
+        };
+        let encoded = encode_store_meta(&meta);
+        let decoded = decode_store_meta(&encoded).unwrap();
+        assert_eq!(decoded.version, STORE_VERSION);
+        assert_eq!(decoded.seed, 55);
+
+        let err = decode_store_meta(&[0x00, 0x01]).unwrap_err();
+        assert!(matches!(
+            err,
+            SamplerError::SplitStore(msg) if msg.contains("missing expected prefix")
+        ));
+    }
+
+    #[test]
+    fn epoch_and_sampler_decoders_cover_tombstone_and_version_mismatch() {
+        assert!(decode_epoch_meta(&[]).unwrap().is_none());
+        assert!(
+            decode_epoch_meta(&[EPOCH_RECORD_TOMBSTONE])
+                .unwrap()
+                .is_none()
+        );
+        assert!(decode_epoch_hashes(&[]).unwrap().is_none());
+        assert!(
+            decode_epoch_hashes(&[EPOCH_RECORD_TOMBSTONE])
+                .unwrap()
+                .is_none()
+        );
+        assert!(decode_sampler_state(&[]).unwrap().is_none());
+
+        let meta_mismatch = decode_epoch_meta(&[EPOCH_META_RECORD_VERSION.wrapping_add(1), 1]);
+        assert!(matches!(
+            meta_mismatch,
+            Err(SamplerError::SplitStore(msg)) if msg.contains("version mismatch")
+        ));
+        let hashes_mismatch = decode_epoch_hashes(&[EPOCH_HASH_RECORD_VERSION.wrapping_add(1), 1]);
+        assert!(matches!(
+            hashes_mismatch,
+            Err(SamplerError::SplitStore(msg)) if msg.contains("version mismatch")
+        ));
+        let state_mismatch =
+            decode_sampler_state(&[SAMPLER_STATE_RECORD_VERSION.wrapping_add(1), 1]);
+        assert!(matches!(
+            state_mismatch,
+            Err(SamplerError::SplitStore(msg)) if msg.contains("version mismatch")
+        ));
+    }
+
+    #[test]
+    fn split_store_trait_methods_and_path_helpers_are_exercised() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("nested").join("store.bin");
+        ensure_parent_dir(&file_path).unwrap();
+        assert!(file_path.parent().unwrap().exists());
+
+        let existing_dir_path = coerce_store_path(dir.path().to_path_buf());
+        assert_eq!(existing_dir_path, dir.path().join(DEFAULT_STORE_FILENAME));
+
+        let ratios = SplitRatios::default();
+        let store = FileSplitStore::open(&file_path, ratios, 444).unwrap();
+        assert!((store.ratios().train - ratios.train).abs() < 1e-6);
+        store
+            .upsert("record_1".to_string(), SplitLabel::Validation)
+            .unwrap();
+        let ensured = store.ensure("record_1".to_string()).unwrap();
+        assert!(matches!(
+            ensured,
+            SplitLabel::Train | SplitLabel::Validation | SplitLabel::Test
+        ));
+
+        let mapped = map_store_err(io::Error::new(io::ErrorKind::Other, "boom"));
+        assert!(matches!(mapped, SamplerError::SplitStore(msg) if msg.contains("boom")));
+    }
+
+    #[test]
+    fn epoch_and_sampler_encode_decode_roundtrips() {
+        let meta = PersistedSplitMeta {
+            epoch: 4,
+            offset: 9,
+            hashes_checksum: 21,
+        };
+        let encoded_meta = encode_epoch_meta(Some(&meta));
+        let decoded_meta = decode_epoch_meta(&encoded_meta).unwrap().unwrap();
+        assert_eq!(decoded_meta.epoch, 4);
+        assert_eq!(decoded_meta.offset, 9);
+
+        let hashes = PersistedSplitHashes {
+            checksum: 7,
+            hashes: vec![1, 2, 3],
+        };
+        let encoded_hashes = encode_epoch_hashes(&hashes);
+        let decoded_hashes = decode_epoch_hashes(&encoded_hashes).unwrap().unwrap();
+        assert_eq!(decoded_hashes.checksum, 7);
+        assert_eq!(decoded_hashes.hashes, vec![1, 2, 3]);
+
+        let state = PersistedSamplerState {
+            source_cycle_idx: 1,
+            source_record_cursors: vec![("s".to_string(), 2)],
+            source_epoch: 3,
+            rng_state: 4,
+            triplet_recipe_rr_idx: 5,
+            text_recipe_rr_idx: 6,
+            source_stream_cursors: vec![("s".to_string(), 7)],
+        };
+        let encoded_state = encode_sampler_state(&state);
+        let decoded_state = decode_sampler_state(&encoded_state).unwrap().unwrap();
+        assert_eq!(decoded_state.source_cycle_idx, 1);
+        assert_eq!(decoded_state.source_epoch, 3);
+        assert_eq!(decoded_state.rng_state, 4);
+    }
+
+    #[test]
+    fn deterministic_store_trait_methods_and_default_paths_work() {
+        let ratios = SplitRatios::default();
+        let store = DeterministicSplitStore::new(ratios, 999).unwrap();
+
+        assert_eq!(store.ratios().train, ratios.train);
+
+        let id = "source::record".to_string();
+        let derived = store.label_for(&id).unwrap();
+        store.upsert(id.clone(), SplitLabel::Validation).unwrap();
+        assert_eq!(store.label_for(&id), Some(SplitLabel::Validation));
+        assert!(matches!(
+            derived,
+            SplitLabel::Train | SplitLabel::Validation | SplitLabel::Test
+        ));
+
+        let mut meta = HashMap::new();
+        meta.insert(
+            SplitLabel::Test,
+            PersistedSplitMeta {
+                epoch: 1,
+                offset: 2,
+                hashes_checksum: 3,
+            },
+        );
+        store.store_epoch_meta(&meta).unwrap();
+        let loaded_meta = store.load_epoch_meta().unwrap();
+        assert_eq!(loaded_meta.get(&SplitLabel::Test).unwrap().offset, 2);
+
+        assert!(store.load_epoch_hashes(SplitLabel::Train).unwrap().is_none());
+        store
+            .store_epoch_hashes(
+                SplitLabel::Train,
+                &PersistedSplitHashes {
+                    checksum: 11,
+                    hashes: vec![4, 5],
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .load_epoch_hashes(SplitLabel::Train)
+                .unwrap()
+                .unwrap()
+                .checksum,
+            11
+        );
+
+        assert!(store.load_sampler_state().unwrap().is_none());
+        let sampler_state = PersistedSamplerState {
+            source_cycle_idx: 1,
+            source_record_cursors: vec![("s1".to_string(), 2)],
+            source_epoch: 3,
+            rng_state: 4,
+            triplet_recipe_rr_idx: 5,
+            text_recipe_rr_idx: 6,
+            source_stream_cursors: vec![("s1".to_string(), 7)],
+        };
+        store.store_sampler_state(&sampler_state).unwrap();
+        assert_eq!(
+            store.load_sampler_state().unwrap().unwrap().source_epoch,
+            sampler_state.source_epoch
+        );
+
+        let in_dir = FileSplitStore::default_path_in_dir("tmp-test-store");
+        assert_eq!(
+            in_dir.file_name().and_then(|name| name.to_str()),
+            Some(DEFAULT_STORE_FILENAME)
+        );
+        let default_path = FileSplitStore::default_path();
+        assert_eq!(
+            default_path.file_name().and_then(|name| name.to_str()),
+            Some(DEFAULT_STORE_FILENAME)
+        );
+    }
 }
