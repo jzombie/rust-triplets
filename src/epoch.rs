@@ -7,6 +7,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 #[derive(Debug, Default)]
+/// Per-split epoch cursor state used by `EpochTracker`.
 struct SplitEpochState {
     epoch: u64,
     /// Vector of (RecordId, SourceId) tuples. SourceId is used for interleaved sorting.

@@ -33,6 +33,7 @@ use crate::splits::{
 use crate::types::{RecipeKey, RecordId, SourceId};
 
 #[derive(Debug, Clone)]
+/// Small deterministic RNG used for reproducible sampler behavior.
 struct DeterministicRng {
     state: u64,
 }
@@ -100,6 +101,7 @@ pub fn chunk_weight(strategy: &ChunkingStrategy, chunk: &RecordChunk) -> f32 {
     (base * trust).max(floor)
 }
 
+/// Public sampling interface for pair, triplet, and text batch generation.
 pub trait Sampler {
     /// Returns a batch of pairs. Consumes the shared epoch cursor for anchor selection.
     fn next_pair_batch(&self, split: SplitLabel) -> Result<SampleBatch, SamplerError> {
@@ -141,6 +143,7 @@ pub struct BatchPrefetcher<T> {
 }
 
 #[derive(Default)]
+/// Prefetcher runtime counters.
 struct PrefetcherStats {
     queued: AtomicUsize,
     produced: AtomicUsize,
@@ -230,6 +233,7 @@ pub struct PairSampler<S: SplitStore + EpochStateStore + SamplerStateStore + 'st
     inner: Mutex<PairSamplerInner<S>>,
 }
 
+/// Internal sampler state implementation guarded by `PairSampler`.
 struct PairSamplerInner<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> {
     /// Immutable sampler configuration (seed, batch size, recipes, splits, etc.).
     config: SamplerConfig,
@@ -1807,6 +1811,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> PairSamplerI
 }
 
 impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> PairSampler<S> {
+    /// Create a sampler from config and a split-state backend.
     pub fn new(config: SamplerConfig, split_store: Arc<S>) -> Self {
         let inner = PairSamplerInner::new(config, split_store);
         Self {
@@ -1814,6 +1819,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> PairSampler<
         }
     }
 
+    /// Return an unweighted pair batch for `split`.
     pub fn next_pair_batch_for_split(
         &self,
         split: SplitLabel,
@@ -1821,10 +1827,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> PairSampler<
         self.next_pair_batch_with_weights_for_split(split, &HashMap::new())
     }
 
+    /// Return an unweighted text batch for `split`.
     pub fn next_text_batch_for_split(&self, split: SplitLabel) -> Result<TextBatch, SamplerError> {
         self.next_text_batch_with_weights_for_split(split, &HashMap::new())
     }
 
+    /// Return an unweighted triplet batch for `split`.
     pub fn next_triplet_batch_for_split(
         &self,
         split: SplitLabel,
@@ -1832,6 +1840,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> PairSampler<
         self.next_triplet_batch_with_weights_for_split(split, &HashMap::new())
     }
 
+    /// Return a weighted pair batch for `split` using per-source weights.
     pub fn next_pair_batch_with_weights_for_split(
         &self,
         split: SplitLabel,
@@ -1851,6 +1860,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> PairSampler<
         Err(SamplerError::Exhausted(RECIPE_LABEL_TRIPLETS.into()))
     }
 
+    /// Return a weighted text batch for `split` using per-source weights.
     pub fn next_text_batch_with_weights_for_split(
         &self,
         split: SplitLabel,
@@ -1870,6 +1880,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> PairSampler<
         Err(SamplerError::Exhausted(RECIPE_LABEL_TEXT.into()))
     }
 
+    /// Return a weighted triplet batch for `split` using per-source weights.
     pub fn next_triplet_batch_with_weights_for_split(
         &self,
         split: SplitLabel,
@@ -1952,21 +1963,25 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> PairSampler<
         })
     }
 
+    /// Return the currently active text recipes.
     pub fn text_recipes(&self) -> Vec<TextRecipe> {
         let inner = self.inner.lock().unwrap();
         inner.text_recipes().to_vec()
     }
 
+    /// Register a data source for ingestion and sampling.
     pub fn register_source(&self, source: Box<dyn DataSource + 'static>) {
         let mut inner = self.inner.lock().unwrap();
         inner.register_source(source);
     }
 
+    /// Force sampler epoch to `epoch` (advanced deterministic replay control).
     pub fn set_epoch(&self, epoch: u64) -> Result<(), SamplerError> {
         let mut inner = self.inner.lock().unwrap();
         inner.set_epoch(epoch)
     }
 
+    /// Persist sampler and split runtime state for restart-resume.
     pub fn persist_state(&self) -> Result<(), SamplerError> {
         let mut inner = self.inner.lock().unwrap();
         inner.persist_state()
@@ -2076,6 +2091,7 @@ mod tests {
     use std::time::Duration as StdDuration;
     use tempfile::tempdir;
 
+    /// `DataSource` wrapper that exposes custom default recipes in tests.
     struct RecipeSource {
         inner: InMemorySource,
         triplet_recipes: Vec<TripletRecipe>,
@@ -2139,6 +2155,7 @@ mod tests {
     }
 
     #[derive(Clone)]
+    /// Test source that counts refresh calls.
     struct CountingSource {
         id: SourceId,
         records: Vec<DataRecord>,
@@ -2180,6 +2197,7 @@ mod tests {
         }
     }
 
+    /// Test source that always returns a refresh error.
     struct FailingSource {
         id: SourceId,
     }
@@ -2191,6 +2209,7 @@ mod tests {
     }
 
     #[derive(Clone)]
+    /// Test source that fails once then succeeds.
     struct FlakySource {
         id: SourceId,
         records: Vec<DataRecord>,
@@ -2518,6 +2537,7 @@ mod tests {
         }
     }
 
+    /// Test source that returns custom records plus default recipes.
     struct RecipeDecoratedSource {
         records: Vec<DataRecord>,
         recipes: Vec<TripletRecipe>,
@@ -2967,6 +2987,7 @@ mod tests {
         assert!(checked > 0);
     }
 
+    /// Helper bundle for split-order determinism tests.
     struct SplitOrderFixture {
         sampler: Arc<PairSampler<DeterministicSplitStore>>,
     }

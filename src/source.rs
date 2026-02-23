@@ -16,35 +16,46 @@ use crate::errors::SamplerError;
 use crate::hash::stable_hash_with;
 use crate::types::SourceId;
 
+/// Date parsing/normalization helpers used by source implementations.
 pub mod date_helpers;
+/// Filesystem-backed corpus indexing and refresh helpers.
 pub mod file_corpus;
 
 pub(crate) mod grouping;
 
-/// Cursor emitted by a source to track incremental refresh state.
+/// Source-owned incremental refresh position.
 ///
-/// `revision` is an opaque position token owned by the source's paging logic.
+/// The sampler stores and returns this value between refresh calls.
+/// `revision` is opaque to the sampler and interpreted only by the source.
 #[derive(Clone, Debug)]
 pub struct SourceCursor {
+    /// Most recent observation timestamp produced by the source.
     pub last_seen: DateTime<Utc>,
+    /// Opaque paging position token used to continue incremental refresh.
     pub revision: u64,
 }
 
-/// Snapshot of records returned by a source refresh.
+/// Result of a single source refresh call.
 ///
-/// `cursor` should be passed back on the next refresh to continue paging.
+/// Pass the returned `cursor` back into the next refresh to continue paging.
 #[derive(Clone, Debug)]
 pub struct SourceSnapshot {
+    /// Records returned by the refresh operation.
     pub records: Vec<DataRecord>,
+    /// Next cursor to pass into a future refresh call.
     pub cursor: SourceCursor,
 }
 
-/// Data source that can stream records into the sampler.
+/// Sampler-facing data source interface.
 ///
-/// Implementations can be streaming or index-backed as long as they return
-/// deterministic results for a fixed cursor and dataset.
+/// Implementations may be streaming or index-backed. For a fixed dataset state
+/// and cursor, refresh output should be deterministic.
 pub trait DataSource: Send + Sync {
+    /// Stable source identifier used in records, metrics, and persistence state.
     fn id(&self) -> &str;
+    /// Fetch up to `limit` records starting from `cursor` state.
+    ///
+    /// Return the next cursor position in `SourceSnapshot.cursor`.
     fn refresh(
         &self,
         cursor: Option<&SourceCursor>,
@@ -63,12 +74,15 @@ pub trait DataSource: Send + Sync {
         None
     }
 
+    /// Optional source-provided default triplet recipes.
+    ///
+    /// Used when sampler config does not provide explicit recipes.
     fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {
         Vec::new()
     }
 }
 
-/// Indexable source interface for deterministic pseudo-random paging.
+/// Index-addressable source interface used by deterministic pagers.
 ///
 /// `len_hint` must be stable within an epoch, and `record_at` must return the
 /// record corresponding to the same index across runs.
@@ -77,19 +91,24 @@ pub trait DataSource: Send + Sync {
 /// with minimal gaps. Sparse indexes (returning `None` for many positions)
 /// still work but waste paging capacity and reduce batch fill rates.
 pub trait IndexableSource: Send + Sync {
+    /// Stable source identifier.
     fn id(&self) -> &str;
+    /// Current index domain size, typically `Some(total_records)`.
     fn len_hint(&self) -> Option<usize>;
+    /// Return the record at index `idx`, or `None` for sparse/missing positions.
     fn record_at(&self, idx: usize) -> Result<Option<DataRecord>, SamplerError>;
 }
 
 /// Deterministic pager for `IndexableSource`.
 ///
-/// Owns the shuffle seed and cursor math so callers don't need free functions.
+/// Encapsulates shuffle seed and cursor math so callers can reuse a stable
+/// paging algorithm without implementing permutation logic themselves.
 pub struct IndexablePager {
     source_id: SourceId,
 }
 
 impl IndexablePager {
+    /// Create a new deterministic pager for `source_id`.
     pub fn new(source_id: impl Into<SourceId>) -> Self {
         Self {
             source_id: source_id.into(),
@@ -112,7 +131,10 @@ impl IndexablePager {
         self.refresh_with(total, cursor, limit, |idx| source.record_at(idx))
     }
 
-    /// Page records using a custom index fetcher (useful for filesystem lists).
+    /// Page records using a custom index fetcher.
+    ///
+    /// Useful when records are indexable but not exposed through `IndexableSource`
+    /// (for example, temporary index stores or precomputed path lists).
     pub fn refresh_with(
         &self,
         total: usize,
@@ -181,6 +203,7 @@ pub struct IndexableAdapter<T: IndexableSource> {
 }
 
 impl<T: IndexableSource> IndexableAdapter<T> {
+    /// Wrap an `IndexableSource` so it can be registered as a `DataSource`.
     pub fn new(inner: T) -> Self {
         Self { inner }
     }
@@ -263,6 +286,7 @@ pub struct InMemorySource {
 }
 
 impl InMemorySource {
+    /// Create an in-memory source from prebuilt records.
     pub fn new(id: impl Into<SourceId>, records: Vec<DataRecord>) -> Self {
         Self {
             id: id.into(),
@@ -322,6 +346,7 @@ mod tests {
     use crate::data::{QualityScore, RecordSection, SectionRole};
     use crate::types::RecordId;
 
+    /// Minimal `IndexableSource` test fixture.
     struct IndexableStub {
         id: SourceId,
         count: usize,

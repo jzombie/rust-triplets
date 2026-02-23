@@ -46,41 +46,59 @@ pub struct DataRecord {
 /// A structured section within a record.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RecordSection {
+    /// Semantic role used by selectors (for example, anchor vs context text).
     pub role: SectionRole,
+    /// Optional short heading/title for this section.
     pub heading: Option<String>,
+    /// Full section text.
     pub text: String,
+    /// Sentence-level segmentation of `text` used by chunking strategies.
     pub sentences: Vec<Sentence>,
 }
 
 /// Role label for a section.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SectionRole {
+    /// Primary section typically used as an anchor candidate.
     Anchor,
+    /// Supporting/context section used for positives, negatives, or text samples.
     Context,
 }
 
 /// A chunked view over a section.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RecordChunk {
+    /// Parent record id this chunk belongs to.
     pub record_id: RecordId,
+    /// Index of the source section in `DataRecord.sections`.
     pub section_idx: usize,
+    /// Chunk view metadata (window position or summary fallback).
     pub view: ChunkView,
+    /// Rendered chunk text (possibly with metadata prefix decoration).
     pub text: String,
+    /// Approximate token count for scheduling/weighting heuristics.
     pub tokens_estimate: usize,
+    /// Trust/quality inherited from the parent record.
     pub quality: QualityScore,
 }
 
 /// Chunk view metadata (window or summary).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ChunkView {
+    /// Sliding-window chunk extracted directly from section text.
     Window {
+        /// Zero-based window index within the section.
         index: usize,
+        /// Overlap (in tokens) with the previous window.
         overlap: usize,
+        /// Nominal window span in tokens.
         span: usize,
         /// Position of the window's start as a fraction of total tokens in the section (0.0 = first token, 1.0 = past the end).
         start_ratio: f32,
     },
+    /// Summary fallback chunk used when window extraction is unavailable.
     SummaryFallback {
+        /// Name of summary strategy that produced this fallback chunk.
         strategy: String,
         /// Precomputed base weight for summary-fallback chunks before trust/floor are applied.
         weight: f32,
@@ -92,11 +110,17 @@ pub enum ChunkView {
 pub struct SamplePair {
     /// Recipe name used to generate this pair.
     pub recipe: String,
+    /// Anchor chunk used to build this supervised pair.
     pub anchor: RecordChunk,
+    /// Candidate chunk paired with the anchor.
     pub positive: RecordChunk,
+    /// Training weight for this pair.
     pub weight: f32,
+    /// Optional instruction/prompt hint for this sample.
     pub instruction: Option<String>,
+    /// Supervision label (positive or negative).
     pub label: PairLabel,
+    /// Optional reason/annotation describing the label.
     pub reason: Option<String>,
 }
 
@@ -105,27 +129,36 @@ pub struct SamplePair {
 pub struct SampleTriplet {
     /// Recipe name used to generate this triplet.
     pub recipe: String,
+    /// Anchor chunk.
     pub anchor: RecordChunk,
+    /// Positive chunk.
     pub positive: RecordChunk,
+    /// Negative chunk.
     pub negative: RecordChunk,
+    /// Training weight for this triplet.
     pub weight: f32,
+    /// Optional instruction/prompt hint for this sample.
     pub instruction: Option<String>,
 }
 
 /// Pair label for supervised pair batches.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PairLabel {
+    /// Anchor and candidate are semantically aligned.
     Positive,
+    /// Anchor and candidate are semantically mismatched.
     Negative,
 }
 
 /// Batch of pairs.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SampleBatch {
+    /// Pair samples contained in this batch.
     pub pairs: Vec<SamplePair>,
 }
 
 impl SampleBatch {
+    /// Returns `true` when the batch has no pairs.
     pub fn is_empty(&self) -> bool {
         self.pairs.is_empty()
     }
@@ -134,10 +167,12 @@ impl SampleBatch {
 /// Batch of triplets.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TripletBatch {
+    /// Triplet samples contained in this batch.
     pub triplets: Vec<SampleTriplet>,
 }
 
 impl TripletBatch {
+    /// Returns `true` when the batch has no triplets.
     pub fn is_empty(&self) -> bool {
         self.triplets.is_empty()
     }
@@ -148,19 +183,125 @@ impl TripletBatch {
 pub struct TextSample {
     /// Recipe name used to generate this sample.
     pub recipe: String,
+    /// Chunk payload used for this text sample.
     pub chunk: RecordChunk,
+    /// Training weight for this sample.
     pub weight: f32,
+    /// Optional instruction/prompt hint for this sample.
     pub instruction: Option<String>,
 }
 
 /// Batch of text samples.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TextBatch {
+    /// Text samples contained in this batch.
     pub samples: Vec<TextSample>,
 }
 
 impl TextBatch {
+    /// Returns `true` when the batch has no text samples.
     pub fn is_empty(&self) -> bool {
         self.samples.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+
+    fn sample_chunk(id: &str) -> RecordChunk {
+        RecordChunk {
+            record_id: id.to_string(),
+            section_idx: 0,
+            view: ChunkView::SummaryFallback {
+                strategy: "test".to_string(),
+                weight: 1.0,
+            },
+            text: "text".to_string(),
+            tokens_estimate: 4,
+            quality: QualityScore::default(),
+        }
+    }
+
+    #[test]
+    fn quality_score_defaults_to_full_trust() {
+        let quality = QualityScore::default();
+        assert!((quality.trust - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn batch_is_empty_helpers_match_contents() {
+        let empty_pairs = SampleBatch { pairs: Vec::new() };
+        assert!(empty_pairs.is_empty());
+
+        let non_empty_pairs = SampleBatch {
+            pairs: vec![SamplePair {
+                recipe: "r".to_string(),
+                anchor: sample_chunk("a"),
+                positive: sample_chunk("b"),
+                weight: 1.0,
+                instruction: None,
+                label: PairLabel::Positive,
+                reason: Some("test".to_string()),
+            }],
+        };
+        assert!(!non_empty_pairs.is_empty());
+
+        let empty_triplets = TripletBatch {
+            triplets: Vec::new(),
+        };
+        assert!(empty_triplets.is_empty());
+
+        let non_empty_triplets = TripletBatch {
+            triplets: vec![SampleTriplet {
+                recipe: "r".to_string(),
+                anchor: sample_chunk("a"),
+                positive: sample_chunk("b"),
+                negative: sample_chunk("c"),
+                weight: 1.0,
+                instruction: Some("hint".to_string()),
+            }],
+        };
+        assert!(!non_empty_triplets.is_empty());
+
+        let empty_text = TextBatch {
+            samples: Vec::new(),
+        };
+        assert!(empty_text.is_empty());
+
+        let non_empty_text = TextBatch {
+            samples: vec![TextSample {
+                recipe: "r".to_string(),
+                chunk: sample_chunk("t"),
+                weight: 1.0,
+                instruction: None,
+            }],
+        };
+        assert!(!non_empty_text.is_empty());
+    }
+
+    #[test]
+    fn data_record_roundtrip_basics_are_constructible() {
+        let now = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let record = DataRecord {
+            id: "source_a::1".to_string(),
+            source: "source_a".to_string(),
+            created_at: now,
+            updated_at: now,
+            quality: QualityScore { trust: 0.9 },
+            taxonomy: vec!["topic:news".to_string()],
+            sections: vec![RecordSection {
+                role: SectionRole::Anchor,
+                heading: Some("headline".to_string()),
+                text: "body".to_string(),
+                sentences: vec!["body".to_string()],
+            }],
+            meta_prefix: None,
+        };
+
+        assert_eq!(record.source, "source_a");
+        assert_eq!(record.sections.len(), 1);
+        assert!(matches!(record.sections[0].role, SectionRole::Anchor));
     }
 }

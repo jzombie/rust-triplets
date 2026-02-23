@@ -5,22 +5,34 @@ use crate::types::SourceId;
 /// Aggregate skew metrics for per-source sample counts.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SourceSkew {
+    /// Total sample count across all sources.
     pub total: usize,
+    /// Number of sources represented in the metric.
     pub sources: usize,
+    /// Minimum per-source sample count.
     pub min: usize,
+    /// Maximum per-source sample count.
     pub max: usize,
+    /// Mean per-source sample count.
     pub mean: f64,
+    /// Largest source share (`max / total`).
     pub max_share: f64,
+    /// Smallest source share (`min / total`).
     pub min_share: f64,
+    /// Imbalance ratio (`max / min`, or `inf` when `min == 0`).
     pub ratio: f64,
+    /// Per-source counts and shares sorted descending by count.
     pub per_source: Vec<SourceShare>,
 }
 
 /// Per-source share of a batch for skew inspection.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SourceShare {
+    /// Source identifier.
     pub source: SourceId,
+    /// Number of samples drawn from this source.
     pub count: usize,
+    /// Fraction of total samples contributed by this source.
     pub share: f64,
 }
 

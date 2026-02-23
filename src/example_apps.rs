@@ -24,6 +24,7 @@ use crate::{
 type DynSource = Box<dyn DataSource + 'static>;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
+/// CLI split selector mapped onto `SplitLabel`.
 enum SplitArg {
     Train,
     Validation,
@@ -48,6 +49,7 @@ impl From<SplitArg> for SplitLabel {
     long_about = "Estimate record, pair, triplet, and text-sample capacity using source-reported counts only (no data refresh).",
     after_help = "Source roots are optional and resolved in order by explicit arg, environment variables, then project defaults."
 )]
+/// CLI arguments for metadata-only capacity estimation.
 struct EstimateCapacityCli {
     #[arg(
         long,
@@ -135,12 +137,14 @@ struct MultiSourceDemoCli {
 }
 
 #[derive(Debug, Clone)]
+/// Source-level inventory used by capacity estimation output.
 struct SourceInventory {
     source_id: String,
     reported_records: u128,
     triplet_recipes: Vec<TripletRecipe>,
 }
 
+/// Run the capacity-estimation CLI with injectable root resolution/source builders.
 pub fn run_estimate_capacity<R, Resolve, Build, I>(
     args_iter: I,
     resolve_roots: Resolve,
@@ -407,6 +411,7 @@ where
     Ok(())
 }
 
+/// Run the multi-source demo CLI with injectable root resolution/source builders.
 pub fn run_multi_source_demo<R, Resolve, Build, I>(
     args_iter: I,
     resolve_roots: Resolve,
@@ -824,10 +829,13 @@ fn extract_source(record_id: &str) -> SourceId {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DeterministicSplitStore;
     use crate::data::SectionRole;
     use crate::source::{SourceCursor, SourceSnapshot};
     use chrono::Utc;
+    use tempfile::tempdir;
 
+    /// Minimal in-memory `DataSource` test double for example app tests.
     struct TestSource {
         id: String,
         count: Option<u128>,
@@ -932,5 +940,158 @@ mod tests {
 
         let err = result.unwrap_err().to_string();
         assert!(err.contains("did not report a record count"));
+    }
+
+    #[test]
+    fn parse_multi_source_cli_handles_help_and_batch_size_validation() {
+        let help = parse_cli::<MultiSourceDemoCli, _>(["multi_source_demo", "--help"]).unwrap();
+        assert!(help.is_none());
+
+        let err = parse_cli::<MultiSourceDemoCli, _>(["multi_source_demo", "--batch-size", "0"]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn run_multi_source_demo_list_text_recipes_path_succeeds() {
+        let dir = tempdir().unwrap();
+        let mut args = vec![
+            "--list-text-recipes".to_string(),
+            "--split-store-dir".to_string(),
+            dir.path().to_string_lossy().to_string(),
+        ];
+        let result = run_multi_source_demo(
+            args.drain(..),
+            |_| Ok(()),
+            |_| {
+                vec![Box::new(TestSource {
+                    id: "source_for_recipes".into(),
+                    count: Some(10),
+                    recipes: vec![default_recipe("recipe_a")],
+                }) as DynSource]
+            },
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn run_multi_source_demo_sampling_modes_handle_empty_sources() {
+        for mode in [
+            vec!["--pair-batch".to_string()],
+            vec!["--text-recipes".to_string()],
+            vec![],
+        ] {
+            let dir = tempdir().unwrap();
+            let mut args = mode;
+            args.push("--split-store-dir".to_string());
+            args.push(dir.path().to_string_lossy().to_string());
+            args.push("--split".to_string());
+            args.push("validation".to_string());
+
+            let result = run_multi_source_demo(
+                args.into_iter(),
+                |_| Ok(()),
+                |_| {
+                    vec![Box::new(TestSource {
+                        id: "source_empty".into(),
+                        count: Some(0),
+                        recipes: vec![default_recipe("recipe_empty")],
+                    }) as DynSource]
+                },
+            );
+
+            assert!(result.is_ok());
+        }
+    }
+
+    #[test]
+    fn print_helpers_and_extract_source_cover_paths() {
+        let split = SplitRatios::default();
+        let store = DeterministicSplitStore::new(split, 42).unwrap();
+        let strategy = ChunkingStrategy::default();
+
+        let anchor = RecordChunk {
+            record_id: "source_a::rec1".to_string(),
+            section_idx: 0,
+            view: ChunkView::Window {
+                index: 1,
+                overlap: 2,
+                span: 12,
+                start_ratio: 0.25,
+            },
+            text: "anchor text".to_string(),
+            tokens_estimate: 8,
+            quality: crate::data::QualityScore { trust: 0.9 },
+        };
+        let positive = RecordChunk {
+            record_id: "source_a::rec2".to_string(),
+            section_idx: 1,
+            view: ChunkView::SummaryFallback {
+                strategy: "summary".to_string(),
+                weight: 0.7,
+            },
+            text: "positive text".to_string(),
+            tokens_estimate: 6,
+            quality: crate::data::QualityScore { trust: 0.8 },
+        };
+        let negative = RecordChunk {
+            record_id: "source_b::rec3".to_string(),
+            section_idx: 2,
+            view: ChunkView::Window {
+                index: 0,
+                overlap: 0,
+                span: 16,
+                start_ratio: 0.0,
+            },
+            text: "negative text".to_string(),
+            tokens_estimate: 7,
+            quality: crate::data::QualityScore { trust: 0.5 },
+        };
+
+        let triplet_batch = TripletBatch {
+            triplets: vec![crate::SampleTriplet {
+                recipe: "triplet_recipe".to_string(),
+                anchor: anchor.clone(),
+                positive: positive.clone(),
+                negative: negative.clone(),
+                weight: 1.0,
+                instruction: Some("triplet instruction".to_string()),
+            }],
+        };
+        print_triplet_batch(&strategy, &triplet_batch, &store);
+
+        let pair_batch = SampleBatch {
+            pairs: vec![crate::SamplePair {
+                recipe: "pair_recipe".to_string(),
+                anchor: anchor.clone(),
+                positive: positive.clone(),
+                weight: 1.0,
+                instruction: None,
+                label: crate::PairLabel::Positive,
+                reason: Some("same topic".to_string()),
+            }],
+        };
+        print_pair_batch(&strategy, &pair_batch, &store);
+
+        let text_batch = TextBatch {
+            samples: vec![crate::TextSample {
+                recipe: "text_recipe".to_string(),
+                chunk: negative,
+                weight: 0.8,
+                instruction: Some("text instruction".to_string()),
+            }],
+        };
+        print_text_batch(&strategy, &text_batch, &store);
+
+        let recipes = vec![TextRecipe {
+            name: "recipe_name".into(),
+            selector: crate::config::Selector::Role(SectionRole::Context),
+            instruction: Some("instruction".into()),
+            weight: 1.0,
+        }];
+        print_text_recipes(&recipes);
+
+        assert_eq!(extract_source("source_a::record"), "source_a");
+        assert_eq!(extract_source("record-without-delimiter"), "unknown");
     }
 }

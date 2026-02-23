@@ -10,10 +10,12 @@ pub struct MetadataKey {
 }
 
 impl MetadataKey {
+    /// Create a metadata key with a canonical static name.
     pub const fn new(name: &'static str) -> Self {
         Self { name }
     }
 
+    /// Return the raw key name.
     pub const fn as_str(&self) -> &'static str {
         self.name
     }
@@ -31,6 +33,7 @@ impl MetadataKey {
     }
 }
 
+/// Build common date string variants for metadata prefixes.
 pub fn build_date_meta_values(date: &NaiveDate) -> Vec<crate::types::MetaValue> {
     let mut vals = vec![
         date.format("%Y-%m-%d").to_string(),    // 2024-10-15 (ISO)
@@ -70,5 +73,14 @@ mod tests {
         uniq.sort();
         uniq.dedup();
         assert_eq!(uniq.len(), values.len());
+    }
+
+    #[test]
+    fn metadata_key_new_and_as_str_work() {
+        const CUSTOM: MetadataKey = MetadataKey::new("custom");
+        assert_eq!(CUSTOM.as_str(), "custom");
+        assert_eq!(CUSTOM.encode(42), "custom=42");
+        assert_eq!(CUSTOM.strip("custom=42"), Some("42"));
+        assert_eq!(CUSTOM.strip("custom42"), None);
     }
 }

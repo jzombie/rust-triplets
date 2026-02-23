@@ -238,4 +238,81 @@ mod tests {
         assert_eq!(collected_expected.len(), total);
         assert_eq!(collected_expected, expected);
     }
+
+    #[test]
+    fn text_file_detection_and_shuffle_key_are_stable() {
+        let txt = PathBuf::from("hello.TXT");
+        let md = PathBuf::from("hello.md");
+        assert!(is_text_file(&txt));
+        assert!(!is_text_file(&md));
+
+        let a = PathBuf::from("a/b/file.txt");
+        let a_again = PathBuf::from("a/b/file.txt");
+        let b = PathBuf::from("a/b/other.txt");
+        assert_eq!(
+            stable_path_shuffle_key(&a),
+            stable_path_shuffle_key(&a_again)
+        );
+        assert_ne!(stable_path_shuffle_key(&a), stable_path_shuffle_key(&b));
+    }
+
+    #[test]
+    fn file_time_helpers_handle_existing_and_missing_paths() {
+        let temp = tempdir().unwrap();
+        let existing = temp.path().join("exists.txt");
+        fs::write(&existing, "hello").unwrap();
+
+        assert!(file_mtime(&existing).is_some());
+        let (created_at, updated_at) = file_times(&existing);
+        assert!(updated_at >= created_at);
+
+        let missing = temp.path().join("missing.txt");
+        assert!(file_mtime(&missing).is_none());
+        let (missing_created, missing_updated) = file_times(&missing);
+        assert!(missing_updated >= missing_created);
+    }
+
+    #[test]
+    fn stream_incremental_handles_limits_none_records_and_cursor_reset() {
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        for name in ["a.txt", "b.txt", "c.txt", "d.txt"] {
+            fs::write(root.join(name), name.as_bytes()).unwrap();
+        }
+
+        let empty = FileStream::new(root)
+            .stream_incremental(None, Some(2), |_path| Ok(None))
+            .unwrap();
+        assert!(empty.records.is_empty());
+        assert_eq!(empty.cursor.revision, 0);
+
+        let first = FileStream::new(root)
+            .stream_incremental(None, Some(2), |path| Ok(Some(build_record(path))))
+            .unwrap();
+        assert_eq!(first.records.len(), 2);
+
+        let out_of_range_cursor = SourceCursor {
+            last_seen: Utc::now(),
+            revision: 999,
+        };
+        let reset = FileStream::new(root)
+            .stream_incremental(Some(&out_of_range_cursor), Some(2), |path| {
+                Ok(Some(build_record(path)))
+            })
+            .unwrap();
+        assert_eq!(reset.records.len(), 2);
+    }
+
+    #[test]
+    fn stream_with_follow_symlinks_builder_is_exercised() {
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        fs::write(root.join("alpha.txt"), b"alpha").unwrap();
+
+        let stream = FileStream::new(root).with_follow_symlinks(true);
+        let snapshot = stream
+            .stream_incremental(None, Some(1), |path| Ok(Some(build_record(path))))
+            .unwrap();
+        assert_eq!(snapshot.records.len(), 1);
+    }
 }

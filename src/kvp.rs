@@ -137,6 +137,7 @@ pub struct MetaFieldSpec<Ctx> {
 }
 
 impl<Ctx> MetaFieldSpec<Ctx> {
+    /// Create a field specification from key, presence probability, and value builder.
     pub const fn new(
         key: MetadataKey,
         presence: f32,
@@ -161,10 +162,12 @@ pub struct MetaPolicy<Ctx: 'static> {
 }
 
 impl<Ctx: 'static> MetaPolicy<Ctx> {
+    /// Create a policy from an ordered static list of field specs.
     pub const fn new(fields: &'static [MetaFieldSpec<Ctx>]) -> Self {
         Self { fields }
     }
 
+    /// Instantiate a `KvpPrefixSampler` for one concrete context value.
     pub fn instantiate(&self, ctx: &Ctx) -> KvpPrefixSampler {
         let built_fields = self
             .fields
