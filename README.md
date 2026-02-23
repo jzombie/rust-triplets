@@ -1,6 +1,6 @@
 # triplets
 
-[![made-with-rust][rust-logo]][rust-src-page]
+[![made-with-rust][rust-logo]][rust-src-page] [![crates.io][crates-badge]][crates-page] [![MIT licensed][mit-license-badge]][mit-license-page] [![Apache 2.0 licensed][apache-2.0-license-badge]][apache-2.0-license-page] [![Coverage][coveralls-badge]][coveralls-page]
 
 **WORK IN PROGRESS**
 
@@ -313,4 +313,16 @@ These are ideas, not commitments.
 See [LICENSE-APACHE](./LICENSE-APACHE) and [LICENSE-MIT](./LICENSE-MIT) for details.
 
 [rust-src-page]: https://www.rust-lang.org/
-[rust-logo]: https://img.shields.io/badge/Made%20with-Rust-black?logo=Rust&style=for-the-badge
+[rust-logo]: https://img.shields.io/badge/Made%20with-Rust-black
+
+[crates-page]: https://crates.io/crates/triplets
+[crates-badge]: https://img.shields.io/crates/v/term-wm.svg
+
+[mit-license-page]: ./LICENSE-MIT
+[mit-license-badge]: https://img.shields.io/badge/license-MIT-blue.svg
+
+[apache-2.0-license-page]: ./LICENSE-APACHE
+[apache-2.0-license-badge]: https://img.shields.io/badge/license-Apache%202.0-blue.svg
+
+[coveralls-page]: https://coveralls.io/github/jzombie/triplets?branch=main
+[coveralls-badge]: https://img.shields.io/coveralls/github/jzombie/term-wm
