@@ -2,11 +2,13 @@
 
 [![made-with-rust][rust-logo]][rust-src-page] [![crates.io][crates-badge]][crates-page] [![MIT licensed][mit-license-badge]][mit-license-page] [![Apache 2.0 licensed][apache-2.0-license-badge]][apache-2.0-license-page] [![Coverage][coveralls-badge]][coveralls-page]
 
-**WORK IN PROGRESS**
+**WORK IN PROGRESS.**
 
 Composable Rust crate for deterministic multi-source sampling and split persistence for ML/AI training data.
 
 `triplets` is a reusable core for ML/AI training-data orchestration. It provides sampler primitives, split/state persistence, chunking and weighting mechanics, and source abstractions (`DataSource`, `DataRecord`) without tying behavior to proprietary corpora.
+
+CI is configured to run tests/linting on macOS, Linux, and Windows.
 
 ## At a glance
 
