@@ -167,6 +167,15 @@ Example (different source mix across consecutive batches):
 
 ```rust,no_run
 use std::collections::HashMap;
+use std::sync::Arc;
+use triplets::{
+  DeterministicSplitStore, PairSampler, Sampler, SamplerConfig, SplitLabel, SplitRatios,
+};
+
+# let split = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
+# let store = Arc::new(DeterministicSplitStore::new(split, 123).unwrap());
+# let config = SamplerConfig::default();
+# let sampler = Arc::new(PairSampler::new(config, store));
 
 let mut weights_a = HashMap::new();
 weights_a.insert("source_a".to_string(), 1.0);
