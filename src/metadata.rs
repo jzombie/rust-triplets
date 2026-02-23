@@ -44,3 +44,31 @@ pub fn build_date_meta_values(date: &NaiveDate) -> Vec<crate::types::MetaValue> 
     vals.dedup();
     vals
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metadata_key_encodes_and_strips_values() {
+        let encoded = META_FIELD_DATE.encode("2025-02-23");
+        assert_eq!(encoded, "date=2025-02-23");
+        assert_eq!(META_FIELD_DATE.strip(&encoded), Some("2025-02-23"));
+        assert_eq!(META_FIELD_DATE.strip("other=2025-02-23"), None);
+    }
+
+    #[test]
+    fn date_meta_values_are_deduped_and_include_expected_formats() {
+        let date = NaiveDate::from_ymd_opt(2025, 2, 25).unwrap();
+        let values = build_date_meta_values(&date);
+
+        assert!(values.contains(&"2025-02-25".to_string()));
+        assert!(values.contains(&"02/25/2025".to_string()));
+        assert!(values.contains(&"25.02.2025".to_string()));
+
+        let mut uniq = values.clone();
+        uniq.sort();
+        uniq.dedup();
+        assert_eq!(uniq.len(), values.len());
+    }
+}

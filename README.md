@@ -1,6 +1,6 @@
 # triplets
 
-[![made-with-rust][rust-logo]][rust-src-page]
+[![made-with-rust][rust-logo]][rust-src-page] [![crates.io][crates-badge]][crates-page] [![MIT licensed][mit-license-badge]][mit-license-page] [![Apache 2.0 licensed][apache-2.0-license-badge]][apache-2.0-license-page] [![Coverage][coveralls-badge]][coveralls-page]
 
 **WORK IN PROGRESS**
 
@@ -8,58 +8,29 @@ Composable Rust crate for deterministic multi-source sampling and split persiste
 
 `triplets` is a reusable core for ML/AI training-data orchestration. It provides sampler primitives, split/state persistence, chunking and weighting mechanics, and source abstractions (`DataSource`, `DataRecord`) without tying behavior to proprietary corpora.
 
-## Why this instead of a static dataset
+## At a glance
 
-Compared with a typical static dataset workflow, `triplets` is designed for deterministic runtime orchestration:
+`triplets` is for building reproducible ML/AI training batches from multiple data sources.
 
-- **Online deterministic sampling:** sample from multiple sources at runtime instead of consuming one pre-materialized dump.
-- **Stable split assignment + persistence:** keep train/validation/test membership reproducible across restarts and runs.
-- **Bounded ingestion windows:** progress through large or changing corpora without loading everything at once.
-- **Recipe-time generation:** build triplet/pair/text training examples during sampling rather than only reading pre-generated examples.
-- **Per-call source weighting:** adjust source mixture without regenerating a static artifact.
-- **Streaming-aware refresh:** incorporate newly available records on subsequent sampling calls.
+Compared with a static prebuilt dataset, it lets you sample at runtime while preserving deterministic behavior.
 
-Concurrency and source progression model:
+Threading model: source refresh work is parallelized per sampling call, while batch assembly remains serialized and deterministic.
 
-- Each source has an independent cursor and buffer, so sources do not advance in lockstep.
-- Source refreshes run concurrently within a sampling/refresh call.
-- Synchronization happens at call boundaries: refresh threads are joined before buffer merge (not an always-on per-source ingest loop).
+## Core capabilities
 
-## Philosophy
+- **Source-agnostic sampling:** implement `DataSource` for filesystem, APIs, DBs, streams, etc.
+- **Runtime example generation:** produce triplet/pair/text batches from recipe selectors.
+- **Deterministic split assignment:** stable train/validation/test assignment from record IDs + seed.
+- **Resume support:** persist sampler/split state and continue after restart.
+- **Bounded ingestion:** refresh in controlled windows instead of loading full corpora into memory.
+- **Per-source progression:** each source has its own cursor; sources do not need to advance in lockstep.
+- **Per-call concurrency:** source refreshes run in parallel within a sampling call, then merge before batch assembly.
 
-You can think of `triplets` as a training-pipeline orchestrator:
+## Not included
 
-- **Composability:** recipe-driven pair/triplet/text generation independent of storage backend.
-- **Abstractions:** source backends (filesystem, SQL, APIs, streams) are decoupled from sampling logic.
-- **Pipeline management:** deterministic split assignment, bounded ingestion, chunk weighting, and persisted resume state.
-
-## Supply-chain mindset
-
-- **Suppliers:** each `DataSource` is a supplier.
-- **Manifests & traceability:** stable record IDs plus deterministic split hashing keep records glued to train/validation/test.
-- **Inventory control:** per-source cursors bound memory and support large corpora.
-- **Routing plan:** seed + epoch + chunking define deterministic ordering.
-- **Packaged outputs:** recipes emit triplets/pairs/text batches without changing source backends.
-
-## Highlights
-
-1. **Data-source agnostic core** – implement `DataSource` for files, SQL, APIs, streams, etc.
-2. **Semantic recipes** – define anchor/positive/negative selectors and mismatch strategies.
-3. **Deterministic split manager** – reproducible split assignment and optional persisted state.
-4. **Quality knobs** – per-record trust scores and chunk-level weighting.
-5. **Chunk orchestration** – overlap-aware windows with summary fallbacks.
-6. **Thread-safe batching** – serialized batch construction with multi-threaded source refresh.
-7. **Prefetchers** – background queueing for triplet/pair/text batch pipelines.
-8. **Capacity estimation helpers** – metadata-only split/pair/triplet/text estimates.
-
-## What this does (and does not do)
-
-- **Does**: deterministic paging, split assignment, state persistence, and reproducible batch assembly.
-- **Does**: enforce bounded ingestion and explicit resume semantics.
-- **Does**: support both finite/index-backed sources and unbounded streaming/append-only sources.
-- **Does not**: perform semantic mining, topic modeling, or relevance scoring by itself.
-- **Does not**: assume every source is infinite.
-- **Does not**: guarantee semantic hardness beyond recipe and source metadata design.
+- This crate does **not** do semantic mining/retrieval scoring by itself.
+- This crate does **not** guarantee semantic hardness beyond your recipes and source metadata design.
+- Sources can be finite or unbounded; infinite streaming is supported but not required.
 
 ## Getting started
 
@@ -87,7 +58,7 @@ Minimal shape:
 2. Create `SamplerConfig` (chunking, recipes, split policy).
 3. Open a split store (`DeterministicSplitStore` or `FileSplitStore`).
 4. Construct `PairSampler` and register sources.
-5. Call `next_*_batch(split)` APIs.
+5. Call one of the batch APIs: `next_triplet_batch(split)`, `next_pair_batch(split)`, or `next_text_batch(split)`.
 6. Call `persist_state()` when you want restart-resume behavior.
 
 ## Examples
@@ -137,8 +108,8 @@ Step-by-step:
 
 1. Build config + open the split store.
 2. Register sources.
-3. Call **`sampler.next_*_batch(split)`**.
-4. Call **`sampler.persist_state()`** when you want to save progress.
+3. Call one of **`sampler.next_triplet_batch(split)`**, **`sampler.next_pair_batch(split)`**, or **`sampler.next_text_batch(split)`**.
+4. Call **`sampler.persist_state()`** when you want to save progress (typically at the end of an epoch, or at explicit checkpoint boundaries).
 5. Optionally call **`sampler.set_epoch(n)`** for explicit epoch replay/order.
 
 Operational notes:
@@ -149,8 +120,8 @@ Operational notes:
 - Batch calls are thread-safe but serialized; refresh work within a call can be parallelized per source.
 - Source cursors advance independently per source, so one source can continue making progress even if another source is sparse or slower.
 - Refresh concurrency is per call: source refreshes run in parallel for that call, then the sampler joins all refresh threads before merging buffers (not an always-on per-source background ingest loop).
-- Prefetchers smooth latency by filling bounded queues from existing `next_*_batch(split)` APIs.
-- New data from streaming sources is pulled in on the next `next_*_batch(split)` call.
+- Prefetchers smooth latency by filling bounded queues from the existing batch APIs (`next_triplet_batch`, `next_pair_batch`, `next_text_batch`).
+- New data from streaming sources is pulled in on the next batch call.
 - `sampler.persist_state()` is manual; skipping it means no resume state after restart.
 - `sampler.set_epoch(n)` is an advanced override and is not required for normal resume behavior.
 - `IngestionManager::source_refresh_stats()` exposes per-source refresh duration/records/throughput/errors.
@@ -175,7 +146,7 @@ let batch = prefetcher.next().unwrap();
 let _ = batch;
 ```
 
-- For per-call source weighting, use `next_*_batch_with_weights(split, &HashMap<SourceId, f32>)`.
+- For per-call source weighting, use `next_triplet_batch_with_weights(...)`, `next_pair_batch_with_weights(...)`, or `next_text_batch_with_weights(...)`.
 - Missing source ids default to `1.0`; `0.0` disables a source for that call.
 - **Production readiness note**: if `len_hint` drifts in streaming/append-only sources, epoch order/coverage can repeat/skip records within an epoch, even though split assignment remains deterministic.
 
@@ -183,7 +154,7 @@ let _ = batch;
 
 This reflects the built-in file-corpus helpers (`FileCorpusIndex`) used by filesystem-backed sources.
 
-- **Ingestion**: `next_*_batch(split)` triggers refresh; per-source buffers refill when empty (or on force refresh).
+- **Ingestion**: `next_triplet_batch(split)`, `next_pair_batch(split)`, and `next_text_batch(split)` trigger refresh; per-source buffers refill when empty (or on force refresh).
 - **Memory bound**: refresh/cache limits are bounded by `ingestion_max_records` with a floor at `batch_size`.
 - **File indexing**: deterministic path ordering + deterministic index permutation for paging.
 - **Source ordering**: round-robin by source, deterministic within-source ordering by seed/epoch.
@@ -313,4 +284,16 @@ These are ideas, not commitments.
 See [LICENSE-APACHE](./LICENSE-APACHE) and [LICENSE-MIT](./LICENSE-MIT) for details.
 
 [rust-src-page]: https://www.rust-lang.org/
-[rust-logo]: https://img.shields.io/badge/Made%20with-Rust-black?logo=Rust&style=for-the-badge
+[rust-logo]: https://img.shields.io/badge/Made%20with-Rust-black
+
+[crates-page]: https://crates.io/crates/triplets
+[crates-badge]: https://img.shields.io/crates/v/term-wm.svg
+
+[mit-license-page]: ./LICENSE-MIT
+[mit-license-badge]: https://img.shields.io/badge/license-MIT-blue.svg
+
+[apache-2.0-license-page]: ./LICENSE-APACHE
+[apache-2.0-license-badge]: https://img.shields.io/badge/license-Apache%202.0-blue.svg
+
+[coveralls-page]: https://coveralls.io/github/jzombie/triplets?branch=main
+[coveralls-badge]: https://img.shields.io/coveralls/github/jzombie/term-wm

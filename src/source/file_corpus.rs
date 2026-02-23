@@ -651,11 +651,7 @@ impl FileCorpusIndex {
         if components.is_empty() {
             return GroupKey::new();
         }
-        let mut grouped = PathBuf::new();
-        for part in &components {
-            grouped.push(part);
-        }
-        grouped.to_string_lossy().into_owned()
+        components.join("/")
     }
 
     fn should_skip_record_error(err: &SamplerError) -> bool {
@@ -682,10 +678,11 @@ fn stable_group_seed(source_id: &SourceId, total: usize) -> u64 {
 }
 
 fn path_relative_key(root: &Path, path: &Path) -> PathString {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .into_owned()
+    let rel = path.strip_prefix(root).unwrap_or(path);
+    rel.components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 #[cfg(test)]
