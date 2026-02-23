@@ -52,6 +52,8 @@ pub use source::{
     RowViewDataSourceAdapter, RowViewSource, SourceCursor, TextField, TextFieldPolicy, TextView,
     TextViewSource,
 };
+#[cfg(feature = "huggingface")]
+pub use source::{HuggingFaceRowSource, HuggingFaceRowsConfig};
 pub use splits::{DeterministicSplitStore, FileSplitStore, SplitLabel, SplitRatios, SplitStore};
 pub use types::{
     CategoryId, HashPart, KvpValue, LogMessage, MetaValue, PathString, RecipeKey, RecordId,

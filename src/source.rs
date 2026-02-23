@@ -9,6 +9,7 @@
 use chrono::{DateTime, Utc};
 use std::hash::Hash;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::config::TripletRecipe;
 use crate::data::DataRecord;
@@ -20,9 +21,14 @@ use crate::types::SourceId;
 pub mod date_helpers;
 /// Filesystem-backed corpus indexing and refresh helpers.
 pub mod file_corpus;
+#[cfg(feature = "huggingface")]
+/// Hugging Face bulk snapshot-backed row source.
+pub mod huggingface;
 /// Source-agnostic row/text contracts and field mapping policies.
 pub mod row_view;
 
+#[cfg(feature = "huggingface")]
+pub use huggingface::{HuggingFaceRowSource, HuggingFaceRowsConfig};
 pub use row_view::{
     MappedRowViewAdapter, ResolvedFieldSets, RowFieldMapping, RowView, RowViewAdapter,
     RowViewDataSourceAdapter, RowViewSource, TextField, TextFieldPolicy, TextView, TextViewSource,
@@ -166,7 +172,19 @@ impl IndexablePager {
         let mut records = Vec::new();
         let seed = Self::seed_for(&self.source_id, total);
         let mut permutation = IndexPermutation::new(total, seed, start as u64);
+        let report_every = Duration::from_millis(750);
+        let refresh_start = Instant::now();
+        let mut last_report = refresh_start;
+        let mut attempts = 0usize;
+        let should_report = total >= 10_000 || max >= 1_024;
+        if should_report {
+            eprintln!(
+                "[triplets:source] refresh start source='{}' total={} target={}",
+                self.source_id, total, max
+            );
+        }
         for _ in 0..total {
+            attempts += 1;
             if records.len() >= max {
                 break;
             }
@@ -174,6 +192,27 @@ impl IndexablePager {
             if let Some(record) = fetch(idx)? {
                 records.push(record);
             }
+            if should_report && last_report.elapsed() >= report_every {
+                eprintln!(
+                    "[triplets:source] refresh progress source='{}' attempted={}/{} fetched={}/{} elapsed={:.1}s",
+                    self.source_id,
+                    attempts,
+                    total,
+                    records.len(),
+                    max,
+                    refresh_start.elapsed().as_secs_f64()
+                );
+                last_report = Instant::now();
+            }
+        }
+        if should_report {
+            eprintln!(
+                "[triplets:source] refresh done source='{}' attempted={} fetched={} elapsed={:.2}s",
+                self.source_id,
+                attempts,
+                records.len(),
+                refresh_start.elapsed().as_secs_f64()
+            );
         }
         let last_seen = records
             .iter()

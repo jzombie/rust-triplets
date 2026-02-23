@@ -1,11 +1,14 @@
 use chrono::{DateTime, Utc};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
-use super::{DataSource, IndexablePager, SourceCursor, SourceSnapshot};
+use super::{DataSource, SourceCursor, SourceSnapshot};
 use crate::config::{NegativeStrategy, Selector, TripletRecipe};
 use crate::data::{DataRecord, QualityScore, SectionRole};
 use crate::errors::SamplerError;
 use crate::utils::make_section;
+
+const ROW_VIEW_READ_BATCH: usize = 128;
 
 /// A named text field in a row-like record.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -128,12 +131,110 @@ where
                 source_id: self.source.id().to_string(),
                 details: "row source did not provide len_hint".to_string(),
             })?;
-        let pager = IndexablePager::new(self.source.id());
-        pager.refresh_with(total, cursor, limit, |idx| {
-            match self.source.row_at(idx)? {
-                Some(row) => self.adapter.row_to_record(&row, idx as u64),
-                None => Ok(None),
+        if total == 0 {
+            return Ok(SourceSnapshot {
+                records: Vec::new(),
+                cursor: SourceCursor {
+                    last_seen: Utc::now(),
+                    revision: 0,
+                },
+            });
+        }
+
+        let max = limit.unwrap_or(total);
+        let mut start = cursor.map(|state| state.revision as usize).unwrap_or(0);
+        if start >= total {
+            start = 0;
+        }
+
+        let source_id = self.source.id().to_string();
+        let seed = super::IndexablePager::seed_for(&source_id, total);
+        let mut permutation = super::IndexPermutation::new(total, seed, start as u64);
+
+        let mut records = Vec::new();
+        let mut pending_indices = Vec::with_capacity(ROW_VIEW_READ_BATCH);
+        let should_report = total >= 10_000 || max >= 1_024;
+        let report_every = Duration::from_millis(750);
+        let refresh_start = Instant::now();
+        let mut last_report = refresh_start;
+        let mut attempts = 0usize;
+        if should_report {
+            eprintln!(
+                "[triplets:source] refresh start source='{}' total={} target={}",
+                source_id, total, max
+            );
+        }
+        for _ in 0..total {
+            if records.len() >= max {
+                break;
             }
+            pending_indices.push(permutation.next());
+            attempts += 1;
+            if pending_indices.len() == ROW_VIEW_READ_BATCH {
+                if should_report {
+                    eprintln!(
+                        "[triplets:source] refresh batch source='{}' batch_size={} attempted={} fetched={} elapsed={:.1}s",
+                        source_id,
+                        pending_indices.len(),
+                        attempts,
+                        records.len(),
+                        refresh_start.elapsed().as_secs_f64()
+                    );
+                }
+                Self::read_row_batch(
+                    &self.source,
+                    &self.adapter,
+                    &pending_indices,
+                    &mut records,
+                    Some(max),
+                )?;
+                pending_indices.clear();
+                if should_report && last_report.elapsed() >= report_every {
+                    eprintln!(
+                        "[triplets:source] refresh progress source='{}' attempted={}/{} fetched={}/{} elapsed={:.1}s",
+                        source_id,
+                        attempts,
+                        total,
+                        records.len(),
+                        max,
+                        refresh_start.elapsed().as_secs_f64()
+                    );
+                    last_report = Instant::now();
+                }
+            }
+        }
+        if !pending_indices.is_empty() && records.len() < max {
+            Self::read_row_batch(
+                &self.source,
+                &self.adapter,
+                &pending_indices,
+                &mut records,
+                Some(max),
+            )?;
+        }
+
+        if should_report {
+            eprintln!(
+                "[triplets:source] refresh done source='{}' attempted={} fetched={} elapsed={:.2}s",
+                source_id,
+                attempts,
+                records.len(),
+                refresh_start.elapsed().as_secs_f64()
+            );
+        }
+
+        let next_start = permutation.cursor();
+        let last_seen = records
+            .iter()
+            .map(|record| record.updated_at)
+            .max()
+            .unwrap_or_else(Utc::now);
+        Ok(SourceSnapshot {
+            records,
+            cursor: SourceCursor {
+                last_seen,
+                revision: next_start as u64,
+            },
         })
     }
 
@@ -143,6 +244,42 @@ where
 
     fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {
         self.adapter.default_triplet_recipes()
+    }
+}
+
+impl<T, A> RowViewDataSourceAdapter<T, A>
+where
+    T: RowViewSource,
+    A: RowViewAdapter,
+{
+    fn read_row_batch(
+        source: &T,
+        adapter: &A,
+        indices: &[usize],
+        out: &mut Vec<DataRecord>,
+        limit: Option<usize>,
+    ) -> Result<(), SamplerError> {
+        let mut sorted = indices.to_vec();
+        sorted.sort_unstable();
+
+        let mut fetched = HashMap::with_capacity(sorted.len());
+        for idx in sorted {
+            let record = match source.row_at(idx)? {
+                Some(row) => adapter.row_to_record(&row, idx as u64)?,
+                None => None,
+            };
+            fetched.insert(idx, record);
+        }
+
+        for idx in indices {
+            if limit.is_some_and(|max| out.len() >= max) {
+                break;
+            }
+            if let Some(record) = fetched.remove(idx).flatten() {
+                out.push(record);
+            }
+        }
+        Ok(())
     }
 }
 
