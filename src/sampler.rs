@@ -100,6 +100,7 @@ pub fn chunk_weight(strategy: &ChunkingStrategy, chunk: &RecordChunk) -> f32 {
     (base * trust).max(floor)
 }
 
+/// Public sampling interface for pair, triplet, and text batch generation.
 pub trait Sampler {
     /// Returns a batch of pairs. Consumes the shared epoch cursor for anchor selection.
     fn next_pair_batch(&self, split: SplitLabel) -> Result<SampleBatch, SamplerError> {
@@ -1807,6 +1808,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> PairSamplerI
 }
 
 impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> PairSampler<S> {
+    /// Create a sampler from config and a split-state backend.
     pub fn new(config: SamplerConfig, split_store: Arc<S>) -> Self {
         let inner = PairSamplerInner::new(config, split_store);
         Self {
@@ -1814,6 +1816,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> PairSampler<
         }
     }
 
+    /// Return an unweighted pair batch for `split`.
     pub fn next_pair_batch_for_split(
         &self,
         split: SplitLabel,
@@ -1821,10 +1824,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> PairSampler<
         self.next_pair_batch_with_weights_for_split(split, &HashMap::new())
     }
 
+    /// Return an unweighted text batch for `split`.
     pub fn next_text_batch_for_split(&self, split: SplitLabel) -> Result<TextBatch, SamplerError> {
         self.next_text_batch_with_weights_for_split(split, &HashMap::new())
     }
 
+    /// Return an unweighted triplet batch for `split`.
     pub fn next_triplet_batch_for_split(
         &self,
         split: SplitLabel,
@@ -1832,6 +1837,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> PairSampler<
         self.next_triplet_batch_with_weights_for_split(split, &HashMap::new())
     }
 
+    /// Return a weighted pair batch for `split` using per-source weights.
     pub fn next_pair_batch_with_weights_for_split(
         &self,
         split: SplitLabel,
@@ -1851,6 +1857,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> PairSampler<
         Err(SamplerError::Exhausted(RECIPE_LABEL_TRIPLETS.into()))
     }
 
+    /// Return a weighted text batch for `split` using per-source weights.
     pub fn next_text_batch_with_weights_for_split(
         &self,
         split: SplitLabel,
@@ -1870,6 +1877,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> PairSampler<
         Err(SamplerError::Exhausted(RECIPE_LABEL_TEXT.into()))
     }
 
+    /// Return a weighted triplet batch for `split` using per-source weights.
     pub fn next_triplet_batch_with_weights_for_split(
         &self,
         split: SplitLabel,
@@ -1952,21 +1960,25 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> PairSampler<
         })
     }
 
+    /// Return the currently active text recipes.
     pub fn text_recipes(&self) -> Vec<TextRecipe> {
         let inner = self.inner.lock().unwrap();
         inner.text_recipes().to_vec()
     }
 
+    /// Register a data source for ingestion and sampling.
     pub fn register_source(&self, source: Box<dyn DataSource + 'static>) {
         let mut inner = self.inner.lock().unwrap();
         inner.register_source(source);
     }
 
+    /// Force sampler epoch to `epoch` (advanced deterministic replay control).
     pub fn set_epoch(&self, epoch: u64) -> Result<(), SamplerError> {
         let mut inner = self.inner.lock().unwrap();
         inner.set_epoch(epoch)
     }
 
+    /// Persist sampler and split runtime state for restart-resume.
     pub fn persist_state(&self) -> Result<(), SamplerError> {
         let mut inner = self.inner.lock().unwrap();
         inner.persist_state()

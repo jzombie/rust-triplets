@@ -16,7 +16,9 @@ use crate::errors::SamplerError;
 use crate::hash::stable_hash_with;
 use crate::types::SourceId;
 
+/// Date parsing/normalization helpers used by source implementations.
 pub mod date_helpers;
+/// Filesystem-backed corpus indexing and refresh helpers.
 pub mod file_corpus;
 
 pub(crate) mod grouping;
@@ -26,7 +28,9 @@ pub(crate) mod grouping;
 /// `revision` is an opaque position token owned by the source's paging logic.
 #[derive(Clone, Debug)]
 pub struct SourceCursor {
+    /// Most recent observation timestamp produced by the source.
     pub last_seen: DateTime<Utc>,
+    /// Opaque paging position token used to continue incremental refresh.
     pub revision: u64,
 }
 
@@ -35,7 +39,9 @@ pub struct SourceCursor {
 /// `cursor` should be passed back on the next refresh to continue paging.
 #[derive(Clone, Debug)]
 pub struct SourceSnapshot {
+    /// Records returned by the refresh operation.
     pub records: Vec<DataRecord>,
+    /// Next cursor to pass into a future refresh call.
     pub cursor: SourceCursor,
 }
 
@@ -44,7 +50,9 @@ pub struct SourceSnapshot {
 /// Implementations can be streaming or index-backed as long as they return
 /// deterministic results for a fixed cursor and dataset.
 pub trait DataSource: Send + Sync {
+    /// Stable source identifier used in records and metrics.
     fn id(&self) -> &str;
+    /// Fetch up to `limit` records starting from `cursor` state.
     fn refresh(
         &self,
         cursor: Option<&SourceCursor>,
@@ -63,6 +71,7 @@ pub trait DataSource: Send + Sync {
         None
     }
 
+    /// Optional source-specific default triplet recipes.
     fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {
         Vec::new()
     }
@@ -77,8 +86,11 @@ pub trait DataSource: Send + Sync {
 /// with minimal gaps. Sparse indexes (returning `None` for many positions)
 /// still work but waste paging capacity and reduce batch fill rates.
 pub trait IndexableSource: Send + Sync {
+    /// Stable source identifier.
     fn id(&self) -> &str;
+    /// Current index domain size, typically `Some(total_records)`.
     fn len_hint(&self) -> Option<usize>;
+    /// Return record for index `idx`, or `None` when sparse/missing.
     fn record_at(&self, idx: usize) -> Result<Option<DataRecord>, SamplerError>;
 }
 
@@ -90,6 +102,7 @@ pub struct IndexablePager {
 }
 
 impl IndexablePager {
+    /// Create a new deterministic pager for `source_id`.
     pub fn new(source_id: impl Into<SourceId>) -> Self {
         Self {
             source_id: source_id.into(),
@@ -181,6 +194,7 @@ pub struct IndexableAdapter<T: IndexableSource> {
 }
 
 impl<T: IndexableSource> IndexableAdapter<T> {
+    /// Wrap an `IndexableSource` so it can be registered as a `DataSource`.
     pub fn new(inner: T) -> Self {
         Self { inner }
     }
@@ -263,6 +277,7 @@ pub struct InMemorySource {
 }
 
 impl InMemorySource {
+    /// Create an in-memory source from prebuilt records.
     pub fn new(id: impl Into<SourceId>, records: Vec<DataRecord>) -> Self {
         Self {
             id: id.into(),

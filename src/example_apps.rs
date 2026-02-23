@@ -141,6 +141,7 @@ struct SourceInventory {
     triplet_recipes: Vec<TripletRecipe>,
 }
 
+/// Run the capacity-estimation CLI with injectable root resolution/source builders.
 pub fn run_estimate_capacity<R, Resolve, Build, I>(
     args_iter: I,
     resolve_roots: Resolve,
@@ -407,6 +408,7 @@ where
     Ok(())
 }
 
+/// Run the multi-source demo CLI with injectable root resolution/source builders.
 pub fn run_multi_source_demo<R, Resolve, Build, I>(
     args_iter: I,
     resolve_roots: Resolve,

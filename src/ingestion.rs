@@ -36,6 +36,7 @@ struct CacheStats {
 }
 
 impl RecordCache {
+    /// Create a cache bounded to at most `max_records` live entries.
     pub fn new(max_records: usize) -> Self {
         Self {
             inner: Arc::new(RwLock::new(RecordCacheInner {
@@ -48,6 +49,7 @@ impl RecordCache {
         }
     }
 
+    /// Ingest a batch of records, updating existing IDs in place.
     pub fn ingest<I>(&self, records: I)
     where
         I: IntoIterator<Item = DataRecord>,
@@ -65,12 +67,14 @@ impl RecordCache {
         cvar.notify_all();
     }
 
+    /// Remove all cached records.
     pub fn clear(&self) {
         let mut inner = self.inner.write().expect("record cache poisoned");
         inner.records.clear();
         inner.order.clear();
     }
 
+    /// Return a cloned snapshot of all cached records.
     pub fn snapshot(&self) -> Vec<DataRecord> {
         let inner = self.inner.read().expect("record cache poisoned");
         inner
@@ -80,11 +84,13 @@ impl RecordCache {
             .collect()
     }
 
+    /// Return the number of completed ingest operations.
     pub fn ingest_count(&self) -> u64 {
         let (lock, _) = &*self.notifier;
         lock.lock().expect("record cache stats poisoned").ingests
     }
 
+    /// Wait until ingest count exceeds `last_seen` or timeout elapses.
     pub fn wait_for_ingest(&self, last_seen: u64, timeout: Duration) -> u64 {
         let (lock, cvar) = &*self.notifier;
         let mut stats = lock.lock().expect("record cache stats poisoned");
@@ -100,6 +106,7 @@ impl RecordCache {
         stats.ingests
     }
 
+    /// Wait indefinitely until ingest count exceeds `last_seen`.
     pub fn wait_for_ingest_blocking(&self, last_seen: u64) -> u64 {
         let (lock, cvar) = &*self.notifier;
         let mut stats = lock.lock().expect("record cache stats poisoned");
@@ -109,11 +116,13 @@ impl RecordCache {
         stats.ingests
     }
 
+    /// Returns `true` when the cache has no records.
     pub fn is_empty(&self) -> bool {
         let inner = self.inner.read().expect("record cache poisoned");
         inner.records.is_empty()
     }
 
+    /// Return the number of records currently cached.
     pub fn len(&self) -> usize {
         let inner = self.inner.read().expect("record cache poisoned");
         inner.records.len()
@@ -171,6 +180,7 @@ impl RecordCacheInner {
     }
 }
 
+/// Coordinates on-demand source refresh and cache population.
 pub struct IngestionManager {
     cache: RecordCache,
     sources: Vec<SourceState>,
@@ -178,11 +188,17 @@ pub struct IngestionManager {
 }
 
 #[derive(Clone, Debug, Default)]
+/// Last-refresh telemetry for a single source.
 pub struct SourceRefreshStats {
+    /// Duration of the most recent refresh in milliseconds.
     pub last_refresh_ms: u128,
+    /// Number of records returned by the most recent refresh.
     pub last_record_count: usize,
+    /// Throughput estimate from the most recent refresh.
     pub last_records_per_sec: f64,
+    /// Last refresh error message, if any.
     pub last_error: Option<String>,
+    /// Total refresh failures seen for this source.
     pub error_count: u64,
 }
 
@@ -206,6 +222,7 @@ impl IngestionManager {
         });
     }
 
+    /// Load persisted per-source stream cursors.
     pub fn load_cursors(&mut self, cursors: &[(SourceId, u64)]) {
         if cursors.is_empty() {
             return;
@@ -224,6 +241,7 @@ impl IngestionManager {
         }
     }
 
+    /// Snapshot current per-source stream cursors.
     pub fn snapshot_cursors(&self) -> Vec<(SourceId, u64)> {
         let mut out = Vec::new();
         for state in &self.sources {
@@ -234,6 +252,7 @@ impl IngestionManager {
         out
     }
 
+    /// Return latest refresh telemetry for each registered source.
     pub fn source_refresh_stats(&self) -> Vec<(SourceId, SourceRefreshStats)> {
         self.sources
             .iter()
@@ -499,6 +518,7 @@ impl IngestionManager {
         }
     }
 
+    /// Returns `true` when at least one source is registered.
     pub fn has_sources(&self) -> bool {
         !self.sources.is_empty()
     }
