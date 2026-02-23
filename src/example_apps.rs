@@ -820,3 +820,117 @@ fn extract_source(record_id: &str) -> SourceId {
         .map(|(source, _)| source.to_string())
         .unwrap_or_else(|| "unknown".to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::SectionRole;
+    use crate::source::{SourceCursor, SourceSnapshot};
+    use chrono::Utc;
+
+    struct TestSource {
+        id: String,
+        count: Option<u128>,
+        recipes: Vec<TripletRecipe>,
+    }
+
+    impl DataSource for TestSource {
+        fn id(&self) -> &str {
+            &self.id
+        }
+
+        fn refresh(
+            &self,
+            _cursor: Option<&SourceCursor>,
+            _limit: Option<usize>,
+        ) -> Result<SourceSnapshot, SamplerError> {
+            Ok(SourceSnapshot {
+                records: Vec::new(),
+                cursor: SourceCursor {
+                    last_seen: Utc::now(),
+                    revision: 0,
+                },
+            })
+        }
+
+        fn reported_record_count(&self) -> Option<u128> {
+            self.count
+        }
+
+        fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {
+            self.recipes.clone()
+        }
+    }
+
+    fn default_recipe(name: &str) -> TripletRecipe {
+        TripletRecipe {
+            name: name.to_string().into(),
+            anchor: crate::config::Selector::Role(SectionRole::Anchor),
+            positive_selector: crate::config::Selector::Role(SectionRole::Context),
+            negative_selector: crate::config::Selector::Role(SectionRole::Context),
+            negative_strategy: crate::config::NegativeStrategy::WrongArticle,
+            weight: 1.0,
+            instruction: None,
+        }
+    }
+
+    #[test]
+    fn parse_helpers_validate_inputs() {
+        assert_eq!(parse_positive_usize("2").unwrap(), 2);
+        assert!(parse_positive_usize("0").is_err());
+        assert!(parse_positive_usize("abc").is_err());
+
+        let split = parse_split_ratios_arg("0.8,0.1,0.1").unwrap();
+        assert!((split.train - 0.8).abs() < 1e-6);
+        assert!(parse_split_ratios_arg("0.8,0.1").is_err());
+        assert!(parse_split_ratios_arg("1.0,0.0,0.1").is_err());
+        assert!(parse_split_ratios_arg("-0.1,0.6,0.5").is_err());
+    }
+
+    #[test]
+    fn parse_cli_handles_help_and_invalid_args() {
+        let help = parse_cli::<EstimateCapacityCli, _>(["estimate_capacity", "--help"]).unwrap();
+        assert!(help.is_none());
+
+        let err = parse_cli::<EstimateCapacityCli, _>(["estimate_capacity", "--unknown"]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn run_estimate_capacity_succeeds_with_reported_counts() {
+        let result = run_estimate_capacity(
+            std::iter::empty::<String>(),
+            |roots| {
+                assert!(roots.is_empty());
+                Ok(())
+            },
+            |_| {
+                vec![Box::new(TestSource {
+                    id: "source_a".into(),
+                    count: Some(12),
+                    recipes: vec![default_recipe("r1")],
+                }) as DynSource]
+            },
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn run_estimate_capacity_errors_when_source_count_missing() {
+        let result = run_estimate_capacity(
+            std::iter::empty::<String>(),
+            |_| Ok(()),
+            |_| {
+                vec![Box::new(TestSource {
+                    id: "source_missing".into(),
+                    count: None,
+                    recipes: vec![default_recipe("r1")],
+                }) as DynSource]
+            },
+        );
+
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("did not report a record count"));
+    }
+}

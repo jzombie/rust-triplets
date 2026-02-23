@@ -3696,7 +3696,8 @@ mod tests {
         // advances source_epoch to 1 before role section selection runs.
         let epoch_seed_mask = 1u64;
         let mut seed = 1u64;
-        while (stable_hash_str(seed ^ epoch_seed_mask, key) as usize).is_multiple_of(section_count) {
+        while (stable_hash_str(seed ^ epoch_seed_mask, key) as usize).is_multiple_of(section_count)
+        {
             seed = seed.saturating_add(1);
         }
 
@@ -4066,9 +4067,10 @@ mod tests {
             let anchor_date = extract_date_prefix(&triplet.anchor.text);
             let positive_date = extract_date_prefix(&triplet.positive.text);
             if let (Some(a), Some(p)) = (anchor_date, positive_date)
-                && a != p {
-                    saw_anchor_positive_diff = true;
-                }
+                && a != p
+            {
+                saw_anchor_positive_diff = true;
+            }
 
             if saw_anchor_positive_diff && seen_splits.len() == 1 {
                 break;
@@ -4299,10 +4301,10 @@ mod tests {
                 prefixes[0].as_ref(),
                 prefixes[1].as_ref(),
                 prefixes[2].as_ref(),
-            )
-                && (a_pref != p_pref || p_pref != n_pref) {
-                    saw_triplet_component_divergence = true;
-                }
+            ) && (a_pref != p_pref || p_pref != n_pref)
+            {
+                saw_triplet_component_divergence = true;
+            }
 
             for pref in prefixes.into_iter().flatten() {
                 let parts = split_meta_parts(&pref);
@@ -4819,9 +4821,11 @@ mod tests {
             find_id(SplitLabel::Validation, "wa_anchor_val"),
             find_id(SplitLabel::Test, "wa_anchor_test"),
         ];
-        let other_ids = [find_id(SplitLabel::Train, "wa_other_train"),
+        let other_ids = [
+            find_id(SplitLabel::Train, "wa_other_train"),
             find_id(SplitLabel::Validation, "wa_other_val"),
-            find_id(SplitLabel::Test, "wa_other_test")];
+            find_id(SplitLabel::Test, "wa_other_test"),
+        ];
 
         let anchor_records: Vec<DataRecord> = anchor_ids
             .iter()
@@ -4893,9 +4897,11 @@ mod tests {
             find_id(SplitLabel::Validation, "wpd_anchor_val"),
             find_id(SplitLabel::Test, "wpd_anchor_test"),
         ];
-        let other_ids = [find_id(SplitLabel::Train, "wpd_other_train"),
+        let other_ids = [
+            find_id(SplitLabel::Train, "wpd_other_train"),
             find_id(SplitLabel::Validation, "wpd_other_val"),
-            find_id(SplitLabel::Test, "wpd_other_test")];
+            find_id(SplitLabel::Test, "wpd_other_test"),
+        ];
 
         let anchor_records: Vec<DataRecord> = anchor_ids
             .iter()
@@ -4967,9 +4973,11 @@ mod tests {
             find_id(SplitLabel::Validation, "qam_anchor_val"),
             find_id(SplitLabel::Test, "qam_anchor_test"),
         ];
-        let other_ids = [find_id(SplitLabel::Train, "qam_other_train"),
+        let other_ids = [
+            find_id(SplitLabel::Train, "qam_other_train"),
             find_id(SplitLabel::Validation, "qam_other_val"),
-            find_id(SplitLabel::Test, "qam_other_test")];
+            find_id(SplitLabel::Test, "qam_other_test"),
+        ];
 
         let qa_records: Vec<DataRecord> = anchor_ids
             .iter()
