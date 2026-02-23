@@ -47,7 +47,11 @@ pub use errors::SamplerError;
 pub use ingestion::{IngestionManager, RecordCache};
 pub use kvp::{KvpField, KvpPrefixSampler};
 pub use sampler::{BatchPrefetcher, PairSampler, Sampler};
-pub use source::{DataSource, SourceCursor};
+pub use source::{
+    DataSource, MappedRowViewAdapter, ResolvedFieldSets, RowFieldMapping, RowView, RowViewAdapter,
+    RowViewDataSourceAdapter, RowViewSource, SourceCursor, TextField, TextFieldPolicy, TextView,
+    TextViewSource,
+};
 pub use splits::{DeterministicSplitStore, FileSplitStore, SplitLabel, SplitRatios, SplitStore};
 pub use types::{
     CategoryId, HashPart, KvpValue, LogMessage, MetaValue, PathString, RecipeKey, RecordId,

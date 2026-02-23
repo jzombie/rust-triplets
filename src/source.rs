@@ -20,6 +20,13 @@ use crate::types::SourceId;
 pub mod date_helpers;
 /// Filesystem-backed corpus indexing and refresh helpers.
 pub mod file_corpus;
+/// Source-agnostic row/text contracts and field mapping policies.
+pub mod row_view;
+
+pub use row_view::{
+    MappedRowViewAdapter, ResolvedFieldSets, RowFieldMapping, RowView, RowViewAdapter,
+    RowViewDataSourceAdapter, RowViewSource, TextField, TextFieldPolicy, TextView, TextViewSource,
+};
 
 pub(crate) mod grouping;
 
