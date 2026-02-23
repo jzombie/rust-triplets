@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+
 /// Sampling configuration types.
 pub mod config;
 /// Centralized constants used across sampler, splits, and sources.
