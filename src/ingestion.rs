@@ -11,14 +11,14 @@ use std::thread;
 use std::time::Duration;
 use tracing::debug;
 
-/// Thread-safe cache of ingested records keyed by record ID.
+/// Thread-safe in-memory cache of ingested records keyed by record id.
 #[derive(Clone)]
 pub struct RecordCache {
     inner: Arc<RwLock<RecordCacheInner>>,
     notifier: Arc<(Mutex<CacheStats>, Condvar)>,
 }
 
-/// Internal mutable cache storage guarded by `RecordCache` locks.
+/// Internal mutable cache storage behind `RecordCache` locks.
 struct RecordCacheInner {
     records: IndexMap<RecordId, CachedRecord>,
     order: VecDeque<RecordId>,
@@ -26,20 +26,20 @@ struct RecordCacheInner {
     next_version: u64,
 }
 
-/// Internal cache entry with monotonic version tracking.
+/// Internal cache entry plus monotonic version marker.
 struct CachedRecord {
     record: DataRecord,
     version: u64,
 }
 
-#[derive(Default)]
 /// Internal ingest notification counters.
+#[derive(Default)]
 struct CacheStats {
     ingests: u64,
 }
 
 impl RecordCache {
-    /// Create a cache bounded to at most `max_records` live entries.
+    /// Create a cache capped to at most `max_records` live records.
     pub fn new(max_records: usize) -> Self {
         Self {
             inner: Arc::new(RwLock::new(RecordCacheInner {
@@ -52,7 +52,7 @@ impl RecordCache {
         }
     }
 
-    /// Ingest a batch of records, updating existing IDs in place.
+    /// Ingest a batch of records, replacing existing entries by id.
     pub fn ingest<I>(&self, records: I)
     where
         I: IntoIterator<Item = DataRecord>,
@@ -77,7 +77,7 @@ impl RecordCache {
         inner.order.clear();
     }
 
-    /// Return a cloned snapshot of all cached records.
+    /// Return a cloned snapshot of current cached records.
     pub fn snapshot(&self) -> Vec<DataRecord> {
         let inner = self.inner.read().expect("record cache poisoned");
         inner
@@ -93,7 +93,7 @@ impl RecordCache {
         lock.lock().expect("record cache stats poisoned").ingests
     }
 
-    /// Wait until ingest count exceeds `last_seen` or timeout elapses.
+    /// Wait until ingest count exceeds `last_seen`, or until timeout elapses.
     pub fn wait_for_ingest(&self, last_seen: u64, timeout: Duration) -> u64 {
         let (lock, cvar) = &*self.notifier;
         let mut stats = lock.lock().expect("record cache stats poisoned");
@@ -183,7 +183,7 @@ impl RecordCacheInner {
     }
 }
 
-/// Coordinates on-demand source refresh and cache population.
+/// Coordinates on-demand source refresh and shared-cache population.
 pub struct IngestionManager {
     cache: RecordCache,
     sources: Vec<SourceState>,
@@ -191,7 +191,7 @@ pub struct IngestionManager {
 }
 
 #[derive(Clone, Debug, Default)]
-/// Last-refresh telemetry for a single source.
+/// Last-refresh telemetry captured per source.
 pub struct SourceRefreshStats {
     /// Duration of the most recent refresh in milliseconds.
     pub last_refresh_ms: u128,

@@ -18,7 +18,7 @@ use crate::data::RecordId;
 use crate::errors::SamplerError;
 use crate::types::SourceId;
 
-/// Train/validation/test split labels.
+/// Logical dataset partitions used during sampling.
 #[derive(
     Clone,
     Copy,
@@ -40,7 +40,7 @@ pub enum SplitLabel {
     Test,
 }
 
-/// Ratios for train/validation/test splits (must sum to 1.0).
+/// Ratio configuration for train/validation/test assignment.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, bitcode::Encode, bitcode::Decode)]
 pub struct SplitRatios {
     /// Fraction assigned to train.
@@ -62,7 +62,7 @@ impl Default for SplitRatios {
 }
 
 impl SplitRatios {
-    /// Validate ratios sum to `1.0` (within epsilon) and return normalized config.
+    /// Validate that ratios sum to `1.0` (within epsilon).
     pub fn normalized(self) -> Result<Self, SamplerError> {
         let sum = self.train + self.validation + self.test;
         if (sum - 1.0).abs() > 1e-6 {
@@ -76,7 +76,7 @@ impl SplitRatios {
 
 pub use crate::constants::splits::{DEFAULT_STORE_DIR, EPOCH_STATE_VERSION};
 
-/// Persisted epoch metadata for a split.
+/// Persisted epoch cursor metadata for one split.
 #[derive(Clone, Debug, bitcode::Encode, bitcode::Decode)]
 pub struct PersistedSplitMeta {
     /// Current epoch for this split.
@@ -87,7 +87,7 @@ pub struct PersistedSplitMeta {
     pub hashes_checksum: u64,
 }
 
-/// Persisted epoch hash list for a split.
+/// Persisted deterministic epoch hash ordering for one split.
 #[derive(Clone, Debug, bitcode::Encode, bitcode::Decode)]
 pub struct PersistedSplitHashes {
     /// Checksum of `hashes`.
@@ -96,7 +96,7 @@ pub struct PersistedSplitHashes {
     pub hashes: Vec<u64>,
 }
 
-/// Persisted sampler state (round-robin indices, cursors, RNG).
+/// Persisted sampler runtime state (cursors, recipe indices, RNG).
 #[derive(Clone, Debug, bitcode::Encode, bitcode::Decode)]
 pub struct PersistedSamplerState {
     /// Source-cycle round-robin index.
@@ -115,19 +115,21 @@ pub struct PersistedSamplerState {
     pub source_stream_cursors: Vec<(SourceId, u64)>,
 }
 
-/// Split assignment store (deterministic via `record_id + seed + ratios`).
+/// Split assignment backend.
+///
+/// Implementations map `RecordId` values to split labels deterministically.
 pub trait SplitStore: Send + Sync {
-    /// Return stored/derived split label for `id`.
+    /// Return split label for `id` if known/derivable.
     fn label_for(&self, id: &RecordId) -> Option<SplitLabel>;
-    /// Persist an explicit split assignment.
+    /// Persist an explicit split assignment for `id`.
     fn upsert(&self, id: RecordId, label: SplitLabel) -> Result<(), SamplerError>;
     /// Return configured split ratios.
     fn ratios(&self) -> SplitRatios;
-    /// Returns the split label for `id`.
+    /// Return the split label for `id`, creating/deriving one when needed.
     fn ensure(&self, id: RecordId) -> Result<SplitLabel, SamplerError>;
 }
 
-/// Storage backend for epoch cursor state.
+/// Persistence backend for epoch metadata and epoch hash orderings.
 pub trait EpochStateStore: Send + Sync {
     /// Load split→epoch metadata map.
     fn load_epoch_meta(&self) -> Result<HashMap<SplitLabel, PersistedSplitMeta>, SamplerError>;
@@ -149,7 +151,7 @@ pub trait EpochStateStore: Send + Sync {
     ) -> Result<(), SamplerError>;
 }
 
-/// Storage backend for sampler state (round-robin indices, RNG).
+/// Persistence backend for sampler runtime state.
 pub trait SamplerStateStore: Send + Sync {
     /// Load persisted sampler runtime state, if present.
     fn load_sampler_state(&self) -> Result<Option<PersistedSamplerState>, SamplerError>;
@@ -157,7 +159,7 @@ pub trait SamplerStateStore: Send + Sync {
     fn store_sampler_state(&self, state: &PersistedSamplerState) -> Result<(), SamplerError>;
 }
 
-/// In-memory split store with deterministic assignments.
+/// In-memory split store with deterministic assignment derivation.
 pub struct DeterministicSplitStore {
     ratios: SplitRatios,
     assignments: RwLock<HashMap<RecordId, SplitLabel>>,
@@ -168,7 +170,7 @@ pub struct DeterministicSplitStore {
 }
 
 impl DeterministicSplitStore {
-    /// Construct an in-memory deterministic split store.
+    /// Create an in-memory split store configured with `ratios` and `seed`.
     pub fn new(ratios: SplitRatios, seed: u64) -> Result<Self, SamplerError> {
         ratios.normalized()?;
         Ok(Self {
@@ -276,7 +278,7 @@ impl SamplerStateStore for DeterministicSplitStore {
 }
 
 #[derive(Clone, Copy, Debug, bitcode::Encode, bitcode::Decode)]
-/// Versioned metadata header persisted in file-backed split stores.
+/// Versioned metadata header stored in file-backed split stores.
 struct StoreMeta {
     version: u8,
     seed: u64,
@@ -294,7 +296,9 @@ fn decode_store_meta(bytes: &[u8]) -> Result<StoreMeta, SamplerError> {
     })
 }
 
-/// File-backed split store for persistent runs (metadata + epoch/sampler state).
+/// File-backed split store for persistent runs.
+///
+/// Persists assignment metadata, epoch state, and sampler runtime state.
 pub struct FileSplitStore {
     store: DataStore,
     ratios: SplitRatios,

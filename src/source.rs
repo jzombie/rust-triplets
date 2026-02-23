@@ -23,9 +23,10 @@ pub mod file_corpus;
 
 pub(crate) mod grouping;
 
-/// Cursor emitted by a source to track incremental refresh state.
+/// Source-owned incremental refresh position.
 ///
-/// `revision` is an opaque position token owned by the source's paging logic.
+/// The sampler stores and returns this value between refresh calls.
+/// `revision` is opaque to the sampler and interpreted only by the source.
 #[derive(Clone, Debug)]
 pub struct SourceCursor {
     /// Most recent observation timestamp produced by the source.
@@ -34,9 +35,9 @@ pub struct SourceCursor {
     pub revision: u64,
 }
 
-/// Snapshot of records returned by a source refresh.
+/// Result of a single source refresh call.
 ///
-/// `cursor` should be passed back on the next refresh to continue paging.
+/// Pass the returned `cursor` back into the next refresh to continue paging.
 #[derive(Clone, Debug)]
 pub struct SourceSnapshot {
     /// Records returned by the refresh operation.
@@ -45,14 +46,16 @@ pub struct SourceSnapshot {
     pub cursor: SourceCursor,
 }
 
-/// Data source that can stream records into the sampler.
+/// Sampler-facing data source interface.
 ///
-/// Implementations can be streaming or index-backed as long as they return
-/// deterministic results for a fixed cursor and dataset.
+/// Implementations may be streaming or index-backed. For a fixed dataset state
+/// and cursor, refresh output should be deterministic.
 pub trait DataSource: Send + Sync {
-    /// Stable source identifier used in records and metrics.
+    /// Stable source identifier used in records, metrics, and persistence state.
     fn id(&self) -> &str;
     /// Fetch up to `limit` records starting from `cursor` state.
+    ///
+    /// Return the next cursor position in `SourceSnapshot.cursor`.
     fn refresh(
         &self,
         cursor: Option<&SourceCursor>,
@@ -71,13 +74,15 @@ pub trait DataSource: Send + Sync {
         None
     }
 
-    /// Optional source-specific default triplet recipes.
+    /// Optional source-provided default triplet recipes.
+    ///
+    /// Used when sampler config does not provide explicit recipes.
     fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {
         Vec::new()
     }
 }
 
-/// Indexable source interface for deterministic pseudo-random paging.
+/// Index-addressable source interface used by deterministic pagers.
 ///
 /// `len_hint` must be stable within an epoch, and `record_at` must return the
 /// record corresponding to the same index across runs.
@@ -90,13 +95,14 @@ pub trait IndexableSource: Send + Sync {
     fn id(&self) -> &str;
     /// Current index domain size, typically `Some(total_records)`.
     fn len_hint(&self) -> Option<usize>;
-    /// Return record for index `idx`, or `None` when sparse/missing.
+    /// Return the record at index `idx`, or `None` for sparse/missing positions.
     fn record_at(&self, idx: usize) -> Result<Option<DataRecord>, SamplerError>;
 }
 
 /// Deterministic pager for `IndexableSource`.
 ///
-/// Owns the shuffle seed and cursor math so callers don't need free functions.
+/// Encapsulates shuffle seed and cursor math so callers can reuse a stable
+/// paging algorithm without implementing permutation logic themselves.
 pub struct IndexablePager {
     source_id: SourceId,
 }
@@ -125,7 +131,10 @@ impl IndexablePager {
         self.refresh_with(total, cursor, limit, |idx| source.record_at(idx))
     }
 
-    /// Page records using a custom index fetcher (useful for filesystem lists).
+    /// Page records using a custom index fetcher.
+    ///
+    /// Useful when records are indexable but not exposed through `IndexableSource`
+    /// (for example, temporary index stores or precomputed path lists).
     pub fn refresh_with(
         &self,
         total: usize,
