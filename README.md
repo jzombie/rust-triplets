@@ -287,7 +287,7 @@ See [LICENSE-APACHE](./LICENSE-APACHE) and [LICENSE-MIT](./LICENSE-MIT) for deta
 [rust-logo]: https://img.shields.io/badge/Made%20with-Rust-black
 
 [crates-page]: https://crates.io/crates/triplets
-[crates-badge]: https://img.shields.io/crates/v/term-wm.svg
+[crates-badge]: https://img.shields.io/crates/v/triplets.svg
 
 [mit-license-page]: ./LICENSE-MIT
 [mit-license-badge]: https://img.shields.io/badge/license-MIT-blue.svg
@@ -295,5 +295,5 @@ See [LICENSE-APACHE](./LICENSE-APACHE) and [LICENSE-MIT](./LICENSE-MIT) for deta
 [apache-2.0-license-page]: ./LICENSE-APACHE
 [apache-2.0-license-badge]: https://img.shields.io/badge/license-Apache%202.0-blue.svg
 
-[coveralls-page]: https://coveralls.io/github/jzombie/triplets?branch=main
-[coveralls-badge]: https://img.shields.io/coveralls/github/jzombie/term-wm
+[coveralls-page]: https://coveralls.io/github/jzombie/rust-triplets?branch=main
+[coveralls-badge]: https://img.shields.io/coveralls/github/jzombie/rust-triplets
