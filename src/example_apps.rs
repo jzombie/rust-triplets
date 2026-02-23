@@ -179,9 +179,9 @@ where
         } else {
             config.recipes.clone()
         };
-        let reported_records = source.reported_record_count().ok_or_else(|| {
+        let reported_records = source.reported_record_count().map_err(|err| {
             format!(
-                "source '{}' did not report a record count; metadata-only capacity estimation requires DataSource::reported_record_count",
+                "source '{}' failed to report exact record count: {err}",
                 source.id()
             )
         })?;
@@ -861,8 +861,11 @@ mod tests {
             })
         }
 
-        fn reported_record_count(&self) -> Option<u128> {
-            self.count
+        fn reported_record_count(&self) -> Result<u128, SamplerError> {
+            self.count.ok_or_else(|| SamplerError::SourceInconsistent {
+                source_id: self.id.clone(),
+                details: "test source has no configured exact count".to_string(),
+            })
         }
 
         fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {

@@ -2149,6 +2149,10 @@ mod tests {
             <InMemorySource as DataSource>::refresh(&self.inner, cursor, limit)
         }
 
+        fn reported_record_count(&self) -> Result<u128, SamplerError> {
+            <InMemorySource as DataSource>::reported_record_count(&self.inner)
+        }
+
         fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {
             self.triplet_recipes.clone()
         }
@@ -2194,6 +2198,10 @@ mod tests {
                     revision: 0,
                 },
             })
+        }
+
+        fn reported_record_count(&self) -> Result<u128, SamplerError> {
+            Ok(self.records.len() as u128)
         }
     }
 
@@ -2256,6 +2264,10 @@ mod tests {
                 },
             })
         }
+
+        fn reported_record_count(&self) -> Result<u128, SamplerError> {
+            Ok(self.records.len() as u128)
+        }
     }
 
     impl DataSource for FailingSource {
@@ -2268,6 +2280,13 @@ mod tests {
             _cursor: Option<&SourceCursor>,
             _limit: Option<usize>,
         ) -> Result<SourceSnapshot, SamplerError> {
+            Err(SamplerError::SourceUnavailable {
+                source_id: self.id.clone(),
+                reason: "forced failure".into(),
+            })
+        }
+
+        fn reported_record_count(&self) -> Result<u128, SamplerError> {
             Err(SamplerError::SourceUnavailable {
                 source_id: self.id.clone(),
                 reason: "forced failure".into(),
@@ -2570,6 +2589,10 @@ mod tests {
                     revision: cursor.map(|c| c.revision + 1).unwrap_or_default(),
                 },
             })
+        }
+
+        fn reported_record_count(&self) -> Result<u128, crate::errors::SamplerError> {
+            Ok(self.records.len() as u128)
         }
 
         fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {

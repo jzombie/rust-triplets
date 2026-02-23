@@ -76,6 +76,10 @@ impl DataSource for PagedSource {
             },
         })
     }
+
+    fn reported_record_count(&self) -> Result<u128, SamplerError> {
+        Ok(self.pages.iter().map(|page| page.len() as u128).sum())
+    }
 }
 
 struct ThreadIdSource {
@@ -103,6 +107,13 @@ impl DataSource for FailingSource {
         _cursor: Option<&SourceCursor>,
         _limit: Option<usize>,
     ) -> Result<SourceSnapshot, SamplerError> {
+        Err(SamplerError::SourceUnavailable {
+            source_id: self.id.clone(),
+            reason: "forced failure".into(),
+        })
+    }
+
+    fn reported_record_count(&self) -> Result<u128, SamplerError> {
         Err(SamplerError::SourceUnavailable {
             source_id: self.id.clone(),
             reason: "forced failure".into(),
@@ -140,6 +151,10 @@ impl DataSource for ThreadIdSource {
                 revision: 0,
             },
         })
+    }
+
+    fn reported_record_count(&self) -> Result<u128, SamplerError> {
+        Ok(0)
     }
 }
 

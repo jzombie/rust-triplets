@@ -75,17 +75,16 @@ pub trait DataSource: Send + Sync {
         limit: Option<usize>,
     ) -> Result<SourceSnapshot, SamplerError>;
 
-    /// Optional metadata-only record count reported by the source.
+    /// Exact metadata record count reported by the source.
     ///
     /// This is intended for estimators that must avoid iterating records.
-    /// Implementations should return `Some(count)` only when the count is
-    /// known without enumerating all records through `refresh`.
+    /// Implementations should return `Ok(count)` only when the count is
+    /// exact for the source scope. Return `Err` when exact counting is not
+    /// possible or the source is unavailable.
     ///
     /// Keep this consistent with `refresh` by using the same backend scope,
     /// filtering, and logical corpus definition.
-    fn reported_record_count(&self) -> Option<u128> {
-        None
-    }
+    fn reported_record_count(&self) -> Result<u128, SamplerError>;
 
     /// Optional source-provided default triplet recipes.
     ///
@@ -268,6 +267,16 @@ impl<T: IndexableSource> DataSource for IndexableAdapter<T> {
         let pager = IndexablePager::new(self.inner.id());
         pager.refresh(&self.inner, cursor, limit)
     }
+
+    fn reported_record_count(&self) -> Result<u128, SamplerError> {
+        self.inner
+            .len_hint()
+            .map(|value| value as u128)
+            .ok_or_else(|| SamplerError::SourceInconsistent {
+                source_id: self.inner.id().to_string(),
+                details: "indexable source did not provide len_hint".into(),
+            })
+    }
 }
 
 /// Internal permutation used by `IndexablePager`.
@@ -383,6 +392,10 @@ impl DataSource for InMemorySource {
                 revision: next_start as u64,
             },
         })
+    }
+
+    fn reported_record_count(&self) -> Result<u128, SamplerError> {
+        Ok(self.records.len() as u128)
     }
 }
 

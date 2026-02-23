@@ -238,8 +238,14 @@ where
         })
     }
 
-    fn reported_record_count(&self) -> Option<u128> {
-        self.source.len_hint().map(|count| count as u128)
+    fn reported_record_count(&self) -> Result<u128, SamplerError> {
+        self.source
+            .len_hint()
+            .map(|count| count as u128)
+            .ok_or_else(|| SamplerError::SourceInconsistent {
+                source_id: self.source.id().to_string(),
+                details: "row source did not provide len_hint".to_string(),
+            })
     }
 
     fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {
@@ -706,7 +712,7 @@ mod tests {
         let second = ds.refresh(Some(&first.cursor), Some(1)).unwrap();
         assert_eq!(second.records.len(), 1);
         assert_ne!(first.records[0].id, second.records[0].id);
-        assert_eq!(ds.reported_record_count(), Some(2));
+        assert_eq!(ds.reported_record_count().unwrap(), 2);
         assert_eq!(ds.default_triplet_recipes().len(), 1);
     }
 
