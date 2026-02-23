@@ -160,6 +160,30 @@ let _ = batch;
 
 - For per-call source weighting, use `next_triplet_batch_with_weights(...)`, `next_pair_batch_with_weights(...)`, or `next_text_batch_with_weights(...)`.
 - Missing source ids default to `1.0`; `0.0` disables a source for that call.
+
+Example (different source mix across consecutive batches):
+
+```rust,no_run
+use std::collections::HashMap;
+
+let mut weights_a = HashMap::new();
+weights_a.insert("source_a".to_string(), 1.0);
+weights_a.insert("source_b".to_string(), 0.2);
+
+let mut weights_b = HashMap::new();
+weights_b.insert("source_a".to_string(), 0.2);
+weights_b.insert("source_b".to_string(), 1.0);
+
+let batch_a = sampler
+  .next_triplet_batch_with_weights(SplitLabel::Train, &weights_a)
+  .unwrap();
+let batch_b = sampler
+  .next_triplet_batch_with_weights(SplitLabel::Train, &weights_b)
+  .unwrap();
+
+let _ = (batch_a, batch_b);
+```
+
 - **Production readiness note**: if `len_hint` drifts in streaming/append-only sources, epoch order/coverage can repeat/skip records within an epoch, even though split assignment remains deterministic.
 
 ## Sampling behavior (current)
