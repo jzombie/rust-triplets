@@ -14,6 +14,8 @@ CI is configured to run tests/linting on macOS, Linux, and Windows.
 
 - **Automatic deterministic splits** (train/validation/test) from record IDs + seed.
 - **Runtime batch sampling** via `next_triplet_batch`, `next_pair_batch`, and `next_text_batch`.
+- **Recipe-driven sample construction** for triplet/pair/text generation (anchor/positive/negative selectors).
+- **Weight-aware sampling controls** across source weights, recipe weights, and chunk trust/quality weighting.
 - **Resume support** via `persist_state()` and split-store persistence.
 - **Source-agnostic backends** (`DataSource` or `IndexableSource` + `IndexableAdapter`).
 - **Supply-chain style orchestration (core layer):** multi-source intake (`refresh`) with per-call parallel ingest, optional per-source weighting, staged buffering, deterministic split routing, and batch assembly into train-ready outputs.
