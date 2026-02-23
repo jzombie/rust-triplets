@@ -58,7 +58,7 @@ Minimal shape:
 2. Create `SamplerConfig` (chunking, recipes, split policy).
 3. Open a split store (`DeterministicSplitStore` or `FileSplitStore`).
 4. Construct `PairSampler` and register sources.
-5. Call `next_*_batch(split)` APIs.
+5. Call one of the batch APIs: `next_triplet_batch(split)`, `next_pair_batch(split)`, or `next_text_batch(split)`.
 6. Call `persist_state()` when you want restart-resume behavior.
 
 ## Examples
@@ -108,8 +108,8 @@ Step-by-step:
 
 1. Build config + open the split store.
 2. Register sources.
-3. Call **`sampler.next_*_batch(split)`**.
-4. Call **`sampler.persist_state()`** when you want to save progress.
+3. Call one of **`sampler.next_triplet_batch(split)`**, **`sampler.next_pair_batch(split)`**, or **`sampler.next_text_batch(split)`**.
+4. Call **`sampler.persist_state()`** when you want to save progress (typically at the end of an epoch, or at explicit checkpoint boundaries).
 5. Optionally call **`sampler.set_epoch(n)`** for explicit epoch replay/order.
 
 Operational notes:
@@ -120,8 +120,8 @@ Operational notes:
 - Batch calls are thread-safe but serialized; refresh work within a call can be parallelized per source.
 - Source cursors advance independently per source, so one source can continue making progress even if another source is sparse or slower.
 - Refresh concurrency is per call: source refreshes run in parallel for that call, then the sampler joins all refresh threads before merging buffers (not an always-on per-source background ingest loop).
-- Prefetchers smooth latency by filling bounded queues from existing `next_*_batch(split)` APIs.
-- New data from streaming sources is pulled in on the next `next_*_batch(split)` call.
+- Prefetchers smooth latency by filling bounded queues from the existing batch APIs (`next_triplet_batch`, `next_pair_batch`, `next_text_batch`).
+- New data from streaming sources is pulled in on the next batch call.
 - `sampler.persist_state()` is manual; skipping it means no resume state after restart.
 - `sampler.set_epoch(n)` is an advanced override and is not required for normal resume behavior.
 - `IngestionManager::source_refresh_stats()` exposes per-source refresh duration/records/throughput/errors.
@@ -146,7 +146,7 @@ let batch = prefetcher.next().unwrap();
 let _ = batch;
 ```
 
-- For per-call source weighting, use `next_*_batch_with_weights(split, &HashMap<SourceId, f32>)`.
+- For per-call source weighting, use `next_triplet_batch_with_weights(...)`, `next_pair_batch_with_weights(...)`, or `next_text_batch_with_weights(...)`.
 - Missing source ids default to `1.0`; `0.0` disables a source for that call.
 - **Production readiness note**: if `len_hint` drifts in streaming/append-only sources, epoch order/coverage can repeat/skip records within an epoch, even though split assignment remains deterministic.
 
@@ -154,7 +154,7 @@ let _ = batch;
 
 This reflects the built-in file-corpus helpers (`FileCorpusIndex`) used by filesystem-backed sources.
 
-- **Ingestion**: `next_*_batch(split)` triggers refresh; per-source buffers refill when empty (or on force refresh).
+- **Ingestion**: `next_triplet_batch(split)`, `next_pair_batch(split)`, and `next_text_batch(split)` trigger refresh; per-source buffers refill when empty (or on force refresh).
 - **Memory bound**: refresh/cache limits are bounded by `ingestion_max_records` with a floor at `batch_size`.
 - **File indexing**: deterministic path ordering + deterministic index permutation for paging.
 - **Source ordering**: round-robin by source, deterministic within-source ordering by seed/epoch.
