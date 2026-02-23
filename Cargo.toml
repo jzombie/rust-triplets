@@ -1,6 +1,6 @@
 [package]
 name = "triplets"
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 edition = "2024"
 description = "Composable data sampling primitives for deterministic multi-source ML/AI training-data orchestration."
 license = "MIT OR Apache-2.0"
