@@ -217,25 +217,29 @@ use triplets::source::{IndexableAdapter, IndexableSource};
 use triplets::{data::DataRecord, SamplerError};
 
 struct MyIndexableSource {
-  ids: Vec<String>,
+  // Could be DB/API client, manifest reader, etc.
+  // No in-memory ID list required.
+  total_records: usize,
 }
 
 impl MyIndexableSource {
   fn load_record(&self, _idx: usize) -> Result<Option<DataRecord>, SamplerError> {
+    // Fetch by numeric position from your backend.
+    // `None` means "no record at this index".
     todo!("load one record by index")
   }
 }
 
 impl IndexableSource for MyIndexableSource {
   fn id(&self) -> &str { "my_source" }
-  fn len_hint(&self) -> Option<usize> { Some(self.ids.len()) }
+  fn len_hint(&self) -> Option<usize> { Some(self.total_records) }
   fn record_at(&self, idx: usize) -> Result<Option<DataRecord>, SamplerError> {
     self.load_record(idx)
   }
 }
 
 // register as a normal DataSource:
-// sampler.register_source(Box::new(IndexableAdapter::new(MyIndexableSource { ids }))); 
+// sampler.register_source(Box::new(IndexableAdapter::new(MyIndexableSource { total_records }))); 
 ```
 
 Manual path (does NOT use `IndexableSource`/`IndexableAdapter` directly):
