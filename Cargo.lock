@@ -2270,6 +2270,7 @@ dependencies = [
  "thiserror",
  "tracing",
  "tracing-subscriber",
+ "ureq",
  "walkdir",
 ]
 

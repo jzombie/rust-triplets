@@ -6,9 +6,11 @@ use parquet::record::reader::RowIter;
 use serde_json::Value;
 use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
+use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::hash::{Hash, Hasher};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -20,6 +22,15 @@ use walkdir::WalkDir;
 use crate::SamplerError;
 
 use super::{RowView, RowViewSource, TextField};
+
+const REMOTE_URL_PREFIX: &str = "url::";
+/// Extra row-index headroom above currently materialized rows exposed via `len_hint`.
+///
+/// This is not a file count. It lets sampling look slightly past the local row
+/// frontier so lazy remote expansion can continue without jumping to the full
+/// global row domain at once.
+const REMOTE_EXPANSION_HEADROOM_ROWS: usize = 8192;
+const REMOTE_BOOTSTRAP_SHARDS: usize = 4;
 
 /// Configuration for a bulk Hugging Face row source backed by local snapshot files.
 #[derive(Clone, Debug)]
@@ -44,6 +55,12 @@ pub struct HuggingFaceRowsConfig {
     pub parquet_row_group_cache_capacity: usize,
     /// Optional maximum row cap exposed by the source.
     pub max_rows: Option<usize>,
+    /// Hard cap for local manifest-shard cache bytes.
+    ///
+    /// When exceeded, oldest cached manifest shards are evicted.
+    pub local_disk_cap_bytes: Option<u64>,
+    /// Minimum number of manifest shards to keep resident during eviction.
+    pub min_resident_shards: usize,
     /// Optional row id column name. Falls back to synthetic id when missing.
     pub id_column: Option<String>,
     /// Text columns to extract. Empty means auto-detect textual scalar columns.
@@ -70,6 +87,8 @@ impl HuggingFaceRowsConfig {
             cache_capacity: 2048,
             parquet_row_group_cache_capacity: 8,
             max_rows: None,
+            local_disk_cap_bytes: Some(32 * 1024 * 1024 * 1024),
+            min_resident_shards: REMOTE_BOOTSTRAP_SHARDS,
             id_column: Some("id".to_string()),
             text_columns: Vec::new(),
         }
@@ -154,9 +173,11 @@ pub struct HuggingFaceRowSource {
 
 #[derive(Debug)]
 struct SourceState {
-    total_rows: usize,
+    materialized_rows: usize,
+    total_rows: Option<usize>,
     shards: Vec<ShardIndex>,
     remote_candidates: Option<Vec<String>>,
+    remote_candidate_sizes: HashMap<String, u64>,
     next_remote_idx: usize,
 }
 
@@ -193,21 +214,41 @@ impl HuggingFaceRowSource {
             );
         }
 
-        let total_rows = config.max_rows.map(|cap| cap.min(discovered)).unwrap_or(discovered);
+        let materialized_rows = config.max_rows.map(|cap| cap.min(discovered)).unwrap_or(discovered);
+        let total_rows = match Self::fetch_global_row_count(&config) {
+            Ok(value) => value,
+            Err(err) => {
+                eprintln!(
+                    "[triplets:hf] global row count request failed; continuing with discovered rows only: {}",
+                    err
+                );
+                None
+            }
+        };
+
+        if let Some(global_total) = total_rows {
+            eprintln!(
+                "[triplets:hf] global split row count reported: {} (known_local_rows={})",
+                global_total,
+                materialized_rows
+            );
+        }
 
         eprintln!(
             "[triplets:hf] source ready in {:.2}s (rows={}, shards={})",
             start_new.elapsed().as_secs_f64(),
-            total_rows,
+            materialized_rows,
             shards.len()
         );
 
         Ok(Self {
             config,
             state: Mutex::new(SourceState {
+                materialized_rows,
                 total_rows,
                 shards,
                 remote_candidates: None,
+                remote_candidate_sizes: HashMap::new(),
                 next_remote_idx: 0,
             }),
             cache: Mutex::new(RowCache::default()),
@@ -215,7 +256,20 @@ impl HuggingFaceRowSource {
         })
     }
 
-    fn list_remote_candidates(config: &HuggingFaceRowsConfig) -> Result<Vec<String>, SamplerError> {
+    fn list_remote_candidates(
+        config: &HuggingFaceRowsConfig,
+    ) -> Result<(Vec<String>, HashMap<String, u64>), SamplerError> {
+        if let Ok((candidates, candidate_sizes)) = Self::list_remote_candidates_from_parquet_manifest(config)
+            && !candidates.is_empty()
+        {
+            eprintln!(
+                "[triplets:hf] remote parquet manifest candidates matching {:?}: {}",
+                config.shard_extensions,
+                candidates.len()
+            );
+            return Ok((candidates, candidate_sizes));
+        }
+
         let api = ApiBuilder::new()
             .with_progress(true)
             .with_retries(5)
@@ -243,42 +297,62 @@ impl HuggingFaceRowSource {
             .map(|value| value.trim().trim_start_matches('.').to_ascii_lowercase())
             .collect::<Vec<_>>();
 
-        let mut saw_parquet = false;
-        let mut candidates = Vec::new();
-        for sibling in info.siblings {
-            let remote_path = sibling.rfilename;
+        let siblings = info
+            .siblings
+            .into_iter()
+            .map(|entry| entry.rfilename)
+            .collect::<Vec<_>>();
 
-            if !config.split.is_empty() {
-                let split_tag = format!("{}/", config.split);
-                let split_token = format!("-{}-", config.split);
-                let split_prefix = format!("{}-", config.split);
-                if !remote_path.contains(&split_tag)
-                    && !remote_path.contains(&split_token)
-                    && !Path::new(&remote_path)
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .is_some_and(|name| name.starts_with(&split_prefix))
+        let collect_candidates = |respect_split: bool| {
+            let mut saw_parquet = false;
+            let mut candidates = Vec::new();
+            for remote_path in &siblings {
+                if respect_split && !config.split.is_empty() {
+                    let split_tag = format!("{}/", config.split);
+                    let split_token = format!("-{}-", config.split);
+                    let split_prefix = format!("{}-", config.split);
+                    if !remote_path.contains(&split_tag)
+                        && !remote_path.contains(&split_token)
+                        && !Path::new(remote_path)
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|name| name.starts_with(&split_prefix))
+                    {
+                        continue;
+                    }
+                }
+
+                let ext = Path::new(remote_path)
+                    .extension()
+                    .and_then(|v| v.to_str())
+                    .map(|v| v.to_ascii_lowercase());
+                if ext.as_deref() == Some("parquet") {
+                    saw_parquet = true;
+                }
+                if ext
+                    .as_deref()
+                    .is_some_and(|ext| accepted.iter().any(|allowed| allowed == ext))
                 {
-                    continue;
+                    let target = Self::candidate_target_path(config, remote_path);
+                    if target.exists() {
+                        continue;
+                    }
+                    candidates.push(remote_path.clone());
                 }
             }
+            (candidates, saw_parquet)
+        };
 
-            let ext = Path::new(&remote_path)
-                .extension()
-                .and_then(|v| v.to_str())
-                .map(|v| v.to_ascii_lowercase());
-            if ext.as_deref() == Some("parquet") {
-                saw_parquet = true;
-            }
-            if ext
-                .as_deref()
-                .is_some_and(|ext| accepted.iter().any(|allowed| allowed == ext))
-            {
-                let target = config.snapshot_dir.join(&remote_path);
-                if target.exists() {
-                    continue;
-                }
-                candidates.push(remote_path);
+        let (mut candidates, mut saw_parquet) = collect_candidates(true);
+        if candidates.is_empty() && !config.split.is_empty() {
+            let (fallback_candidates, fallback_saw_parquet) = collect_candidates(false);
+            if !fallback_candidates.is_empty() {
+                eprintln!(
+                    "[triplets:hf] split filter '{}' matched no remote files; falling back to extension-only remote candidate scan",
+                    config.split
+                );
+                candidates = fallback_candidates;
+                saw_parquet = fallback_saw_parquet;
             }
         }
 
@@ -299,23 +373,449 @@ impl HuggingFaceRowSource {
                     ),
                 });
             }
-            return Err(SamplerError::SourceUnavailable {
+            eprintln!(
+                "[triplets:hf] no remote candidates found for dataset='{}' split='{}' extensions={:?}; source will be treated as exhausted",
+                config.dataset,
+                config.split,
+                config.shard_extensions
+            );
+            return Ok((Vec::new(), HashMap::new()));
+        }
+
+        Ok((candidates, HashMap::new()))
+    }
+
+    fn rotate_candidates_deterministically(config: &HuggingFaceRowsConfig, candidates: &mut Vec<String>) {
+        if candidates.len() <= 1 {
+            return;
+        }
+        let mut hasher = DefaultHasher::new();
+        config.source_id.hash(&mut hasher);
+        config.dataset.hash(&mut hasher);
+        config.config.hash(&mut hasher);
+        config.split.hash(&mut hasher);
+        let offset = (hasher.finish() as usize) % candidates.len();
+        candidates.rotate_left(offset);
+    }
+
+    fn list_remote_candidates_from_parquet_manifest(
+        config: &HuggingFaceRowsConfig,
+    ) -> Result<(Vec<String>, HashMap<String, u64>), SamplerError> {
+        let endpoint = "https://datasets-server.huggingface.co/parquet";
+        eprintln!(
+            "[triplets:hf] reading datasets-server parquet manifest for dataset {}",
+            config.dataset
+        );
+        let response = ureq::get(endpoint)
+            .query("dataset", &config.dataset)
+            .query("config", &config.config)
+            .query("split", &config.split)
+            .call()
+            .map_err(|err| SamplerError::SourceUnavailable {
                 source_id: config.source_id.clone(),
+                reason: format!("failed querying datasets-server parquet endpoint: {err}"),
+            })?;
+
+        let body = response
+            .into_body()
+            .read_to_string()
+            .map_err(|err| SamplerError::SourceUnavailable {
+                source_id: config.source_id.clone(),
+                reason: format!("failed reading datasets-server parquet response body: {err}"),
+            })?;
+
+        let json: Value = serde_json::from_str(&body).map_err(|err| SamplerError::SourceUnavailable {
+            source_id: config.source_id.clone(),
+            reason: format!("failed parsing datasets-server parquet response: {err}"),
+        })?;
+
+        let accepted = config
+            .shard_extensions
+            .iter()
+            .map(|value| value.trim().trim_start_matches('.').to_ascii_lowercase())
+            .collect::<Vec<_>>();
+
+        let mut candidates = Vec::new();
+        let mut candidate_sizes = HashMap::new();
+        if let Some(entries) = json.get("parquet_files").and_then(Value::as_array) {
+            for entry in entries {
+                let Some(url) = entry.get("url").and_then(Value::as_str) else {
+                    continue;
+                };
+
+                let ext = Path::new(url)
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .map(|value| value.to_ascii_lowercase());
+                if !ext
+                    .as_deref()
+                    .is_some_and(|value| accepted.iter().any(|allowed| allowed == value))
+                {
+                    continue;
+                }
+
+                let candidate = format!("{REMOTE_URL_PREFIX}{url}");
+                let target = Self::candidate_target_path(config, &candidate);
+                if target.exists() {
+                    continue;
+                }
+                if let Some(size) = entry.get("size").and_then(Value::as_u64) {
+                    candidate_sizes.insert(candidate.clone(), size);
+                }
+                candidates.push(candidate);
+            }
+        }
+
+        candidates.sort();
+        Ok((candidates, candidate_sizes))
+    }
+
+    fn candidate_target_path(config: &HuggingFaceRowsConfig, candidate: &str) -> PathBuf {
+        if let Some(url) = candidate.strip_prefix(REMOTE_URL_PREFIX) {
+            let suffix = url
+                .split("/resolve/")
+                .nth(1)
+                .map(|value| value.trim_start_matches('/'))
+                .filter(|value| !value.is_empty())
+                .unwrap_or("parquet/unknown.parquet");
+            return config.snapshot_dir.join("_parquet_manifest").join(suffix);
+        }
+        config.snapshot_dir.join(candidate)
+    }
+
+    fn manifest_cache_root(&self) -> PathBuf {
+        self.config.snapshot_dir.join("_parquet_manifest")
+    }
+
+    fn shard_size_bytes(path: &Path) -> u64 {
+        fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
+    }
+
+    fn recompute_shard_offsets(state: &mut SourceState) {
+        let mut running = 0usize;
+        for shard in &mut state.shards {
+            shard.global_start = running;
+            running = running.saturating_add(shard.row_count);
+        }
+        state.materialized_rows = running;
+    }
+
+    fn enforce_disk_cap_locked(
+        &self,
+        state: &mut SourceState,
+        protected_path: &Path,
+    ) -> Result<bool, SamplerError> {
+        let Some(cap_bytes) = self.config.local_disk_cap_bytes else {
+            return Ok(false);
+        };
+
+        let manifest_root = self.manifest_cache_root();
+        let mut usage_bytes = state
+            .shards
+            .iter()
+            .filter(|shard| shard.path.starts_with(&manifest_root))
+            .map(|shard| Self::shard_size_bytes(&shard.path))
+            .sum::<u64>();
+
+        if usage_bytes <= cap_bytes {
+            return Ok(false);
+        }
+
+        let mut evicted_any = false;
+        loop {
+            if usage_bytes <= cap_bytes {
+                break;
+            }
+
+            let resident_manifest_count = state
+                .shards
+                .iter()
+                .filter(|shard| shard.path.starts_with(&manifest_root))
+                .count();
+            if resident_manifest_count <= self.config.min_resident_shards {
+                break;
+            }
+
+            let evict_pos = state.shards.iter().position(|shard| {
+                shard.path.starts_with(&manifest_root) && shard.path != protected_path
+            });
+            let Some(pos) = evict_pos else {
+                break;
+            };
+
+            let shard = state.shards.remove(pos);
+            let shard_size = Self::shard_size_bytes(&shard.path);
+            if let Err(err) = fs::remove_file(&shard.path)
+                && err.kind() != std::io::ErrorKind::NotFound
+            {
+                return Err(SamplerError::SourceUnavailable {
+                    source_id: self.config.source_id.clone(),
+                    reason: format!(
+                        "failed evicting shard {} under disk cap: {err}",
+                        shard.path.display()
+                    ),
+                });
+            }
+
+            usage_bytes = usage_bytes.saturating_sub(shard_size);
+            evicted_any = true;
+            eprintln!(
+                "[triplets:hf] evicted shard for disk cap: {} (usage={:.2} GiB cap={:.2} GiB)",
+                shard.path.display(),
+                usage_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+                cap_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+            );
+        }
+
+        if usage_bytes > cap_bytes {
+            if protected_path.exists() {
+                let _ = fs::remove_file(protected_path);
+            }
+            return Err(SamplerError::SourceUnavailable {
+                source_id: self.config.source_id.clone(),
                 reason: format!(
-                    "no remote shard files found for dataset '{}' with extensions {:?}",
-                    config.dataset,
-                    config.shard_extensions
+                    "local disk cap exceeded and cannot evict further (usage={} bytes cap={} bytes)",
+                    usage_bytes, cap_bytes
                 ),
             });
         }
 
-        Ok(candidates)
+        if evicted_any {
+            Self::recompute_shard_offsets(state);
+        }
+        Ok(evicted_any)
+    }
+
+    fn manifest_usage_bytes_locked(&self, state: &SourceState) -> u64 {
+        let manifest_root = self.manifest_cache_root();
+        state
+            .shards
+            .iter()
+            .filter(|shard| shard.path.starts_with(&manifest_root))
+            .map(|shard| Self::shard_size_bytes(&shard.path))
+            .sum::<u64>()
+    }
+
+    fn fetch_global_row_count(config: &HuggingFaceRowsConfig) -> Result<Option<usize>, SamplerError> {
+        let endpoint = "https://datasets-server.huggingface.co/size";
+        eprintln!(
+            "[triplets:hf] requesting global row count dataset='{}' config='{}' split='{}'",
+            config.dataset,
+            config.config,
+            config.split
+        );
+
+        let response = ureq::get(endpoint)
+            .query("dataset", &config.dataset)
+            .query("config", &config.config)
+            .query("split", &config.split)
+            .call()
+            .map_err(|err| SamplerError::SourceUnavailable {
+                source_id: config.source_id.clone(),
+                reason: format!("failed querying datasets-server size endpoint: {err}"),
+            })?;
+
+        let body = response
+            .into_body()
+            .read_to_string()
+            .map_err(|err| SamplerError::SourceUnavailable {
+            source_id: config.source_id.clone(),
+            reason: format!("failed reading datasets-server size response body: {err}"),
+        })?;
+
+        let json: Value = serde_json::from_str(&body).map_err(|err| SamplerError::SourceUnavailable {
+            source_id: config.source_id.clone(),
+            reason: format!("failed parsing datasets-server size response: {err}"),
+        })?;
+
+        let mut count = Self::extract_split_row_count_from_size_response(&json, &config.config, &config.split);
+        if let (Some(max_rows), Some(rows)) = (config.max_rows, count) {
+            count = Some(rows.min(max_rows));
+        }
+        Ok(count)
+    }
+
+    fn extract_split_row_count_from_size_response(
+        json: &Value,
+        config_name: &str,
+        split_name: &str,
+    ) -> Option<usize> {
+        let to_usize = |value: &Value| {
+            value
+                .as_u64()
+                .and_then(|raw| usize::try_from(raw).ok())
+        };
+
+        let size = json.get("size")?;
+
+        if let Some(splits) = size.get("splits").and_then(Value::as_array) {
+            for entry in splits {
+                let entry_config = entry
+                    .get("config")
+                    .or_else(|| entry.get("config_name"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let entry_split = entry
+                    .get("split")
+                    .or_else(|| entry.get("name"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if entry_config == config_name && entry_split == split_name {
+                    if let Some(rows) = entry.get("num_rows").and_then(to_usize) {
+                        return Some(rows);
+                    }
+                }
+            }
+        }
+
+        if let Some(configs) = size.get("configs").and_then(Value::as_array) {
+            for config_entry in configs {
+                let entry_config = config_entry
+                    .get("config")
+                    .or_else(|| config_entry.get("config_name"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if entry_config != config_name {
+                    continue;
+                }
+
+                if let Some(splits) = config_entry.get("splits").and_then(Value::as_array) {
+                    for split_entry in splits {
+                        let entry_split = split_entry
+                            .get("split")
+                            .or_else(|| split_entry.get("name"))
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        if entry_split == split_name {
+                            if let Some(rows) = split_entry.get("num_rows").and_then(to_usize) {
+                                return Some(rows);
+                            }
+                        }
+                    }
+                }
+
+                if split_name.is_empty() {
+                    if let Some(rows) = config_entry.get("num_rows").and_then(to_usize) {
+                        return Some(rows);
+                    }
+                }
+            }
+        }
+
+        if split_name.is_empty() {
+            return size
+                .get("dataset")
+                .and_then(|dataset| dataset.get("num_rows"))
+                .and_then(to_usize);
+        }
+
+        None
     }
 
     fn download_and_materialize_shard(
         config: &HuggingFaceRowsConfig,
         remote_path: &str,
+        expected_bytes: Option<u64>,
     ) -> Result<PathBuf, SamplerError> {
+        if let Some(remote_url) = remote_path.strip_prefix(REMOTE_URL_PREFIX) {
+            let target = Self::candidate_target_path(config, remote_path);
+            if !target.exists() {
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent).map_err(|err| SamplerError::SourceUnavailable {
+                        source_id: config.source_id.clone(),
+                        reason: format!("failed creating snapshot subdir {}: {err}", parent.display()),
+                    })?;
+                }
+
+                let response = ureq::get(remote_url).call().map_err(|err| {
+                    SamplerError::SourceUnavailable {
+                        source_id: config.source_id.clone(),
+                        reason: format!("failed downloading shard URL '{}': {err}", remote_url),
+                    }
+                })?;
+                let mut reader = response.into_body().into_reader();
+                let mut file = File::create(&target).map_err(|err| SamplerError::SourceUnavailable {
+                    source_id: config.source_id.clone(),
+                    reason: format!("failed creating target shard {}: {err}", target.display()),
+                })?;
+                eprintln!(
+                    "[triplets:hf] downloading shard payload -> {}",
+                    target.display()
+                );
+                let started = Instant::now();
+                let mut total_bytes = 0u64;
+                let mut buffer = vec![0u8; 8 * 1024 * 1024];
+                let mut last_report = Instant::now();
+                loop {
+                    let read = reader.read(&mut buffer).map_err(|err| SamplerError::SourceUnavailable {
+                        source_id: config.source_id.clone(),
+                        reason: format!("failed reading shard stream '{}': {err}", remote_url),
+                    })?;
+                    if read == 0 {
+                        break;
+                    }
+                    file.write_all(&buffer[..read]).map_err(|err| SamplerError::SourceUnavailable {
+                        source_id: config.source_id.clone(),
+                        reason: format!("failed writing target shard {}: {err}", target.display()),
+                    })?;
+                    total_bytes = total_bytes.saturating_add(read as u64);
+                    if last_report.elapsed() >= Duration::from_secs(2) {
+                        let elapsed = started.elapsed().as_secs_f64();
+                        if let Some(expected) = expected_bytes
+                            && expected > 0
+                        {
+                            let pct = ((total_bytes as f64 / expected as f64) * 100.0).clamp(0.0, 100.0);
+                            let rate = if elapsed > 0.0 { total_bytes as f64 / elapsed } else { 0.0 };
+                            let eta_secs = if rate > 0.0 && total_bytes < expected {
+                                (expected.saturating_sub(total_bytes) as f64) / rate
+                            } else {
+                                0.0
+                            };
+                            eprintln!(
+                                "[triplets:hf] download progress {}: {:.1}/{:.1} MiB ({:.1}%, {:.1}s elapsed, ETA {:.1}s)",
+                                target.display(),
+                                total_bytes as f64 / (1024.0 * 1024.0),
+                                expected as f64 / (1024.0 * 1024.0),
+                                pct,
+                                elapsed,
+                                eta_secs.max(0.0)
+                            );
+                        } else {
+                            eprintln!(
+                                "[triplets:hf] download progress {}: {:.1} MiB ({:.1}s)",
+                                target.display(),
+                                total_bytes as f64 / (1024.0 * 1024.0),
+                                elapsed
+                            );
+                        }
+                        last_report = Instant::now();
+                    }
+                }
+                let elapsed = started.elapsed().as_secs_f64();
+                if let Some(expected) = expected_bytes
+                    && expected > 0
+                {
+                    let pct = ((total_bytes as f64 / expected as f64) * 100.0).clamp(0.0, 100.0);
+                    eprintln!(
+                        "[triplets:hf] download complete {}: {:.1}/{:.1} MiB ({:.1}%) in {:.1}s",
+                        target.display(),
+                        total_bytes as f64 / (1024.0 * 1024.0),
+                        expected as f64 / (1024.0 * 1024.0),
+                        pct,
+                        elapsed
+                    );
+                } else {
+                    eprintln!(
+                        "[triplets:hf] download complete {}: {:.1} MiB in {:.1}s",
+                        target.display(),
+                        total_bytes as f64 / (1024.0 * 1024.0),
+                        elapsed
+                    );
+                }
+            }
+            return Ok(target);
+        }
+
         let api = ApiBuilder::new()
             .with_progress(true)
             .with_retries(5)
@@ -361,7 +861,7 @@ impl HuggingFaceRowSource {
             });
         }
 
-        let target = config.snapshot_dir.join(remote_path);
+        let target = Self::candidate_target_path(config, remote_path);
         Self::materialize_local_file(config, &local_cached, &target)?;
         Ok(target)
     }
@@ -475,7 +975,7 @@ impl HuggingFaceRowSource {
                     reason: "huggingface source state lock poisoned".to_string(),
                 })?;
 
-                if idx < state.total_rows {
+                if idx < state.materialized_rows {
                     return Ok(true);
                 }
 
@@ -499,104 +999,179 @@ impl HuggingFaceRowSource {
             };
 
             if need_candidates {
-                let candidates = Self::list_remote_candidates(&self.config)?;
+                let (mut candidates, candidate_sizes) = Self::list_remote_candidates(&self.config)?;
+                Self::rotate_candidates_deterministically(&self.config, &mut candidates);
+                let candidate_count = candidates.len();
                 let mut state = self.state.lock().map_err(|_| SamplerError::SourceUnavailable {
                     source_id: self.config.source_id.clone(),
                     reason: "huggingface source state lock poisoned".to_string(),
                 })?;
+                let bootstrap_needed = state.materialized_rows == 0 && candidate_count > 0;
                 if state.remote_candidates.is_none() {
+                    let known_rows = state.materialized_rows;
+                    let shard_count = state.shards.len();
                     eprintln!(
-                        "[triplets:hf] lazy candidate set initialized with {} remote shard(s)",
-                        candidates.len()
+                        "[triplets:hf] state: candidates={} known_rows={} active_shards={} disk_cap={} min_resident_shards={}",
+                        candidates.len(),
+                        known_rows,
+                        shard_count,
+                        self.config
+                            .local_disk_cap_bytes
+                            .map(|bytes| format!("{:.2} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0)))
+                            .unwrap_or_else(|| "disabled".to_string()),
+                        self.config.min_resident_shards,
                     );
                     state.remote_candidates = Some(candidates);
+                    state.remote_candidate_sizes = candidate_sizes;
                     state.next_remote_idx = 0;
+                }
+                drop(state);
+
+                if bootstrap_needed {
+                    let bootstrap_target = REMOTE_BOOTSTRAP_SHARDS.min(candidate_count);
+                    eprintln!(
+                        "[triplets:hf] bootstrapping remote shard diversity: target={} shard(s)",
+                        bootstrap_target
+                    );
+                    for step in 0..bootstrap_target {
+                        eprintln!(
+                            "[triplets:hf] bootstrap progress: {}/{}",
+                            step + 1,
+                            bootstrap_target
+                        );
+                        if !self.download_next_remote_shard()? {
+                            break;
+                        }
+                    }
+                    eprintln!("[triplets:hf] bootstrap complete");
                 }
                 continue;
             }
+            if !self.download_next_remote_shard()? {
+                return Ok(false);
+            }
+        }
+    }
 
-            let (remote_ordinal, remote_total, remote_path) = {
-                let mut state = self.state.lock().map_err(|_| SamplerError::SourceUnavailable {
-                    source_id: self.config.source_id.clone(),
-                    reason: "huggingface source state lock poisoned".to_string(),
-                })?;
-                let Some(candidates) = &state.remote_candidates else {
-                    continue;
-                };
-                if state.next_remote_idx >= candidates.len() {
-                    return Ok(false);
-                }
-                let remote_ordinal = state.next_remote_idx + 1;
-                let remote_total = candidates.len();
-                let remote_path = candidates[state.next_remote_idx].clone();
-                state.next_remote_idx += 1;
-                (remote_ordinal, remote_total, remote_path)
-            };
-
-            eprintln!(
-                "[triplets:hf] lazy downloading shard {}/{}: {}",
-                remote_ordinal,
-                remote_total,
-                remote_path
-            );
-            let local_path = Self::download_and_materialize_shard(&self.config, &remote_path)?;
-
-            let global_start = {
-                let state = self.state.lock().map_err(|_| SamplerError::SourceUnavailable {
-                    source_id: self.config.source_id.clone(),
-                    reason: "huggingface source state lock poisoned".to_string(),
-                })?;
-                state.total_rows
-            };
-
-            let Some(shard) = Self::index_single_shard(&self.config, &local_path, global_start)? else {
-                eprintln!(
-                    "[triplets:hf] downloaded shard had zero rows and was skipped: {}",
-                    local_path.display()
-                );
-                continue;
-            };
-
+    fn download_next_remote_shard(&self) -> Result<bool, SamplerError> {
+        let (remote_ordinal, remote_total, remote_path, expected_bytes) = {
             let mut state = self.state.lock().map_err(|_| SamplerError::SourceUnavailable {
                 source_id: self.config.source_id.clone(),
                 reason: "huggingface source state lock poisoned".to_string(),
             })?;
-
-            if self
-                .config
-                .max_rows
-                .is_some_and(|max_rows| state.total_rows >= max_rows)
-            {
-                return Ok(idx < state.total_rows);
+            let Some(candidates) = &state.remote_candidates else {
+                return Ok(false);
+            };
+            if state.next_remote_idx >= candidates.len() {
+                return Ok(false);
             }
+            let remote_ordinal = state.next_remote_idx + 1;
+            let remote_total = candidates.len();
+            let remote_path = candidates[state.next_remote_idx].clone();
+            let expected_bytes = state.remote_candidate_sizes.get(&remote_path).copied();
+            state.next_remote_idx += 1;
+            (remote_ordinal, remote_total, remote_path, expected_bytes)
+        };
 
-            let mut rows_to_add = shard.row_count;
-            if let Some(max_rows) = self.config.max_rows {
-                rows_to_add = rows_to_add.min(max_rows.saturating_sub(state.total_rows));
-            }
-            if rows_to_add == 0 {
-                return Ok(idx < state.total_rows);
-            }
+        eprintln!(
+            "[triplets:hf] lazy downloading shard {}/{}: {}",
+            remote_ordinal,
+            remote_total,
+            remote_path
+        );
+        let local_path = Self::download_and_materialize_shard(
+            &self.config,
+            &remote_path,
+            expected_bytes,
+        )?;
 
-            let mut shard = shard;
-            shard.global_start = state.total_rows;
-            shard.row_count = rows_to_add;
-            if shard.is_parquet {
-                shard.parquet_row_groups.retain(|(start, _)| *start < rows_to_add);
-                if let Some((start, count)) = shard.parquet_row_groups.last_mut() {
-                    let allowed = rows_to_add.saturating_sub(*start);
-                    *count = (*count).min(allowed);
-                }
-            }
-            state.total_rows += rows_to_add;
-            state.shards.push(shard);
+        let global_start = {
+            let state = self.state.lock().map_err(|_| SamplerError::SourceUnavailable {
+                source_id: self.config.source_id.clone(),
+                reason: "huggingface source state lock poisoned".to_string(),
+            })?;
+            state.materialized_rows
+        };
 
+        let Some(shard) = Self::index_single_shard(&self.config, &local_path, global_start)? else {
             eprintln!(
-                "[triplets:hf] lazy index expanded: rows={}, shards={}",
-                state.total_rows,
-                state.shards.len()
+                "[triplets:hf] downloaded shard had zero rows and was skipped: {}",
+                local_path.display()
             );
+            return Ok(true);
+        };
+
+        let mut state = self.state.lock().map_err(|_| SamplerError::SourceUnavailable {
+            source_id: self.config.source_id.clone(),
+            reason: "huggingface source state lock poisoned".to_string(),
+        })?;
+
+        if self
+            .config
+            .max_rows
+            .is_some_and(|max_rows| state.materialized_rows >= max_rows)
+        {
+            return Ok(true);
         }
+
+        let mut rows_to_add = shard.row_count;
+        if let Some(max_rows) = self.config.max_rows {
+            rows_to_add = rows_to_add.min(max_rows.saturating_sub(state.materialized_rows));
+        }
+        if rows_to_add == 0 {
+            return Ok(true);
+        }
+
+        let mut shard = shard;
+        shard.global_start = state.materialized_rows;
+        shard.row_count = rows_to_add;
+        if shard.is_parquet {
+            shard.parquet_row_groups.retain(|(start, _)| *start < rows_to_add);
+            if let Some((start, count)) = shard.parquet_row_groups.last_mut() {
+                let allowed = rows_to_add.saturating_sub(*start);
+                *count = (*count).min(allowed);
+            }
+        }
+        state.materialized_rows += rows_to_add;
+        state.shards.push(shard);
+
+        let evicted_any = self.enforce_disk_cap_locked(&mut state, &local_path)?;
+        let materialized_rows = state.materialized_rows;
+        let shard_count = state.shards.len();
+        let remaining_candidates = state
+            .remote_candidates
+            .as_ref()
+            .map(|candidates| candidates.len().saturating_sub(state.next_remote_idx))
+            .unwrap_or(0);
+        let usage_bytes = self.manifest_usage_bytes_locked(&state);
+        let usage_gib = usage_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+        let cap_str = self
+            .config
+            .local_disk_cap_bytes
+            .map(|bytes| format!("{:.2} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0)))
+            .unwrap_or_else(|| "disabled".to_string());
+        drop(state);
+
+        if evicted_any {
+            if let Ok(mut cache) = self.cache.lock() {
+                cache.rows.clear();
+                cache.order.clear();
+            }
+            if let Ok(mut parquet_cache) = self.parquet_cache.lock() {
+                parquet_cache.readers.clear();
+            }
+        }
+
+        eprintln!(
+            "[triplets:hf] state: rows={} shards={} remaining_candidates={} disk_usage={:.2} GiB cap={}",
+            materialized_rows,
+            shard_count,
+            remaining_candidates,
+            usage_gib,
+            cap_str,
+        );
+
+        Ok(true)
     }
 
     fn materialize_local_file(
@@ -1064,16 +1639,41 @@ impl RowViewSource for HuggingFaceRowSource {
 
     fn len_hint(&self) -> Option<usize> {
         let state = self.state.lock().ok()?;
-        let known = state.total_rows;
+        let known = state.materialized_rows;
         if known > 0 {
-            return Some(known);
+            let mut upper = known;
+            if state
+                .total_rows
+                .is_some_and(|total_rows| total_rows > known)
+            {
+                upper = known.saturating_add(REMOTE_EXPANSION_HEADROOM_ROWS);
+                if let Some(total_rows) = state.total_rows {
+                    upper = upper.min(total_rows);
+                }
+            }
+            if let Some(max_rows) = self.config.max_rows {
+                upper = upper.min(max_rows);
+            }
+            return Some(upper.max(known));
+        }
+
+        if state.total_rows.is_some_and(|total_rows| total_rows == 0) {
+            return Some(0);
+        }
+
+        if state
+            .remote_candidates
+            .as_ref()
+            .is_some_and(|candidates| candidates.is_empty())
+        {
+            return Some(0);
         }
 
         if self.config.max_rows.is_some_and(|max_rows| max_rows == 0) {
             return Some(0);
         }
 
-        Some(self.config.max_rows.unwrap_or(1))
+        Some(1)
     }
 
     fn row_at(&self, idx: usize) -> Result<Option<RowView>, SamplerError> {
