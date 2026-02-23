@@ -202,9 +202,43 @@ fn reported_record_count(&self) -> Option<u128> {
 }
 ```
 
-If a source emits sequential IDs, implement indexable paging (`IndexableSource` + `IndexablePager` or `IndexableAdapter`) to avoid time-ordered ingestion bias.
+If your records are time-ordered (oldest → newest), use these APIs:
 
-Example hash-sorted refresh skeleton:
+- `IndexableSource` (you provide `len_hint()` + `record_at(idx)`).
+- `IndexableAdapter` (easiest: turns your `IndexableSource` into a `DataSource`).
+- `IndexablePager` (use directly only if you are writing a custom `refresh(...)`).
+
+That is the built-in path for shuffled paging + cursor resume.
+
+Helper-based path (uses the APIs above):
+
+```rust,ignore
+use triplets::source::{IndexableAdapter, IndexableSource};
+use triplets::{data::DataRecord, SamplerError};
+
+struct MyIndexableSource {
+  ids: Vec<String>,
+}
+
+impl MyIndexableSource {
+  fn load_record(&self, _idx: usize) -> Result<Option<DataRecord>, SamplerError> {
+    todo!("load one record by index")
+  }
+}
+
+impl IndexableSource for MyIndexableSource {
+  fn id(&self) -> &str { "my_source" }
+  fn len_hint(&self) -> Option<usize> { Some(self.ids.len()) }
+  fn record_at(&self, idx: usize) -> Result<Option<DataRecord>, SamplerError> {
+    self.load_record(idx)
+  }
+}
+
+// register as a normal DataSource:
+// sampler.register_source(Box::new(IndexableAdapter::new(MyIndexableSource { ids }))); 
+```
+
+Manual path (does NOT use `IndexableSource`/`IndexableAdapter` directly):
 
 ```rust
 use chrono::Utc;
@@ -215,15 +249,21 @@ use triplets::source::{SourceCursor, SourceSnapshot};
 use triplets::SamplerError;
 
 struct MySource {
+  // Canonical record IDs for this source.
+  // We keep IDs separate from record payloads so refresh can page deterministically.
   ids: Vec<String>,
 }
 
 impl MySource {
   fn load_record(&self, _id: &str) -> Result<DataRecord, SamplerError> {
+    // Put your real fetch logic here (database call, API request, file read, etc.).
+    // The sampler expects each loaded item to be returned as a DataRecord.
     todo!("load record from storage")
   }
 
   fn stable_hash(id: &str) -> u64 {
+    // Convert each ID to a repeatable number so ordering is the same every run.
+    // This avoids "newest-first" bias when IDs are naturally time-ordered.
     let mut hasher = DefaultHasher::new();
     id.hash(&mut hasher);
     hasher.finish()
@@ -234,15 +274,32 @@ impl MySource {
     cursor: Option<&SourceCursor>,
     limit: Option<usize>,
   ) -> Result<SourceSnapshot, SamplerError> {
+    // Make a sorted copy of IDs so this call runs in a repeatable order.
+    // Note: this copy holds all IDs in memory for this refresh call.
     let mut ids = self.ids.clone();
     ids.sort_by_key(|id| Self::stable_hash(id));
+
+    // How many records exist right now.
     let total = ids.len();
+
+    // `revision` means "where to resume next time".
+    // No cursor yet means this is the first run, so start at index 0.
     let mut start = cursor.map(|c| c.revision as usize).unwrap_or(0);
+
+    // If data size changed and start is now invalid, safely reset to the beginning.
     if total > 0 && start >= total {
       start = 0;
     }
+
+    // Hard cap for this call.
+    // - If `limit` is Some(n), we load at most `n` records this call.
+    // - If `limit` is None, we allow one full pass (`total` records).
     let max = limit.unwrap_or(total);
     let mut records = Vec::new();
+
+    // Load records one-by-one, starting at `start`, and wrap at the end.
+    // We stop as soon as `records.len() == max`.
+    // So this does NOT always load everything; it only loads up to `max`.
     for idx in 0..total {
       if records.len() >= max {
         break;
@@ -250,11 +307,15 @@ impl MySource {
       let pos = (start + idx) % total;
       records.push(self.load_record(&ids[pos])?);
     }
+
+    // Save where the next call should continue.
     let next_start = (start + records.len()) % total.max(1);
     Ok(SourceSnapshot {
       records,
       cursor: SourceCursor {
+        // Record when this refresh happened.
         last_seen: Utc::now(),
+        // Store resume position for the next refresh call.
         revision: next_start as u64,
       },
     })
