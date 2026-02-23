@@ -955,7 +955,7 @@ mod tests {
             SplitLabel::Train | SplitLabel::Validation | SplitLabel::Test
         ));
 
-        let mapped = map_store_err(io::Error::new(io::ErrorKind::Other, "boom"));
+        let mapped = map_store_err(io::Error::other("boom"));
         assert!(matches!(mapped, SamplerError::SplitStore(msg) if msg.contains("boom")));
     }
 
