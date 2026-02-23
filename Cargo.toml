@@ -7,11 +7,11 @@ license = "MIT OR Apache-2.0"
 authors = ["Jeremy <jeremy@example.com>"]
 categories = ["algorithms", "science", "text-processing"]
 keywords = [
-	"machine-learning",
-	"contrastive-learning",
-	"triplet-loss",
-	"dataset-sampling",
-	"training-data",
+    "machine-learning",
+    "contrastive-learning",
+    "triplet-loss",
+    "dataset-sampling",
+    "training-data",
 ]
 
 [dependencies]
