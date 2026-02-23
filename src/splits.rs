@@ -693,6 +693,7 @@ fn map_store_err(err: io::Error) -> SamplerError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use tempfile::tempdir;
 
     #[test]
@@ -790,5 +791,76 @@ mod tests {
         store.ensure("abc".to_string()).unwrap();
         let expected_file = dir.path().join(DEFAULT_STORE_FILENAME);
         assert!(expected_file.is_file());
+    }
+
+    #[test]
+    fn bitcode_payload_requires_prefix() {
+        let err = decode_bitcode_payload(&[0x00, 0x01]).unwrap_err();
+        assert!(
+            matches!(err, SamplerError::SplitStore(msg) if msg.contains("missing expected prefix"))
+        );
+    }
+
+    #[test]
+    fn file_store_round_trips_epoch_and_sampler_state() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("epoch_sampler_state.bin");
+        let store = FileSplitStore::open(&path, SplitRatios::default(), 222).unwrap();
+
+        let mut epoch_meta = HashMap::new();
+        epoch_meta.insert(
+            SplitLabel::Train,
+            PersistedSplitMeta {
+                epoch: 3,
+                offset: 7,
+                hashes_checksum: 42,
+            },
+        );
+        store.store_epoch_meta(&epoch_meta).unwrap();
+
+        let loaded_meta = store.load_epoch_meta().unwrap();
+        let loaded_train = loaded_meta.get(&SplitLabel::Train).unwrap();
+        assert_eq!(loaded_train.epoch, 3);
+        assert_eq!(loaded_train.offset, 7);
+        assert_eq!(loaded_train.hashes_checksum, 42);
+
+        let hashes = PersistedSplitHashes {
+            checksum: 99,
+            hashes: vec![10, 20, 30],
+        };
+        store
+            .store_epoch_hashes(SplitLabel::Validation, &hashes)
+            .unwrap();
+        let loaded_hashes = store
+            .load_epoch_hashes(SplitLabel::Validation)
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded_hashes.checksum, 99);
+        assert_eq!(loaded_hashes.hashes, vec![10, 20, 30]);
+
+        let state = PersistedSamplerState {
+            source_cycle_idx: 11,
+            source_record_cursors: vec![("source_a".to_string(), 1)],
+            source_epoch: 8,
+            rng_state: 1234,
+            triplet_recipe_rr_idx: 2,
+            text_recipe_rr_idx: 5,
+            source_stream_cursors: vec![("source_a".to_string(), 9)],
+        };
+        store.store_sampler_state(&state).unwrap();
+        let loaded_state = store.load_sampler_state().unwrap().unwrap();
+        assert_eq!(loaded_state.source_cycle_idx, 11);
+        assert_eq!(loaded_state.source_epoch, 8);
+        assert_eq!(loaded_state.rng_state, 1234);
+        assert_eq!(loaded_state.triplet_recipe_rr_idx, 2);
+        assert_eq!(loaded_state.text_recipe_rr_idx, 5);
+        assert_eq!(
+            loaded_state.source_record_cursors,
+            vec![("source_a".to_string(), 1)]
+        );
+        assert_eq!(
+            loaded_state.source_stream_cursors,
+            vec![("source_a".to_string(), 9)]
+        );
     }
 }

@@ -832,6 +832,7 @@ mod tests {
     use crate::data::SectionRole;
     use crate::source::{SourceCursor, SourceSnapshot};
     use chrono::Utc;
+    use tempfile::tempdir;
 
     /// Minimal in-memory `DataSource` test double for example app tests.
     struct TestSource {
@@ -938,5 +939,67 @@ mod tests {
 
         let err = result.unwrap_err().to_string();
         assert!(err.contains("did not report a record count"));
+    }
+
+    #[test]
+    fn parse_multi_source_cli_handles_help_and_batch_size_validation() {
+        let help = parse_cli::<MultiSourceDemoCli, _>(["multi_source_demo", "--help"]).unwrap();
+        assert!(help.is_none());
+
+        let err = parse_cli::<MultiSourceDemoCli, _>(["multi_source_demo", "--batch-size", "0"]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn run_multi_source_demo_list_text_recipes_path_succeeds() {
+        let dir = tempdir().unwrap();
+        let mut args = vec![
+            "--list-text-recipes".to_string(),
+            "--split-store-dir".to_string(),
+            dir.path().to_string_lossy().to_string(),
+        ];
+        let result = run_multi_source_demo(
+            args.drain(..),
+            |_| Ok(()),
+            |_| {
+                vec![Box::new(TestSource {
+                    id: "source_for_recipes".into(),
+                    count: Some(10),
+                    recipes: vec![default_recipe("recipe_a")],
+                }) as DynSource]
+            },
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn run_multi_source_demo_sampling_modes_handle_empty_sources() {
+        for mode in [
+            vec!["--pair-batch".to_string()],
+            vec!["--text-recipes".to_string()],
+            vec![],
+        ] {
+            let dir = tempdir().unwrap();
+            let mut args = mode;
+            args.push("--split-store-dir".to_string());
+            args.push(dir.path().to_string_lossy().to_string());
+            args.push("--split".to_string());
+            args.push("validation".to_string());
+
+            let result = run_multi_source_demo(
+                args.into_iter(),
+                |_| Ok(()),
+                |_| {
+                    vec![Box::new(TestSource {
+                        id: "source_empty".into(),
+                        count: Some(0),
+                        recipes: vec![default_recipe("recipe_empty")],
+                    }) as DynSource]
+                },
+            );
+
+            assert!(result.is_ok());
+        }
     }
 }
