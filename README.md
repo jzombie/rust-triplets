@@ -8,58 +8,29 @@ Composable Rust crate for deterministic multi-source sampling and split persiste
 
 `triplets` is a reusable core for ML/AI training-data orchestration. It provides sampler primitives, split/state persistence, chunking and weighting mechanics, and source abstractions (`DataSource`, `DataRecord`) without tying behavior to proprietary corpora.
 
-## Why this instead of a static dataset
+## At a glance
 
-Compared with a typical static dataset workflow, `triplets` is designed for deterministic runtime orchestration:
+`triplets` is for building reproducible ML/AI training batches from multiple data sources.
 
-- **Online deterministic sampling:** sample from multiple sources at runtime instead of consuming one pre-materialized dump.
-- **Stable split assignment + persistence:** keep train/validation/test membership reproducible across restarts and runs.
-- **Bounded ingestion windows:** progress through large or changing corpora without loading everything at once.
-- **Recipe-time generation:** build triplet/pair/text training examples during sampling rather than only reading pre-generated examples.
-- **Per-call source weighting:** adjust source mixture without regenerating a static artifact.
-- **Streaming-aware refresh:** incorporate newly available records on subsequent sampling calls.
+Compared with a static prebuilt dataset, it lets you sample at runtime while preserving deterministic behavior.
 
-Concurrency and source progression model:
+Threading model: source refresh work is parallelized per sampling call, while batch assembly remains serialized and deterministic.
 
-- Each source has an independent cursor and buffer, so sources do not advance in lockstep.
-- Source refreshes run concurrently within a sampling/refresh call.
-- Synchronization happens at call boundaries: refresh threads are joined before buffer merge (not an always-on per-source ingest loop).
+## Core capabilities
 
-## Philosophy
+- **Source-agnostic sampling:** implement `DataSource` for filesystem, APIs, DBs, streams, etc.
+- **Runtime example generation:** produce triplet/pair/text batches from recipe selectors.
+- **Deterministic split assignment:** stable train/validation/test assignment from record IDs + seed.
+- **Resume support:** persist sampler/split state and continue after restart.
+- **Bounded ingestion:** refresh in controlled windows instead of loading full corpora into memory.
+- **Per-source progression:** each source has its own cursor; sources do not need to advance in lockstep.
+- **Per-call concurrency:** source refreshes run in parallel within a sampling call, then merge before batch assembly.
 
-You can think of `triplets` as a training-pipeline orchestrator:
+## Not included
 
-- **Composability:** recipe-driven pair/triplet/text generation independent of storage backend.
-- **Abstractions:** source backends (filesystem, SQL, APIs, streams) are decoupled from sampling logic.
-- **Pipeline management:** deterministic split assignment, bounded ingestion, chunk weighting, and persisted resume state.
-
-## Supply-chain mindset
-
-- **Suppliers:** each `DataSource` is a supplier.
-- **Manifests & traceability:** stable record IDs plus deterministic split hashing keep records glued to train/validation/test.
-- **Inventory control:** per-source cursors bound memory and support large corpora.
-- **Routing plan:** seed + epoch + chunking define deterministic ordering.
-- **Packaged outputs:** recipes emit triplets/pairs/text batches without changing source backends.
-
-## Highlights
-
-1. **Data-source agnostic core** – implement `DataSource` for files, SQL, APIs, streams, etc.
-2. **Semantic recipes** – define anchor/positive/negative selectors and mismatch strategies.
-3. **Deterministic split manager** – reproducible split assignment and optional persisted state.
-4. **Quality knobs** – per-record trust scores and chunk-level weighting.
-5. **Chunk orchestration** – overlap-aware windows with summary fallbacks.
-6. **Thread-safe batching** – serialized batch construction with multi-threaded source refresh.
-7. **Prefetchers** – background queueing for triplet/pair/text batch pipelines.
-8. **Capacity estimation helpers** – metadata-only split/pair/triplet/text estimates.
-
-## What this does (and does not do)
-
-- **Does**: deterministic paging, split assignment, state persistence, and reproducible batch assembly.
-- **Does**: enforce bounded ingestion and explicit resume semantics.
-- **Does**: support both finite/index-backed sources and unbounded streaming/append-only sources.
-- **Does not**: perform semantic mining, topic modeling, or relevance scoring by itself.
-- **Does not**: assume every source is infinite.
-- **Does not**: guarantee semantic hardness beyond recipe and source metadata design.
+- This crate does **not** do semantic mining/retrieval scoring by itself.
+- This crate does **not** guarantee semantic hardness beyond your recipes and source metadata design.
+- Sources can be finite or unbounded; infinite streaming is supported but not required.
 
 ## Getting started
 
