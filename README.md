@@ -114,7 +114,7 @@ You can override persistence location with either:
 
 Short version:
 
-- Call **`sampler.next_*_batch(split)`** to sample batches (ingestion happens automatically).
+- Call **`sampler.next_triplet_batch(split)`**, **`sampler.next_pair_batch(split)`**, or **`sampler.next_text_batch(split)`** to sample batches (ingestion happens automatically).
 - Call **`sampler.persist_state()`** when you want restart-resume behavior.
 - Optionally call **`sampler.set_epoch(n)`** for explicit epoch control.
 
