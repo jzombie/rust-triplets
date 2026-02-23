@@ -146,7 +146,7 @@ use triplets::{
   DeterministicSplitStore, PairSampler, Sampler, SamplerConfig, SplitLabel, SplitRatios,
 };
 
-# let split = SplitRatios { train: 1.0, validation: 0.0, test: 0.0 };
+# let split = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
 # let store = Arc::new(DeterministicSplitStore::new(split, 123).unwrap());
 # let config = SamplerConfig::default();
 let sampler = Arc::new(PairSampler::new(config, store));
