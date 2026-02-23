@@ -4,7 +4,7 @@
 
 **WORK IN PROGRESS.**
 
-Composable Rust crate for deterministic multi-source sampling and split persistence for ML/AI training data.
+Composable data sampling primitives for deterministic multi-source ML/AI training-data orchestration.
 
 `triplets` is a reusable core for ML/AI training-data orchestration. It provides sampler primitives, split/state persistence, chunking and weighting mechanics, and source abstractions (`DataSource`, `DataRecord`) without tying behavior to proprietary corpora.
 
