@@ -16,6 +16,7 @@ CI is configured to run tests/linting on macOS, Linux, and Windows.
 - **Runtime batch sampling** via `next_triplet_batch`, `next_pair_batch`, and `next_text_batch`.
 - **Resume support** via `persist_state()` and split-store persistence.
 - **Source-agnostic backends** (`DataSource` or `IndexableSource` + `IndexableAdapter`).
+- **Supply-chain style orchestration (core layer):** multi-source intake (`refresh`) with per-call parallel ingest, optional per-source weighting, staged buffering, deterministic split routing, and batch assembly into train-ready outputs.
 - **Bounded ingestion** windows instead of loading full corpora into memory.
 - **Per-call source threading**: during refresh, each source is fetched on its own short-lived thread, then merged deterministically for batch assembly.
 - **Streaming-friendly**: sources can be finite or unbounded.
