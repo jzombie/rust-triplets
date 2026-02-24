@@ -83,6 +83,43 @@ This crate does **not** perform semantic mining/retrieval scoring by itself; ins
   - Used when role columns are unset and `text_columns` is empty.
   - All non-id scalar/object/array fields are textified and used.
 
+> _Rows that are missing required mapped columns, or where required fields are empty/blank after textification, are skipped instead of erroring._
+
+#### Hugging Face source lists
+
+For multi-source runs, you can provide an explicit source list file instead of hardcoding field mappings in code. Each line is a single dataset entry with a required mapping:
+
+```
+hf://org/dataset/config/split anchor=... positive=... context=a,b text=x,y
+```
+
+Rules:
+
+- Lines are whitespace-delimited; comments start with `#`.
+- `anchor=`, `positive=`, `context=`, and `text=` are the only accepted keys.
+- At least one mapping key is required per line (no schema inference or heuristics).
+- `context=` and `text=` accept comma-delimited column lists.
+
+Example list (see [examples/common/hf_sources.txt](examples/common/hf_sources.txt)):
+
+```
+# role columns
+hf://labofsahil/hackernews-vector-search-dataset/default/train anchor=title positive=text
+hf://wikimedia/wikipedia/20231101.en/train anchor=title positive=text
+
+# explicit text-column mode
+hf://pfox/71k-English-uncleaned-wordlist/default/train text=text
+```
+
+Helpers (feature `huggingface`) are exposed from the crate root:
+
+- `parse_hf_source_line`
+- `load_hf_sources_from_list`
+- `resolve_hf_list_roots`
+- `build_hf_sources`
+
+The list helpers create snapshot directories under `.hf-snapshots/source-list/<dataset>/<config>/<split>/replica_N`.
+
 Minimal role-column example:
 
 ```rust,no_run

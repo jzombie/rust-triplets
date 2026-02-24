@@ -8,6 +8,7 @@ use parquet::data_type::{ByteArray, ByteArrayType};
 use parquet::file::properties::WriterProperties;
 use parquet::file::writer::SerializedFileWriter;
 use parquet::schema::parser::parse_message_type;
+use triplets::source::backends::huggingface_source::load_hf_sources_from_list;
 use triplets::{DataSource, HuggingFaceRowSource, HuggingFaceRowsConfig, SamplerConfig};
 
 fn seeded_config(seed: u64) -> SamplerConfig {
@@ -266,6 +267,32 @@ fn huggingface_role_columns_mode_and_synthetic_ids_work() {
             .count()
             >= 2
     }));
+}
+
+#[test]
+fn huggingface_parses_source_list_with_explicit_mappings() {
+    let temp = tempfile::tempdir().expect("failed creating tempdir");
+    let list_path = temp.path().join("hf_sources.txt");
+
+    fs::write(
+        &list_path,
+        "# demo list\n\n"
+            .to_string()
+            + "hf://org/dataset/default/train anchor=title positive=text context=ctx1,ctx2 text=text\n",
+    )
+    .expect("failed writing source list");
+
+    let entries =
+        load_hf_sources_from_list(list_path.to_str().expect("utf8 path"))
+            .expect("failed parsing source list");
+
+    assert_eq!(entries.len(), 1);
+    let entry = &entries[0];
+    assert_eq!(entry.uri, "hf://org/dataset/default/train");
+    assert_eq!(entry.anchor_column.as_deref(), Some("title"));
+    assert_eq!(entry.positive_column.as_deref(), Some("text"));
+    assert_eq!(entry.context_columns, vec!["ctx1".to_string(), "ctx2".to_string()]);
+    assert_eq!(entry.text_columns, vec!["text".to_string()]);
 }
 
 #[test]

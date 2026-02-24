@@ -50,6 +50,11 @@ pub use sampler::{BatchPrefetcher, Sampler, TripletSampler};
 pub use source::{DataSource, SourceCursor};
 #[cfg(feature = "huggingface")]
 pub use source::{HuggingFaceRowSource, HuggingFaceRowsConfig};
+#[cfg(feature = "huggingface")]
+pub use source::backends::huggingface_source::{
+    HfListRoots, HfSourceEntry, build_hf_sources, load_hf_sources_from_list,
+    parse_csv_fields, parse_hf_source_line, parse_hf_uri, resolve_hf_list_roots,
+};
 pub use splits::{DeterministicSplitStore, FileSplitStore, SplitLabel, SplitRatios, SplitStore};
 pub use types::{
     CategoryId, HashPart, KvpValue, LogMessage, MetaValue, PathString, RecipeKey, RecordId,
