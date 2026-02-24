@@ -60,7 +60,8 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use triplets::{
-  DataRecord, DeterministicSplitStore, SamplerConfig, SplitLabel, SplitRatios, TripletSampler,
+  DataRecord, DeterministicSplitStore, Sampler, SamplerConfig, SplitLabel, SplitRatios,
+  TripletSampler,
 };
 use triplets::source::InMemorySource;
 
@@ -82,7 +83,8 @@ let split = SplitRatios {
   validation: 0.0,
   test: 0.0,
 };
-let store = Arc::new(DeterministicSplitStore::new(split, 7)?);
+// Deterministic split seed; keep stable to preserve split assignments across runs.
+let store = Arc::new(DeterministicSplitStore::new(split, 42)?);
 let sampler = TripletSampler::new(SamplerConfig::default(), Arc::clone(&store));
 
 sampler.register_source(Box::new(source));
