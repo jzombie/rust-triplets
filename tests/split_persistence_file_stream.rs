@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use triplets::source::InMemorySource;
-use triplets::source::file_corpus::FileCorpusIndex;
+use triplets::source::utilities::file_corpus::FileCorpusIndex;
 use triplets::splits::{FileSplitStore, SplitRatios, SplitStore};
 use triplets::utils::make_section;
 use triplets::{

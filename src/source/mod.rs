@@ -17,27 +17,10 @@ use crate::errors::SamplerError;
 use crate::hash::stable_hash_with;
 use crate::types::SourceId;
 
-/// Date parsing and normalization helpers.
-pub mod date_helpers;
-/// Filesystem-backed corpus indexing and refresh helpers.
-pub mod file_corpus;
-pub(crate) mod grouping;
-
-#[cfg(feature = "huggingface")]
-/// Hugging Face snapshot-backed row source implementation.
-pub mod huggingface;
-
-/// Utility modules used by source implementations.
-pub mod utilities {
-    pub use super::date_helpers;
-    pub use super::file_corpus;
-}
-
+/// Utility helpers used by source implementations.
+pub mod utilities;
 /// Source implementation modules.
-#[cfg(feature = "huggingface")]
-pub mod sources {
-    pub use super::huggingface;
-}
+pub mod sources;
 #[cfg(feature = "huggingface")]
 pub use sources::huggingface::{HuggingFaceRowSource, HuggingFaceRowsConfig};
 

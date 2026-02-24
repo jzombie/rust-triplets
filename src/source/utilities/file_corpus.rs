@@ -514,7 +514,7 @@ impl FileCorpusIndex {
             .map(|path| self.group_key_for_path(path))
             .collect::<HashSet<GroupKey>>();
         let per_group_cap =
-            crate::source::grouping::per_group_refresh_cap(max, unique_groups.len());
+            crate::source::utilities::grouping::per_group_refresh_cap(max, unique_groups.len());
         let mut selected_per_group: HashMap<GroupKey, usize> = HashMap::new();
         let mut records = Vec::new();
         let mut steps = 0usize;
@@ -584,7 +584,7 @@ impl FileCorpusIndex {
             permuted_paths.push(paths[idx].clone());
         }
 
-        Ok(crate::source::grouping::deterministic_grouped_order(
+        Ok(crate::source::utilities::grouping::deterministic_grouped_order(
             &permuted_paths,
             seed,
             self.group_window_divisor,

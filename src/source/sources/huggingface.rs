@@ -28,7 +28,7 @@ use crate::data::{DataRecord, QualityScore, SectionRole};
 use crate::utils::make_section;
 use chrono::{DateTime, Utc};
 
-use super::{DataSource, SourceCursor, SourceSnapshot};
+use crate::source::{DataSource, SourceCursor, SourceSnapshot};
 
 const REMOTE_URL_PREFIX: &str = "url::";
 /// Extra row-index headroom above currently materialized rows exposed via `len_hint`.
@@ -1467,7 +1467,7 @@ impl HuggingFaceRowSource {
                 .and_then(|config| config.as_ref().map(|value| value.seed));
             let seed = Self::shard_candidate_seed(&self.config, remote_total, sampler_seed);
             let mut permutation =
-                super::IndexPermutation::new(remote_total, seed, sequence_pos as u64);
+                crate::source::IndexPermutation::new(remote_total, seed, sequence_pos as u64);
             let candidate_idx = permutation.next();
             let remote_path = candidates[candidate_idx].clone();
             let expected_bytes = state.remote_candidate_sizes.get(&remote_path).copied();
@@ -1477,7 +1477,9 @@ impl HuggingFaceRowSource {
 
         info!(
             "[triplets:hf] lazy downloading shard {}/{}: {}",
-            remote_ordinal, remote_total, remote_path
+            remote_ordinal,
+            remote_total,
+            remote_path.as_str()
         );
         let local_path =
             Self::download_and_materialize_shard(&self.config, &remote_path, expected_bytes)?;
@@ -2364,8 +2366,8 @@ impl DataSource for HuggingFaceRowSource {
         }
 
         let source_id = self.config.source_id.clone();
-        let seed = super::IndexablePager::seed_for(&source_id, total);
-        let mut permutation = super::IndexPermutation::new(total, seed, start as u64);
+        let seed = crate::source::IndexablePager::seed_for(&source_id, total);
+        let mut permutation = crate::source::IndexPermutation::new(total, seed, start as u64);
 
         let mut records = Vec::new();
         let read_batch_target = self.effective_refresh_batch_target(max);
