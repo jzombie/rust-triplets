@@ -704,10 +704,9 @@ mod tests {
             test: 0.3,
         };
 
-        let err = match DeterministicSplitStore::new(invalid, 1) {
-            Ok(_) => panic!("expected non-unit split ratios to fail"),
-            Err(err) => err,
-        };
+        let err = DeterministicSplitStore::new(invalid, 1)
+            .err()
+            .expect("expected non-unit split ratios to fail");
         assert!(matches!(
             err,
             SamplerError::Configuration(ref msg) if msg.contains("split ratios must sum to 1.0")
@@ -775,12 +774,10 @@ mod tests {
         drop(store);
 
         let err = FileSplitStore::open(&path, ratios, 999).unwrap_err();
-        match err {
-            SamplerError::SplitStore(msg) => {
-                assert!(msg.contains("seed"))
-            }
-            other => panic!("unexpected error: {:?}", other),
-        }
+        assert!(matches!(
+            err,
+            SamplerError::SplitStore(msg) if msg.contains("seed")
+        ));
     }
 
     #[test]
@@ -806,6 +803,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("epoch_sampler_state.bin");
         let store = FileSplitStore::open(&path, SplitRatios::default(), 222).unwrap();
+
+        assert!(store.load_epoch_hashes(SplitLabel::Test).unwrap().is_none());
 
         let mut epoch_meta = HashMap::new();
         epoch_meta.insert(
@@ -875,8 +874,10 @@ mod tests {
         assert!(decode_label(b"x").is_err());
 
         let epoch_meta_train = epoch_meta_key(SplitLabel::Train);
+        let epoch_hashes_train = epoch_hashes_key(SplitLabel::Train);
         let epoch_hashes_test = epoch_hashes_key(SplitLabel::Test);
         assert!(epoch_meta_train.starts_with(EPOCH_META_PREFIX));
+        assert!(epoch_hashes_train.starts_with(EPOCH_HASHES_PREFIX));
         assert!(epoch_hashes_test.starts_with(EPOCH_HASHES_PREFIX));
     }
 
@@ -1075,5 +1076,100 @@ mod tests {
             default_path.file_name().and_then(|name| name.to_str()),
             Some(DEFAULT_STORE_FILENAME)
         );
+    }
+
+    #[test]
+    fn file_store_metadata_mismatch_and_debug_paths_are_covered() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("meta_mismatch.bin");
+        let ratios = SplitRatios::default();
+        let store = FileSplitStore::open(&path, ratios, 123).unwrap();
+
+        let debug_repr = format!("{store:?}");
+        assert!(debug_repr.contains("FileSplitStore"));
+
+        let wrong_version = StoreMeta {
+            version: STORE_VERSION.wrapping_add(1),
+            seed: 123,
+            ratios,
+        };
+        let payload = encode_store_meta(&wrong_version);
+        store.store.write(META_KEY, &payload).unwrap();
+        drop(store);
+
+        let err = FileSplitStore::open(&path, ratios, 123).unwrap_err();
+        assert!(matches!(err, SamplerError::SplitStore(msg) if msg.contains("version mismatch")));
+
+        let ratio_path = dir.path().join("ratio_mismatch.bin");
+        let _baseline = FileSplitStore::open(&ratio_path, ratios, 777).unwrap();
+
+        let different_ratios = SplitRatios {
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
+        };
+        let err = FileSplitStore::open(&ratio_path, different_ratios, 777).unwrap_err();
+        assert!(matches!(err, SamplerError::SplitStore(msg) if msg.contains("ratios mismatch")));
+    }
+
+    #[test]
+    fn split_decode_helpers_reject_corrupt_bitcode_payloads() {
+        let store_meta_err = decode_store_meta(&[BITCODE_PREFIX, 0xFF, 0xEE]).unwrap_err();
+        assert!(matches!(
+            store_meta_err,
+            SamplerError::SplitStore(msg) if msg.contains("failed to decode split store metadata")
+        ));
+
+        let epoch_meta_err =
+            decode_epoch_meta(&[EPOCH_META_RECORD_VERSION, BITCODE_PREFIX, 0xFF]).unwrap_err();
+        assert!(
+            matches!(epoch_meta_err, SamplerError::SplitStore(msg) if msg.contains("corrupt epoch meta record"))
+        );
+
+        let epoch_hashes_err =
+            decode_epoch_hashes(&[EPOCH_HASH_RECORD_VERSION, BITCODE_PREFIX, 0xFF]).unwrap_err();
+        assert!(matches!(
+            epoch_hashes_err,
+            SamplerError::SplitStore(msg) if msg.contains("corrupt epoch hashes record")
+        ));
+
+        let sampler_state_err =
+            decode_sampler_state(&[SAMPLER_STATE_RECORD_VERSION, BITCODE_PREFIX, 0xFF])
+                .unwrap_err();
+        assert!(matches!(
+            sampler_state_err,
+            SamplerError::SplitStore(msg) if msg.contains("corrupt sampler state record")
+        ));
+    }
+
+    #[test]
+    fn file_store_label_fallback_and_validation_keys_are_covered() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("labels.bin");
+        let store = FileSplitStore::open(&path, SplitRatios::default(), 42).unwrap();
+
+        let id = "bad_label_record".to_string();
+        let expected = derive_label_for_id(&id, 42, SplitRatios::default());
+        let key = split_key(&id);
+
+        store.store.write(&key, b"x").unwrap();
+        assert_eq!(store.label_for(&id), Some(expected));
+
+        store.store.write(&key, b"1").unwrap();
+        assert_eq!(store.label_for(&id), Some(SplitLabel::Validation));
+
+        let meta_validation = epoch_meta_key(SplitLabel::Validation);
+        let hashes_validation = epoch_hashes_key(SplitLabel::Validation);
+        assert!(meta_validation.starts_with(EPOCH_META_PREFIX));
+        assert!(hashes_validation.starts_with(EPOCH_HASHES_PREFIX));
+        assert!(meta_validation.ends_with(b"validation"));
+        assert!(hashes_validation.ends_with(b"validation"));
+    }
+
+    #[test]
+    fn ensure_parent_dir_allows_plain_file_names() {
+        ensure_parent_dir(Path::new("split_store_local.bin")).unwrap();
+        let coerced = coerce_store_path(PathBuf::from("explicit_store.bin"));
+        assert_eq!(coerced, PathBuf::from("explicit_store.bin"));
     }
 }
