@@ -7,7 +7,7 @@ use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use triplets::config::TripletRecipe;
 use triplets::data::{DataRecord, QualityScore, SectionRole};
 use triplets::metadata::META_FIELD_DATE;
-use triplets::source::utilities::file_corpus::FileCorpusIndex;
+use triplets::source::indexing::file_corpus::FileCorpusIndex;
 use triplets::source::{DataSource, InMemorySource, SourceCursor, SourceSnapshot};
 use triplets::types::SourceId;
 use triplets::utils::{make_section, normalize_inline_whitespace};

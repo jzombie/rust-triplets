@@ -18,15 +18,15 @@ use crate::hash::stable_hash_with;
 use crate::types::SourceId;
 
 /// Source implementation modules.
-pub mod sources;
+pub mod backends;
 /// Utility helpers used by source implementations.
-pub mod utilities;
-pub use sources::file_source::{
+pub mod indexing;
+pub use backends::file_source::{
     FileSource, FileSourceConfig, SectionBuilder, TaxonomyBuilder, anchor_context_sections,
     taxonomy_from_path,
 };
 #[cfg(feature = "huggingface")]
-pub use sources::huggingface_source::{HuggingFaceRowSource, HuggingFaceRowsConfig};
+pub use backends::huggingface_source::{HuggingFaceRowSource, HuggingFaceRowsConfig};
 
 /// Source-owned incremental refresh position.
 ///

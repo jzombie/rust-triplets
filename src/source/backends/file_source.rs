@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::config::TripletRecipe;
 use crate::data::{DataRecord, QualityScore, RecordSection, SectionRole};
 use crate::errors::SamplerError;
-use crate::source::utilities::file_corpus::FileCorpusIndex;
+use crate::source::indexing::file_corpus::FileCorpusIndex;
 use crate::source::{DataSource, SourceCursor, SourceSnapshot};
 use crate::transport::fs::{file_times, is_text_file};
 use crate::types::{CategoryId, SourceId, TaxonomyValue};
