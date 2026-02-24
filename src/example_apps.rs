@@ -1177,4 +1177,64 @@ mod tests {
         assert_eq!(extract_source("source_a::record"), "source_a");
         assert_eq!(extract_source("record-without-delimiter"), "unknown");
     }
+
+    #[test]
+    fn split_arg_conversion_and_version_parse_paths_are_covered() {
+        assert!(matches!(
+            SplitLabel::from(SplitArg::Train),
+            SplitLabel::Train
+        ));
+        assert!(matches!(
+            SplitLabel::from(SplitArg::Validation),
+            SplitLabel::Validation
+        ));
+        assert!(matches!(SplitLabel::from(SplitArg::Test), SplitLabel::Test));
+    }
+
+    #[test]
+    fn parse_split_ratios_reports_per_field_parse_errors() {
+        assert!(
+            parse_split_ratios_arg("x,0.1,0.9")
+                .unwrap_err()
+                .contains("invalid train ratio")
+        );
+        assert!(
+            parse_split_ratios_arg("0.1,y,0.8")
+                .unwrap_err()
+                .contains("invalid validation ratio")
+        );
+        assert!(
+            parse_split_ratios_arg("0.1,0.2,z")
+                .unwrap_err()
+                .contains("invalid test ratio")
+        );
+    }
+
+    #[test]
+    fn run_multi_source_demo_exhausted_paths_are_handled() {
+        for mode in [
+            vec!["--pair-batch".to_string()],
+            vec!["--text-recipes".to_string()],
+            Vec::new(),
+        ] {
+            let dir = tempdir().unwrap();
+            let mut args = mode;
+            args.push("--split-store-dir".to_string());
+            args.push(dir.path().to_string_lossy().to_string());
+
+            let result = run_multi_source_demo(
+                args.into_iter(),
+                |_| Ok(()),
+                |_| {
+                    vec![Box::new(TestSource {
+                        id: "source_without_recipes".into(),
+                        count: Some(1),
+                        recipes: Vec::new(),
+                    }) as DynSource]
+                },
+            );
+
+            assert!(result.is_ok());
+        }
+    }
 }

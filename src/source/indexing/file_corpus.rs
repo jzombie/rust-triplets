@@ -720,7 +720,7 @@ mod tests {
     use chrono::Utc;
     use std::collections::HashMap;
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use tempfile::tempdir;
 
     fn build_stub_record(
@@ -1430,5 +1430,179 @@ mod tests {
             .map(|record| record.id.clone())
             .collect();
         assert_eq!(ids_a, ids_b);
+    }
+
+    #[test]
+    fn builder_options_and_seed_requirements_are_enforced() {
+        let dir = tempdir().unwrap();
+        let index = FileCorpusIndex::new(dir.path(), "seeded")
+            .with_follow_links(false)
+            .with_text_files_only(false)
+            .with_directory_grouping(true)
+            .with_directory_grouping_window_divisor(0);
+
+        assert!(!index.follow_links);
+        assert!(!index.text_files_only);
+        assert!(index.group_by_directory);
+        assert_eq!(index.group_window_divisor, 1);
+
+        let err = index.required_sampler_seed().unwrap_err();
+        assert!(matches!(
+            err,
+            SamplerError::SourceInconsistent { ref details, .. } if details.contains("sampler seed")
+        ));
+
+        let seeded = index.with_sampler_seed(123);
+        assert_eq!(seeded.required_sampler_seed().unwrap(), 123);
+
+        let recipes = FileCorpusIndex::default_title_summary_triplet_recipes();
+        assert_eq!(recipes.len(), 2);
+        assert!(matches!(
+            recipes[0].negative_strategy,
+            NegativeStrategy::WrongPublicationDate
+        ));
+        assert!(matches!(
+            recipes[1].negative_strategy,
+            NegativeStrategy::WrongArticle
+        ));
+    }
+
+    #[test]
+    fn title_and_record_id_helpers_cover_error_paths() {
+        let source_id = "helper_source".to_string();
+        let root = PathBuf::from("/tmp/root");
+
+        let with_underscores = PathBuf::from("/tmp/root/my_title.txt");
+        let preserved =
+            FileCorpusIndex::normalized_title_from_stem(&with_underscores, &source_id, false)
+                .unwrap();
+        assert_eq!(preserved, "my_title");
+        let replaced =
+            FileCorpusIndex::normalized_title_from_stem(&with_underscores, &source_id, true)
+                .unwrap();
+        assert_eq!(replaced, "my title");
+
+        let err = FileCorpusIndex::normalized_title_from_stem(Path::new("/"), &source_id, true)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            SamplerError::SourceInconsistent { ref details, .. } if details.contains("file stem")
+        ));
+
+        let empty_title = FileCorpusIndex::normalized_title_from_stem(
+            Path::new("/tmp/root/___ .txt"),
+            &source_id,
+            true,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            empty_title,
+            SamplerError::SourceInconsistent { ref details, .. } if details.contains("empty normalized title")
+        ));
+
+        let scoped = FileCorpusIndex::source_scoped_record_id(
+            &source_id,
+            &root,
+            Path::new("/outside/path/doc.txt"),
+        );
+        assert!(scoped.starts_with("helper_source::"));
+    }
+
+    #[test]
+    fn read_index_meta_mismatch_and_decode_errors_return_none_or_error() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+        let index = FileCorpusIndex::new(&root, "meta_mismatch");
+        let store = index.open_index_store().unwrap();
+
+        let mismatch = FileIndexMeta {
+            root: root.to_string_lossy().to_string(),
+            follow_links: false,
+            text_files_only: true,
+            count: 0,
+        };
+        let mismatch_bytes = bitcode::encode(&mismatch);
+        store.write(FILE_INDEX_META_KEY, &mismatch_bytes).unwrap();
+        assert!(index.read_index_meta(&store).unwrap().is_none());
+
+        let bad_bytes = vec![0xff, 0x00];
+        store.write(FILE_INDEX_META_KEY, &bad_bytes).unwrap();
+        match index.read_index_meta(&store) {
+            Err(SamplerError::SourceInconsistent { details, .. }) => {
+                assert!(details.contains("meta decode failed"));
+            }
+            _ => panic!("unexpected result variant"),
+        }
+    }
+
+    #[test]
+    fn read_index_batch_handles_missing_entries_and_skippable_errors() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+        let index = FileCorpusIndex::new(&root, "batch_read").with_sampler_seed(5);
+        let store = index.open_index_store().unwrap();
+
+        let path = root.join("one.txt");
+        fs::write(&path, "hello").unwrap();
+        store
+            .write(
+                &FileCorpusIndex::index_key(0),
+                path.to_string_lossy().as_bytes(),
+            )
+            .unwrap();
+
+        let mut records = Vec::new();
+        let missing =
+            index.read_index_batch(&store, &mut |_path| Ok(None), &[1], &mut records, Some(10));
+        assert!(matches!(
+            missing,
+            Err(SamplerError::SourceInconsistent { ref details, .. }) if details.contains("missing entry")
+        ));
+
+        let bad = root.join("bad.txt");
+        fs::write(&bad, "bad").unwrap();
+        store
+            .write(
+                &FileCorpusIndex::index_key(1),
+                bad.to_string_lossy().as_bytes(),
+            )
+            .unwrap();
+
+        let mut records = Vec::new();
+        index
+            .read_index_batch(
+                &store,
+                &mut |p| {
+                    if p == bad.as_path() {
+                        return Err(SamplerError::SourceInconsistent {
+                            source_id: "batch_read".to_string(),
+                            details: "skip me".to_string(),
+                        });
+                    }
+                    Ok(Some(DataRecord {
+                        id: "ok".to_string(),
+                        source: "batch_read".to_string(),
+                        created_at: Utc::now(),
+                        updated_at: Utc::now(),
+                        quality: QualityScore { trust: 1.0 },
+                        taxonomy: Vec::new(),
+                        sections: vec![RecordSection {
+                            role: SectionRole::Anchor,
+                            heading: None,
+                            text: "ok".to_string(),
+                            sentences: vec!["ok".to_string()],
+                        }],
+                        meta_prefix: None,
+                    }))
+                },
+                &[0, 1],
+                &mut records,
+                Some(10),
+            )
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, "ok");
     }
 }

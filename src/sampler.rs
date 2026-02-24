@@ -6459,4 +6459,173 @@ mod tests {
             assert_eq!(batch.samples.len(), 1);
         }
     }
+
+    struct DelegatingSampler;
+
+    impl Sampler for DelegatingSampler {
+        fn next_pair_batch_with_weights(
+            &self,
+            _split: SplitLabel,
+            weights: &HashMap<SourceId, f32>,
+        ) -> Result<SampleBatch, SamplerError> {
+            assert!(weights.is_empty());
+            Ok(SampleBatch { pairs: Vec::new() })
+        }
+
+        fn next_text_batch_with_weights(
+            &self,
+            _split: SplitLabel,
+            weights: &HashMap<SourceId, f32>,
+        ) -> Result<TextBatch, SamplerError> {
+            assert!(weights.is_empty());
+            Ok(TextBatch {
+                samples: Vec::new(),
+            })
+        }
+
+        fn next_triplet_batch_with_weights(
+            &self,
+            _split: SplitLabel,
+            weights: &HashMap<SourceId, f32>,
+        ) -> Result<TripletBatch, SamplerError> {
+            assert!(weights.is_empty());
+            Ok(TripletBatch {
+                triplets: Vec::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn sampler_trait_default_methods_delegate_to_weighted_variants() {
+        let sampler = DelegatingSampler;
+        assert!(
+            sampler
+                .next_pair_batch(SplitLabel::Train)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            sampler
+                .next_text_batch(SplitLabel::Train)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            sampler
+                .next_triplet_batch(SplitLabel::Train)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn batch_prefetcher_reports_stopped_when_receiver_missing() {
+        let prefetcher = BatchPrefetcher::<TripletBatch> {
+            receiver: None,
+            handle: None,
+            stats: Arc::new(PrefetcherStats::default()),
+        };
+        let err = prefetcher.next().unwrap_err();
+        assert!(matches!(
+            err,
+            SamplerError::SourceUnavailable { ref reason, .. } if reason == PREFETCHER_STOPPED_REASON
+        ));
+    }
+
+    #[test]
+    fn batch_prefetcher_reports_stopped_when_worker_panics() {
+        let prefetcher =
+            BatchPrefetcher::<TripletBatch>::new(1, || panic!("prefetcher panic path"));
+        let err = prefetcher.next().unwrap_err();
+        assert!(matches!(
+            err,
+            SamplerError::SourceUnavailable { ref source_id, .. } if source_id == PREFETCHER_SOURCE_ID
+        ));
+    }
+
+    fn sampler_for_prefetch_tests() -> Arc<TripletSampler<DeterministicSplitStore>> {
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let store = Arc::new(DeterministicSplitStore::new(split, 501).unwrap());
+        let mut config = base_config();
+        config.split = split;
+        config.allowed_splits = vec![SplitLabel::Train];
+        config.batch_size = 1;
+        config.ingestion_max_records = 16;
+        config.recipes = vec![TripletRecipe {
+            name: "prefetch_triplet".into(),
+            anchor: Selector::Role(SectionRole::Anchor),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 1.0,
+            instruction: None,
+        }];
+        config.text_recipes = vec![TextRecipe {
+            name: "prefetch_text".into(),
+            selector: Selector::Role(SectionRole::Context),
+            weight: 1.0,
+            instruction: None,
+        }];
+
+        let sampler = Arc::new(TripletSampler::new(config, store));
+        let mut records = Vec::new();
+        for idx in 0..4 {
+            let mut record = sample_record();
+            record.id = format!("prefetch_{idx}");
+            record.source = "prefetch_source".to_string();
+            records.push(record);
+        }
+        sampler.register_source(Box::new(InMemorySource::new("prefetch_source", records)));
+        sampler
+    }
+
+    #[test]
+    fn prefetch_public_apis_produce_batches_and_stats() {
+        let sampler = sampler_for_prefetch_tests();
+
+        let triplet = Arc::clone(&sampler).prefetch_triplet_batches(SplitLabel::Train, 1);
+        let pair = Arc::clone(&sampler).prefetch_pair_batches(SplitLabel::Train, 1);
+        let text = Arc::clone(&sampler).prefetch_text_batches(SplitLabel::Train, 1);
+
+        let triplet_batch = triplet.next().unwrap();
+        assert_eq!(triplet_batch.triplets.len(), 1);
+        assert!(triplet.produced_count() >= 1);
+
+        let pair_batch = pair.next().unwrap();
+        assert_eq!(pair_batch.pairs.len(), 1);
+        assert!(pair.produced_count() >= 1);
+
+        let text_batch = text.next().unwrap();
+        assert_eq!(text_batch.samples.len(), 1);
+        assert!(text.produced_count() >= 1);
+    }
+
+    #[test]
+    fn prefetch_weighted_public_apis_produce_batches() {
+        let sampler = sampler_for_prefetch_tests();
+        let mut weights = HashMap::new();
+        weights.insert("prefetch_source".to_string(), 1.0);
+
+        let triplet = Arc::clone(&sampler).prefetch_triplet_batches_with_weights(
+            SplitLabel::Train,
+            1,
+            weights.clone(),
+        );
+        let pair = Arc::clone(&sampler).prefetch_pair_batches_with_weights(
+            SplitLabel::Train,
+            1,
+            weights.clone(),
+        );
+        let text =
+            Arc::clone(&sampler).prefetch_text_batches_with_weights(SplitLabel::Train, 1, weights);
+
+        assert_eq!(triplet.next().unwrap().triplets.len(), 1);
+        assert_eq!(pair.next().unwrap().pairs.len(), 1);
+        assert_eq!(text.next().unwrap().samples.len(), 1);
+        assert_eq!(triplet.error_count(), 0);
+    }
 }

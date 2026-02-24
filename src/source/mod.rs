@@ -620,4 +620,62 @@ mod tests {
         assert!(seen.iter().all(|idx| *idx < 3));
         assert!(perm.cursor() < 3);
     }
+
+    #[test]
+    fn indexable_pager_large_refresh_triggers_reporting_branch_and_wraps_cursor() {
+        let pager = IndexablePager::new("reporting");
+        let cursor = SourceCursor {
+            last_seen: Utc::now(),
+            revision: 20_000,
+        };
+        let snapshot = pager
+            .refresh_with(10_000, Some(&cursor), Some(4), |idx| {
+                Ok(Some(DataRecord {
+                    id: format!("record_{idx}"),
+                    source: "reporting".to_string(),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                    quality: QualityScore { trust: 1.0 },
+                    taxonomy: Vec::new(),
+                    sections: vec![RecordSection {
+                        role: SectionRole::Anchor,
+                        heading: None,
+                        text: "t".to_string(),
+                        sentences: vec!["t".to_string()],
+                    }],
+                    meta_prefix: None,
+                }))
+            })
+            .unwrap();
+
+        assert_eq!(snapshot.records.len(), 4);
+        assert!(snapshot.cursor.revision < 10_000);
+    }
+
+    #[test]
+    fn indexable_pager_refresh_with_propagates_fetch_error() {
+        let pager = IndexablePager::new("err");
+        let err = pager
+            .refresh_with(8, None, Some(2), |_idx| {
+                Err(SamplerError::SourceUnavailable {
+                    source_id: "err".to_string(),
+                    reason: "fetch failed".to_string(),
+                })
+            })
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            SamplerError::SourceUnavailable { ref reason, .. } if reason.contains("fetch failed")
+        ));
+    }
+
+    #[test]
+    fn seed_for_sampler_depends_on_sampler_seed() {
+        let source_id = "seeded".to_string();
+        let base = IndexablePager::seed_for(&source_id, 17);
+        let with_a = IndexablePager::seed_for_sampler(&source_id, 17, 1);
+        let with_b = IndexablePager::seed_for_sampler(&source_id, 17, 2);
+        assert_ne!(with_a, with_b);
+        assert_ne!(with_a, base);
+    }
 }
