@@ -3184,6 +3184,208 @@ mod tests {
     }
 
     #[test]
+    fn enforce_disk_cap_evicts_manifest_shards_and_recomputes_offsets() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.local_disk_cap_bytes = Some(20);
+        config.min_resident_shards = 0;
+        let source = test_source(config);
+        let manifest_root = source.manifest_cache_root();
+        fs::create_dir_all(&manifest_root).unwrap();
+
+        let first = manifest_root.join("first.parquet");
+        let second = manifest_root.join("second.parquet");
+        fs::write(&first, vec![1u8; 16]).unwrap();
+        fs::write(&second, vec![2u8; 16]).unwrap();
+
+        let mut state = SourceState {
+            materialized_rows: 2,
+            total_rows: None,
+            shards: vec![
+                ShardIndex {
+                    path: first.clone(),
+                    global_start: 0,
+                    row_count: 1,
+                    is_parquet: true,
+                    parquet_row_groups: vec![(0, 1)],
+                    checkpoints: Vec::new(),
+                },
+                ShardIndex {
+                    path: second.clone(),
+                    global_start: 1,
+                    row_count: 1,
+                    is_parquet: true,
+                    parquet_row_groups: vec![(0, 1)],
+                    checkpoints: Vec::new(),
+                },
+            ],
+            remote_candidates: None,
+            remote_candidate_sizes: HashMap::new(),
+            next_remote_idx: 0,
+        };
+
+        let evicted = source.enforce_disk_cap_locked(&mut state, &second).unwrap();
+        assert!(evicted);
+        assert!(!first.exists());
+        assert!(second.exists());
+        assert_eq!(state.shards.len(), 1);
+        assert_eq!(state.shards[0].global_start, 0);
+        assert_eq!(state.materialized_rows, 1);
+    }
+
+    #[test]
+    fn enforce_disk_cap_errors_when_usage_still_exceeds_cap() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.local_disk_cap_bytes = Some(1);
+        config.min_resident_shards = 1;
+        let source = test_source(config);
+        let manifest_root = source.manifest_cache_root();
+        fs::create_dir_all(&manifest_root).unwrap();
+
+        let protected = manifest_root.join("protected.parquet");
+        fs::write(&protected, vec![3u8; 16]).unwrap();
+
+        let mut state = SourceState {
+            materialized_rows: 1,
+            total_rows: None,
+            shards: vec![ShardIndex {
+                path: protected.clone(),
+                global_start: 0,
+                row_count: 1,
+                is_parquet: true,
+                parquet_row_groups: vec![(0, 1)],
+                checkpoints: Vec::new(),
+            }],
+            remote_candidates: None,
+            remote_candidate_sizes: HashMap::new(),
+            next_remote_idx: 0,
+        };
+
+        let err = source
+            .enforce_disk_cap_locked(&mut state, &protected)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            SamplerError::SourceUnavailable { ref reason, .. } if reason.contains("cannot evict further")
+        ));
+        assert!(!protected.exists());
+    }
+
+    #[test]
+    fn configured_sampler_seed_and_paging_seed_require_sampler_config() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = HuggingFaceRowSource {
+            config,
+            sampler_config: Mutex::new(None),
+            state: Mutex::new(SourceState {
+                materialized_rows: 0,
+                total_rows: None,
+                shards: Vec::new(),
+                remote_candidates: None,
+                remote_candidate_sizes: HashMap::new(),
+                next_remote_idx: 0,
+            }),
+            cache: Mutex::new(RowCache::default()),
+            parquet_cache: Mutex::new(ParquetCache::default()),
+        };
+
+        assert!(source.configured_sampler_seed().is_err());
+        assert!(source.paging_seed(5).is_err());
+    }
+
+    #[test]
+    fn shard_candidate_seed_and_rotation_are_deterministic() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.source_id = "hf_rotator".to_string();
+
+        let seed_a = HuggingFaceRowSource::shard_candidate_seed(&config, 12, 1);
+        let seed_b = HuggingFaceRowSource::shard_candidate_seed(&config, 12, 2);
+        assert_ne!(seed_a, seed_b);
+
+        let baseline = vec!["c".to_string(), "a".to_string(), "b".to_string()];
+        let mut left = baseline.clone();
+        let mut right = baseline;
+        HuggingFaceRowSource::rotate_candidates_deterministically(&config, &mut left);
+        HuggingFaceRowSource::rotate_candidates_deterministically(&config, &mut right);
+        assert_eq!(left, right);
+
+        let mut sorted = left.clone();
+        sorted.sort();
+        assert_eq!(
+            sorted,
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+    }
+
+    #[test]
+    fn extract_split_row_count_handles_configs_and_dataset_fallbacks() {
+        let by_config_splits = json!({
+            "size": {
+                "configs": [
+                    {
+                        "config_name": "default",
+                        "splits": [
+                            {"name": "train", "num_rows": 21},
+                            {"name": "validation", "num_rows": 4}
+                        ]
+                    }
+                ]
+            }
+        });
+        let rows = HuggingFaceRowSource::extract_split_row_count_from_size_response(
+            &by_config_splits,
+            "default",
+            "train",
+        );
+        assert_eq!(rows, Some(21));
+
+        let dataset_only = json!({
+            "size": {
+                "dataset": {"num_rows": 99}
+            }
+        });
+        let rows = HuggingFaceRowSource::extract_split_row_count_from_size_response(
+            &dataset_only,
+            "default",
+            "",
+        );
+        assert_eq!(rows, Some(99));
+    }
+
+    #[test]
+    fn load_persisted_shard_sequence_clamps_next_remote_index() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let state_path = HuggingFaceRowSource::shard_sequence_state_path(&config);
+        fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        fs::write(
+            &state_path,
+            serde_json::to_vec_pretty(&json!({
+                "version": SHARD_SEQUENCE_STATE_VERSION,
+                "source_id": config.source_id,
+                "dataset": config.dataset,
+                "config": config.config,
+                "split": config.split,
+                "sampler_seed": 7,
+                "candidates": ["train/0.ndjson", "train/1.ndjson"],
+                "candidate_sizes": {},
+                "next_remote_idx": 99
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let loaded = HuggingFaceRowSource::load_persisted_shard_sequence(&config, 7)
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.candidates.len(), 2);
+        assert_eq!(loaded.next_remote_idx, 2);
+    }
+
+    #[test]
     fn default_triplet_recipes_returns_expected_shape() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
