@@ -18,6 +18,14 @@ In metric learning, a triplet is a training example composed of:
 - **Positive**: another example that should be close to the anchor.
 - **Negative**: an example that should be farther from the anchor.
 
+```text
+      Anchor
+      /    \
+ Positive Negative
+
+ Triplet: (Anchor, Positive, Negative)
+```
+
 Training on many `(anchor, positive, negative)` groups helps a model learn useful embedding space structure (similar items closer together, dissimilar items farther apart).
 
 `triplets` focuses on building these training examples deterministically across multiple data sources, with reproducible split assignment, weighting, chunking, and resume-friendly state.
