@@ -9,19 +9,24 @@
 use chrono::{DateTime, Utc};
 use std::hash::Hash;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use crate::config::TripletRecipe;
+use crate::config::{SamplerConfig, TripletRecipe};
 use crate::data::DataRecord;
 use crate::errors::SamplerError;
 use crate::hash::stable_hash_with;
 use crate::types::SourceId;
 
-/// Date parsing/normalization helpers used by source implementations.
-pub mod date_helpers;
-/// Filesystem-backed corpus indexing and refresh helpers.
-pub mod file_corpus;
-
-pub(crate) mod grouping;
+/// Source implementation modules.
+pub mod backends;
+/// Utility helpers used by source implementations.
+pub mod indexing;
+pub use backends::file_source::{
+    FileSource, FileSourceConfig, SectionBuilder, TaxonomyBuilder, anchor_context_sections,
+    taxonomy_from_path,
+};
+#[cfg(feature = "huggingface")]
+pub use backends::huggingface_source::{HuggingFaceRowSource, HuggingFaceRowsConfig};
 
 /// Source-owned incremental refresh position.
 ///
@@ -58,21 +63,21 @@ pub trait DataSource: Send + Sync {
     /// Return the next cursor position in `SourceSnapshot.cursor`.
     fn refresh(
         &self,
+        config: &SamplerConfig,
         cursor: Option<&SourceCursor>,
         limit: Option<usize>,
     ) -> Result<SourceSnapshot, SamplerError>;
 
-    /// Optional metadata-only record count reported by the source.
+    /// Exact metadata record count reported by the source.
     ///
     /// This is intended for estimators that must avoid iterating records.
-    /// Implementations should return `Some(count)` only when the count is
-    /// known without enumerating all records through `refresh`.
+    /// Implementations should return `Ok(count)` only when the count is
+    /// exact for the source scope. Return `Err` when exact counting is not
+    /// possible or the source is unavailable.
     ///
     /// Keep this consistent with `refresh` by using the same backend scope,
     /// filtering, and logical corpus definition.
-    fn reported_record_count(&self) -> Option<u128> {
-        None
-    }
+    fn reported_record_count(&self, config: &SamplerConfig) -> Result<u128, SamplerError>;
 
     /// Optional source-provided default triplet recipes.
     ///
@@ -159,7 +164,19 @@ impl IndexablePager {
         let mut records = Vec::new();
         let seed = Self::seed_for(&self.source_id, total);
         let mut permutation = IndexPermutation::new(total, seed, start as u64);
+        let report_every = Duration::from_millis(750);
+        let refresh_start = Instant::now();
+        let mut last_report = refresh_start;
+        let mut attempts = 0usize;
+        let should_report = total >= 10_000 || max >= 1_024;
+        if should_report {
+            eprintln!(
+                "[triplets:source] refresh start source='{}' total={} target={}",
+                self.source_id, total, max
+            );
+        }
         for _ in 0..total {
+            attempts += 1;
             if records.len() >= max {
                 break;
             }
@@ -167,6 +184,27 @@ impl IndexablePager {
             if let Some(record) = fetch(idx)? {
                 records.push(record);
             }
+            if should_report && last_report.elapsed() >= report_every {
+                eprintln!(
+                    "[triplets:source] refresh progress source='{}' attempted={}/{} fetched={}/{} elapsed={:.1}s",
+                    self.source_id,
+                    attempts,
+                    total,
+                    records.len(),
+                    max,
+                    refresh_start.elapsed().as_secs_f64()
+                );
+                last_report = Instant::now();
+            }
+        }
+        if should_report {
+            eprintln!(
+                "[triplets:source] refresh done source='{}' attempted={} fetched={} elapsed={:.2}s",
+                self.source_id,
+                attempts,
+                records.len(),
+                refresh_start.elapsed().as_secs_f64()
+            );
         }
         let last_seen = records
             .iter()
@@ -187,6 +225,18 @@ impl IndexablePager {
     pub(crate) fn seed_for(source_id: &SourceId, total: usize) -> u64 {
         Self::stable_index_shuffle_key(source_id, 0)
             ^ Self::stable_index_shuffle_key(source_id, total)
+    }
+
+    /// Build a deterministic seed for a source/total pair with explicit sampler seed.
+    #[cfg(any(test, feature = "huggingface"))]
+    pub(crate) fn seed_for_sampler(source_id: &SourceId, total: usize, sampler_seed: u64) -> u64 {
+        Self::seed_for(source_id, total)
+            ^ stable_hash_with(|hasher| {
+                "triplets_sampler_seed".hash(hasher);
+                source_id.hash(hasher);
+                total.hash(hasher);
+                sampler_seed.hash(hasher);
+            })
     }
 
     fn stable_index_shuffle_key(source_id: &SourceId, idx: usize) -> u64 {
@@ -216,11 +266,22 @@ impl<T: IndexableSource> DataSource for IndexableAdapter<T> {
 
     fn refresh(
         &self,
+        _config: &SamplerConfig,
         cursor: Option<&SourceCursor>,
         limit: Option<usize>,
     ) -> Result<SourceSnapshot, SamplerError> {
         let pager = IndexablePager::new(self.inner.id());
         pager.refresh(&self.inner, cursor, limit)
+    }
+
+    fn reported_record_count(&self, _config: &SamplerConfig) -> Result<u128, SamplerError> {
+        self.inner
+            .len_hint()
+            .map(|value| value as u128)
+            .ok_or_else(|| SamplerError::SourceInconsistent {
+                source_id: self.inner.id().to_string(),
+                details: "indexable source did not provide len_hint".into(),
+            })
     }
 }
 
@@ -302,6 +363,7 @@ impl DataSource for InMemorySource {
 
     fn refresh(
         &self,
+        _config: &SamplerConfig,
         cursor: Option<&SourceCursor>,
         limit: Option<usize>,
     ) -> Result<SourceSnapshot, SamplerError> {
@@ -338,6 +400,10 @@ impl DataSource for InMemorySource {
             },
         })
     }
+
+    fn reported_record_count(&self, _config: &SamplerConfig) -> Result<u128, SamplerError> {
+        Ok(self.records.len() as u128)
+    }
 }
 
 #[cfg(test)]
@@ -345,11 +411,16 @@ mod tests {
     use super::*;
     use crate::data::{QualityScore, RecordSection, SectionRole};
     use crate::types::RecordId;
+    use chrono::Duration;
 
     /// Minimal `IndexableSource` test fixture.
     struct IndexableStub {
         id: SourceId,
         count: usize,
+    }
+
+    struct NoLenHintStub {
+        id: SourceId,
     }
 
     impl IndexableStub {
@@ -358,6 +429,12 @@ mod tests {
                 id: id.to_string(),
                 count,
             }
+        }
+    }
+
+    impl NoLenHintStub {
+        fn new(id: &str) -> Self {
+            Self { id: id.to_string() }
         }
     }
 
@@ -393,16 +470,31 @@ mod tests {
         }
     }
 
+    impl IndexableSource for NoLenHintStub {
+        fn id(&self) -> &str {
+            &self.id
+        }
+
+        fn len_hint(&self) -> Option<usize> {
+            None
+        }
+
+        fn record_at(&self, _idx: usize) -> Result<Option<DataRecord>, SamplerError> {
+            Ok(None)
+        }
+    }
+
     #[test]
     fn indexable_adapter_pages_in_stable_order() {
         let adapter = IndexableAdapter::new(IndexableStub::new("stub", 6));
-        let full = adapter.refresh(None, None).unwrap();
+        let config = SamplerConfig::default();
+        let full = adapter.refresh(&config, None, None).unwrap();
         let full_ids: Vec<RecordId> = full.records.into_iter().map(|r| r.id).collect();
 
         let mut cursor = None;
         let mut paged = Vec::new();
         for _ in 0..3 {
-            let snapshot = adapter.refresh(cursor.as_ref(), Some(2)).unwrap();
+            let snapshot = adapter.refresh(&config, cursor.as_ref(), Some(2)).unwrap();
             cursor = Some(snapshot.cursor);
             paged.extend(snapshot.records.into_iter().map(|r| r.id));
         }
@@ -427,7 +519,9 @@ mod tests {
         // Pull a single page and ensure the indices are spread across the space,
         // which indicates the permutation isn't stuck in a narrow regime.
         let adapter = IndexableAdapter::new(IndexableStub::new(&source_id, total));
-        let snapshot = adapter.refresh(None, Some(64)).unwrap();
+        let snapshot = adapter
+            .refresh(&SamplerConfig::default(), None, Some(64))
+            .unwrap();
         let indices: Vec<usize> = snapshot
             .records
             .into_iter()
@@ -444,5 +538,145 @@ mod tests {
             max_idx - min_idx >= total / 2,
             "expected spread across the index space, got min={min_idx} max={max_idx}"
         );
+    }
+
+    #[test]
+    fn indexable_pager_errors_when_len_hint_missing() {
+        let pager = IndexablePager::new("no_len_hint");
+        let source = NoLenHintStub::new("no_len_hint");
+        let result = pager.refresh(&source, None, Some(3));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn indexable_adapter_reported_count_errors_when_len_hint_missing() {
+        let adapter = IndexableAdapter::new(NoLenHintStub::new("no_len_hint"));
+        let result = adapter.reported_record_count(&SamplerConfig::default());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn indexable_pager_refresh_with_zero_total_returns_empty_snapshot() {
+        let pager = IndexablePager::new("empty");
+        let snapshot = pager
+            .refresh_with(0, None, Some(4), |_idx| Ok(None))
+            .unwrap();
+        assert!(snapshot.records.is_empty());
+        assert_eq!(snapshot.cursor.revision, 0);
+    }
+
+    #[test]
+    fn in_memory_source_refresh_wraps_cursor_and_uses_latest_timestamp() {
+        let now = Utc::now();
+        let older = now - Duration::seconds(5);
+        let newer = now + Duration::seconds(5);
+        let mk = |id: &str, ts: chrono::DateTime<Utc>| DataRecord {
+            id: id.to_string(),
+            source: "mem".to_string(),
+            created_at: ts,
+            updated_at: ts,
+            quality: QualityScore { trust: 1.0 },
+            taxonomy: Vec::new(),
+            sections: vec![RecordSection {
+                role: SectionRole::Anchor,
+                heading: None,
+                text: id.to_string(),
+                sentences: vec![id.to_string()],
+            }],
+            meta_prefix: None,
+        };
+
+        let source = InMemorySource::new("mem", vec![mk("a", older), mk("b", newer)]);
+        let cursor = SourceCursor {
+            last_seen: now,
+            revision: 7,
+        };
+
+        let snapshot = source
+            .refresh(&SamplerConfig::default(), Some(&cursor), Some(1))
+            .unwrap();
+        assert_eq!(snapshot.records.len(), 1);
+        assert_eq!(snapshot.records[0].id, "a");
+        assert_eq!(snapshot.cursor.revision, 1);
+        assert_eq!(snapshot.cursor.last_seen, older);
+    }
+
+    #[test]
+    fn index_permutation_permute_bits_handles_zero_bits_and_zero_seed_path() {
+        assert_eq!(IndexPermutation::permute_bits(123, 0, 99), 0);
+
+        let bits = 1;
+        let value = 1;
+        let out = IndexPermutation::permute_bits(value, bits, 0);
+        assert!(out <= 1);
+    }
+
+    #[test]
+    fn index_permutation_next_stays_within_total_and_cursor_advances() {
+        let mut perm = IndexPermutation::new(3, 7, 0);
+        let mut seen = Vec::new();
+        for _ in 0..8 {
+            seen.push(perm.next());
+        }
+        assert!(seen.iter().all(|idx| *idx < 3));
+        assert!(perm.cursor() < 3);
+    }
+
+    #[test]
+    fn indexable_pager_large_refresh_triggers_reporting_branch_and_wraps_cursor() {
+        let pager = IndexablePager::new("reporting");
+        let cursor = SourceCursor {
+            last_seen: Utc::now(),
+            revision: 20_000,
+        };
+        let snapshot = pager
+            .refresh_with(10_000, Some(&cursor), Some(4), |idx| {
+                Ok(Some(DataRecord {
+                    id: format!("record_{idx}"),
+                    source: "reporting".to_string(),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                    quality: QualityScore { trust: 1.0 },
+                    taxonomy: Vec::new(),
+                    sections: vec![RecordSection {
+                        role: SectionRole::Anchor,
+                        heading: None,
+                        text: "t".to_string(),
+                        sentences: vec!["t".to_string()],
+                    }],
+                    meta_prefix: None,
+                }))
+            })
+            .unwrap();
+
+        assert_eq!(snapshot.records.len(), 4);
+        assert!(snapshot.cursor.revision < 10_000);
+    }
+
+    #[test]
+    fn indexable_pager_refresh_with_propagates_fetch_error() {
+        let pager = IndexablePager::new("err");
+        let err = pager
+            .refresh_with(8, None, Some(2), |_idx| {
+                Err(SamplerError::SourceUnavailable {
+                    source_id: "err".to_string(),
+                    reason: "fetch failed".to_string(),
+                })
+            })
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            SamplerError::SourceUnavailable { ref reason, .. } if reason.contains("fetch failed")
+        ));
+    }
+
+    #[test]
+    fn seed_for_sampler_depends_on_sampler_seed() {
+        let source_id = "seeded".to_string();
+        let base = IndexablePager::seed_for(&source_id, 17);
+        let with_a = IndexablePager::seed_for_sampler(&source_id, 17, 1);
+        let with_b = IndexablePager::seed_for_sampler(&source_id, 17, 2);
+        assert_ne!(with_a, with_b);
+        assert_ne!(with_a, base);
     }
 }

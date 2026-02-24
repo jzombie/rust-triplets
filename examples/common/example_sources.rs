@@ -7,11 +7,14 @@ use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use triplets::config::TripletRecipe;
 use triplets::data::{DataRecord, QualityScore, SectionRole};
 use triplets::metadata::META_FIELD_DATE;
-use triplets::source::file_corpus::FileCorpusIndex;
+use triplets::source::indexing::file_corpus::FileCorpusIndex;
 use triplets::source::{DataSource, InMemorySource, SourceCursor, SourceSnapshot};
 use triplets::types::SourceId;
 use triplets::utils::{make_section, normalize_inline_whitespace};
 use walkdir::WalkDir;
+
+#[cfg(feature = "huggingface")]
+use triplets::{HuggingFaceRowSource, HuggingFaceRowsConfig};
 
 #[derive(Debug, Clone)]
 pub struct SourceRoots {
@@ -81,7 +84,7 @@ pub fn resolve_source_roots(source_overrides: Vec<String>) -> Result<SourceRoots
 }
 
 pub fn build_default_sources(roots: &SourceRoots) -> Vec<Box<dyn DataSource + 'static>> {
-    roots
+    let mut sources = roots
         .sources
         .iter()
         .enumerate()
@@ -91,7 +94,13 @@ pub fn build_default_sources(roots: &SourceRoots) -> Vec<Box<dyn DataSource + 's
                 root,
             )) as Box<dyn DataSource + 'static>
         })
-        .collect()
+        .collect::<Vec<_>>();
+
+    if let Some(source) = maybe_huggingface_source() {
+        sources.push(source);
+    }
+
+    sources
 }
 
 struct ExampleFileSource {
@@ -123,19 +132,57 @@ impl DataSource for ExampleFileSource {
 
     fn refresh(
         &self,
+        config: &triplets::SamplerConfig,
         cursor: Option<&SourceCursor>,
         limit: Option<usize>,
     ) -> Result<SourceSnapshot, triplets::SamplerError> {
-        self.inner.refresh(cursor, limit)
+        self.inner.refresh(config, cursor, limit)
     }
 
-    fn reported_record_count(&self) -> Option<u128> {
-        Some(self.reported_records)
+    fn reported_record_count(
+        &self,
+        _config: &triplets::SamplerConfig,
+    ) -> Result<u128, triplets::SamplerError> {
+        Ok(self.reported_records)
     }
 
     fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {
         self.triplet_recipes.clone()
     }
+}
+
+#[cfg(feature = "huggingface")]
+fn maybe_huggingface_source() -> Option<Box<dyn DataSource + 'static>> {
+    let source_id = "hf_rows".to_string();
+    let dataset = "HuggingFaceFW/fineweb".to_string();
+    let config_name = "default".to_string();
+    let split_name = "train".to_string();
+    let snapshot_dir = PathBuf::from(".hf-snapshots")
+        .join(dataset.replace('/', "__"))
+        .join(&config_name)
+        .join(&split_name);
+
+    let mut hf =
+        HuggingFaceRowsConfig::new(source_id, dataset, config_name, split_name, snapshot_dir);
+    hf.anchor_column = Some("text".to_string());
+    hf.positive_column = Some("text".to_string());
+    hf.context_columns = Vec::new();
+
+    match HuggingFaceRowSource::new(hf) {
+        Ok(source) => Some(Box::new(source)),
+        Err(err) => {
+            eprintln!(
+                "Skipping Hugging Face source initialization for multi_source_demo: {}",
+                err
+            );
+            None
+        }
+    }
+}
+
+#[cfg(not(feature = "huggingface"))]
+fn maybe_huggingface_source() -> Option<Box<dyn DataSource + 'static>> {
+    None
 }
 
 fn load_records(source_id: &str, root: &Path) -> Vec<DataRecord> {

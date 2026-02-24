@@ -46,8 +46,10 @@ pub use data::{
 pub use errors::SamplerError;
 pub use ingestion::{IngestionManager, RecordCache};
 pub use kvp::{KvpField, KvpPrefixSampler};
-pub use sampler::{BatchPrefetcher, PairSampler, Sampler};
+pub use sampler::{BatchPrefetcher, Sampler, TripletSampler};
 pub use source::{DataSource, SourceCursor};
+#[cfg(feature = "huggingface")]
+pub use source::{HuggingFaceRowSource, HuggingFaceRowsConfig};
 pub use splits::{DeterministicSplitStore, FileSplitStore, SplitLabel, SplitRatios, SplitStore};
 pub use types::{
     CategoryId, HashPart, KvpValue, LogMessage, MetaValue, PathString, RecipeKey, RecordId,

@@ -4,18 +4,44 @@
 
 **WORK IN PROGRESS.**
 
-Composable data sampling primitives for deterministic multi-source ML/AI training-data orchestration.
+`triplets` is a reusable core of composable data sampling primitives for deterministic multi-source ML/AI training-data orchestration, with sampler primitives, split/state persistence, chunking and weighting mechanics, and source abstractions (`DataSource`, `DataRecord`) that avoid tying behavior to proprietary corpora.
 
-`triplets` is a reusable core for ML/AI training-data orchestration. It provides sampler primitives, split/state persistence, chunking and weighting mechanics, and source abstractions (`DataSource`, `DataRecord`) without tying behavior to proprietary corpora.
+**Note:** This crate is intended primarily for textual (or textualized) data — records that can be represented as text (for example: documents, QA pairs, logs, or metadata-prefixed chunks) suitable for language-model training, embedding/metric-learning workflows, and related text-model pipelines.
 
-CI is configured to run tests/linting on macOS, Linux, and Windows.
+> _CI is configured to run tests/linting on macOS, Linux, and Windows._
+
+## What are triplets?
+
+In metric learning, a triplet is a training example composed of:
+
+- **Anchor**: a reference example.
+- **Positive**: another example that should be close to the anchor.
+- **Negative**: an example that should be farther from the anchor.
+
+```text
+      Anchor
+      /    \
+ Positive Negative
+
+ Triplet: (Anchor, Positive, Negative)
+```
+
+Training on many `(anchor, positive, negative)` groups helps a model learn useful embedding space structure (similar items closer together, dissimilar items farther apart).
+
+In this crate, those triplets are built automatically from one or more data sources using metadata-driven, user-defined recipes/selectors for anchor/positive/negative section choice.
+
+It is designed for multi-source training pipelines where each batch can mix records from several sources, while source contribution is controlled independently (for example, over/under-sampling frequency and trust/quality weighting per source) to rebalance representation and reduce source-driven bias. Because source weights can be set per batch call, they can be wired to training-time loss/metric signals and adjusted dynamically during training.
 
 ## High-level features
 
 - **Automatic deterministic splits** (train/validation/test) from record IDs + seed.
+- **Sampler-seed-driven source determinism** for built-in deterministic source ordering (file + Hugging Face).
 - **Runtime batch sampling** via `next_triplet_batch`, `next_pair_batch`, and `next_text_batch`.
 - **Recipe-driven sample construction** for triplet/pair/text generation (anchor/positive/negative selectors).
 - **Weight-aware sampling controls** across source weights, recipe weights, and chunk trust/quality weighting.
+- **Per-source batch mixing controls** so multiple sources can contribute to the same batch, with independent source frequency controls (including over/under-sampling).
+- **Per-source trust controls** to weight quality/trust independently by source/taxonomy and help mitigate bias from uneven source quality.
+- **Per-batch dynamic source reweighting** so source weights can be changed across batches (for example from loss/metric feedback) while training.
 - **Resume support** via `persist_state()` and split-store persistence.
 - **Source-agnostic backends** (`DataSource` or `IndexableSource` + `IndexableAdapter`).
 - **Supply-chain style orchestration (core layer):** multi-source intake (`refresh`) with per-call parallel ingest, optional per-source weighting, staged buffering, deterministic split routing, and batch assembly into train-ready outputs.
@@ -24,6 +50,100 @@ CI is configured to run tests/linting on macOS, Linux, and Windows.
 - **Streaming-friendly**: sources can be finite or unbounded.
 
 This crate does **not** perform semantic mining/retrieval scoring by itself; instead, it gives you deterministic, metadata-driven sampling primitives you can feed into your downstream mining/retrieval stack.
+
+## Integrated sources
+
+`triplets` currently includes two integrated source backends:
+
+- **Non-optional determinism guarantee:** built-in deterministic source paging is always on for integrated deterministic sources (`FileSource`, `HuggingFaceRowSource`) and is keyed by sampler seed.
+
+- **File source (`FileSource`)**
+  - Indexes local filesystem content and converts files into `DataRecord`s.
+  - Supports configurable taxonomy extraction and section construction (anchor/context shaping), category-level trust overrides, and deterministic paging through `FileCorpusIndex`.
+  - Best when your corpus already lives in local folders (for example docs, QA exports, notes, logs) and you want deterministic, metadata-aware sampling without a separate ingestion service.
+
+- **Hugging Face source (`HuggingFaceRowSource`)** *(feature: `huggingface`)*
+  - Reads split/config-scoped dataset rows from Hugging Face (including remote shard discovery, local materialization, and lazy row access).
+  - Supports deterministic row paging, local shard caching, optional disk-cap controls, and conversion from row payloads into sampler-ready records.
+  - Best when your training data is hosted as HF datasets and you want to combine remote corpus slices with local sources in the same deterministic batch pipeline.
+
+## Adding new sources
+
+You can extend `triplets` by implementing one of the source interfaces and registering it with the sampler.
+
+- **Path 1: implement `DataSource` directly**
+  - Use this when your backend already has its own paging/cursor model (API pagination, DB cursors, streaming offsets, etc.).
+  - Implement `id()`, `refresh(&SamplerConfig, cursor, limit)`, and `reported_record_count(&SamplerConfig)`.
+  - Return `DataRecord` values with stable record IDs and the sections/taxonomy your recipes need.
+
+- **Path 2: implement `IndexableSource` and wrap with `IndexableAdapter`**
+  - Use this when your backend can fetch records by stable integer index.
+  - Implement `len_hint()` and `record_at(idx)`; then register `IndexableAdapter::new(your_source)`.
+  - This reuses the built-in deterministic paging/cursor behavior automatically.
+
+Recommended implementation checklist:
+
+1. Define source configuration (connection/root path/filtering options).
+2. Implement source-to-`DataRecord` mapping (sections, taxonomy, trust).
+3. Keep `refresh(...)` and `reported_record_count()` aligned to the same corpus scope.
+4. Register with `sampler.register_source(...)`.
+5. Validate with batch calls (`next_triplet_batch`, `next_pair_batch`, `next_text_batch`) and persistence (`persist_state()`).
+
+Seed/configuration contract:
+
+- `DataSource` receives `&SamplerConfig` directly in `refresh(...)` and `reported_record_count(...)`.
+- `FileSource` and `HuggingFaceRowSource` use that runtime sampler config for deterministic behavior.
+- For direct source usage outside sampler registration, pass the intended `SamplerConfig` into each `refresh(...)` / `reported_record_count(...)` call.
+
+### Seed behavior summary
+
+For built-in deterministic sources (`FileSource`, `HuggingFaceRowSource`), a fixed seed gives the same sample order across runs.
+
+This holds when source configuration, sampler seed, dataset snapshot/content, split/config selection, and refresh limit/cursor pattern are unchanged.
+
+Using a different seed changes deterministic permutation state; very small/degenerate sample windows can still overlap.
+
+Minimal direct-source example:
+
+```rust,no_run
+use triplets::{DataSource, SamplerConfig};
+use triplets::source::{FileSource, FileSourceConfig};
+
+# let root = std::path::PathBuf::from("/tmp/corpus");
+let base = FileSourceConfig::new("docs", &root);
+
+let seed_7 = SamplerConfig { seed: 7, ..SamplerConfig::default() };
+let seed_123 = SamplerConfig { seed: 123, ..SamplerConfig::default() };
+
+let source_a = FileSource::new(base.clone());
+let source_b = FileSource::new(base.clone());
+let source_c = FileSource::new(base);
+
+let ids_a: Vec<String> = source_a
+  .refresh(&seed_7, None, Some(8))?
+  .records
+  .into_iter()
+  .map(|record| record.id)
+  .collect();
+let ids_b: Vec<String> = source_b
+  .refresh(&seed_7, None, Some(8))?
+  .records
+  .into_iter()
+  .map(|record| record.id)
+  .collect();
+let ids_c: Vec<String> = source_c
+  .refresh(&seed_123, None, Some(8))?
+  .records
+  .into_iter()
+  .map(|record| record.id)
+  .collect();
+
+assert_eq!(ids_a, ids_b);
+assert_ne!(ids_a, ids_c);
+# Ok::<(), triplets::SamplerError>(())
+```
+
+For deeper implementation templates (including indexable and manual paging patterns), see [Advanced source implementation examples](#advanced-source-implementation-examples).
 
 ### Metadata-driven sampling flow
 
@@ -71,7 +191,8 @@ Minimal shape:
 1. Implement one or more `DataSource` backends.
 2. Create `SamplerConfig` (chunking, recipes, split policy).
 3. Open a split store (`DeterministicSplitStore` or `FileSplitStore`).
-4. Construct `PairSampler` and register sources.
+4. Construct `TripletSampler` and register sources.
+  - If you call a source directly (without registering), pass the intended `SamplerConfig` into source calls.
 5. Call one of the batch APIs: `next_triplet_batch(split)`, `next_pair_batch(split)`, or `next_text_batch(split)`.
 6. Call `persist_state()` when you want restart-resume behavior.
 
@@ -146,13 +267,13 @@ Example:
 ```rust,no_run
 use std::sync::Arc;
 use triplets::{
-  DeterministicSplitStore, PairSampler, Sampler, SamplerConfig, SplitLabel, SplitRatios,
+  DeterministicSplitStore, TripletSampler, Sampler, SamplerConfig, SplitLabel, SplitRatios,
 };
 
 # let split = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
 # let store = Arc::new(DeterministicSplitStore::new(split, 123).unwrap());
 # let config = SamplerConfig::default();
-let sampler = Arc::new(PairSampler::new(config, store));
+let sampler = Arc::new(TripletSampler::new(config, store));
 // register sources...
 
 let prefetcher = Arc::clone(&sampler).prefetch_triplet_batches(SplitLabel::Train, 4);
@@ -169,13 +290,13 @@ Example (different source mix across consecutive batches):
 use std::collections::HashMap;
 use std::sync::Arc;
 use triplets::{
-  DeterministicSplitStore, PairSampler, Sampler, SamplerConfig, SplitLabel, SplitRatios,
+  DeterministicSplitStore, TripletSampler, Sampler, SamplerConfig, SplitLabel, SplitRatios,
 };
 
 # let split = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
 # let store = Arc::new(DeterministicSplitStore::new(split, 123).unwrap());
 # let config = SamplerConfig::default();
-# let sampler = Arc::new(PairSampler::new(config, store));
+# let sampler = Arc::new(TripletSampler::new(config, store));
 
 let mut weights_a = HashMap::new();
 weights_a.insert("source_a".to_string(), 1.0);
@@ -217,7 +338,7 @@ This reflects the built-in file-corpus helpers (`FileCorpusIndex`) used by files
 - **Text recipes**: follow per-source behavior when provided; otherwise config recipes are used.
 - **Oversampling**: when sources run dry, cached records may be reused (no global no-repeat guarantee).
 
-### New-source implementation pattern
+### Advanced source implementation examples
 
 For any new backend (file/API/DB/stream), centralize backend configuration/state access in one helper reused by both `refresh(...)` and `reported_record_count()`.
 
@@ -226,36 +347,33 @@ Why this matters: capacity estimates and runtime sampling stay aligned only when
 File-backed pattern:
 
 ```rust,ignore
-fn source_index(&self) -> FileCorpusIndex {
-  FileCorpusIndex::new(&self.root, &self.id)
+fn source_index(&self, config: &SamplerConfig) -> Result<FileCorpusIndex, SamplerError> {
+  let sampler_seed = config.seed;
+  Ok(FileCorpusIndex::new(&self.root, &self.id)
+    .with_sampler_seed(sampler_seed)
     .with_follow_links(true)
     .with_text_files_only(true)
-    .with_directory_grouping(true)
+    .with_directory_grouping(true))
 }
 
 fn refresh(
   &self,
+  config: &SamplerConfig,
   cursor: Option<&SourceCursor>,
   limit: Option<usize>,
 ) -> Result<SourceSnapshot, SamplerError> {
-  self.source_index()
+  self.source_index(config)?
     .refresh_indexable(cursor, limit, |path| self.build_record(path))
 }
 
-fn reported_record_count(&self) -> Option<u128> {
-  self.source_index().indexed_record_count().ok().map(|n| n as u128)
+fn reported_record_count(&self, config: &SamplerConfig) -> Result<u128, SamplerError> {
+  self.source_index(config)?.indexed_record_count().map(|n| n as u128)
 }
 ```
 
-If your records are time-ordered (oldest → newest), use these APIs:
+For time-ordered corpora, prefer the `IndexableSource` + `IndexableAdapter` path (and use `IndexablePager` directly only when you need a custom `refresh(...)`) for deterministic shuffled paging with cursor resume.
 
-- `IndexableSource` (you provide `len_hint()` + `record_at(idx)`).
-- `IndexableAdapter` (easiest: turns your `IndexableSource` into a `DataSource`).
-- `IndexablePager` (use directly only if you are writing a custom `refresh(...)`).
-
-That is the built-in path for shuffled paging + cursor resume.
-
-Helper-based path (uses the APIs above):
+Helper-based example:
 
 ```rust,ignore
 use triplets::source::{IndexableAdapter, IndexableSource};

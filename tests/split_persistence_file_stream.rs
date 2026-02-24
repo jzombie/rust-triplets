@@ -4,12 +4,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 use triplets::source::InMemorySource;
-use triplets::source::file_corpus::FileCorpusIndex;
+use triplets::source::indexing::file_corpus::FileCorpusIndex;
 use triplets::splits::{FileSplitStore, SplitRatios, SplitStore};
 use triplets::utils::make_section;
 use triplets::{
-    DataRecord, NegativeStrategy, PairSampler, QualityScore, RecordId, Sampler, SamplerConfig,
-    SectionRole, Selector, SourceId, SplitLabel, TripletRecipe,
+    DataRecord, NegativeStrategy, QualityScore, RecordId, Sampler, SamplerConfig, SectionRole,
+    Selector, SourceId, SplitLabel, TripletRecipe, TripletSampler,
 };
 
 fn write_qa_file(dir: &std::path::Path, name: &str, answer: &str) {
@@ -41,7 +41,7 @@ fn build_qa_record(
 }
 
 fn ids_from_root(root: &Path, source_id: &SourceId) -> Vec<RecordId> {
-    let index = FileCorpusIndex::new(root, source_id.clone());
+    let index = FileCorpusIndex::new(root, source_id.clone()).with_sampler_seed(123);
     let snapshot = index
         .refresh_indexable(None, None, |path| build_qa_record(root, source_id, path))
         .unwrap();
@@ -216,7 +216,7 @@ fn split_store_growth_stays_bounded_per_epoch() {
 
     let records: Vec<DataRecord> = (0..64).map(|idx| build_record("unit", idx)).collect();
     let store = Arc::new(FileSplitStore::open(&store_path, split, 123).unwrap());
-    let sampler = PairSampler::new(build_config(8, split), store);
+    let sampler = TripletSampler::new(build_config(8, split), store);
     sampler.register_source(Box::new(InMemorySource::new("unit", records)));
 
     let mut sizes = Vec::new();

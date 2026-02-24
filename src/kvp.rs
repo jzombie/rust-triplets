@@ -298,4 +298,68 @@ mod tests {
         let mut rng2 = StdRng::from_seed([7_u8; 32]);
         assert_eq!(present.render(&mut rng2), Some("foo=bar".into()));
     }
+
+    #[test]
+    fn sampler_and_field_probabilities_are_clamped() {
+        let mut always = KvpPrefixSampler::new(2.0);
+        always.add_variant([("k", "v")]);
+        let mut rng = StdRng::from_seed([8_u8; 32]);
+        assert!(always.sample(&mut rng).is_some());
+
+        let mut never = KvpPrefixSampler::new(-1.0);
+        never.add_variant([("k", "v")]);
+        assert!(never.sample(&mut rng).is_none());
+
+        let field = KvpField::one("a", "b").with_presence(2.0);
+        assert_eq!(field.presence, 1.0);
+        let field = KvpField::one("a", "b").with_presence(-5.0);
+        assert_eq!(field.presence, 0.0);
+    }
+
+    #[test]
+    fn variant_with_only_absent_fields_returns_none() {
+        let mut sampler = KvpPrefixSampler::new(1.0);
+        sampler.add_variant_fields([
+            KvpField::one("foo", "bar").with_presence(0.0),
+            KvpField::many("empty", [""]).with_presence(1.0),
+        ]);
+        let mut rng = StdRng::from_seed([9_u8; 32]);
+        assert!(sampler.sample(&mut rng).is_none());
+    }
+
+    #[derive(Clone)]
+    struct DemoCtx {
+        date: &'static str,
+        source: &'static str,
+    }
+
+    fn date_values(ctx: &DemoCtx) -> Vec<KvpValue> {
+        vec![ctx.date.into()]
+    }
+
+    fn source_values(ctx: &DemoCtx) -> Vec<KvpValue> {
+        vec![ctx.source.into()]
+    }
+
+    const DEMO_DATE_KEY: MetadataKey = MetadataKey::new("date");
+    const DEMO_SOURCE_KEY: MetadataKey = MetadataKey::new("source");
+
+    const POLICY_FIELDS: [MetaFieldSpec<DemoCtx>; 2] = [
+        MetaFieldSpec::new(DEMO_DATE_KEY, 1.0, date_values),
+        MetaFieldSpec::new(DEMO_SOURCE_KEY, 1.0, source_values),
+    ];
+
+    #[test]
+    fn meta_policy_instantiates_sampler_with_context_values() {
+        let policy = MetaPolicy::new(&POLICY_FIELDS);
+        let ctx = DemoCtx {
+            date: "2026-02-24",
+            source: "reports",
+        };
+        let sampler = policy.instantiate(&ctx);
+        let mut rng = StdRng::from_seed([10_u8; 32]);
+        let out = sampler.sample(&mut rng).unwrap();
+        assert!(out.contains("date=2026-02-24"));
+        assert!(out.contains("source=reports"));
+    }
 }

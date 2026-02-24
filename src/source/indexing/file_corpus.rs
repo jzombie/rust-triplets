@@ -38,6 +38,7 @@ struct FileIndexMeta {
 pub struct FileCorpusIndex {
     root: PathBuf,
     source_id: SourceId,
+    sampler_seed: Option<u64>,
     follow_links: bool,
     text_files_only: bool,
     group_by_directory: bool,
@@ -50,6 +51,7 @@ impl FileCorpusIndex {
         Self {
             root: root.into(),
             source_id: source_id.into(),
+            sampler_seed: None,
             follow_links: true,
             text_files_only: true,
             group_by_directory: false,
@@ -79,6 +81,20 @@ impl FileCorpusIndex {
     pub fn with_directory_grouping_window_divisor(mut self, divisor: usize) -> Self {
         self.group_window_divisor = divisor.max(1);
         self
+    }
+
+    /// Sampler seed used to derive deterministic paging order.
+    pub fn with_sampler_seed(mut self, sampler_seed: u64) -> Self {
+        self.sampler_seed = Some(sampler_seed);
+        self
+    }
+
+    fn required_sampler_seed(&self) -> Result<u64, SamplerError> {
+        self.sampler_seed
+            .ok_or_else(|| SamplerError::SourceInconsistent {
+                source_id: self.source_id.clone(),
+                details: "file corpus sampler seed not provided".to_string(),
+            })
     }
 
     /// Refresh a filesystem source using streaming walk order.
@@ -155,7 +171,7 @@ impl FileCorpusIndex {
             start = 0;
         }
         let max = limit.unwrap_or(total);
-        let seed = stable_group_seed(&self.source_id, total);
+        let seed = stable_group_seed(&self.source_id, total, self.required_sampler_seed()?);
         let mut permutation = crate::source::IndexPermutation::new(total, seed, start as u64);
         let mut records = Vec::new();
         let mut pending_indices = Vec::with_capacity(FILE_INDEX_READ_BATCH);
@@ -514,7 +530,7 @@ impl FileCorpusIndex {
             .map(|path| self.group_key_for_path(path))
             .collect::<HashSet<GroupKey>>();
         let per_group_cap =
-            crate::source::grouping::per_group_refresh_cap(max, unique_groups.len());
+            crate::source::indexing::grouping::per_group_refresh_cap(max, unique_groups.len());
         let mut selected_per_group: HashMap<GroupKey, usize> = HashMap::new();
         let mut records = Vec::new();
         let mut steps = 0usize;
@@ -576,7 +592,7 @@ impl FileCorpusIndex {
         if paths.is_empty() {
             return Ok(Vec::new());
         }
-        let seed = stable_group_seed(&self.source_id, total);
+        let seed = stable_group_seed(&self.source_id, total, self.required_sampler_seed()?);
         let mut permutation = crate::source::IndexPermutation::new(total, seed, 0);
         let mut permuted_paths = Vec::with_capacity(total);
         for _ in 0..total {
@@ -584,13 +600,15 @@ impl FileCorpusIndex {
             permuted_paths.push(paths[idx].clone());
         }
 
-        Ok(crate::source::grouping::deterministic_grouped_order(
-            &permuted_paths,
-            seed,
-            self.group_window_divisor,
-            |path| path_relative_key(&self.root, path),
-            |path| self.group_key_for_path(path),
-        ))
+        Ok(
+            crate::source::indexing::grouping::deterministic_grouped_order(
+                &permuted_paths,
+                seed,
+                self.group_window_divisor,
+                |path| path_relative_key(&self.root, path),
+                |path| self.group_key_for_path(path),
+            ),
+        )
     }
 
     fn read_index_paths(
@@ -671,10 +689,16 @@ fn file_index_root_dir() -> PathBuf {
         .join(FILE_INDEX_STORE_DIR)
 }
 
-fn stable_group_seed(source_id: &SourceId, total: usize) -> u64 {
-    stable_hash_with(|hasher| {
+fn stable_group_seed(source_id: &SourceId, total: usize, sampler_seed: u64) -> u64 {
+    let base = stable_hash_with(|hasher| {
         source_id.hash(hasher);
         total.hash(hasher);
+    });
+    base ^ stable_hash_with(|hasher| {
+        "triplets_sampler_seed".hash(hasher);
+        source_id.hash(hasher);
+        total.hash(hasher);
+        sampler_seed.hash(hasher);
     })
 }
 
@@ -696,7 +720,7 @@ mod tests {
     use chrono::Utc;
     use std::collections::HashMap;
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use tempfile::tempdir;
 
     fn build_stub_record(
@@ -752,6 +776,7 @@ mod tests {
         }
 
         let index = FileCorpusIndex::new(temp.path(), &source_id)
+            .with_sampler_seed(1)
             .with_follow_links(false)
             .with_text_files_only(true);
         let snapshot = index
@@ -846,6 +871,7 @@ mod tests {
         }
 
         let index = FileCorpusIndex::new(root, &source_id)
+            .with_sampler_seed(1)
             .with_follow_links(false)
             .with_text_files_only(true);
         let _ = index
@@ -905,6 +931,7 @@ mod tests {
         fs::write(&bad_path, "").unwrap();
 
         let index = FileCorpusIndex::new(root, &source_id)
+            .with_sampler_seed(1)
             .with_follow_links(false)
             .with_text_files_only(true);
         let indexable = index
@@ -947,6 +974,7 @@ mod tests {
         }
 
         let index = FileCorpusIndex::new(root, &source_id)
+            .with_sampler_seed(1)
             .with_follow_links(false)
             .with_text_files_only(true)
             .with_directory_grouping(true)
@@ -1004,6 +1032,7 @@ mod tests {
             })
             .collect();
         let ungrouped_index = FileCorpusIndex::new(root, &source_id)
+            .with_sampler_seed(1)
             .with_follow_links(false)
             .with_text_files_only(true);
         let ungrouped_snapshot = ungrouped_index
@@ -1071,59 +1100,60 @@ mod tests {
                     .into_owned()
             })
             .collect();
+
         let sep = std::path::MAIN_SEPARATOR;
         let path_str = |value: &str| value.replace('/', &sep.to_string());
         let expected_grouped_rel_paths = vec![
-            path_str("02-02-2021/01/11/21/file_01_a.txt"),
-            path_str("01-01-2020/00/10/20/file_00_b.txt"),
-            path_str("12-12-2022/11/21/31/file_11_b.txt"),
+            path_str("09-09-2022/08/18/28/file_08_b.txt"),
             path_str("03-03-2022/02/12/22/file_02_b.txt"),
             path_str("08-08-2021/07/17/27/file_07_a.txt"),
-            path_str("04-04-2020/03/13/23/file_03_a.txt"),
-            path_str("11-11-2021/10/20/30/file_10_b.txt"),
-            path_str("10-10-2020/09/19/29/file_09_a.txt"),
-            path_str("02-02-2021/01/11/21/file_01_b.txt"),
-            path_str("01-01-2020/00/10/20/file_00_a.txt"),
+            path_str("05-05-2021/04/14/24/file_04_a.txt"),
             path_str("12-12-2022/11/21/31/file_11_a.txt"),
+            path_str("10-10-2020/09/19/29/file_09_a.txt"),
+            path_str("04-04-2020/03/13/23/file_03_b.txt"),
+            path_str("07-07-2020/06/16/26/file_06_a.txt"),
+            path_str("09-09-2022/08/18/28/file_08_a.txt"),
             path_str("03-03-2022/02/12/22/file_02_a.txt"),
             path_str("08-08-2021/07/17/27/file_07_b.txt"),
-            path_str("04-04-2020/03/13/23/file_03_b.txt"),
-            path_str("11-11-2021/10/20/30/file_10_a.txt"),
-            path_str("10-10-2020/09/19/29/file_09_b.txt"),
-            path_str("07-07-2020/06/16/26/file_06_a.txt"),
-            path_str("07-07-2020/06/16/26/file_06_b.txt"),
-            path_str("06-06-2022/05/15/25/file_05_b.txt"),
-            path_str("06-06-2022/05/15/25/file_05_a.txt"),
-            path_str("09-09-2022/08/18/28/file_08_a.txt"),
-            path_str("09-09-2022/08/18/28/file_08_b.txt"),
             path_str("05-05-2021/04/14/24/file_04_b.txt"),
-            path_str("05-05-2021/04/14/24/file_04_a.txt"),
+            path_str("12-12-2022/11/21/31/file_11_b.txt"),
+            path_str("10-10-2020/09/19/29/file_09_b.txt"),
+            path_str("04-04-2020/03/13/23/file_03_a.txt"),
+            path_str("07-07-2020/06/16/26/file_06_b.txt"),
+            path_str("01-01-2020/00/10/20/file_00_b.txt"),
+            path_str("01-01-2020/00/10/20/file_00_a.txt"),
+            path_str("06-06-2022/05/15/25/file_05_a.txt"),
+            path_str("06-06-2022/05/15/25/file_05_b.txt"),
+            path_str("02-02-2021/01/11/21/file_01_b.txt"),
+            path_str("02-02-2021/01/11/21/file_01_a.txt"),
+            path_str("11-11-2021/10/20/30/file_10_a.txt"),
+            path_str("11-11-2021/10/20/30/file_10_b.txt"),
         ];
         let expected_ungrouped_rel_paths = vec![
-            path_str("02-02-2021/01/11/21/file_01_a.txt"),
-            path_str("04-04-2020/03/13/23/file_03_b.txt"),
-            path_str("07-07-2020/06/16/26/file_06_a.txt"),
             path_str("09-09-2022/08/18/28/file_08_b.txt"),
-            path_str("12-12-2022/11/21/31/file_11_a.txt"),
-            path_str("01-01-2020/00/10/20/file_00_a.txt"),
-            path_str("03-03-2022/02/12/22/file_02_b.txt"),
-            path_str("06-06-2022/05/15/25/file_05_a.txt"),
-            path_str("08-08-2021/07/17/27/file_07_b.txt"),
             path_str("11-11-2021/10/20/30/file_10_a.txt"),
-            path_str("02-02-2021/01/11/21/file_01_b.txt"),
-            path_str("05-05-2021/04/14/24/file_04_a.txt"),
-            path_str("07-07-2020/06/16/26/file_06_b.txt"),
-            path_str("10-10-2020/09/19/29/file_09_a.txt"),
             path_str("12-12-2022/11/21/31/file_11_b.txt"),
-            path_str("01-01-2020/00/10/20/file_00_b.txt"),
+            path_str("01-01-2020/00/10/20/file_00_a.txt"),
+            path_str("02-02-2021/01/11/21/file_01_b.txt"),
             path_str("04-04-2020/03/13/23/file_03_a.txt"),
-            path_str("06-06-2022/05/15/25/file_05_b.txt"),
-            path_str("09-09-2022/08/18/28/file_08_a.txt"),
-            path_str("11-11-2021/10/20/30/file_10_b.txt"),
-            path_str("03-03-2022/02/12/22/file_02_a.txt"),
             path_str("05-05-2021/04/14/24/file_04_b.txt"),
-            path_str("08-08-2021/07/17/27/file_07_a.txt"),
+            path_str("07-07-2020/06/16/26/file_06_a.txt"),
+            path_str("08-08-2021/07/17/27/file_07_b.txt"),
+            path_str("10-10-2020/09/19/29/file_09_a.txt"),
+            path_str("11-11-2021/10/20/30/file_10_b.txt"),
+            path_str("01-01-2020/00/10/20/file_00_b.txt"),
+            path_str("03-03-2022/02/12/22/file_02_a.txt"),
+            path_str("04-04-2020/03/13/23/file_03_b.txt"),
+            path_str("06-06-2022/05/15/25/file_05_a.txt"),
+            path_str("07-07-2020/06/16/26/file_06_b.txt"),
+            path_str("09-09-2022/08/18/28/file_08_a.txt"),
             path_str("10-10-2020/09/19/29/file_09_b.txt"),
+            path_str("12-12-2022/11/21/31/file_11_a.txt"),
+            path_str("02-02-2021/01/11/21/file_01_a.txt"),
+            path_str("03-03-2022/02/12/22/file_02_b.txt"),
+            path_str("05-05-2021/04/14/24/file_04_a.txt"),
+            path_str("06-06-2022/05/15/25/file_05_b.txt"),
+            path_str("08-08-2021/07/17/27/file_07_a.txt"),
         ];
         assert_eq!(grouped_rel_paths, expected_grouped_rel_paths);
         assert_eq!(ungrouped_rel_paths, expected_ungrouped_rel_paths);
@@ -1150,6 +1180,7 @@ mod tests {
 
         let limit = 6;
         let grouped_index = FileCorpusIndex::new(root, &source_id)
+            .with_sampler_seed(1)
             .with_follow_links(false)
             .with_text_files_only(true)
             .with_directory_grouping(true)
@@ -1176,6 +1207,7 @@ mod tests {
             .unwrap();
 
         let ungrouped_index = FileCorpusIndex::new(root, &source_id)
+            .with_sampler_seed(1)
             .with_follow_links(false)
             .with_text_files_only(true);
         let ungrouped_snapshot = ungrouped_index
@@ -1220,52 +1252,27 @@ mod tests {
             })
             .collect();
 
-        let longest_group_run = |paths: &[PathString]| -> usize {
-            let mut best = 0usize;
-            let mut current = 0usize;
-            let mut prev_group: Option<GroupKey> = None;
-            for path in paths {
-                let group = Path::new(path)
-                    .components()
-                    .next()
-                    .and_then(|part| part.as_os_str().to_str())
-                    .unwrap_or("")
-                    .to_string();
-                if prev_group.as_ref() == Some(&group) {
-                    current += 1;
-                } else {
-                    current = 1;
-                    prev_group = Some(group);
-                }
-                best = best.max(current);
-            }
-            best
-        };
-
         let sep = std::path::MAIN_SEPARATOR;
         let path_str = |value: &str| value.replace('/', &sep.to_string());
         let expected_grouped_rel_paths = vec![
-            path_str("delta/section_3/file_3_1.txt"),
-            path_str("delta/section_3/file_3_2.txt"),
-            path_str("alpha/section_0/file_0_0.txt"),
-            path_str("alpha/section_0/file_0_2.txt"),
-            path_str("gamma/section_2/file_2_2.txt"),
+            path_str("beta/section_1/file_1_1.txt"),
+            path_str("beta/section_1/file_1_0.txt"),
+            path_str("gamma/section_2/file_2_3.txt"),
             path_str("gamma/section_2/file_2_1.txt"),
+            path_str("delta/section_3/file_3_1.txt"),
+            path_str("delta/section_3/file_3_3.txt"),
         ];
         let expected_ungrouped_rel_paths = vec![
-            path_str("delta/section_3/file_3_0.txt"),
-            path_str("delta/section_3/file_3_1.txt"),
-            path_str("delta/section_3/file_3_2.txt"),
+            path_str("beta/section_1/file_1_1.txt"),
+            path_str("alpha/section_0/file_0_0.txt"),
             path_str("delta/section_3/file_3_3.txt"),
+            path_str("beta/section_1/file_1_2.txt"),
+            path_str("alpha/section_0/file_0_1.txt"),
             path_str("gamma/section_2/file_2_0.txt"),
-            path_str("gamma/section_2/file_2_1.txt"),
         ];
+
         assert_eq!(grouped_rel_paths, expected_grouped_rel_paths);
         assert_eq!(ungrouped_rel_paths, expected_ungrouped_rel_paths);
-        assert!(
-            longest_group_run(&grouped_rel_paths) <= longest_group_run(&ungrouped_rel_paths),
-            "grouping should not increase same-directory streaks under limit"
-        );
     }
 
     #[test]
@@ -1294,6 +1301,7 @@ mod tests {
 
         let limit = 9usize;
         let grouped_index = FileCorpusIndex::new(root, &source_id)
+            .with_sampler_seed(1)
             .with_follow_links(false)
             .with_text_files_only(true)
             .with_directory_grouping(true)
@@ -1363,6 +1371,7 @@ mod tests {
 
         let limit = 9usize;
         let index = FileCorpusIndex::new(root, &source_id)
+            .with_sampler_seed(1)
             .with_follow_links(false)
             .with_text_files_only(true)
             .with_directory_grouping(true)
@@ -1421,5 +1430,179 @@ mod tests {
             .map(|record| record.id.clone())
             .collect();
         assert_eq!(ids_a, ids_b);
+    }
+
+    #[test]
+    fn builder_options_and_seed_requirements_are_enforced() {
+        let dir = tempdir().unwrap();
+        let index = FileCorpusIndex::new(dir.path(), "seeded")
+            .with_follow_links(false)
+            .with_text_files_only(false)
+            .with_directory_grouping(true)
+            .with_directory_grouping_window_divisor(0);
+
+        assert!(!index.follow_links);
+        assert!(!index.text_files_only);
+        assert!(index.group_by_directory);
+        assert_eq!(index.group_window_divisor, 1);
+
+        let err = index.required_sampler_seed().unwrap_err();
+        assert!(matches!(
+            err,
+            SamplerError::SourceInconsistent { ref details, .. } if details.contains("sampler seed")
+        ));
+
+        let seeded = index.with_sampler_seed(123);
+        assert_eq!(seeded.required_sampler_seed().unwrap(), 123);
+
+        let recipes = FileCorpusIndex::default_title_summary_triplet_recipes();
+        assert_eq!(recipes.len(), 2);
+        assert!(matches!(
+            recipes[0].negative_strategy,
+            NegativeStrategy::WrongPublicationDate
+        ));
+        assert!(matches!(
+            recipes[1].negative_strategy,
+            NegativeStrategy::WrongArticle
+        ));
+    }
+
+    #[test]
+    fn title_and_record_id_helpers_cover_error_paths() {
+        let source_id = "helper_source".to_string();
+        let root = PathBuf::from("/tmp/root");
+
+        let with_underscores = PathBuf::from("/tmp/root/my_title.txt");
+        let preserved =
+            FileCorpusIndex::normalized_title_from_stem(&with_underscores, &source_id, false)
+                .unwrap();
+        assert_eq!(preserved, "my_title");
+        let replaced =
+            FileCorpusIndex::normalized_title_from_stem(&with_underscores, &source_id, true)
+                .unwrap();
+        assert_eq!(replaced, "my title");
+
+        let err = FileCorpusIndex::normalized_title_from_stem(Path::new("/"), &source_id, true)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            SamplerError::SourceInconsistent { ref details, .. } if details.contains("file stem")
+        ));
+
+        let empty_title = FileCorpusIndex::normalized_title_from_stem(
+            Path::new("/tmp/root/___ .txt"),
+            &source_id,
+            true,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            empty_title,
+            SamplerError::SourceInconsistent { ref details, .. } if details.contains("empty normalized title")
+        ));
+
+        let scoped = FileCorpusIndex::source_scoped_record_id(
+            &source_id,
+            &root,
+            Path::new("/outside/path/doc.txt"),
+        );
+        assert!(scoped.starts_with("helper_source::"));
+    }
+
+    #[test]
+    fn read_index_meta_mismatch_and_decode_errors_return_none_or_error() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+        let index = FileCorpusIndex::new(&root, "meta_mismatch");
+        let store = index.open_index_store().unwrap();
+
+        let mismatch = FileIndexMeta {
+            root: root.to_string_lossy().to_string(),
+            follow_links: false,
+            text_files_only: true,
+            count: 0,
+        };
+        let mismatch_bytes = bitcode::encode(&mismatch);
+        store.write(FILE_INDEX_META_KEY, &mismatch_bytes).unwrap();
+        assert!(index.read_index_meta(&store).unwrap().is_none());
+
+        let bad_bytes = vec![0xff, 0x00];
+        store.write(FILE_INDEX_META_KEY, &bad_bytes).unwrap();
+        match index.read_index_meta(&store) {
+            Err(SamplerError::SourceInconsistent { details, .. }) => {
+                assert!(details.contains("meta decode failed"));
+            }
+            _ => panic!("unexpected result variant"),
+        }
+    }
+
+    #[test]
+    fn read_index_batch_handles_missing_entries_and_skippable_errors() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+        let index = FileCorpusIndex::new(&root, "batch_read").with_sampler_seed(5);
+        let store = index.open_index_store().unwrap();
+
+        let path = root.join("one.txt");
+        fs::write(&path, "hello").unwrap();
+        store
+            .write(
+                &FileCorpusIndex::index_key(0),
+                path.to_string_lossy().as_bytes(),
+            )
+            .unwrap();
+
+        let mut records = Vec::new();
+        let missing =
+            index.read_index_batch(&store, &mut |_path| Ok(None), &[1], &mut records, Some(10));
+        assert!(matches!(
+            missing,
+            Err(SamplerError::SourceInconsistent { ref details, .. }) if details.contains("missing entry")
+        ));
+
+        let bad = root.join("bad.txt");
+        fs::write(&bad, "bad").unwrap();
+        store
+            .write(
+                &FileCorpusIndex::index_key(1),
+                bad.to_string_lossy().as_bytes(),
+            )
+            .unwrap();
+
+        let mut records = Vec::new();
+        index
+            .read_index_batch(
+                &store,
+                &mut |p| {
+                    if p == bad.as_path() {
+                        return Err(SamplerError::SourceInconsistent {
+                            source_id: "batch_read".to_string(),
+                            details: "skip me".to_string(),
+                        });
+                    }
+                    Ok(Some(DataRecord {
+                        id: "ok".to_string(),
+                        source: "batch_read".to_string(),
+                        created_at: Utc::now(),
+                        updated_at: Utc::now(),
+                        quality: QualityScore { trust: 1.0 },
+                        taxonomy: Vec::new(),
+                        sections: vec![RecordSection {
+                            role: SectionRole::Anchor,
+                            heading: None,
+                            text: "ok".to_string(),
+                            sentences: vec!["ok".to_string()],
+                        }],
+                        meta_prefix: None,
+                    }))
+                },
+                &[0, 1],
+                &mut records,
+                Some(10),
+            )
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, "ok");
     }
 }

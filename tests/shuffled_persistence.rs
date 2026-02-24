@@ -5,8 +5,8 @@ use chrono::{TimeZone, Utc};
 use triplets::source::InMemorySource;
 use triplets::utils::make_section;
 use triplets::{
-    DataRecord, FileSplitStore, NegativeStrategy, PairSampler, QualityScore, RecordId, Sampler,
-    SamplerConfig, SectionRole, Selector, SplitLabel, SplitRatios, TripletRecipe,
+    DataRecord, FileSplitStore, NegativeStrategy, QualityScore, RecordId, Sampler, SamplerConfig,
+    SectionRole, Selector, SplitLabel, SplitRatios, TripletRecipe, TripletSampler,
 };
 
 fn build_record(source: &str, suffix: &str, day_offset: u32) -> DataRecord {
@@ -64,7 +64,7 @@ fn first_record_ids(store_path: &std::path::Path, batch_size: usize) -> Vec<Reco
         test: 0.0,
     };
     let store = Arc::new(FileSplitStore::open(store_path, split, 73).unwrap());
-    let sampler = PairSampler::new(build_config(batch_size, split), store);
+    let sampler = TripletSampler::new(build_config(batch_size, split), store);
 
     let source_a = vec![
         build_record("source_a", "a1", 1),
@@ -143,7 +143,7 @@ fn negatives_persist_across_restart() {
 
     let first_run_negatives = {
         let store = Arc::new(FileSplitStore::open(&store_path, split, 73).unwrap());
-        let sampler = PairSampler::new(build_config(4, split), store);
+        let sampler = TripletSampler::new(build_config(4, split), store);
         sampler.register_source(Box::new(InMemorySource::new("source_a", source_a.clone())));
         sampler.register_source(Box::new(InMemorySource::new("source_b", source_b.clone())));
 
@@ -158,7 +158,7 @@ fn negatives_persist_across_restart() {
 
     let restart_negatives = {
         let store = Arc::new(FileSplitStore::open(&store_path, split, 73).unwrap());
-        let sampler = PairSampler::new(build_config(4, split), store);
+        let sampler = TripletSampler::new(build_config(4, split), store);
         sampler.register_source(Box::new(InMemorySource::new("source_a", source_a)));
         sampler.register_source(Box::new(InMemorySource::new("source_b", source_b)));
 

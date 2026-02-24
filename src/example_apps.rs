@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Once;
 
 use clap::{Parser, ValueEnum, error::ErrorKind};
 
@@ -17,11 +18,22 @@ use crate::sampler::chunk_weight;
 use crate::source::DataSource;
 use crate::splits::{FileSplitStore, SplitLabel, SplitRatios, SplitStore};
 use crate::{
-    PairSampler, RecordChunk, SampleBatch, Sampler, SamplerError, SourceId, TextBatch, TextRecipe,
-    TripletBatch,
+    RecordChunk, SampleBatch, Sampler, SamplerError, SourceId, TextBatch, TextRecipe, TripletBatch,
+    TripletSampler,
 };
 
 type DynSource = Box<dyn DataSource + 'static>;
+
+fn init_example_tracing() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("triplets=info"));
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(env_filter)
+            .try_init();
+    });
+}
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 /// CLI split selector mapped onto `SplitLabel`.
@@ -145,6 +157,9 @@ struct SourceInventory {
 }
 
 /// Run the capacity-estimation CLI with injectable root resolution/source builders.
+///
+/// `build_sources` is construction-only; sampler configuration is applied
+/// centrally by this function before any source calls.
 pub fn run_estimate_capacity<R, Resolve, Build, I>(
     args_iter: I,
     resolve_roots: Resolve,
@@ -155,6 +170,8 @@ where
     Build: FnOnce(&R) -> Vec<DynSource>,
     I: Iterator<Item = String>,
 {
+    init_example_tracing();
+
     let Some(cli) = parse_cli::<EstimateCapacityCli, _>(
         std::iter::once("estimate_capacity".to_string()).chain(args_iter),
     )?
@@ -179,9 +196,9 @@ where
         } else {
             config.recipes.clone()
         };
-        let reported_records = source.reported_record_count().ok_or_else(|| {
+        let reported_records = source.reported_record_count(&config).map_err(|err| {
             format!(
-                "source '{}' did not report a record count; metadata-only capacity estimation requires DataSource::reported_record_count",
+                "source '{}' failed to report exact record count: {err}",
                 source.id()
             )
         })?;
@@ -412,6 +429,9 @@ where
 }
 
 /// Run the multi-source demo CLI with injectable root resolution/source builders.
+///
+/// `build_sources` is construction-only. Source sampler configuration is owned
+/// by sampler registration (`TripletSampler::register_source`).
 pub fn run_multi_source_demo<R, Resolve, Build, I>(
     args_iter: I,
     resolve_roots: Resolve,
@@ -422,9 +442,7 @@ where
     Build: FnOnce(&R) -> Vec<DynSource>,
     I: Iterator<Item = String>,
 {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .try_init();
+    init_example_tracing();
 
     let Some(cli) = parse_cli::<MultiSourceDemoCli, _>(
         std::iter::once("multi_source_demo".to_string()).chain(args_iter),
@@ -456,9 +474,10 @@ where
         "Persisting split assignments and epoch state to {}",
         split_store_path.display()
     );
+    let sources = build_sources(&roots);
     let split_store = Arc::new(FileSplitStore::open(&split_store_path, config.split, 99)?);
-    let sampler = PairSampler::new(config, split_store.clone());
-    for source in build_sources(&roots) {
+    let sampler = TripletSampler::new(config, split_store.clone());
+    for source in sources {
         sampler.register_source(source);
     }
 
@@ -849,6 +868,7 @@ mod tests {
 
         fn refresh(
             &self,
+            _config: &SamplerConfig,
             _cursor: Option<&SourceCursor>,
             _limit: Option<usize>,
         ) -> Result<SourceSnapshot, SamplerError> {
@@ -861,12 +881,59 @@ mod tests {
             })
         }
 
-        fn reported_record_count(&self) -> Option<u128> {
-            self.count
+        fn reported_record_count(&self, _config: &SamplerConfig) -> Result<u128, SamplerError> {
+            self.count.ok_or_else(|| SamplerError::SourceInconsistent {
+                source_id: self.id.clone(),
+                details: "test source has no configured exact count".to_string(),
+            })
         }
 
         fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {
             self.recipes.clone()
+        }
+    }
+
+    struct ConfigRequiredSource {
+        id: String,
+        expected_seed: u64,
+    }
+
+    impl DataSource for ConfigRequiredSource {
+        fn id(&self) -> &str {
+            &self.id
+        }
+
+        fn refresh(
+            &self,
+            _config: &SamplerConfig,
+            _cursor: Option<&SourceCursor>,
+            _limit: Option<usize>,
+        ) -> Result<SourceSnapshot, SamplerError> {
+            Ok(SourceSnapshot {
+                records: Vec::new(),
+                cursor: SourceCursor {
+                    last_seen: Utc::now(),
+                    revision: 0,
+                },
+            })
+        }
+
+        fn reported_record_count(&self, config: &SamplerConfig) -> Result<u128, SamplerError> {
+            if config.seed == self.expected_seed {
+                Ok(1)
+            } else {
+                Err(SamplerError::SourceInconsistent {
+                    source_id: self.id.clone(),
+                    details: format!(
+                        "expected sampler seed {} but got {}",
+                        self.expected_seed, config.seed
+                    ),
+                })
+            }
+        }
+
+        fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {
+            Vec::new()
         }
     }
 
@@ -939,7 +1006,35 @@ mod tests {
         );
 
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("did not report a record count"));
+        assert!(err.contains("failed to report exact record count"));
+    }
+
+    #[test]
+    fn run_estimate_capacity_propagates_root_resolution_error() {
+        let result = run_estimate_capacity(
+            std::iter::empty::<String>(),
+            |_| Err("root resolution failed".into()),
+            |_: &()| Vec::<DynSource>::new(),
+        );
+
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("root resolution failed"));
+    }
+
+    #[test]
+    fn run_estimate_capacity_configures_sources_centrally_before_counting() {
+        let result = run_estimate_capacity(
+            std::iter::empty::<String>(),
+            |_| Ok(()),
+            |_| {
+                vec![Box::new(ConfigRequiredSource {
+                    id: "requires_config".into(),
+                    expected_seed: 99,
+                }) as DynSource]
+            },
+        );
+
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -949,6 +1044,25 @@ mod tests {
 
         let err = parse_cli::<MultiSourceDemoCli, _>(["multi_source_demo", "--batch-size", "0"]);
         assert!(err.is_err());
+
+        let conflict = parse_cli::<MultiSourceDemoCli, _>([
+            "multi_source_demo",
+            "--split-store-dir",
+            "./a",
+            "--split-store-path",
+            "./b.bin",
+        ]);
+        assert!(conflict.is_err());
+    }
+
+    #[test]
+    fn parse_cli_handles_display_version_path() {
+        #[derive(Debug, Parser)]
+        #[command(name = "version_test", version = "1.0.0")]
+        struct VersionCli {}
+
+        let parsed = parse_cli::<VersionCli, _>(["version_test", "--version"]).unwrap();
+        assert!(parsed.is_none());
     }
 
     #[test]
@@ -967,6 +1081,31 @@ mod tests {
                     id: "source_for_recipes".into(),
                     count: Some(10),
                     recipes: vec![default_recipe("recipe_a")],
+                }) as DynSource]
+            },
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn run_multi_source_demo_list_text_recipes_uses_explicit_split_store_path() {
+        let dir = tempdir().unwrap();
+        let split_store_path = dir.path().join("custom_split_store.bin");
+        let args = vec![
+            "--list-text-recipes".to_string(),
+            "--split-store-path".to_string(),
+            split_store_path.to_string_lossy().to_string(),
+        ];
+
+        let result = run_multi_source_demo(
+            args.into_iter(),
+            |_| Ok(()),
+            |_| {
+                vec![Box::new(TestSource {
+                    id: "source_without_text_recipes".into(),
+                    count: Some(1),
+                    recipes: Vec::new(),
                 }) as DynSource]
             },
         );
@@ -1002,6 +1141,18 @@ mod tests {
 
             assert!(result.is_ok());
         }
+    }
+
+    #[test]
+    fn run_multi_source_demo_propagates_root_resolution_error() {
+        let result = run_multi_source_demo(
+            std::iter::empty::<String>(),
+            |_| Err("demo root resolution failed".into()),
+            |_: &()| Vec::<DynSource>::new(),
+        );
+
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("demo root resolution failed"));
     }
 
     #[test]
@@ -1093,5 +1244,65 @@ mod tests {
 
         assert_eq!(extract_source("source_a::record"), "source_a");
         assert_eq!(extract_source("record-without-delimiter"), "unknown");
+    }
+
+    #[test]
+    fn split_arg_conversion_and_version_parse_paths_are_covered() {
+        assert!(matches!(
+            SplitLabel::from(SplitArg::Train),
+            SplitLabel::Train
+        ));
+        assert!(matches!(
+            SplitLabel::from(SplitArg::Validation),
+            SplitLabel::Validation
+        ));
+        assert!(matches!(SplitLabel::from(SplitArg::Test), SplitLabel::Test));
+    }
+
+    #[test]
+    fn parse_split_ratios_reports_per_field_parse_errors() {
+        assert!(
+            parse_split_ratios_arg("x,0.1,0.9")
+                .unwrap_err()
+                .contains("invalid train ratio")
+        );
+        assert!(
+            parse_split_ratios_arg("0.1,y,0.8")
+                .unwrap_err()
+                .contains("invalid validation ratio")
+        );
+        assert!(
+            parse_split_ratios_arg("0.1,0.2,z")
+                .unwrap_err()
+                .contains("invalid test ratio")
+        );
+    }
+
+    #[test]
+    fn run_multi_source_demo_exhausted_paths_are_handled() {
+        for mode in [
+            vec!["--pair-batch".to_string()],
+            vec!["--text-recipes".to_string()],
+            Vec::new(),
+        ] {
+            let dir = tempdir().unwrap();
+            let mut args = mode;
+            args.push("--split-store-dir".to_string());
+            args.push(dir.path().to_string_lossy().to_string());
+
+            let result = run_multi_source_demo(
+                args.into_iter(),
+                |_| Ok(()),
+                |_| {
+                    vec![Box::new(TestSource {
+                        id: "source_without_recipes".into(),
+                        count: Some(1),
+                        recipes: Vec::new(),
+                    }) as DynSource]
+                },
+            );
+
+            assert!(result.is_ok());
+        }
     }
 }
