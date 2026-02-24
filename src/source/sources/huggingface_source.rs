@@ -2572,7 +2572,7 @@ mod tests {
         (format!("http://{addr}"), handle)
     }
 
-    fn write_simple_parquet(path: &Path, rows: &[(&str, &str)]) {
+    fn write_parquet_fixture(path: &Path, rows: &[(&str, &str)]) {
         let schema = Arc::new(
             parse_message_type(
                 "message test_schema {
@@ -3527,7 +3527,7 @@ mod tests {
     fn parquet_row_group_map_and_index_single_shard_cover_success_path() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("rows.parquet");
-        write_simple_parquet(&path, &[("r1", "alpha"), ("r2", "beta"), ("r3", "gamma")]);
+        write_parquet_fixture(&path, &[("r1", "alpha"), ("r2", "beta"), ("r3", "gamma")]);
         let config = test_config(dir.path().to_path_buf());
 
         let (total_rows, groups) = HuggingFaceRowSource::parquet_row_group_map(&config, &path).unwrap();
@@ -3546,7 +3546,7 @@ mod tests {
     fn read_row_batch_reads_parquet_rows_and_uses_cache_on_repeat() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("rows.parquet");
-        write_simple_parquet(&path, &[("r10", "ten"), ("r11", "eleven")]);
+        write_parquet_fixture(&path, &[("r10", "ten"), ("r11", "eleven")]);
 
         let config = test_config(dir.path().to_path_buf());
         let source = test_source(config.clone());
