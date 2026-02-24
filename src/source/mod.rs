@@ -92,6 +92,25 @@ pub trait DataSource: Send + Sync {
     }
 }
 
+/// Apply sampler configuration to a single source.
+///
+/// This is the crate-owned configuration hook used by sampler registration and
+/// helper setup paths, so source configuration behavior is centralized.
+pub fn configure_source_for_sampler(source: &dyn DataSource, config: &SamplerConfig) {
+    source.configure_sampler(config);
+}
+
+/// Apply sampler configuration to all sources in-place and return them.
+pub fn configure_sources_for_sampler(
+    sources: Vec<Box<dyn DataSource + 'static>>,
+    config: &SamplerConfig,
+) -> Vec<Box<dyn DataSource + 'static>> {
+    for source in &sources {
+        configure_source_for_sampler(source.as_ref(), config);
+    }
+    sources
+}
+
 /// Configure a source with a full sampler configuration and return it.
 ///
 /// Useful for direct source usage outside `PairSampler::register_source`, where

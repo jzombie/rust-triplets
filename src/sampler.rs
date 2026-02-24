@@ -26,7 +26,7 @@ use crate::errors::SamplerError;
 use crate::hash::stable_hash_str;
 use crate::ingestion::IngestionManager;
 use crate::metadata::{META_FIELD_DATE, MetadataKey};
-use crate::source::DataSource;
+use crate::source::{DataSource, configure_source_for_sampler};
 use crate::splits::{
     EpochStateStore, PersistedSamplerState, SamplerStateStore, SplitLabel, SplitStore,
 };
@@ -350,7 +350,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> PairSamplerI
     }
 
     fn register_source(&mut self, source: Box<dyn DataSource + 'static>) {
-        source.configure_sampler(&self.config);
+        configure_source_for_sampler(source.as_ref(), &self.config);
         let source_id = source.id().to_string();
         if !self.using_config_triplet_recipes {
             let triplets = source.default_triplet_recipes();

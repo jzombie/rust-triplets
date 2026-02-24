@@ -15,7 +15,7 @@ use crate::heuristics::{
 };
 use crate::metrics::source_skew;
 use crate::sampler::chunk_weight;
-use crate::source::DataSource;
+use crate::source::{DataSource, configure_sources_for_sampler};
 use crate::splits::{FileSplitStore, SplitLabel, SplitRatios, SplitStore};
 use crate::{
     PairSampler, RecordChunk, SampleBatch, Sampler, SamplerError, SourceId, TextBatch, TextRecipe,
@@ -157,6 +157,9 @@ struct SourceInventory {
 }
 
 /// Run the capacity-estimation CLI with injectable root resolution/source builders.
+///
+/// `build_sources` is construction-only; sampler configuration is applied
+/// centrally by this function before any source calls.
 pub fn run_estimate_capacity<R, Resolve, Build, I>(
     args_iter: I,
     resolve_roots: Resolve,
@@ -184,10 +187,7 @@ where
         ..SamplerConfig::default()
     };
 
-    let sources = build_sources(&roots);
-    for source in &sources {
-        source.configure_sampler(&config);
-    }
+    let sources = configure_sources_for_sampler(build_sources(&roots), &config);
 
     let mut inventories = Vec::new();
     for source in &sources {
@@ -429,6 +429,9 @@ where
 }
 
 /// Run the multi-source demo CLI with injectable root resolution/source builders.
+///
+/// `build_sources` is construction-only. Source sampler configuration is owned
+/// by sampler registration (`PairSampler::register_source`).
 pub fn run_multi_source_demo<R, Resolve, Build, I>(
     args_iter: I,
     resolve_roots: Resolve,
@@ -471,9 +474,10 @@ where
         "Persisting split assignments and epoch state to {}",
         split_store_path.display()
     );
+    let sources = build_sources(&roots);
     let split_store = Arc::new(FileSplitStore::open(&split_store_path, config.split, 99)?);
     let sampler = PairSampler::new(config, split_store.clone());
-    for source in build_sources(&roots) {
+    for source in sources {
         sampler.register_source(source);
     }
 
@@ -848,6 +852,7 @@ mod tests {
     use crate::data::SectionRole;
     use crate::source::{SourceCursor, SourceSnapshot};
     use chrono::Utc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tempfile::tempdir;
 
     /// Minimal in-memory `DataSource` test double for example app tests.
@@ -887,6 +892,46 @@ mod tests {
 
         fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {
             self.recipes.clone()
+        }
+    }
+
+    struct ConfigRequiredSource {
+        id: String,
+        configured: AtomicBool,
+    }
+
+    impl DataSource for ConfigRequiredSource {
+        fn id(&self) -> &str {
+            &self.id
+        }
+
+        fn refresh(
+            &self,
+            _cursor: Option<&SourceCursor>,
+            _limit: Option<usize>,
+        ) -> Result<SourceSnapshot, SamplerError> {
+            Ok(SourceSnapshot {
+                records: Vec::new(),
+                cursor: SourceCursor {
+                    last_seen: Utc::now(),
+                    revision: 0,
+                },
+            })
+        }
+
+        fn reported_record_count(&self) -> Result<u128, SamplerError> {
+            if self.configured.load(Ordering::SeqCst) {
+                Ok(1)
+            } else {
+                Err(SamplerError::SourceInconsistent {
+                    source_id: self.id.clone(),
+                    details: "sampler configuration not provided".to_string(),
+                })
+            }
+        }
+
+        fn configure_sampler(&self, _config: &SamplerConfig) {
+            self.configured.store(true, Ordering::SeqCst);
         }
     }
 
@@ -960,6 +1005,22 @@ mod tests {
 
         let err = result.unwrap_err().to_string();
         assert!(err.contains("failed to report exact record count"));
+    }
+
+    #[test]
+    fn run_estimate_capacity_configures_sources_centrally_before_counting() {
+        let result = run_estimate_capacity(
+            std::iter::empty::<String>(),
+            |_| Ok(()),
+            |_| {
+                vec![Box::new(ConfigRequiredSource {
+                    id: "requires_config".into(),
+                    configured: AtomicBool::new(false),
+                }) as DynSource]
+            },
+        );
+
+        assert!(result.is_ok());
     }
 
     #[test]
