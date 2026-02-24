@@ -16,8 +16,7 @@ pub type TaxonomyBuilder =
     Arc<dyn Fn(&Path, &Path, &SourceId) -> Vec<TaxonomyValue> + Send + Sync + 'static>;
 
 /// Builds record sections from a normalized title and body.
-pub type SectionBuilder =
-    Arc<dyn Fn(&str, &str) -> Vec<RecordSection> + Send + Sync + 'static>;
+pub type SectionBuilder = Arc<dyn Fn(&str, &str) -> Vec<RecordSection> + Send + Sync + 'static>;
 
 /// Configuration for a generic filesystem-backed data source.
 #[derive(Clone)]
@@ -72,7 +71,8 @@ impl FileSourceConfig {
 
     /// Add a taxonomy-segment trust override.
     pub fn with_category_trust(mut self, category: impl Into<String>, trust: f32) -> Self {
-        self.category_trust.insert(category.into().to_lowercase(), trust);
+        self.category_trust
+            .insert(category.into().to_lowercase(), trust);
         self
     }
 
@@ -267,8 +267,16 @@ mod tests {
         let opinion = temp.path().join("opinionated");
         std::fs::create_dir_all(&factual).unwrap();
         std::fs::create_dir_all(&opinion).unwrap();
-        std::fs::write(factual.join("What_is_beta.txt"), "Beta compares volatility.").unwrap();
-        std::fs::write(opinion.join("Will_rates_fall.txt"), "Probably not this year.").unwrap();
+        std::fs::write(
+            factual.join("What_is_beta.txt"),
+            "Beta compares volatility.",
+        )
+        .unwrap();
+        std::fs::write(
+            opinion.join("Will_rates_fall.txt"),
+            "Probably not this year.",
+        )
+        .unwrap();
 
         let source = FileSource::new(
             FileSourceConfig::new("qa_weighted", temp.path())
@@ -294,8 +302,11 @@ mod tests {
     #[test]
     fn supports_custom_sections_and_default_recipes() {
         let temp = tempdir().unwrap();
-        std::fs::write(temp.path().join("What_is_gamma.txt"), "Gamma measures convexity.")
-            .unwrap();
+        std::fs::write(
+            temp.path().join("What_is_gamma.txt"),
+            "Gamma measures convexity.",
+        )
+        .unwrap();
 
         let sections: SectionBuilder = Arc::new(|question, answer| {
             vec![

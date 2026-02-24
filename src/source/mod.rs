@@ -17,10 +17,10 @@ use crate::errors::SamplerError;
 use crate::hash::stable_hash_with;
 use crate::types::SourceId;
 
-/// Utility helpers used by source implementations.
-pub mod utilities;
 /// Source implementation modules.
 pub mod sources;
+/// Utility helpers used by source implementations.
+pub mod utilities;
 pub use sources::file_source::{
     FileSource, FileSourceConfig, SectionBuilder, TaxonomyBuilder, anchor_context_sections,
     taxonomy_from_path,

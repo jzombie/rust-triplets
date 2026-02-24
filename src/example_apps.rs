@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::path::PathBuf;
-use std::sync::Once;
 use std::sync::Arc;
+use std::sync::Once;
 
 use clap::{Parser, ValueEnum, error::ErrorKind};
 
@@ -29,7 +29,9 @@ fn init_example_tracing() {
     INIT.call_once(|| {
         let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("triplets=debug"));
-        let _ = tracing_subscriber::fmt().with_env_filter(env_filter).try_init();
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(env_filter)
+            .try_init();
     });
 }
 

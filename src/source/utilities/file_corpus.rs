@@ -584,13 +584,15 @@ impl FileCorpusIndex {
             permuted_paths.push(paths[idx].clone());
         }
 
-        Ok(crate::source::utilities::grouping::deterministic_grouped_order(
-            &permuted_paths,
-            seed,
-            self.group_window_divisor,
-            |path| path_relative_key(&self.root, path),
-            |path| self.group_key_for_path(path),
-        ))
+        Ok(
+            crate::source::utilities::grouping::deterministic_grouped_order(
+                &permuted_paths,
+                seed,
+                self.group_window_divisor,
+                |path| path_relative_key(&self.root, path),
+                |path| self.group_key_for_path(path),
+            ),
+        )
     }
 
     fn read_index_paths(
