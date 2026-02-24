@@ -28,7 +28,7 @@ In metric learning, a triplet is a training example composed of:
 
 Training on many `(anchor, positive, negative)` groups helps a model learn useful embedding space structure (similar items closer together, dissimilar items farther apart).
 
-`triplets` focuses on building these training examples deterministically across multiple data sources, with reproducible split assignment, weighting, chunking, and resume-friendly state.
+`triplets` helps automatically construct these triplets from multiple data sources using a metadata-driven approach: you define recipes/selectors for how anchor/positive/negative sections are chosen, and the sampler applies them deterministically with reproducible split assignment, weighting, chunking, and resume-friendly state.
 
 ## High-level features
 
