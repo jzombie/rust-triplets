@@ -63,6 +63,7 @@ pub trait DataSource: Send + Sync {
     /// Return the next cursor position in `SourceSnapshot.cursor`.
     fn refresh(
         &self,
+        config: &SamplerConfig,
         cursor: Option<&SourceCursor>,
         limit: Option<usize>,
     ) -> Result<SourceSnapshot, SamplerError>;
@@ -76,13 +77,7 @@ pub trait DataSource: Send + Sync {
     ///
     /// Keep this consistent with `refresh` by using the same backend scope,
     /// filtering, and logical corpus definition.
-    fn reported_record_count(&self) -> Result<u128, SamplerError>;
-
-    /// Provide the active sampler configuration to this source.
-    ///
-    /// Called when the source is registered with a sampler. Sources can use
-    /// this to align internal heuristics with runtime sampler settings.
-    fn configure_sampler(&self, config: &SamplerConfig);
+    fn reported_record_count(&self, config: &SamplerConfig) -> Result<u128, SamplerError>;
 
     /// Optional source-provided default triplet recipes.
     ///
@@ -90,45 +85,6 @@ pub trait DataSource: Send + Sync {
     fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {
         Vec::new()
     }
-}
-
-/// Apply sampler configuration to a single source.
-///
-/// This is the crate-owned configuration hook used by sampler registration and
-/// helper setup paths, so source configuration behavior is centralized.
-pub fn configure_source_for_sampler(source: &dyn DataSource, config: &SamplerConfig) {
-    source.configure_sampler(config);
-}
-
-/// Apply sampler configuration to all sources in-place and return them.
-pub fn configure_sources_for_sampler(
-    sources: Vec<Box<dyn DataSource + 'static>>,
-    config: &SamplerConfig,
-) -> Vec<Box<dyn DataSource + 'static>> {
-    for source in &sources {
-        configure_source_for_sampler(source.as_ref(), config);
-    }
-    sources
-}
-
-/// Configure a source with a full sampler configuration and return it.
-///
-/// Useful for direct source usage outside `PairSampler::register_source`, where
-/// forgetting to call `configure_sampler` can otherwise cause runtime errors.
-pub fn configured_source<T: DataSource>(source: T, config: &SamplerConfig) -> T {
-    source.configure_sampler(config);
-    source
-}
-
-/// Configure a source with only a deterministic seed and return it.
-///
-/// This is a convenience wrapper for direct source usage in tests/examples.
-pub fn configured_source_with_seed<T: DataSource>(source: T, seed: u64) -> T {
-    let config = SamplerConfig {
-        seed,
-        ..SamplerConfig::default()
-    };
-    configured_source(source, &config)
 }
 
 /// Index-addressable source interface used by deterministic pagers.
@@ -309,6 +265,7 @@ impl<T: IndexableSource> DataSource for IndexableAdapter<T> {
 
     fn refresh(
         &self,
+        _config: &SamplerConfig,
         cursor: Option<&SourceCursor>,
         limit: Option<usize>,
     ) -> Result<SourceSnapshot, SamplerError> {
@@ -316,7 +273,7 @@ impl<T: IndexableSource> DataSource for IndexableAdapter<T> {
         pager.refresh(&self.inner, cursor, limit)
     }
 
-    fn reported_record_count(&self) -> Result<u128, SamplerError> {
+    fn reported_record_count(&self, _config: &SamplerConfig) -> Result<u128, SamplerError> {
         self.inner
             .len_hint()
             .map(|value| value as u128)
@@ -325,8 +282,6 @@ impl<T: IndexableSource> DataSource for IndexableAdapter<T> {
                 details: "indexable source did not provide len_hint".into(),
             })
     }
-
-    fn configure_sampler(&self, _config: &SamplerConfig) {}
 }
 
 /// Internal permutation used by `IndexablePager`.
@@ -407,6 +362,7 @@ impl DataSource for InMemorySource {
 
     fn refresh(
         &self,
+        _config: &SamplerConfig,
         cursor: Option<&SourceCursor>,
         limit: Option<usize>,
     ) -> Result<SourceSnapshot, SamplerError> {
@@ -444,11 +400,9 @@ impl DataSource for InMemorySource {
         })
     }
 
-    fn reported_record_count(&self) -> Result<u128, SamplerError> {
+    fn reported_record_count(&self, _config: &SamplerConfig) -> Result<u128, SamplerError> {
         Ok(self.records.len() as u128)
     }
-
-    fn configure_sampler(&self, _config: &SamplerConfig) {}
 }
 
 #[cfg(test)]
@@ -532,13 +486,14 @@ mod tests {
     #[test]
     fn indexable_adapter_pages_in_stable_order() {
         let adapter = IndexableAdapter::new(IndexableStub::new("stub", 6));
-        let full = adapter.refresh(None, None).unwrap();
+        let config = SamplerConfig::default();
+        let full = adapter.refresh(&config, None, None).unwrap();
         let full_ids: Vec<RecordId> = full.records.into_iter().map(|r| r.id).collect();
 
         let mut cursor = None;
         let mut paged = Vec::new();
         for _ in 0..3 {
-            let snapshot = adapter.refresh(cursor.as_ref(), Some(2)).unwrap();
+            let snapshot = adapter.refresh(&config, cursor.as_ref(), Some(2)).unwrap();
             cursor = Some(snapshot.cursor);
             paged.extend(snapshot.records.into_iter().map(|r| r.id));
         }
@@ -563,7 +518,9 @@ mod tests {
         // Pull a single page and ensure the indices are spread across the space,
         // which indicates the permutation isn't stuck in a narrow regime.
         let adapter = IndexableAdapter::new(IndexableStub::new(&source_id, total));
-        let snapshot = adapter.refresh(None, Some(64)).unwrap();
+        let snapshot = adapter
+            .refresh(&SamplerConfig::default(), None, Some(64))
+            .unwrap();
         let indices: Vec<usize> = snapshot
             .records
             .into_iter()
@@ -593,7 +550,7 @@ mod tests {
     #[test]
     fn indexable_adapter_reported_count_errors_when_len_hint_missing() {
         let adapter = IndexableAdapter::new(NoLenHintStub::new("no_len_hint"));
-        let result = adapter.reported_record_count();
+        let result = adapter.reported_record_count(&SamplerConfig::default());
         assert!(result.is_err());
     }
 
@@ -634,7 +591,9 @@ mod tests {
             revision: 7,
         };
 
-        let snapshot = source.refresh(Some(&cursor), Some(1)).unwrap();
+        let snapshot = source
+            .refresh(&SamplerConfig::default(), Some(&cursor), Some(1))
+            .unwrap();
         assert_eq!(snapshot.records.len(), 1);
         assert_eq!(snapshot.records[0].id, "a");
         assert_eq!(snapshot.cursor.revision, 1);

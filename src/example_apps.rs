@@ -15,7 +15,7 @@ use crate::heuristics::{
 };
 use crate::metrics::source_skew;
 use crate::sampler::chunk_weight;
-use crate::source::{DataSource, configure_sources_for_sampler};
+use crate::source::DataSource;
 use crate::splits::{FileSplitStore, SplitLabel, SplitRatios, SplitStore};
 use crate::{
     PairSampler, RecordChunk, SampleBatch, Sampler, SamplerError, SourceId, TextBatch, TextRecipe,
@@ -187,7 +187,7 @@ where
         ..SamplerConfig::default()
     };
 
-    let sources = configure_sources_for_sampler(build_sources(&roots), &config);
+    let sources = build_sources(&roots);
 
     let mut inventories = Vec::new();
     for source in &sources {
@@ -196,7 +196,7 @@ where
         } else {
             config.recipes.clone()
         };
-        let reported_records = source.reported_record_count().map_err(|err| {
+        let reported_records = source.reported_record_count(&config).map_err(|err| {
             format!(
                 "source '{}' failed to report exact record count: {err}",
                 source.id()
@@ -852,7 +852,6 @@ mod tests {
     use crate::data::SectionRole;
     use crate::source::{SourceCursor, SourceSnapshot};
     use chrono::Utc;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use tempfile::tempdir;
 
     /// Minimal in-memory `DataSource` test double for example app tests.
@@ -869,6 +868,7 @@ mod tests {
 
         fn refresh(
             &self,
+            _config: &SamplerConfig,
             _cursor: Option<&SourceCursor>,
             _limit: Option<usize>,
         ) -> Result<SourceSnapshot, SamplerError> {
@@ -881,14 +881,12 @@ mod tests {
             })
         }
 
-        fn reported_record_count(&self) -> Result<u128, SamplerError> {
+        fn reported_record_count(&self, _config: &SamplerConfig) -> Result<u128, SamplerError> {
             self.count.ok_or_else(|| SamplerError::SourceInconsistent {
                 source_id: self.id.clone(),
                 details: "test source has no configured exact count".to_string(),
             })
         }
-
-        fn configure_sampler(&self, _config: &SamplerConfig) {}
 
         fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {
             self.recipes.clone()
@@ -897,7 +895,7 @@ mod tests {
 
     struct ConfigRequiredSource {
         id: String,
-        configured: AtomicBool,
+        expected_seed: u64,
     }
 
     impl DataSource for ConfigRequiredSource {
@@ -907,6 +905,7 @@ mod tests {
 
         fn refresh(
             &self,
+            _config: &SamplerConfig,
             _cursor: Option<&SourceCursor>,
             _limit: Option<usize>,
         ) -> Result<SourceSnapshot, SamplerError> {
@@ -919,19 +918,22 @@ mod tests {
             })
         }
 
-        fn reported_record_count(&self) -> Result<u128, SamplerError> {
-            if self.configured.load(Ordering::SeqCst) {
+        fn reported_record_count(&self, config: &SamplerConfig) -> Result<u128, SamplerError> {
+            if config.seed == self.expected_seed {
                 Ok(1)
             } else {
                 Err(SamplerError::SourceInconsistent {
                     source_id: self.id.clone(),
-                    details: "sampler configuration not provided".to_string(),
+                    details: format!(
+                        "expected sampler seed {} but got {}",
+                        self.expected_seed, config.seed
+                    ),
                 })
             }
         }
 
-        fn configure_sampler(&self, _config: &SamplerConfig) {
-            self.configured.store(true, Ordering::SeqCst);
+        fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {
+            Vec::new()
         }
     }
 
@@ -1015,7 +1017,7 @@ mod tests {
             |_| {
                 vec![Box::new(ConfigRequiredSource {
                     id: "requires_config".into(),
-                    configured: AtomicBool::new(false),
+                    expected_seed: 99,
                 }) as DynSource]
             },
         );

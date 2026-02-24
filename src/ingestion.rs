@@ -1,5 +1,6 @@
 use crate::data::DataRecord;
 use crate::errors::SamplerError;
+use crate::config::SamplerConfig;
 use crate::source::{DataSource, SourceCursor, SourceSnapshot};
 use crate::types::{RecordId, SourceId};
 use chrono::Utc;
@@ -188,6 +189,7 @@ pub struct IngestionManager {
     cache: RecordCache,
     sources: Vec<SourceState>,
     max_records: usize,
+    sampler_config: SamplerConfig,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -207,11 +209,12 @@ pub struct SourceRefreshStats {
 
 impl IngestionManager {
     /// Create a new ingestion manager that ingests on demand.
-    pub fn new(max_records: usize) -> Self {
+    pub fn new(max_records: usize, sampler_config: SamplerConfig) -> Self {
         Self {
             cache: RecordCache::new(max_records),
             sources: Vec::new(),
             max_records,
+            sampler_config,
         }
     }
 
@@ -326,16 +329,22 @@ impl IngestionManager {
             > = Vec::with_capacity(self.sources.len());
             results.resize_with(self.sources.len(), || None);
             let fetch_limit = step.unwrap_or(self.max_records);
+            let sampler_config = self.sampler_config.clone();
             thread::scope(|scope| {
                 let mut handles = Vec::with_capacity(refresh_plan.len());
                 for (idx, cursor) in &refresh_plan {
                     let source = &self.sources[*idx].source;
                     let cursor = cursor.clone();
+                    let sampler_config = sampler_config.clone();
                     handles.push((
                         *idx,
                         scope.spawn(move || {
                             let start = std::time::Instant::now();
-                            let result = source.refresh(cursor.as_ref(), Some(fetch_limit));
+                            let result = source.refresh(
+                                &sampler_config,
+                                cursor.as_ref(),
+                                Some(fetch_limit),
+                            );
                             let elapsed = start.elapsed();
                             (result, elapsed)
                         }),

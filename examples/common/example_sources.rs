@@ -132,18 +132,18 @@ impl DataSource for ExampleFileSource {
 
     fn refresh(
         &self,
+        config: &triplets::SamplerConfig,
         cursor: Option<&SourceCursor>,
         limit: Option<usize>,
     ) -> Result<SourceSnapshot, triplets::SamplerError> {
-        self.inner.refresh(cursor, limit)
+        self.inner.refresh(config, cursor, limit)
     }
 
-    fn reported_record_count(&self) -> Result<u128, triplets::SamplerError> {
+    fn reported_record_count(
+        &self,
+        _config: &triplets::SamplerConfig,
+    ) -> Result<u128, triplets::SamplerError> {
         Ok(self.reported_records)
-    }
-
-    fn configure_sampler(&self, config: &triplets::SamplerConfig) {
-        self.inner.configure_sampler(config);
     }
 
     fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {

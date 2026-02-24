@@ -26,7 +26,7 @@ use crate::errors::SamplerError;
 use crate::hash::stable_hash_str;
 use crate::ingestion::IngestionManager;
 use crate::metadata::{META_FIELD_DATE, MetadataKey};
-use crate::source::{DataSource, configure_source_for_sampler};
+use crate::source::DataSource;
 use crate::splits::{
     EpochStateStore, PersistedSamplerState, SamplerStateStore, SplitLabel, SplitStore,
 };
@@ -308,13 +308,14 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> PairSamplerI
         } else {
             Vec::new()
         };
+        let ingestion = IngestionManager::new(buffer_size, config.clone());
         let epoch_backend = Some(Arc::clone(&split_store) as Arc<dyn EpochStateStore>);
         let epoch_tracker = EpochTracker::new(true, epoch_backend, config.seed ^ EPOCH_SEED_OFFSET);
         let mut sampler = Self {
             rng: DeterministicRng::new(config.seed),
             config,
             split_store,
-            ingestion: IngestionManager::new(buffer_size),
+            ingestion,
             records: IndexMap::new(),
             triplet_recipes,
             text_recipes,
@@ -350,7 +351,6 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> PairSamplerI
     }
 
     fn register_source(&mut self, source: Box<dyn DataSource + 'static>) {
-        configure_source_for_sampler(source.as_ref(), &self.config);
         let source_id = source.id().to_string();
         if !self.using_config_triplet_recipes {
             let triplets = source.default_triplet_recipes();
@@ -2227,18 +2227,15 @@ mod tests {
 
         fn refresh(
             &self,
+            config: &SamplerConfig,
             cursor: Option<&SourceCursor>,
             limit: Option<usize>,
         ) -> Result<SourceSnapshot, SamplerError> {
-            <InMemorySource as DataSource>::refresh(&self.inner, cursor, limit)
+            <InMemorySource as DataSource>::refresh(&self.inner, config, cursor, limit)
         }
 
-        fn reported_record_count(&self) -> Result<u128, SamplerError> {
-            <InMemorySource as DataSource>::reported_record_count(&self.inner)
-        }
-
-        fn configure_sampler(&self, config: &SamplerConfig) {
-            <InMemorySource as DataSource>::configure_sampler(&self.inner, config)
+        fn reported_record_count(&self, config: &SamplerConfig) -> Result<u128, SamplerError> {
+            <InMemorySource as DataSource>::reported_record_count(&self.inner, config)
         }
 
         fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {
@@ -2271,6 +2268,7 @@ mod tests {
 
         fn refresh(
             &self,
+            _config: &SamplerConfig,
             _cursor: Option<&SourceCursor>,
             limit: Option<usize>,
         ) -> Result<SourceSnapshot, SamplerError> {
@@ -2288,11 +2286,9 @@ mod tests {
             })
         }
 
-        fn reported_record_count(&self) -> Result<u128, SamplerError> {
+        fn reported_record_count(&self, _config: &SamplerConfig) -> Result<u128, SamplerError> {
             Ok(self.records.len() as u128)
         }
-
-        fn configure_sampler(&self, _config: &SamplerConfig) {}
     }
 
     /// Test source that always returns a refresh error.
@@ -2331,6 +2327,7 @@ mod tests {
 
         fn refresh(
             &self,
+            _config: &SamplerConfig,
             _cursor: Option<&SourceCursor>,
             limit: Option<usize>,
         ) -> Result<SourceSnapshot, SamplerError> {
@@ -2355,11 +2352,9 @@ mod tests {
             })
         }
 
-        fn reported_record_count(&self) -> Result<u128, SamplerError> {
+        fn reported_record_count(&self, _config: &SamplerConfig) -> Result<u128, SamplerError> {
             Ok(self.records.len() as u128)
         }
-
-        fn configure_sampler(&self, _config: &SamplerConfig) {}
     }
 
     impl DataSource for FailingSource {
@@ -2369,6 +2364,7 @@ mod tests {
 
         fn refresh(
             &self,
+            _config: &SamplerConfig,
             _cursor: Option<&SourceCursor>,
             _limit: Option<usize>,
         ) -> Result<SourceSnapshot, SamplerError> {
@@ -2378,14 +2374,12 @@ mod tests {
             })
         }
 
-        fn reported_record_count(&self) -> Result<u128, SamplerError> {
+        fn reported_record_count(&self, _config: &SamplerConfig) -> Result<u128, SamplerError> {
             Err(SamplerError::SourceUnavailable {
                 source_id: self.id.clone(),
                 reason: "forced failure".into(),
             })
         }
-
-        fn configure_sampler(&self, _config: &SamplerConfig) {}
     }
 
     fn sample_record() -> DataRecord {
@@ -2669,6 +2663,7 @@ mod tests {
 
         fn refresh(
             &self,
+            _config: &SamplerConfig,
             cursor: Option<&SourceCursor>,
             limit: Option<usize>,
         ) -> Result<SourceSnapshot, crate::errors::SamplerError> {
@@ -2685,11 +2680,12 @@ mod tests {
             })
         }
 
-        fn reported_record_count(&self) -> Result<u128, crate::errors::SamplerError> {
+        fn reported_record_count(
+            &self,
+            _config: &SamplerConfig,
+        ) -> Result<u128, crate::errors::SamplerError> {
             Ok(self.records.len() as u128)
         }
-
-        fn configure_sampler(&self, _config: &SamplerConfig) {}
 
         fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {
             self.recipes.clone()

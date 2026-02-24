@@ -339,6 +339,42 @@ impl HuggingFaceRowSource {
         })
     }
 
+    fn set_active_sampler_config(&self, config: &SamplerConfig) {
+        if let Ok(mut slot) = self.sampler_config.lock() {
+            *slot = Some(config.clone());
+        }
+    }
+
+    #[cfg(test)]
+    fn active_or_default_sampler_config(&self) -> SamplerConfig {
+        self.sampler_config
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
+            .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    fn configure_sampler(&self, config: &SamplerConfig) {
+        self.set_active_sampler_config(config);
+    }
+
+    #[cfg(test)]
+    fn refresh(
+        &self,
+        cursor: Option<&SourceCursor>,
+        limit: Option<usize>,
+    ) -> Result<SourceSnapshot, SamplerError> {
+        let config = self.active_or_default_sampler_config();
+        <Self as DataSource>::refresh(self, &config, cursor, limit)
+    }
+
+    #[cfg(test)]
+    fn reported_record_count(&self) -> Result<u128, SamplerError> {
+        let config = self.active_or_default_sampler_config();
+        <Self as DataSource>::reported_record_count(self, &config)
+    }
+
     /// Compute the effective internal row read target from refresh `limit`.
     fn effective_refresh_batch_target(&self, limit: usize) -> usize {
         let multiplier = self.config.refresh_batch_multiplier.max(1);
@@ -2364,19 +2400,14 @@ impl DataSource for HuggingFaceRowSource {
         &self.config.source_id
     }
 
-    /// Store active sampler configuration for runtime behavior alignment.
-    fn configure_sampler(&self, config: &SamplerConfig) {
-        if let Ok(mut slot) = self.sampler_config.lock() {
-            *slot = Some(config.clone());
-        }
-    }
-
     /// Refresh source records for the requested cursor and row limit.
     fn refresh(
         &self,
+        config: &SamplerConfig,
         cursor: Option<&SourceCursor>,
         limit: Option<usize>,
     ) -> Result<SourceSnapshot, SamplerError> {
+        self.set_active_sampler_config(config);
         let total = self
             .len_hint()
             .ok_or_else(|| SamplerError::SourceInconsistent {
@@ -2490,7 +2521,8 @@ impl DataSource for HuggingFaceRowSource {
     }
 
     /// Return exact reported record count from current len hint.
-    fn reported_record_count(&self) -> Result<u128, SamplerError> {
+    fn reported_record_count(&self, config: &SamplerConfig) -> Result<u128, SamplerError> {
+        self.set_active_sampler_config(config);
         self.len_hint()
             .map(|count| count as u128)
             .ok_or_else(|| SamplerError::SourceInconsistent {
@@ -2535,28 +2567,26 @@ mod tests {
     }
 
     fn test_source(config: HuggingFaceRowsConfig) -> HuggingFaceRowSource {
-        let sampler = SamplerConfig {
-            seed: 1,
-            ingestion_max_records: config.cache_capacity,
-            ..SamplerConfig::default()
+        let source = HuggingFaceRowSource {
+            config,
+            sampler_config: Mutex::new(None),
+            state: Mutex::new(SourceState {
+                materialized_rows: 0,
+                total_rows: None,
+                shards: Vec::new(),
+                remote_candidates: None,
+                remote_candidate_sizes: HashMap::new(),
+                next_remote_idx: 0,
+            }),
+            cache: Mutex::new(RowCache::default()),
+            parquet_cache: Mutex::new(ParquetCache::default()),
         };
-        crate::source::configured_source(
-            HuggingFaceRowSource {
-                config,
-                sampler_config: Mutex::new(None),
-                state: Mutex::new(SourceState {
-                    materialized_rows: 0,
-                    total_rows: None,
-                    shards: Vec::new(),
-                    remote_candidates: None,
-                    remote_candidate_sizes: HashMap::new(),
-                    next_remote_idx: 0,
-                }),
-                cache: Mutex::new(RowCache::default()),
-                parquet_cache: Mutex::new(ParquetCache::default()),
-            },
-            &sampler,
-        )
+        source.set_active_sampler_config(&SamplerConfig {
+            seed: 1,
+            ingestion_max_records: source.config.cache_capacity,
+            ..SamplerConfig::default()
+        });
+        source
     }
 
     fn spawn_one_shot_http(payload: Vec<u8>) -> (String, thread::JoinHandle<()>) {

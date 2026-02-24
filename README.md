@@ -73,7 +73,7 @@ You can extend `triplets` by implementing one of the source interfaces and regis
 
 - **Path 1: implement `DataSource` directly**
   - Use this when your backend already has its own paging/cursor model (API pagination, DB cursors, streaming offsets, etc.).
-  - Implement `id()`, `refresh(cursor, limit)`, `reported_record_count()`, and `configure_sampler(&SamplerConfig)`.
+  - Implement `id()`, `refresh(&SamplerConfig, cursor, limit)`, and `reported_record_count(&SamplerConfig)`.
   - Return `DataRecord` values with stable record IDs and the sections/taxonomy your recipes need.
 
 - **Path 2: implement `IndexableSource` and wrap with `IndexableAdapter`**
@@ -91,9 +91,9 @@ Recommended implementation checklist:
 
 Seed/configuration contract:
 
-- `configure_sampler(...)` is mandatory on `DataSource` and is called by `sampler.register_source(...)`.
-- `FileSource` and `HuggingFaceRowSource` require sampler configuration before `refresh(...)` / `reported_record_count()`.
-- For direct source usage outside sampler registration, use `configured_source(...)` or `configured_source_with_seed(...)`.
+- `DataSource` receives `&SamplerConfig` directly in `refresh(...)` and `reported_record_count(...)`.
+- `FileSource` and `HuggingFaceRowSource` use that runtime sampler config for deterministic behavior.
+- For direct source usage outside sampler registration, pass the intended `SamplerConfig` into each `refresh(...)` / `reported_record_count(...)` call.
 
 ### Seed behavior summary
 
@@ -106,30 +106,33 @@ Using a different seed changes deterministic permutation state; very small/degen
 Minimal direct-source example:
 
 ```rust,no_run
-use triplets::{DataSource, configured_source_with_seed};
+use triplets::{DataSource, SamplerConfig};
 use triplets::source::{FileSource, FileSourceConfig};
 
 # let root = std::path::PathBuf::from("/tmp/corpus");
 let base = FileSourceConfig::new("docs", &root);
 
-let source_a = configured_source_with_seed(FileSource::new(base.clone()), 7);
-let source_b = configured_source_with_seed(FileSource::new(base.clone()), 7);
-let source_c = configured_source_with_seed(FileSource::new(base), 123);
+let seed_7 = SamplerConfig { seed: 7, ..SamplerConfig::default() };
+let seed_123 = SamplerConfig { seed: 123, ..SamplerConfig::default() };
+
+let source_a = FileSource::new(base.clone());
+let source_b = FileSource::new(base.clone());
+let source_c = FileSource::new(base);
 
 let ids_a: Vec<String> = source_a
-  .refresh(None, Some(8))?
+  .refresh(&seed_7, None, Some(8))?
   .records
   .into_iter()
   .map(|record| record.id)
   .collect();
 let ids_b: Vec<String> = source_b
-  .refresh(None, Some(8))?
+  .refresh(&seed_7, None, Some(8))?
   .records
   .into_iter()
   .map(|record| record.id)
   .collect();
 let ids_c: Vec<String> = source_c
-  .refresh(None, Some(8))?
+  .refresh(&seed_123, None, Some(8))?
   .records
   .into_iter()
   .map(|record| record.id)
@@ -189,7 +192,7 @@ Minimal shape:
 2. Create `SamplerConfig` (chunking, recipes, split policy).
 3. Open a split store (`DeterministicSplitStore` or `FileSplitStore`).
 4. Construct `PairSampler` and register sources.
-  - If you call a source directly (without registering), configure it first via `configured_source(...)` or `configured_source_with_seed(...)`.
+  - If you call a source directly (without registering), pass the intended `SamplerConfig` into source calls.
 5. Call one of the batch APIs: `next_triplet_batch(split)`, `next_pair_batch(split)`, or `next_text_batch(split)`.
 6. Call `persist_state()` when you want restart-resume behavior.
 
@@ -344,21 +347,8 @@ Why this matters: capacity estimates and runtime sampling stay aligned only when
 File-backed pattern:
 
 ```rust,ignore
-fn configured_sampler_seed(&self) -> Result<u64, SamplerError> {
-  self.sampler_seed
-    .lock()
-    .map_err(|_| SamplerError::SourceUnavailable {
-      source_id: self.id.clone(),
-      reason: "sampler-seed lock poisoned".to_string(),
-    })?
-    .ok_or_else(|| SamplerError::SourceInconsistent {
-    source_id: self.id.clone(),
-    details: "sampler configuration not provided".to_string(),
-  })
-}
-
-fn source_index(&self) -> Result<FileCorpusIndex, SamplerError> {
-  let sampler_seed = self.configured_sampler_seed()?;
+fn source_index(&self, config: &SamplerConfig) -> Result<FileCorpusIndex, SamplerError> {
+  let sampler_seed = config.seed;
   Ok(FileCorpusIndex::new(&self.root, &self.id)
     .with_sampler_seed(sampler_seed)
     .with_follow_links(true)
@@ -368,21 +358,16 @@ fn source_index(&self) -> Result<FileCorpusIndex, SamplerError> {
 
 fn refresh(
   &self,
+  config: &SamplerConfig,
   cursor: Option<&SourceCursor>,
   limit: Option<usize>,
 ) -> Result<SourceSnapshot, SamplerError> {
-  self.source_index()?
+  self.source_index(config)?
     .refresh_indexable(cursor, limit, |path| self.build_record(path))
 }
 
-fn reported_record_count(&self) -> Result<u128, SamplerError> {
-  self.source_index()?.indexed_record_count().map(|n| n as u128)
-}
-
-fn configure_sampler(&self, config: &SamplerConfig) {
-  if let Ok(mut slot) = self.sampler_seed.lock() {
-    *slot = Some(config.seed);
-  }
+fn reported_record_count(&self, config: &SamplerConfig) -> Result<u128, SamplerError> {
+  self.source_index(config)?.indexed_record_count().map(|n| n as u128)
 }
 ```
 
