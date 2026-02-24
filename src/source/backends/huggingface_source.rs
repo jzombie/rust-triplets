@@ -162,7 +162,9 @@ pub fn parse_hf_source_line(line: &str) -> Result<HfSourceEntry, String> {
 pub fn parse_hf_uri(uri: &str) -> Result<(String, String, String), String> {
     let trimmed = uri.trim();
     let Some(rest) = trimmed.strip_prefix("hf://") else {
-        return Err(format!("unsupported source URI (expected hf://...): {trimmed}"));
+        return Err(format!(
+            "unsupported source URI (expected hf://...): {trimmed}"
+        ));
     };
 
     let parts = rest
@@ -2198,7 +2200,11 @@ impl HuggingFaceRowSource {
     }
 
     /// Parse a raw row payload into normalized `RowView` fields.
-    fn parse_row(&self, absolute_idx: usize, row_value: &Value) -> Result<Option<RowView>, SamplerError> {
+    fn parse_row(
+        &self,
+        absolute_idx: usize,
+        row_value: &Value,
+    ) -> Result<Option<RowView>, SamplerError> {
         let row_payload = row_value.get("row").unwrap_or(row_value);
         let row_obj = row_payload
             .as_object()
@@ -2303,7 +2309,12 @@ impl HuggingFaceRowSource {
     }
 
     /// Decode one line from a non-parquet shard into an object-like row payload.
-    fn parse_non_parquet_line(&self, shard: &ShardIndex, local_idx: usize, line: &str) -> Result<Value, SamplerError> {
+    fn parse_non_parquet_line(
+        &self,
+        shard: &ShardIndex,
+        local_idx: usize,
+        line: &str,
+    ) -> Result<Value, SamplerError> {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             return Err(SamplerError::SourceInconsistent {

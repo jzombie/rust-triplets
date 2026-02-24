@@ -68,10 +68,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .map(|value| value.to_string())
             .unwrap_or_else(|| "none".to_string())
     );
-    println!(
-        "forwarding args to multi_source_demo: {:?}",
-        passthrough
-    );
+    println!("forwarding args to multi_source_demo: {:?}", passthrough);
 
     triplets::example_apps::run_multi_source_demo(
         passthrough.into_iter(),

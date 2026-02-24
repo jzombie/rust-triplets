@@ -179,13 +179,7 @@ fn huggingface_reads_local_text_lines_snapshot() {
     let temp = tempfile::tempdir().expect("failed creating tempdir");
     let shard_path = temp.path().join("part-00000.txt");
 
-    write_lines(
-        &shard_path,
-        &[
-            "plain text row one",
-            "plain text row two",
-        ],
-    );
+    write_lines(&shard_path, &["plain text row one", "plain text row two"]);
 
     let mut config = HuggingFaceRowsConfig::new(
         "hf_local_text",
@@ -282,16 +276,18 @@ fn huggingface_parses_source_list_with_explicit_mappings() {
     )
     .expect("failed writing source list");
 
-    let entries =
-        load_hf_sources_from_list(list_path.to_str().expect("utf8 path"))
-            .expect("failed parsing source list");
+    let entries = load_hf_sources_from_list(list_path.to_str().expect("utf8 path"))
+        .expect("failed parsing source list");
 
     assert_eq!(entries.len(), 1);
     let entry = &entries[0];
     assert_eq!(entry.uri, "hf://org/dataset/default/train");
     assert_eq!(entry.anchor_column.as_deref(), Some("title"));
     assert_eq!(entry.positive_column.as_deref(), Some("text"));
-    assert_eq!(entry.context_columns, vec!["ctx1".to_string(), "ctx2".to_string()]);
+    assert_eq!(
+        entry.context_columns,
+        vec!["ctx1".to_string(), "ctx2".to_string()]
+    );
     assert_eq!(entry.text_columns, vec!["text".to_string()]);
 }
 
