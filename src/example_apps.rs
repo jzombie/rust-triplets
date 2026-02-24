@@ -1010,6 +1010,18 @@ mod tests {
     }
 
     #[test]
+    fn run_estimate_capacity_propagates_root_resolution_error() {
+        let result = run_estimate_capacity(
+            std::iter::empty::<String>(),
+            |_| Err("root resolution failed".into()),
+            |_: &()| Vec::<DynSource>::new(),
+        );
+
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("root resolution failed"));
+    }
+
+    #[test]
     fn run_estimate_capacity_configures_sources_centrally_before_counting() {
         let result = run_estimate_capacity(
             std::iter::empty::<String>(),
@@ -1032,6 +1044,25 @@ mod tests {
 
         let err = parse_cli::<MultiSourceDemoCli, _>(["multi_source_demo", "--batch-size", "0"]);
         assert!(err.is_err());
+
+        let conflict = parse_cli::<MultiSourceDemoCli, _>([
+            "multi_source_demo",
+            "--split-store-dir",
+            "./a",
+            "--split-store-path",
+            "./b.bin",
+        ]);
+        assert!(conflict.is_err());
+    }
+
+    #[test]
+    fn parse_cli_handles_display_version_path() {
+        #[derive(Debug, Parser)]
+        #[command(name = "version_test", version = "1.0.0")]
+        struct VersionCli {}
+
+        let parsed = parse_cli::<VersionCli, _>(["version_test", "--version"]).unwrap();
+        assert!(parsed.is_none());
     }
 
     #[test]
@@ -1050,6 +1081,31 @@ mod tests {
                     id: "source_for_recipes".into(),
                     count: Some(10),
                     recipes: vec![default_recipe("recipe_a")],
+                }) as DynSource]
+            },
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn run_multi_source_demo_list_text_recipes_uses_explicit_split_store_path() {
+        let dir = tempdir().unwrap();
+        let split_store_path = dir.path().join("custom_split_store.bin");
+        let args = vec![
+            "--list-text-recipes".to_string(),
+            "--split-store-path".to_string(),
+            split_store_path.to_string_lossy().to_string(),
+        ];
+
+        let result = run_multi_source_demo(
+            args.into_iter(),
+            |_| Ok(()),
+            |_| {
+                vec![Box::new(TestSource {
+                    id: "source_without_text_recipes".into(),
+                    count: Some(1),
+                    recipes: Vec::new(),
                 }) as DynSource]
             },
         );
@@ -1085,6 +1141,18 @@ mod tests {
 
             assert!(result.is_ok());
         }
+    }
+
+    #[test]
+    fn run_multi_source_demo_propagates_root_resolution_error() {
+        let result = run_multi_source_demo(
+            std::iter::empty::<String>(),
+            |_| Err("demo root resolution failed".into()),
+            |_: &()| Vec::<DynSource>::new(),
+        );
+
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("demo root resolution failed"));
     }
 
     #[test]

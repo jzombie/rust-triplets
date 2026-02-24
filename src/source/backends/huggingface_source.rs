@@ -775,16 +775,36 @@ impl HuggingFaceRowSource {
         hasher.finish()
     }
 
+    fn parquet_manifest_endpoint() -> String {
+        #[cfg(test)]
+        if let Ok(value) = std::env::var("TRIPLETS_HF_PARQUET_ENDPOINT") {
+            if !value.trim().is_empty() {
+                return value;
+            }
+        }
+        "https://datasets-server.huggingface.co/parquet".to_string()
+    }
+
+    fn size_endpoint() -> String {
+        #[cfg(test)]
+        if let Ok(value) = std::env::var("TRIPLETS_HF_SIZE_ENDPOINT") {
+            if !value.trim().is_empty() {
+                return value;
+            }
+        }
+        "https://datasets-server.huggingface.co/size".to_string()
+    }
+
     /// Query datasets-server parquet manifest and derive shard candidates.
     fn list_remote_candidates_from_parquet_manifest(
         config: &HuggingFaceRowsConfig,
     ) -> Result<(Vec<String>, HashMap<String, u64>), SamplerError> {
-        let endpoint = "https://datasets-server.huggingface.co/parquet";
+        let endpoint = Self::parquet_manifest_endpoint();
         info!(
             "[triplets:hf] reading datasets-server parquet manifest for dataset {}",
             config.dataset
         );
-        let response = ureq::get(endpoint)
+        let response = ureq::get(&endpoint)
             .query("dataset", &config.dataset)
             .query("config", &config.config)
             .query("split", &config.split)
@@ -968,13 +988,13 @@ impl HuggingFaceRowSource {
     fn fetch_global_row_count(
         config: &HuggingFaceRowsConfig,
     ) -> Result<Option<usize>, SamplerError> {
-        let endpoint = "https://datasets-server.huggingface.co/size";
+        let endpoint = Self::size_endpoint();
         info!(
             "[triplets:hf] requesting global row count dataset='{}' config='{}' split='{}'",
             config.dataset, config.config, config.split
         );
 
-        let response = ureq::get(endpoint)
+        let response = ureq::get(&endpoint)
             .query("dataset", &config.dataset)
             .query("config", &config.config)
             .query("split", &config.split)
@@ -2553,8 +2573,10 @@ mod tests {
     use parquet::file::writer::SerializedFileWriter;
     use parquet::schema::parser::parse_message_type;
     use serde_json::json;
+    use std::env;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::OnceLock;
     use std::thread;
     use tempfile::tempdir;
 
@@ -2605,6 +2627,24 @@ mod tests {
             let _ = stream.flush();
         });
         (format!("http://{addr}"), handle)
+    }
+
+    fn with_env_var<R>(key: &str, value: &str, run: impl FnOnce() -> R) -> R {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env lock poisoned");
+        let previous = env::var(key).ok();
+        unsafe { env::set_var(key, value) };
+        let result = run();
+        if let Some(old) = previous {
+            unsafe { env::set_var(key, old) };
+        } else {
+            unsafe { env::remove_var(key) };
+        }
+        drop(guard);
+        result
     }
 
     fn write_parquet_fixture(path: &Path, rows: &[(&str, &str)]) {
@@ -3120,6 +3160,66 @@ mod tests {
     }
 
     #[test]
+    fn read_row_batch_errors_on_invalid_json_row() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("broken.ndjson");
+        fs::write(&path, b"not-json\n").unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config);
+
+        {
+            let mut state = source.state.lock().unwrap();
+            state.materialized_rows = 1;
+            state.total_rows = Some(1);
+            state.shards = vec![ShardIndex {
+                path,
+                global_start: 0,
+                row_count: 1,
+                is_parquet: false,
+                parquet_row_groups: Vec::new(),
+                checkpoints: vec![0],
+            }];
+        }
+
+        let mut out = Vec::new();
+        let err = source.read_row_batch(&[0], &mut out, Some(1)).unwrap_err();
+        assert!(matches!(
+            err,
+            SamplerError::SourceInconsistent { ref details, .. } if details.contains("failed decoding JSON row")
+        ));
+    }
+
+    #[test]
+    fn read_row_batch_errors_when_parquet_local_offsets_are_missing() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("rows.parquet");
+        write_parquet_fixture(&path, &[("id-1", "text-1")]);
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config);
+
+        {
+            let mut state = source.state.lock().unwrap();
+            state.materialized_rows = 3;
+            state.total_rows = Some(3);
+            state.shards = vec![ShardIndex {
+                path,
+                global_start: 0,
+                row_count: 3,
+                is_parquet: true,
+                parquet_row_groups: vec![(0, 3)],
+                checkpoints: Vec::new(),
+            }];
+        }
+
+        let mut out = Vec::new();
+        let err = source.read_row_batch(&[2], &mut out, Some(1)).unwrap_err();
+        assert!(matches!(
+            err,
+            SamplerError::SourceUnavailable { ref reason, .. } if reason.contains("parquet rows missing")
+        ));
+    }
+
+    #[test]
     fn len_hint_applies_max_rows_cap() {
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path().to_path_buf());
@@ -3353,6 +3453,227 @@ mod tests {
             "",
         );
         assert_eq!(rows, Some(99));
+    }
+
+    #[test]
+    fn parse_global_row_count_response_uses_config_total_when_split_empty() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let body = serde_json::to_string(&json!({
+            "size": {
+                "configs": [
+                    {"config": "default", "num_rows": 17}
+                ]
+            }
+        }))
+        .unwrap();
+
+        let parsed = HuggingFaceRowSource::parse_global_row_count_response(
+            &HuggingFaceRowsConfig {
+                split: "".to_string(),
+                ..config
+            },
+            &body,
+        )
+        .unwrap();
+        assert_eq!(parsed, Some(17));
+    }
+
+    #[test]
+    fn ensure_row_available_returns_from_fast_paths() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config);
+
+        {
+            let mut state = source.state.lock().unwrap();
+            state.materialized_rows = 3;
+            state.remote_candidates = Some(vec!["x".to_string()]);
+            state.next_remote_idx = 0;
+        }
+        assert!(source.ensure_row_available(1).unwrap());
+
+        let mut cfg_max = test_config(dir.path().to_path_buf());
+        cfg_max.max_rows = Some(2);
+        let source_max = test_source(cfg_max);
+        {
+            let mut state = source_max.state.lock().unwrap();
+            state.materialized_rows = 0;
+            state.remote_candidates = Some(vec!["x".to_string()]);
+            state.next_remote_idx = 0;
+        }
+        assert!(!source_max.ensure_row_available(2).unwrap());
+
+        let source_done = test_source(test_config(dir.path().to_path_buf()));
+        {
+            let mut state = source_done.state.lock().unwrap();
+            state.materialized_rows = 0;
+            state.remote_candidates = Some(vec!["a".to_string()]);
+            state.next_remote_idx = 1;
+        }
+        assert!(!source_done.ensure_row_available(0).unwrap());
+    }
+
+    #[test]
+    fn build_shard_index_errors_when_no_accepted_files_exist() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("notes.txt"), b"plain").unwrap();
+        let config = test_config(dir.path().to_path_buf());
+
+        let err = HuggingFaceRowSource::build_shard_index(&config).unwrap_err();
+        assert!(matches!(
+            err,
+            SamplerError::SourceUnavailable { ref reason, .. } if reason.contains("no shard files found")
+        ));
+    }
+
+    #[test]
+    fn build_shard_index_applies_max_rows_to_parquet_shard() {
+        let dir = tempdir().unwrap();
+        let parquet_path = dir.path().join("rows.parquet");
+        write_parquet_fixture(
+            &parquet_path,
+            &[("id-1", "text-1"), ("id-2", "text-2"), ("id-3", "text-3")],
+        );
+        let mut config = test_config(dir.path().to_path_buf());
+        config.max_rows = Some(2);
+
+        let (shards, discovered) = HuggingFaceRowSource::build_shard_index(&config).unwrap();
+        assert_eq!(discovered, 2);
+        assert_eq!(shards.len(), 1);
+        assert!(shards[0].is_parquet);
+        assert_eq!(shards[0].row_count, 2);
+    }
+
+    #[test]
+    fn materialize_local_file_errors_for_missing_source() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let missing = dir.path().join("missing.ndjson");
+        let target = dir.path().join("target.ndjson");
+
+        let err =
+            HuggingFaceRowSource::materialize_local_file(&config, &missing, &target).unwrap_err();
+        assert!(matches!(
+            err,
+            SamplerError::SourceUnavailable { ref reason, .. } if reason.contains("failed copying synced file")
+        ));
+    }
+
+    #[test]
+    fn download_and_materialize_shard_hf_hub_branch_returns_error_for_invalid_repo() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.dataset = "invalid///dataset".to_string();
+
+        let err = HuggingFaceRowSource::download_and_materialize_shard(
+            &config,
+            "train/part-000.parquet",
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, SamplerError::SourceUnavailable { .. }));
+    }
+
+    #[test]
+    fn index_single_shard_errors_for_missing_file() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let missing = dir.path().join("missing.ndjson");
+
+        let err = HuggingFaceRowSource::index_single_shard(&config, &missing, 0).unwrap_err();
+        assert!(matches!(err, SamplerError::SourceUnavailable { .. }));
+    }
+
+    #[test]
+    fn index_single_shard_jsonl_records_checkpoints_by_stride() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("rows.ndjson");
+        fs::write(
+            &path,
+            b"{\"text\":\"a\"}\n{\"text\":\"b\"}\n{\"text\":\"c\"}\n",
+        )
+        .unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.checkpoint_stride = 2;
+
+        let shard = HuggingFaceRowSource::index_single_shard(&config, &path, 5)
+            .unwrap()
+            .unwrap();
+        assert_eq!(shard.global_start, 5);
+        assert_eq!(shard.row_count, 3);
+        assert!(!shard.is_parquet);
+        assert!(shard.checkpoints.len() >= 2);
+        assert_eq!(shard.checkpoints[0], 0);
+    }
+
+    #[test]
+    fn parquet_row_group_map_handles_empty_parquet_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("empty.parquet");
+        write_parquet_fixture(&path, &[]);
+        let config = test_config(dir.path().to_path_buf());
+
+        let (rows, groups) = HuggingFaceRowSource::parquet_row_group_map(&config, &path).unwrap();
+        assert_eq!(rows, 0);
+        assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn download_next_remote_shard_clears_row_cache_when_eviction_occurs() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.local_disk_cap_bytes = Some(20);
+        config.min_resident_shards = 0;
+        let source = test_source(config.clone());
+
+        let manifest_root = source.manifest_cache_root();
+        fs::create_dir_all(&manifest_root).unwrap();
+        let old_path = manifest_root.join("old.parquet");
+        fs::write(&old_path, vec![1u8; 20]).unwrap();
+
+        let payload = b"{\"text\":\"new\"}\n".to_vec();
+        let (base_url, server) = spawn_one_shot_http(payload);
+        let candidate =
+            format!("url::{base_url}/datasets/org/ds/resolve/main/train/new-shard.ndjson");
+
+        {
+            let mut state = source.state.lock().unwrap();
+            state.materialized_rows = 1;
+            state.shards = vec![ShardIndex {
+                path: old_path.clone(),
+                global_start: 0,
+                row_count: 1,
+                is_parquet: true,
+                parquet_row_groups: vec![(0, 1)],
+                checkpoints: Vec::new(),
+            }];
+            state.remote_candidates = Some(vec![candidate]);
+            state.next_remote_idx = 0;
+        }
+        {
+            let mut cache = source.cache.lock().unwrap();
+            cache.insert(
+                0,
+                RowView {
+                    row_id: Some("cached".to_string()),
+                    timestamp: None,
+                    text_fields: vec![RowTextField {
+                        name: "text".to_string(),
+                        text: "cached".to_string(),
+                    }],
+                },
+                8,
+            );
+        }
+
+        assert!(source.download_next_remote_shard().unwrap());
+        server.join().unwrap();
+
+        assert!(!old_path.exists());
+        let cache = source.cache.lock().unwrap();
+        assert!(cache.rows.is_empty());
+        assert!(cache.order.is_empty());
     }
 
     #[test]
@@ -4049,6 +4370,149 @@ mod tests {
             HuggingFaceRowSource::parse_parquet_manifest_response(&config, &body).unwrap();
         assert_eq!(candidates.len(), 1);
         assert_eq!(sizes.len(), 1);
+    }
+
+    #[test]
+    fn list_remote_candidates_from_parquet_manifest_uses_test_endpoint_override() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let body = serde_json::to_vec(&json!({
+            "parquet_files": [
+                {"url": "https://host/datasets/x/resolve/main/train/0.parquet", "size": 5}
+            ]
+        }))
+        .unwrap();
+        let (base_url, server) = spawn_one_shot_http(body);
+
+        let (candidates, sizes) = with_env_var("TRIPLETS_HF_PARQUET_ENDPOINT", &base_url, || {
+            HuggingFaceRowSource::list_remote_candidates_from_parquet_manifest(&config)
+        })
+        .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(sizes.len(), 1);
+    }
+
+    #[test]
+    fn fetch_global_row_count_uses_test_endpoint_override() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let body = serde_json::to_vec(&json!({
+            "size": {
+                "splits": [
+                    {"config": "default", "split": "train", "num_rows": 12}
+                ]
+            }
+        }))
+        .unwrap();
+        let (base_url, server) = spawn_one_shot_http(body);
+
+        let rows = with_env_var("TRIPLETS_HF_SIZE_ENDPOINT", &base_url, || {
+            HuggingFaceRowSource::fetch_global_row_count(&config)
+        })
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(rows, Some(12));
+    }
+
+    #[test]
+    fn endpoint_helpers_fallback_for_empty_env_values() {
+        let parquet = with_env_var("TRIPLETS_HF_PARQUET_ENDPOINT", "   ", || {
+            HuggingFaceRowSource::parquet_manifest_endpoint()
+        });
+        assert_eq!(parquet, "https://datasets-server.huggingface.co/parquet");
+
+        let size = with_env_var("TRIPLETS_HF_SIZE_ENDPOINT", "", || {
+            HuggingFaceRowSource::size_endpoint()
+        });
+        assert_eq!(size, "https://datasets-server.huggingface.co/size");
+    }
+
+    #[test]
+    fn resolve_remote_candidates_respects_split_prefix_in_filename() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.split = "train".to_string();
+        let accepted = HuggingFaceRowSource::normalized_shard_extensions(&config);
+        let siblings = vec![
+            "train-part-000.ndjson".to_string(),
+            "validation-part-000.ndjson".to_string(),
+        ];
+
+        let (candidates, _) = HuggingFaceRowSource::resolve_remote_candidates_from_siblings(
+            &config, &siblings, &accepted,
+        )
+        .unwrap();
+
+        assert_eq!(candidates, vec!["train-part-000.ndjson".to_string()]);
+    }
+
+    #[test]
+    fn fetch_global_row_count_returns_none_when_split_not_present() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let body = serde_json::to_vec(&json!({
+            "size": {
+                "splits": [
+                    {"config": "default", "split": "validation", "num_rows": 12}
+                ]
+            }
+        }))
+        .unwrap();
+        let (base_url, server) = spawn_one_shot_http(body);
+
+        let rows = with_env_var("TRIPLETS_HF_SIZE_ENDPOINT", &base_url, || {
+            HuggingFaceRowSource::fetch_global_row_count(&config)
+        })
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(rows, None);
+    }
+
+    #[test]
+    fn list_remote_candidates_returns_manifest_candidates_before_repo_fallback() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let body = serde_json::to_vec(&json!({
+            "parquet_files": [
+                {"url": "https://host/datasets/x/resolve/main/train/1.ndjson", "size": 9}
+            ]
+        }))
+        .unwrap();
+        let (base_url, server) = spawn_one_shot_http(body);
+
+        let (candidates, sizes) = with_env_var("TRIPLETS_HF_PARQUET_ENDPOINT", &base_url, || {
+            HuggingFaceRowSource::list_remote_candidates(&config)
+        })
+        .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(sizes.len(), 1);
+        assert!(candidates[0].ends_with("/1.ndjson"));
+    }
+
+    #[test]
+    fn list_remote_candidates_from_parquet_manifest_errors_when_endpoint_unreachable() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+
+        let result = with_env_var("TRIPLETS_HF_PARQUET_ENDPOINT", "http://127.0.0.1:1", || {
+            HuggingFaceRowSource::list_remote_candidates_from_parquet_manifest(&config)
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn fetch_global_row_count_errors_when_endpoint_unreachable() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+
+        let result = with_env_var("TRIPLETS_HF_SIZE_ENDPOINT", "http://127.0.0.1:1", || {
+            HuggingFaceRowSource::fetch_global_row_count(&config)
+        });
+        assert!(result.is_err());
     }
 
     #[test]
