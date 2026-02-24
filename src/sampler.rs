@@ -6585,6 +6585,15 @@ mod tests {
 
     #[test]
     fn prefetch_public_apis_produce_batches_and_stats() {
+        fn wait_for_count<T: Send + 'static>(prefetcher: &BatchPrefetcher<T>, minimum: usize) {
+            let start = std::time::Instant::now();
+            while prefetcher.produced_count() < minimum
+                && start.elapsed() < StdDuration::from_millis(250)
+            {
+                std::thread::sleep(StdDuration::from_millis(5));
+            }
+        }
+
         let sampler = sampler_for_prefetch_tests();
 
         let triplet = Arc::clone(&sampler).prefetch_triplet_batches(SplitLabel::Train, 1);
@@ -6593,14 +6602,17 @@ mod tests {
 
         let triplet_batch = triplet.next().unwrap();
         assert_eq!(triplet_batch.triplets.len(), 1);
+        wait_for_count(&triplet, 1);
         assert!(triplet.produced_count() >= 1);
 
         let pair_batch = pair.next().unwrap();
         assert_eq!(pair_batch.pairs.len(), 1);
+        wait_for_count(&pair, 1);
         assert!(pair.produced_count() >= 1);
 
         let text_batch = text.next().unwrap();
         assert_eq!(text_batch.samples.len(), 1);
+        wait_for_count(&text, 1);
         assert!(text.produced_count() >= 1);
     }
 
