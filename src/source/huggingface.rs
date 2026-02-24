@@ -14,14 +14,14 @@ use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 use walkdir::WalkDir;
 
 use crate::SamplerError;
-use crate::config::{NegativeStrategy, Selector, TripletRecipe};
+use crate::config::{NegativeStrategy, SamplerConfig, Selector, TripletRecipe};
 use crate::data::{DataRecord, QualityScore, SectionRole};
 use crate::utils::make_section;
 use chrono::{DateTime, Utc};
@@ -34,19 +34,18 @@ const REMOTE_URL_PREFIX: &str = "url::";
 /// This is not a file count. It lets sampling look slightly past the local row
 /// frontier so lazy remote expansion can continue without jumping to the full
 /// global row domain at once.
-const REMOTE_EXPANSION_HEADROOM_ROWS: usize = 8192;
+/// Multiplies the sampler ingestion base (`SamplerConfig.ingestion_max_records`)
+/// to compute `len_hint` expansion headroom rows.
+const REMOTE_EXPANSION_HEADROOM_MULTIPLIER: usize = 4;
+/// Number of initial remote shards to materialize when bootstrapping an empty
+/// local snapshot before regular lazy expansion.
 const REMOTE_BOOTSTRAP_SHARDS: usize = 4;
-const HUGGINGFACE_REFRESH_BATCH: usize = 128;
+/// Multiplies the source `refresh` limit passed by `IngestionManager`
+/// (`step.unwrap_or(max_records)`) to set this source's internal row-read
+/// batch target for each refresh pass.
+const HUGGINGFACE_REFRESH_BATCH_MULTIPLIER: usize = 32;
 const SHARD_SEQUENCE_STATE_VERSION: u32 = 1;
 const SHARD_SEQUENCE_STATE_FILE: &str = "_sequence_state.json";
-
-static SAMPLER_SEED_BY_SOURCE: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
-
-fn sampler_seed_for_source(source_id: &str) -> Option<u64> {
-    let registry = SAMPLER_SEED_BY_SOURCE.get_or_init(|| Mutex::new(HashMap::new()));
-    let lock = registry.lock().ok()?;
-    lock.get(source_id).copied()
-}
 
 #[derive(Clone, Debug)]
 struct RowTextField {
@@ -82,6 +81,14 @@ pub struct HuggingFaceRowsConfig {
     pub cache_capacity: usize,
     /// Maximum number of decoded parquet row groups cached in-memory.
     pub parquet_row_group_cache_capacity: usize,
+    /// Multiplier applied to current refresh `limit` when building a read batch target.
+    ///
+    /// Effective target is `limit * refresh_batch_multiplier`.
+    pub refresh_batch_multiplier: usize,
+    /// Multiplier applied to ingestion-sized base records for `len_hint` headroom.
+    ///
+    /// Effective headroom is `cache_capacity * remote_expansion_headroom_multiplier`.
+    pub remote_expansion_headroom_multiplier: usize,
     /// Optional maximum row cap exposed by the source.
     pub max_rows: Option<usize>,
     /// Hard cap for local manifest-shard cache bytes.
@@ -130,8 +137,10 @@ impl HuggingFaceRowsConfig {
                 "ndjson".to_string(),
             ],
             checkpoint_stride: 4096,
-            cache_capacity: 2048,
+            cache_capacity: SamplerConfig::default().ingestion_max_records,
             parquet_row_group_cache_capacity: 8,
+            refresh_batch_multiplier: HUGGINGFACE_REFRESH_BATCH_MULTIPLIER,
+            remote_expansion_headroom_multiplier: REMOTE_EXPANSION_HEADROOM_MULTIPLIER,
             max_rows: None,
             local_disk_cap_bytes: Some(32 * 1024 * 1024 * 1024),
             min_resident_shards: REMOTE_BOOTSTRAP_SHARDS,
@@ -216,6 +225,7 @@ impl RowCache {
 /// Bulk-oriented Hugging Face source backed by local shard files.
 pub struct HuggingFaceRowSource {
     config: HuggingFaceRowsConfig,
+    sampler_config: Mutex<Option<SamplerConfig>>,
     state: Mutex<SourceState>,
     cache: Mutex<RowCache>,
     parquet_cache: Mutex<ParquetCache>,
@@ -311,6 +321,7 @@ impl HuggingFaceRowSource {
 
         Ok(Self {
             config,
+            sampler_config: Mutex::new(None),
             state: Mutex::new(SourceState {
                 materialized_rows,
                 total_rows,
@@ -322,6 +333,23 @@ impl HuggingFaceRowSource {
             cache: Mutex::new(RowCache::default()),
             parquet_cache: Mutex::new(ParquetCache::default()),
         })
+    }
+
+    fn effective_refresh_batch_target(&self, limit: usize) -> usize {
+        let multiplier = self.config.refresh_batch_multiplier.max(1);
+        limit.saturating_mul(multiplier)
+    }
+
+    fn effective_expansion_headroom_rows(&self) -> usize {
+        let multiplier = self.config.remote_expansion_headroom_multiplier.max(1);
+        let base = self
+            .sampler_config
+            .lock()
+            .ok()
+            .and_then(|config| config.as_ref().map(|value| value.ingestion_max_records))
+            .unwrap_or(self.config.cache_capacity)
+            .max(1);
+        base.saturating_mul(multiplier)
     }
 
     fn list_remote_candidates(
@@ -462,6 +490,7 @@ impl HuggingFaceRowSource {
 
     fn load_persisted_shard_sequence(
         config: &HuggingFaceRowsConfig,
+        current_sampler_seed: Option<u64>,
     ) -> Result<Option<PersistedShardSequence>, SamplerError> {
         let path = Self::shard_sequence_state_path(config);
         if !path.exists() {
@@ -485,7 +514,6 @@ impl HuggingFaceRowSource {
                 ),
             })?;
 
-        let current_sampler_seed = sampler_seed_for_source(&config.source_id);
         if persisted.version != SHARD_SEQUENCE_STATE_VERSION
             || persisted.source_id != config.source_id
             || persisted.dataset != config.dataset
@@ -529,7 +557,11 @@ impl HuggingFaceRowSource {
             dataset: self.config.dataset.clone(),
             config: self.config.config.clone(),
             split: self.config.split.clone(),
-            sampler_seed: sampler_seed_for_source(&self.config.source_id),
+            sampler_seed: self
+                .sampler_config
+                .lock()
+                .ok()
+                .and_then(|config| config.as_ref().map(|value| value.seed)),
             candidates: candidates.clone(),
             candidate_sizes: state.remote_candidate_sizes.clone(),
             next_remote_idx: state.next_remote_idx.min(candidates.len()),
@@ -580,10 +612,14 @@ impl HuggingFaceRowSource {
         candidates.rotate_left(offset);
     }
 
-    fn shard_candidate_seed(config: &HuggingFaceRowsConfig, total_candidates: usize) -> u64 {
+    fn shard_candidate_seed(
+        config: &HuggingFaceRowsConfig,
+        total_candidates: usize,
+        sampler_seed: Option<u64>,
+    ) -> u64 {
         let mut hasher = DefaultHasher::new();
         "hf_shard_candidate_sequence_v1".hash(&mut hasher);
-        if let Some(seed) = sampler_seed_for_source(&config.source_id) {
+        if let Some(seed) = sampler_seed {
             seed.hash(&mut hasher);
         } else {
             config.source_id.hash(&mut hasher);
@@ -1296,7 +1332,14 @@ impl HuggingFaceRowSource {
                         reason: "huggingface source state lock poisoned".to_string(),
                     })?;
                 if state.remote_candidates.is_none() {
-                    if let Some(persisted) = Self::load_persisted_shard_sequence(&self.config)? {
+                    let sampler_seed = self
+                        .sampler_config
+                        .lock()
+                        .ok()
+                        .and_then(|config| config.as_ref().map(|value| value.seed));
+                    if let Some(persisted) =
+                        Self::load_persisted_shard_sequence(&self.config, sampler_seed)?
+                    {
                         let candidate_count = persisted.candidates.len();
                         state.remote_candidates = Some(persisted.candidates);
                         state.remote_candidate_sizes = persisted.candidate_sizes;
@@ -1389,7 +1432,12 @@ impl HuggingFaceRowSource {
             let sequence_pos = state.next_remote_idx;
             let remote_ordinal = sequence_pos + 1;
             let remote_total = candidates.len();
-            let seed = Self::shard_candidate_seed(&self.config, remote_total);
+            let sampler_seed = self
+                .sampler_config
+                .lock()
+                .ok()
+                .and_then(|config| config.as_ref().map(|value| value.seed));
+            let seed = Self::shard_candidate_seed(&self.config, remote_total, sampler_seed);
             let mut permutation =
                 super::IndexPermutation::new(remote_total, seed, sequence_pos as u64);
             let candidate_idx = permutation.next();
@@ -2238,11 +2286,9 @@ impl HuggingFaceRowSource {
         let known = state.materialized_rows;
         if known > 0 {
             let mut upper = known;
-            if state
-                .total_rows
-                .is_some_and(|total_rows| total_rows > known)
-            {
-                upper = known.saturating_add(REMOTE_EXPANSION_HEADROOM_ROWS);
+            if state.total_rows.is_some_and(|total_rows| total_rows > known) {
+                let headroom = self.effective_expansion_headroom_rows();
+                upper = known.saturating_add(headroom);
                 if let Some(total_rows) = state.total_rows {
                     upper = upper.min(total_rows);
                 }
@@ -2278,6 +2324,12 @@ impl DataSource for HuggingFaceRowSource {
         &self.config.source_id
     }
 
+    fn configure_sampler(&self, config: &SamplerConfig) {
+        if let Ok(mut slot) = self.sampler_config.lock() {
+            *slot = Some(config.clone());
+        }
+    }
+
     fn refresh(
         &self,
         cursor: Option<&SourceCursor>,
@@ -2311,13 +2363,14 @@ impl DataSource for HuggingFaceRowSource {
         let mut permutation = super::IndexPermutation::new(total, seed, start as u64);
 
         let mut records = Vec::new();
-        let read_batch_target = max.max(HUGGINGFACE_REFRESH_BATCH);
+        let read_batch_target = self.effective_refresh_batch_target(max);
         let mut pending_indices = Vec::with_capacity(read_batch_target);
         let should_report = total >= 10_000 || max >= 1_024;
         let report_every = Duration::from_millis(750);
         let refresh_start = Instant::now();
         let mut last_report = refresh_start;
         let mut attempts = 0usize;
+
         if should_report {
             eprintln!(
                 "[triplets:source] refresh start source='{}' total={} target={}",

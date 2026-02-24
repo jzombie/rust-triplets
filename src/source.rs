@@ -11,7 +11,7 @@ use std::hash::Hash;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::config::TripletRecipe;
+use crate::config::{SamplerConfig, TripletRecipe};
 use crate::data::DataRecord;
 use crate::errors::SamplerError;
 use crate::hash::stable_hash_with;
@@ -79,6 +79,12 @@ pub trait DataSource: Send + Sync {
     /// Keep this consistent with `refresh` by using the same backend scope,
     /// filtering, and logical corpus definition.
     fn reported_record_count(&self) -> Result<u128, SamplerError>;
+
+    /// Provide the active sampler configuration to this source.
+    ///
+    /// Called when the source is registered with a sampler. Sources can use
+    /// this to align internal heuristics with runtime sampler settings.
+    fn configure_sampler(&self, _config: &SamplerConfig) {}
 
     /// Optional source-provided default triplet recipes.
     ///

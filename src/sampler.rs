@@ -350,6 +350,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> PairSamplerI
     }
 
     fn register_source(&mut self, source: Box<dyn DataSource + 'static>) {
+        source.configure_sampler(&self.config);
         let source_id = source.id().to_string();
         if !self.using_config_triplet_recipes {
             let triplets = source.default_triplet_recipes();
