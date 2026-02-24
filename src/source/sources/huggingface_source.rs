@@ -3571,6 +3571,147 @@ mod tests {
     }
 
     #[test]
+    fn ensure_row_available_resumes_persisted_sequence_and_bootstraps() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config.clone());
+
+        let payload = b"{\"id\":\"r1\",\"text\":\"alpha\"}\n{\"id\":\"r2\",\"text\":\"beta\"}\n".to_vec();
+        let (base_url, server) = spawn_one_shot_http(payload);
+        let candidate = format!(
+            "url::{base_url}/datasets/org/ds/resolve/main/train/persisted.ndjson"
+        );
+
+        let state_path = HuggingFaceRowSource::shard_sequence_state_path(&config);
+        fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        fs::write(
+            &state_path,
+            serde_json::to_vec_pretty(&json!({
+                "version": 1,
+                "source_id": config.source_id,
+                "dataset": config.dataset,
+                "config": config.config,
+                "split": config.split,
+                "sampler_seed": null,
+                "candidates": [candidate],
+                "candidate_sizes": {},
+                "next_remote_idx": 0
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(source.ensure_row_available(0).unwrap());
+        server.join().unwrap();
+
+        let state = source.state.lock().unwrap();
+        assert_eq!(state.materialized_rows, 2);
+        assert_eq!(state.next_remote_idx, 1);
+        assert_eq!(state.shards.len(), 1);
+    }
+
+    #[test]
+    fn configure_sampler_updates_len_hint_headroom_via_trait_methods() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.cache_capacity = 10;
+        config.remote_expansion_headroom_multiplier = 3;
+        let source = test_source(config);
+        {
+            let mut state = source.state.lock().unwrap();
+            state.materialized_rows = 5;
+            state.total_rows = Some(100);
+        }
+
+        assert_eq!(source.reported_record_count().unwrap(), 35);
+
+        let mut sampler = SamplerConfig::default();
+        sampler.ingestion_max_records = 2;
+        source.configure_sampler(&sampler);
+
+        assert_eq!(source.reported_record_count().unwrap(), 11);
+    }
+
+    #[test]
+    fn refresh_can_bootstrap_from_persisted_remote_sequence() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config.clone());
+
+        let payload = b"{\"id\":\"rr\",\"text\":\"hello\"}\n".to_vec();
+        let (base_url, server) = spawn_one_shot_http(payload);
+        let candidate = format!(
+            "url::{base_url}/datasets/org/ds/resolve/main/train/refresh.ndjson"
+        );
+
+        let state_path = HuggingFaceRowSource::shard_sequence_state_path(&config);
+        fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        fs::write(
+            &state_path,
+            serde_json::to_vec_pretty(&json!({
+                "version": 1,
+                "source_id": config.source_id,
+                "dataset": config.dataset,
+                "config": config.config,
+                "split": config.split,
+                "sampler_seed": null,
+                "candidates": [candidate],
+                "candidate_sizes": {},
+                "next_remote_idx": 0
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let snapshot = source.refresh(None, Some(1)).unwrap();
+        server.join().unwrap();
+
+        assert_eq!(snapshot.records.len(), 1);
+        assert!(snapshot.records[0].id.contains("hf_test::rr"));
+    }
+
+    #[test]
+    fn download_next_remote_shard_trims_rows_to_max_rows_limit() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.max_rows = Some(1);
+        let source = test_source(config);
+        let payload = b"{\"text\":\"a\"}\n{\"text\":\"b\"}\n".to_vec();
+        let (base_url, server) = spawn_one_shot_http(payload);
+        let candidate = format!(
+            "url::{base_url}/datasets/org/ds/resolve/main/train/trim.ndjson"
+        );
+
+        {
+            let mut state = source.state.lock().unwrap();
+            state.remote_candidates = Some(vec![candidate]);
+            state.next_remote_idx = 0;
+            state.materialized_rows = 0;
+        }
+
+        assert!(source.download_next_remote_shard().unwrap());
+        server.join().unwrap();
+
+        let state = source.state.lock().unwrap();
+        assert_eq!(state.materialized_rows, 1);
+        assert_eq!(state.shards.len(), 1);
+        assert_eq!(state.shards[0].row_count, 1);
+    }
+
+    #[test]
+    fn build_shard_index_skips_empty_files_and_keeps_non_empty() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("a.ndjson"), b"").unwrap();
+        fs::write(dir.path().join("b.ndjson"), b"{\"text\":\"x\"}\n").unwrap();
+        let config = test_config(dir.path().to_path_buf());
+
+        let (shards, discovered) = HuggingFaceRowSource::build_shard_index(&config).unwrap();
+        assert_eq!(discovered, 1);
+        assert_eq!(shards.len(), 1);
+        assert_eq!(shards[0].row_count, 1);
+    }
+
+    #[test]
     fn resolve_remote_candidates_from_siblings_falls_back_when_split_filter_misses() {
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path().to_path_buf());
@@ -4492,5 +4633,72 @@ mod tests {
         };
         let snapshot = source2.refresh(Some(&cursor), Some(1)).unwrap();
         assert_eq!(snapshot.records.len(), 1);
+    }
+
+    #[test]
+    fn new_rejects_zero_checkpoint_stride() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.checkpoint_stride = 0;
+        let result = HuggingFaceRowSource::new(config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_global_row_count_response_returns_none_when_split_missing() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let body = r#"{
+            "size": {
+                "splits": [
+                    {"config":"main","split":"test","num_rows":7}
+                ]
+            }
+        }"#;
+
+        let parsed = HuggingFaceRowSource::parse_global_row_count_response(&config, body).unwrap();
+        assert_eq!(parsed, None);
+    }
+
+    #[test]
+    fn extract_split_row_count_uses_config_num_rows_when_split_empty() {
+        let payload = serde_json::json!({
+            "size": {
+                "configs": [
+                    {
+                        "config": "main",
+                        "num_rows": 123,
+                        "splits": [
+                            {"split": "train", "num_rows": 999}
+                        ]
+                    }
+                ]
+            }
+        });
+
+        let rows = HuggingFaceRowSource::extract_split_row_count_from_size_response(
+            &payload,
+            "main",
+            "",
+        );
+        assert_eq!(rows, Some(123));
+    }
+
+    #[test]
+    fn extract_split_row_count_uses_dataset_num_rows_when_split_empty() {
+        let payload = serde_json::json!({
+            "size": {
+                "dataset": {
+                    "num_rows": 77
+                }
+            }
+        });
+
+        let rows = HuggingFaceRowSource::extract_split_row_count_from_size_response(
+            &payload,
+            "main",
+            "",
+        );
+        assert_eq!(rows, Some(77));
     }
 }
