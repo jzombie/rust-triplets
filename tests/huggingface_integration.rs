@@ -174,6 +174,45 @@ fn huggingface_reads_local_ndjson_snapshot() {
 }
 
 #[test]
+fn huggingface_reads_local_text_lines_snapshot() {
+    let temp = tempfile::tempdir().expect("failed creating tempdir");
+    let shard_path = temp.path().join("part-00000.txt");
+
+    write_lines(
+        &shard_path,
+        &[
+            "plain text row one",
+            "plain text row two",
+        ],
+    );
+
+    let mut config = HuggingFaceRowsConfig::new(
+        "hf_local_text",
+        "local/test-dataset",
+        "default",
+        "train",
+        temp.path(),
+    );
+    config.shard_extensions = vec!["txt".to_string()];
+    config.max_rows = Some(2);
+
+    let source = HuggingFaceRowSource::new(config).expect("failed creating huggingface source");
+    let seed = seeded_config(17);
+
+    let snapshot = source
+        .refresh(&seed, None, Some(2))
+        .expect("refresh should read text rows");
+
+    assert_eq!(snapshot.records.len(), 2);
+    assert!(snapshot.records.iter().all(|record| {
+        record
+            .sections
+            .iter()
+            .any(|section| section.text.contains("plain text row"))
+    }));
+}
+
+#[test]
 fn huggingface_role_columns_mode_and_synthetic_ids_work() {
     let temp = tempfile::tempdir().expect("failed creating tempdir");
     let shard_path = temp.path().join("part-00001.ndjson");

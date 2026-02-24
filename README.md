@@ -67,6 +67,70 @@ This crate does **not** perform semantic mining/retrieval scoring by itself; ins
   - Supports deterministic row paging, local shard caching, optional disk-cap controls, and conversion from row payloads into sampler-ready records.
   - Best when your training data is hosted as HF datasets and you want to combine remote corpus slices with local sources in the same deterministic batch pipeline.
 
+### Hugging Face field mapping and row formats
+
+`HuggingFaceRowSource` supports three mapping modes:
+
+1. **Role-column mode** (explicit anchor/positive/context columns)
+  - Enabled when any of these are set: `anchor_column`, `positive_column`, `context_columns`.
+  - Use this when you want full control over which fields become anchor/context text.
+
+2. **Selected text-columns mode** (explicit text field list)
+  - Set `text_columns = vec![...]`.
+  - First selected field becomes anchor; second+ become context sections.
+
+3. **Auto-detect mode**
+  - Used when role columns are unset and `text_columns` is empty.
+  - All non-id scalar/object/array fields are textified and used.
+
+Minimal role-column example:
+
+```rust,no_run
+use triplets::{HuggingFaceRowSource, HuggingFaceRowsConfig};
+
+# let snapshot_dir = std::path::PathBuf::from(".hf-snapshots/local");
+let mut hf = HuggingFaceRowsConfig::new(
+   "hf_rows",
+   "org/dataset",
+   "default",
+   "train",
+   snapshot_dir,
+);
+hf.anchor_column = Some("question".to_string());
+hf.positive_column = Some("answer".to_string());
+hf.context_columns = vec!["title".to_string(), "tags".to_string()];
+
+let _source = HuggingFaceRowSource::new(hf)?;
+# Ok::<(), triplets::SamplerError>(())
+```
+
+Minimal selected text-columns example:
+
+```rust,no_run
+use triplets::{HuggingFaceRowSource, HuggingFaceRowsConfig};
+
+# let snapshot_dir = std::path::PathBuf::from(".hf-snapshots/local");
+let mut hf = HuggingFaceRowsConfig::new(
+   "hf_rows",
+   "org/dataset",
+   "default",
+   "train",
+   snapshot_dir,
+);
+hf.text_columns = vec!["title".to_string(), "body".to_string()];
+
+let _source = HuggingFaceRowSource::new(hf)?;
+# Ok::<(), triplets::SamplerError>(())
+```
+
+Supported shard formats:
+
+- **Parquet** (`.parquet`)
+- **Line-delimited JSON** (`.jsonl`, `.ndjson`) where each line is a row object
+- **Plain text lines** (for example `.txt`) where each non-empty line is treated as `{ "text": "..." }`
+
+Important: this source is row-oriented, so non-parquet inputs must be line-delimited. If your corpus is free-form files/documents (not row lines), prefer `FileSource`.
+
 ## Adding new sources
 
 You can extend `triplets` by implementing one of the source interfaces and registering it with the sampler.

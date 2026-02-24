@@ -5,7 +5,7 @@ use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::record::reader::RowIter;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -76,6 +76,10 @@ pub struct HuggingFaceRowsConfig {
     /// Local path to a snapshot directory for this split.
     pub snapshot_dir: PathBuf,
     /// File extensions accepted as shard files.
+    ///
+    /// Non-parquet files are read as line-delimited entries. Each line may be:
+    /// - a JSON object row (for example JSONL/NDJSON), or
+    /// - plain text, which is wrapped as `{ "text": "..." }`.
     pub shard_extensions: Vec<String>,
     /// Number of rows between seek checkpoints while indexing a shard.
     pub checkpoint_stride: usize,
@@ -2106,6 +2110,63 @@ impl HuggingFaceRowSource {
         })
     }
 
+    /// Decode one line from a non-parquet shard into an object-like row payload.
+    fn parse_non_parquet_line(&self, shard: &ShardIndex, local_idx: usize, line: &str) -> Result<Value, SamplerError> {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return Err(SamplerError::SourceInconsistent {
+                source_id: self.config.source_id.clone(),
+                details: format!(
+                    "empty row in shard {} at local index {}",
+                    shard.path.display(),
+                    local_idx
+                ),
+            });
+        }
+
+        let is_strict_json_lines = shard
+            .path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| {
+                ext.eq_ignore_ascii_case("jsonl") || ext.eq_ignore_ascii_case("ndjson")
+            });
+
+        match serde_json::from_str::<Value>(trimmed) {
+            Ok(value) => {
+                let payload = value.get("row").unwrap_or(&value);
+                if payload.is_object() {
+                    Ok(value)
+                } else if let Some(text) = Self::value_to_text(payload) {
+                    Ok(json!({ "text": text }))
+                } else {
+                    Err(SamplerError::SourceInconsistent {
+                        source_id: self.config.source_id.clone(),
+                        details: format!(
+                            "non-object JSON row in shard {} at local index {} could not be converted to text",
+                            shard.path.display(),
+                            local_idx
+                        ),
+                    })
+                }
+            }
+            Err(err) => {
+                if is_strict_json_lines {
+                    Err(SamplerError::SourceInconsistent {
+                        source_id: self.config.source_id.clone(),
+                        details: format!(
+                            "failed decoding JSON row from shard {} at local index {}: {err}",
+                            shard.path.display(),
+                            local_idx
+                        ),
+                    })
+                } else {
+                    Ok(json!({ "text": trimmed }))
+                }
+            }
+        }
+    }
+
     /// Convert a `RowView` into a sampler `DataRecord`.
     fn row_to_record(
         &self,
@@ -2234,16 +2295,7 @@ impl HuggingFaceRowSource {
                 }
 
                 let line = self.read_line_at(&shard, local_idx)?;
-                let row_value = serde_json::from_str::<Value>(line.trim()).map_err(|err| {
-                    SamplerError::SourceInconsistent {
-                        source_id: self.config.source_id.clone(),
-                        details: format!(
-                            "failed decoding JSON row from shard {} at local index {}: {err}",
-                            shard.path.display(),
-                            local_idx
-                        ),
-                    }
-                })?;
+                let row_value = self.parse_non_parquet_line(&shard, local_idx, &line)?;
                 let row = self.parse_row(idx, &row_value)?;
                 let record = self.row_to_record(&row, idx as u64)?;
                 self.cache
