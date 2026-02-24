@@ -50,6 +50,44 @@ It is designed for multi-source training pipelines where each batch can mix reco
 
 This crate does **not** perform semantic mining/retrieval scoring by itself; instead, it gives you deterministic, metadata-driven sampling primitives you can feed into your downstream mining/retrieval stack.
 
+## Integrated sources
+
+`triplets` currently includes two integrated source backends:
+
+- **File source (`FileSource`)**
+  - Indexes local filesystem content and converts files into `DataRecord`s.
+  - Supports configurable taxonomy extraction and section construction (anchor/context shaping), category-level trust overrides, and deterministic paging through `FileCorpusIndex`.
+  - Best when your corpus already lives in local folders (for example docs, QA exports, notes, logs) and you want deterministic, metadata-aware sampling without a separate ingestion service.
+
+- **Hugging Face source (`HuggingFaceRowSource`)** *(feature: `huggingface`)*
+  - Reads split/config-scoped dataset rows from Hugging Face (including remote shard discovery, local materialization, and lazy row access).
+  - Supports deterministic row paging, local shard caching, optional disk-cap controls, resume-friendly shard sequence state, and conversion from row payloads into sampler-ready records.
+  - Best when your training data is hosted as HF datasets and you want to combine remote corpus slices with local sources in the same deterministic batch pipeline.
+
+## Adding new sources
+
+You can extend `triplets` by implementing one of the source interfaces and registering it with the sampler.
+
+- **Path 1: implement `DataSource` directly**
+  - Use this when your backend already has its own paging/cursor model (API pagination, DB cursors, streaming offsets, etc.).
+  - Implement `id()`, `refresh(cursor, limit)`, and `reported_record_count()`.
+  - Return `DataRecord` values with stable record IDs and the sections/taxonomy your recipes need.
+
+- **Path 2: implement `IndexableSource` and wrap with `IndexableAdapter`**
+  - Use this when your backend can fetch records by stable integer index.
+  - Implement `len_hint()` and `record_at(idx)`; then register `IndexableAdapter::new(your_source)`.
+  - This reuses the built-in deterministic paging/cursor behavior automatically.
+
+Recommended implementation checklist:
+
+1. Define source configuration (connection/root path/filtering options).
+2. Implement source-to-`DataRecord` mapping (sections, taxonomy, trust).
+3. Keep `refresh(...)` and `reported_record_count()` aligned to the same corpus scope.
+4. Register with `sampler.register_source(...)`.
+5. Validate with batch calls (`next_triplet_batch`, `next_pair_batch`, `next_text_batch`) and persistence (`persist_state()`).
+
+For deeper implementation templates (including indexable and manual paging patterns), see [Advanced source implementation examples](#advanced-source-implementation-examples).
+
 ### Metadata-driven sampling flow
 
 Use `triplets` to build deterministic training batches that carry metadata context:
@@ -242,7 +280,7 @@ This reflects the built-in file-corpus helpers (`FileCorpusIndex`) used by files
 - **Text recipes**: follow per-source behavior when provided; otherwise config recipes are used.
 - **Oversampling**: when sources run dry, cached records may be reused (no global no-repeat guarantee).
 
-### New-source implementation pattern
+### Advanced source implementation examples
 
 For any new backend (file/API/DB/stream), centralize backend configuration/state access in one helper reused by both `refresh(...)` and `reported_record_count()`.
 
@@ -272,15 +310,9 @@ fn reported_record_count(&self) -> Option<u128> {
 }
 ```
 
-If your records are time-ordered (oldest → newest), use these APIs:
+For time-ordered corpora, prefer the `IndexableSource` + `IndexableAdapter` path (and use `IndexablePager` directly only when you need a custom `refresh(...)`) for deterministic shuffled paging with cursor resume.
 
-- `IndexableSource` (you provide `len_hint()` + `record_at(idx)`).
-- `IndexableAdapter` (easiest: turns your `IndexableSource` into a `DataSource`).
-- `IndexablePager` (use directly only if you are writing a custom `refresh(...)`).
-
-That is the built-in path for shuffled paging + cursor resume.
-
-Helper-based path (uses the APIs above):
+Helper-based example:
 
 ```rust,ignore
 use triplets::source::{IndexableAdapter, IndexableSource};
