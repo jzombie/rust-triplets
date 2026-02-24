@@ -39,6 +39,7 @@ It is designed for multi-source training pipelines where each batch can mix reco
 - **Runtime batch sampling** via `next_triplet_batch`, `next_pair_batch`, and `next_text_batch`.
 - **Recipe-driven sample construction** for triplet/pair/text generation (anchor/positive/negative selectors).
 - **Weight-aware sampling controls** across source weights, recipe weights, and chunk trust/quality weighting.
+- **Anti-shortcut metadata-prefix variation** via `KvpPrefixSampler` (variant choice, per-field presence probabilities, field-order shuffle, and prefix dropout) to reduce rigid header-pattern dependence.
 - **Per-source batch mixing controls** so multiple sources can contribute to the same batch, with independent source frequency controls (including over/under-sampling).
 - **Per-source trust controls** to weight quality/trust independently by source/taxonomy and help mitigate bias from uneven source quality.
 - **Per-batch dynamic source reweighting** so source weights can be changed across batches (for example from loss/metric feedback) while training.
@@ -414,6 +415,15 @@ This reflects the built-in file-corpus helpers (`FileCorpusIndex`) used by files
   - Else if triplet recipes are configured/available, text recipes are derived as `{triplet_name}_anchor`, `{triplet_name}_positive`, `{triplet_name}_negative`.
   - Else per-source text recipes are used when available.
 - **Oversampling**: when sources run dry, cached records may be reused (no global no-repeat guarantee).
+
+### Reducing shortcut learning
+
+When you use `DataRecord.meta_prefix` / `KvpPrefixSampler`, prefer varied prefix rendering instead of a single rigid header format.
+
+- Use multiple renderings per key (`KvpField` variants) and per-field presence/dropout.
+- Vary field order and enable prefix dropout so headers are informative but not mandatory.
+- This helps avoid narrow sampling regimes and model shortcuts tied to one repeated prefix pattern.
+- Prefixes decorate sampled text only; they do not change deterministic split assignment.
 
 ### Advanced source implementation examples
 
