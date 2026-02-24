@@ -3,6 +3,7 @@ use hf_hub::RepoType;
 use hf_hub::api::sync::ApiBuilder;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::record::reader::RowIter;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::cmp::Ordering;
@@ -1661,94 +1662,55 @@ impl HuggingFaceRowSource {
             });
         }
 
+        let mut indexed_shards = shard_paths
+            .into_par_iter()
+            .enumerate()
+            .map(|(ordinal, path)| {
+                eprintln!(
+                    "[triplets:hf] indexing shard {}: {}",
+                    ordinal + 1,
+                    path.display()
+                );
+                let shard = Self::index_single_shard(config, &path, 0)?;
+                Ok::<_, SamplerError>((ordinal, shard))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        indexed_shards.sort_by_key(|(ordinal, _)| *ordinal);
+
         let mut shards = Vec::new();
         let mut running_total = 0usize;
-        for (ordinal, path) in shard_paths.into_iter().enumerate() {
-            if let Some(max_rows) = config.max_rows
-                && running_total >= max_rows
-            {
-                break;
-            }
-
-            eprintln!(
-                "[triplets:hf] indexing shard {}: {}",
-                ordinal + 1,
-                path.display()
-            );
-
-            let is_parquet = path
-                .extension()
-                .and_then(|v| v.to_str())
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("parquet"));
-
-            let (rows, parquet_row_groups, checkpoints) = if is_parquet {
-                let (mut rows, mut parquet_row_groups) =
-                    Self::parquet_row_group_map(config, &path)?;
-                if let Some(max_rows) = config.max_rows {
-                    rows = rows.min(max_rows.saturating_sub(running_total));
-                    let covered = parquet_row_groups
-                        .last()
-                        .map(|(start, count)| start.saturating_add(*count))
-                        .unwrap_or(0);
-                    if covered > rows {
-                        parquet_row_groups.retain(|(start, _)| *start < rows);
-                        if let Some((start, count)) = parquet_row_groups.last_mut() {
-                            let allowed = rows.saturating_sub(*start);
-                            *count = (*count).min(allowed);
-                        }
-                    }
-                }
-                (rows, parquet_row_groups, Vec::new())
-            } else {
-                let file = File::open(&path).map_err(|err| SamplerError::SourceUnavailable {
-                    source_id: config.source_id.clone(),
-                    reason: format!("failed opening shard {}: {err}", path.display()),
-                })?;
-                let mut reader = BufReader::new(file);
-                let mut checkpoints = Vec::new();
-                let mut line = String::new();
-                let mut offset = 0u64;
-                let mut rows = 0usize;
-
-                loop {
-                    if rows.is_multiple_of(config.checkpoint_stride) {
-                        checkpoints.push(offset);
-                    }
-                    line.clear();
-                    let bytes = reader.read_line(&mut line).map_err(|err| {
-                        SamplerError::SourceUnavailable {
-                            source_id: config.source_id.clone(),
-                            reason: format!("failed reading shard {}: {err}", path.display()),
-                        }
-                    })?;
-                    if bytes == 0 {
-                        break;
-                    }
-                    rows += 1;
-                    offset = offset.saturating_add(bytes as u64);
-
-                    if let Some(max_rows) = config.max_rows
-                        && running_total + rows >= max_rows
-                    {
-                        break;
-                    }
-                }
-                (rows, Vec::new(), checkpoints)
+        for (_, maybe_shard) in indexed_shards {
+            let Some(mut shard) = maybe_shard else {
+                continue;
             };
 
-            if rows == 0 {
+            if let Some(max_rows) = config.max_rows {
+                if running_total >= max_rows {
+                    break;
+                }
+                let allowed = max_rows.saturating_sub(running_total);
+                if shard.row_count > allowed {
+                    shard.row_count = allowed;
+                    if shard.is_parquet {
+                        shard
+                            .parquet_row_groups
+                            .retain(|(start, _)| *start < shard.row_count);
+                        if let Some((start, count)) = shard.parquet_row_groups.last_mut() {
+                            let group_allowed = shard.row_count.saturating_sub(*start);
+                            *count = (*count).min(group_allowed);
+                        }
+                    }
+                }
+            }
+
+            if shard.row_count == 0 {
                 continue;
             }
 
-            shards.push(ShardIndex {
-                path,
-                global_start: running_total,
-                row_count: rows,
-                is_parquet,
-                parquet_row_groups,
-                checkpoints,
-            });
-            running_total += rows;
+            shard.global_start = running_total;
+            running_total = running_total.saturating_add(shard.row_count);
+            shards.push(shard);
         }
 
         eprintln!(
