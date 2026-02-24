@@ -400,6 +400,7 @@ This reflects the built-in file-corpus helpers (`FileCorpusIndex`) used by files
 
 - **Ingestion**: `next_triplet_batch(split)`, `next_pair_batch(split)`, and `next_text_batch(split)` trigger refresh; per-source buffers refill when empty (or on force refresh).
 - **Memory bound**: refresh/cache limits are bounded by `ingestion_max_records` with a floor at `batch_size`.
+- **`ingestion_max_records` tuning**: setting this above `batch_size` usually improves sample diversity (broader anchor/negative candidate pool) and reduces near-term repetition, but returns diminish once source availability, split boundaries, and recipe constraints dominate. For remote backends such as Hugging Face, larger initial ingestion targets can require pulling more initial shards before the first batch, so startup latency can increase depending on shard sizes and network throughput.
 - **File indexing**: deterministic path ordering + deterministic index permutation for paging.
 - **Source ordering**: round-robin by source, deterministic within-source ordering by seed/epoch.
 - **Splits**: labels are deterministic from `record_id + seed + ratios`; split APIs enforce `allowed_splits`.
