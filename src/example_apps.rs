@@ -28,7 +28,7 @@ fn init_example_tracing() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
         let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("triplets=debug"));
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("triplets=info"));
         let _ = tracing_subscriber::fmt()
             .with_env_filter(env_filter)
             .try_init();
