@@ -412,6 +412,52 @@ impl HuggingFaceRowSource {
         (candidates, saw_parquet)
     }
 
+    fn resolve_remote_candidates_from_siblings(
+        config: &HuggingFaceRowsConfig,
+        siblings: &[String],
+        accepted: &[String],
+    ) -> Result<(Vec<String>, HashMap<String, u64>), SamplerError> {
+        let (mut candidates, mut saw_parquet) =
+            Self::collect_candidates_from_siblings(config, siblings, accepted, true);
+        if candidates.is_empty() && !config.split.is_empty() {
+            let (fallback_candidates, fallback_saw_parquet) =
+                Self::collect_candidates_from_siblings(config, siblings, accepted, false);
+            if !fallback_candidates.is_empty() {
+                warn!(
+                    "[triplets:hf] split filter '{}' matched no remote files; falling back to extension-only remote candidate scan",
+                    config.split
+                );
+                candidates = fallback_candidates;
+                saw_parquet = fallback_saw_parquet;
+            }
+        }
+
+        candidates.sort();
+        info!(
+            "[triplets:hf] remote candidates matching {:?}: {}",
+            config.shard_extensions,
+            candidates.len()
+        );
+        if candidates.is_empty() {
+            if saw_parquet {
+                return Err(SamplerError::SourceUnavailable {
+                    source_id: config.source_id.clone(),
+                    reason: format!(
+                        "dataset '{}' appears to be parquet-only, but shard_extensions does not include parquet ({:?}).",
+                        config.dataset, config.shard_extensions
+                    ),
+                });
+            }
+            warn!(
+                "[triplets:hf] no remote candidates found for dataset='{}' split='{}' extensions={:?}; source will be treated as exhausted",
+                config.dataset, config.split, config.shard_extensions
+            );
+            return Ok((Vec::new(), HashMap::new()));
+        }
+
+        Ok((candidates, HashMap::new()))
+    }
+
     fn candidates_from_parquet_manifest_json(
         config: &HuggingFaceRowsConfig,
         json: &Value,
@@ -518,45 +564,7 @@ impl HuggingFaceRowSource {
             .map(|entry| entry.rfilename)
             .collect::<Vec<_>>();
 
-        let (mut candidates, mut saw_parquet) =
-            Self::collect_candidates_from_siblings(config, &siblings, &accepted, true);
-        if candidates.is_empty() && !config.split.is_empty() {
-            let (fallback_candidates, fallback_saw_parquet) =
-                Self::collect_candidates_from_siblings(config, &siblings, &accepted, false);
-            if !fallback_candidates.is_empty() {
-                warn!(
-                    "[triplets:hf] split filter '{}' matched no remote files; falling back to extension-only remote candidate scan",
-                    config.split
-                );
-                candidates = fallback_candidates;
-                saw_parquet = fallback_saw_parquet;
-            }
-        }
-
-        candidates.sort();
-        info!(
-            "[triplets:hf] remote candidates matching {:?}: {}",
-            config.shard_extensions,
-            candidates.len()
-        );
-        if candidates.is_empty() {
-            if saw_parquet {
-                return Err(SamplerError::SourceUnavailable {
-                    source_id: config.source_id.clone(),
-                    reason: format!(
-                        "dataset '{}' appears to be parquet-only, but shard_extensions does not include parquet ({:?}).",
-                        config.dataset, config.shard_extensions
-                    ),
-                });
-            }
-            warn!(
-                "[triplets:hf] no remote candidates found for dataset='{}' split='{}' extensions={:?}; source will be treated as exhausted",
-                config.dataset, config.split, config.shard_extensions
-            );
-            return Ok((Vec::new(), HashMap::new()));
-        }
-
-        Ok((candidates, HashMap::new()))
+        Self::resolve_remote_candidates_from_siblings(config, &siblings, &accepted)
     }
 
     /// Return the persistence file path for shard sequence state.
@@ -740,8 +748,16 @@ impl HuggingFaceRowSource {
             }
         })?;
 
+        Self::parse_parquet_manifest_response(config, &body)
+    }
+
+    fn parse_parquet_manifest_response(
+        config: &HuggingFaceRowsConfig,
+        body: &str,
+    ) -> Result<(Vec<String>, HashMap<String, u64>), SamplerError> {
+
         let json: Value =
-            serde_json::from_str(&body).map_err(|err| SamplerError::SourceUnavailable {
+            serde_json::from_str(body).map_err(|err| SamplerError::SourceUnavailable {
                 source_id: config.source_id.clone(),
                 reason: format!("failed parsing datasets-server parquet response: {err}"),
             })?;
@@ -923,8 +939,16 @@ impl HuggingFaceRowSource {
             }
         })?;
 
+        Self::parse_global_row_count_response(config, &body)
+    }
+
+    fn parse_global_row_count_response(
+        config: &HuggingFaceRowsConfig,
+        body: &str,
+    ) -> Result<Option<usize>, SamplerError> {
+
         let json: Value =
-            serde_json::from_str(&body).map_err(|err| SamplerError::SourceUnavailable {
+            serde_json::from_str(body).map_err(|err| SamplerError::SourceUnavailable {
                 source_id: config.source_id.clone(),
                 reason: format!("failed parsing datasets-server size response: {err}"),
             })?;
@@ -2495,6 +2519,10 @@ impl DataSource for HuggingFaceRowSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use parquet::data_type::{ByteArray, ByteArrayType};
+    use parquet::file::properties::WriterProperties;
+    use parquet::file::writer::SerializedFileWriter;
+    use parquet::schema::parser::parse_message_type;
     use serde_json::json;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -2542,6 +2570,50 @@ mod tests {
             let _ = stream.flush();
         });
         (format!("http://{addr}"), handle)
+    }
+
+    fn write_simple_parquet(path: &Path, rows: &[(&str, &str)]) {
+        let schema = Arc::new(
+            parse_message_type(
+                "message test_schema {
+                    REQUIRED BINARY id (UTF8);
+                    REQUIRED BINARY text (UTF8);
+                }",
+            )
+            .unwrap(),
+        );
+        let props = Arc::new(WriterProperties::builder().build());
+        let file = File::create(path).unwrap();
+        let mut writer = SerializedFileWriter::new(file, schema, props).unwrap();
+        let mut row_group = writer.next_row_group().unwrap();
+
+        if let Some(mut col_writer) = row_group.next_column().unwrap() {
+            let values = rows
+                .iter()
+                .map(|(id, _)| ByteArray::from(*id))
+                .collect::<Vec<_>>();
+            col_writer
+                .typed::<ByteArrayType>()
+                .write_batch(&values, None, None)
+                .unwrap();
+            col_writer.close().unwrap();
+        }
+
+        if let Some(mut col_writer) = row_group.next_column().unwrap() {
+            let values = rows
+                .iter()
+                .map(|(_, text)| ByteArray::from(*text))
+                .collect::<Vec<_>>();
+            col_writer
+                .typed::<ByteArrayType>()
+                .write_batch(&values, None, None)
+                .unwrap();
+            col_writer.close().unwrap();
+        }
+
+        assert!(row_group.next_column().unwrap().is_none());
+        row_group.close().unwrap();
+        writer.close().unwrap();
     }
 
     #[test]
@@ -3449,6 +3521,155 @@ mod tests {
         assert!(HuggingFaceRowSource::target_matches_expected_size(
             &path, None
         ));
+    }
+
+    #[test]
+    fn parquet_row_group_map_and_index_single_shard_cover_success_path() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("rows.parquet");
+        write_simple_parquet(&path, &[("r1", "alpha"), ("r2", "beta"), ("r3", "gamma")]);
+        let config = test_config(dir.path().to_path_buf());
+
+        let (total_rows, groups) = HuggingFaceRowSource::parquet_row_group_map(&config, &path).unwrap();
+        assert_eq!(total_rows, 3);
+        assert!(!groups.is_empty());
+
+        let shard = HuggingFaceRowSource::index_single_shard(&config, &path, 0)
+            .unwrap()
+            .unwrap();
+        assert!(shard.is_parquet);
+        assert_eq!(shard.row_count, 3);
+        assert!(shard.checkpoints.is_empty());
+    }
+
+    #[test]
+    fn read_row_batch_reads_parquet_rows_and_uses_cache_on_repeat() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("rows.parquet");
+        write_simple_parquet(&path, &[("r10", "ten"), ("r11", "eleven")]);
+
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config.clone());
+        let shard = HuggingFaceRowSource::index_single_shard(&config, &path, 0)
+            .unwrap()
+            .unwrap();
+        {
+            let mut state = source.state.lock().unwrap();
+            state.materialized_rows = 2;
+            state.total_rows = Some(2);
+            state.shards = vec![shard];
+        }
+
+        let mut first = Vec::new();
+        source.read_row_batch(&[0, 1], &mut first, None).unwrap();
+        assert_eq!(first.len(), 2);
+        assert!(first.iter().any(|record| record.id.ends_with("::r10")));
+
+        let mut second = Vec::new();
+        source.read_row_batch(&[0, 1], &mut second, None).unwrap();
+        assert_eq!(second.len(), 2);
+    }
+
+    #[test]
+    fn resolve_remote_candidates_from_siblings_falls_back_when_split_filter_misses() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.split = "train".to_string();
+        let accepted = HuggingFaceRowSource::normalized_shard_extensions(&config);
+        let siblings = vec![
+            "validation/file-a.ndjson".to_string(),
+            "test/file-b.ndjson".to_string(),
+        ];
+
+        let (candidates, sizes) = HuggingFaceRowSource::resolve_remote_candidates_from_siblings(
+            &config, &siblings, &accepted,
+        )
+        .unwrap();
+
+        assert!(sizes.is_empty());
+        assert_eq!(candidates.len(), 2);
+    }
+
+    #[test]
+    fn resolve_remote_candidates_from_siblings_errors_for_parquet_only_when_not_accepted() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.shard_extensions = vec!["ndjson".to_string()];
+        let accepted = HuggingFaceRowSource::normalized_shard_extensions(&config);
+        let siblings = vec!["train/only.parquet".to_string()];
+
+        let result = HuggingFaceRowSource::resolve_remote_candidates_from_siblings(
+            &config, &siblings, &accepted,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_remote_candidates_from_siblings_returns_empty_when_no_matches_and_no_parquet() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let accepted = HuggingFaceRowSource::normalized_shard_extensions(&config);
+        let siblings = vec!["train/notes.txt".to_string()];
+
+        let (candidates, sizes) = HuggingFaceRowSource::resolve_remote_candidates_from_siblings(
+            &config, &siblings, &accepted,
+        )
+        .unwrap();
+        assert!(candidates.is_empty());
+        assert!(sizes.is_empty());
+    }
+
+    #[test]
+    fn parse_global_row_count_response_applies_max_rows() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.max_rows = Some(3);
+        let body = serde_json::to_string(&json!({
+            "size": {
+                "splits": [
+                    {"config": "default", "split": "train", "num_rows": 10}
+                ]
+            }
+        }))
+        .unwrap();
+
+        let rows = HuggingFaceRowSource::parse_global_row_count_response(&config, &body)
+            .unwrap()
+            .unwrap();
+        assert_eq!(rows, 3);
+    }
+
+    #[test]
+    fn parse_global_row_count_response_errors_on_invalid_json() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let parsed = HuggingFaceRowSource::parse_global_row_count_response(&config, "{bad-json");
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn parse_parquet_manifest_response_errors_on_invalid_json() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let parsed = HuggingFaceRowSource::parse_parquet_manifest_response(&config, "{bad-json");
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn parse_parquet_manifest_response_returns_candidates() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let body = serde_json::to_string(&json!({
+            "parquet_files": [
+                {"url": "https://host/datasets/x/resolve/main/train/0.parquet", "size": 5}
+            ]
+        }))
+        .unwrap();
+
+        let (candidates, sizes) =
+            HuggingFaceRowSource::parse_parquet_manifest_response(&config, &body).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(sizes.len(), 1);
     }
 
     #[test]
