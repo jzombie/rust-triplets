@@ -6,7 +6,7 @@ use parquet::record::reader::RowIter;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::cmp::Ordering;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::fs::File;
@@ -1706,37 +1706,11 @@ impl HuggingFaceRowSource {
         Ok(line)
     }
 
-    fn read_row_json(&self, idx: usize) -> Result<Value, SamplerError> {
-        let (shard, local_idx) = {
-            let state = self.state.lock().map_err(|_| SamplerError::SourceUnavailable {
-                source_id: self.config.source_id.clone(),
-                reason: "huggingface source state lock poisoned".to_string(),
-            })?;
-            let (shard, local_idx) = Self::locate_shard(&state.shards, idx).ok_or_else(|| {
-                SamplerError::SourceUnavailable {
-                    source_id: self.config.source_id.clone(),
-                    reason: format!("row index out of range: {idx}"),
-                }
-            })?;
-            (shard.clone(), local_idx)
-        };
-
-        if shard.is_parquet {
-            return self.read_parquet_row_json(&shard, local_idx);
-        }
-
-        let line = self.read_line_at(&shard, local_idx)?;
-        serde_json::from_str::<Value>(line.trim()).map_err(|err| SamplerError::SourceInconsistent {
-            source_id: self.config.source_id.clone(),
-            details: format!(
-                "failed decoding JSON row from shard {} at local index {}: {err}",
-                shard.path.display(),
-                local_idx
-            ),
-        })
-    }
-
-    fn read_parquet_row_json(&self, shard: &ShardIndex, local_idx: usize) -> Result<Value, SamplerError> {
+    fn locate_parquet_group(
+        &self,
+        shard: &ShardIndex,
+        local_idx: usize,
+    ) -> Result<(usize, usize), SamplerError> {
         let group_pos = shard
             .parquet_row_groups
             .binary_search_by(|(start, count)| {
@@ -1757,59 +1731,7 @@ impl HuggingFaceRowSource {
                 ),
             })?;
         let (group_start, _) = shard.parquet_row_groups[group_pos];
-        let local_in_group = local_idx.saturating_sub(group_start);
-
-        let reader = self
-            .parquet_cache
-            .lock()
-            .map_err(|_| SamplerError::SourceUnavailable {
-                source_id: self.config.source_id.clone(),
-                reason: "huggingface parquet cache lock poisoned".to_string(),
-            })?
-            .reader_for(&self.config.source_id, &shard.path)?;
-
-        let row_group = reader.get_row_group(group_pos).map_err(|err| SamplerError::SourceUnavailable {
-            source_id: self.config.source_id.clone(),
-            reason: format!(
-                "failed opening parquet row group {} for {}: {err}",
-                group_pos,
-                shard.path.display()
-            ),
-        })?;
-        let iter = RowIter::from_row_group(None, row_group.as_ref()).map_err(|err| {
-            SamplerError::SourceUnavailable {
-                source_id: self.config.source_id.clone(),
-                reason: format!(
-                    "failed iterating parquet row group {} for {}: {err}",
-                    group_pos,
-                    shard.path.display()
-                ),
-            }
-        })?;
-
-        let row = iter
-            .skip(local_in_group)
-            .next()
-            .ok_or_else(|| SamplerError::SourceUnavailable {
-                source_id: self.config.source_id.clone(),
-                reason: format!(
-                    "parquet row {} missing in shard {} row_group {}",
-                    local_idx,
-                    shard.path.display(),
-                    group_pos
-                ),
-            })?
-            .map_err(|err| SamplerError::SourceUnavailable {
-                source_id: self.config.source_id.clone(),
-                reason: format!(
-                    "failed reading parquet row {} in shard {} row_group {}: {err}",
-                    local_idx,
-                    shard.path.display(),
-                    group_pos
-                ),
-            })?;
-
-        Ok(row.to_json_value())
+        Ok((group_pos, local_idx.saturating_sub(group_start)))
     }
 
     fn value_to_text(value: &Value) -> Option<String> {
@@ -2013,12 +1935,187 @@ impl HuggingFaceRowSource {
         sorted.sort_unstable();
 
         let mut fetched = HashMap::with_capacity(sorted.len());
-        for idx in sorted {
-            let record = match self.row_at(idx)? {
-                Some(row) => self.row_to_record(&row, idx as u64)?,
-                None => None,
+        let mut pending = Vec::new();
+        for idx in &sorted {
+            if !self.ensure_row_available(*idx)? {
+                fetched.insert(*idx, None);
+                continue;
+            }
+
+            if let Some(row) = self
+                .cache
+                .lock()
+                .map_err(|_| SamplerError::SourceUnavailable {
+                    source_id: self.config.source_id.clone(),
+                    reason: "huggingface row cache lock poisoned".to_string(),
+                })?
+                .get(*idx)
+            {
+                let record = self.row_to_record(&row, *idx as u64)?;
+                fetched.insert(*idx, record);
+                continue;
+            }
+
+            pending.push(*idx);
+        }
+
+        if !pending.is_empty() {
+            let resolutions = {
+                let state = self.state.lock().map_err(|_| SamplerError::SourceUnavailable {
+                    source_id: self.config.source_id.clone(),
+                    reason: "huggingface source state lock poisoned".to_string(),
+                })?;
+                let mut resolved = Vec::with_capacity(pending.len());
+                for idx in &pending {
+                    let (shard, local_idx) = Self::locate_shard(&state.shards, *idx).ok_or_else(|| {
+                        SamplerError::SourceUnavailable {
+                            source_id: self.config.source_id.clone(),
+                            reason: format!("row index out of range: {idx}"),
+                        }
+                    })?;
+                    resolved.push((*idx, shard.clone(), local_idx));
+                }
+                resolved
             };
-            fetched.insert(idx, record);
+
+            let mut parquet_groups: HashMap<(PathBuf, usize), Vec<(usize, usize, ShardIndex)>> =
+                HashMap::new();
+            for (idx, shard, local_idx) in resolutions {
+                if shard.is_parquet {
+                    let (group_pos, local_in_group) = self.locate_parquet_group(&shard, local_idx)?;
+                    parquet_groups
+                        .entry((shard.path.clone(), group_pos))
+                        .or_default()
+                        .push((idx, local_in_group, shard));
+                    continue;
+                }
+
+                let line = self.read_line_at(&shard, local_idx)?;
+                let row_value = serde_json::from_str::<Value>(line.trim()).map_err(|err| {
+                    SamplerError::SourceInconsistent {
+                        source_id: self.config.source_id.clone(),
+                        details: format!(
+                            "failed decoding JSON row from shard {} at local index {}: {err}",
+                            shard.path.display(),
+                            local_idx
+                        ),
+                    }
+                })?;
+                let row = self.parse_row(idx, &row_value)?;
+                let record = self.row_to_record(&row, idx as u64)?;
+                self.cache
+                    .lock()
+                    .map_err(|_| SamplerError::SourceUnavailable {
+                        source_id: self.config.source_id.clone(),
+                        reason: "huggingface row cache lock poisoned".to_string(),
+                    })?
+                    .insert(idx, row, self.config.cache_capacity);
+                fetched.insert(idx, record);
+            }
+
+            for ((shard_path, group_pos), mut requested) in parquet_groups {
+                requested.sort_by_key(|(_, local_in_group, _)| *local_in_group);
+                let shard = requested
+                    .first()
+                    .map(|(_, _, shard)| shard.clone())
+                    .ok_or_else(|| SamplerError::SourceUnavailable {
+                        source_id: self.config.source_id.clone(),
+                        reason: format!(
+                            "missing parquet request metadata for shard {} row_group {}",
+                            shard_path.display(),
+                            group_pos
+                        ),
+                    })?;
+
+                let mut targets: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+                for (idx, local_in_group, _) in requested {
+                    targets.entry(local_in_group).or_default().push(idx);
+                }
+                let max_target = targets.keys().next_back().copied().unwrap_or(0);
+
+                let reader = self
+                    .parquet_cache
+                    .lock()
+                    .map_err(|_| SamplerError::SourceUnavailable {
+                        source_id: self.config.source_id.clone(),
+                        reason: "huggingface parquet cache lock poisoned".to_string(),
+                    })?
+                    .reader_for(&self.config.source_id, &shard.path)?;
+
+                let row_group = reader.get_row_group(group_pos).map_err(|err| {
+                    SamplerError::SourceUnavailable {
+                        source_id: self.config.source_id.clone(),
+                        reason: format!(
+                            "failed opening parquet row group {} for {}: {err}",
+                            group_pos,
+                            shard.path.display()
+                        ),
+                    }
+                })?;
+                let iter = RowIter::from_row_group(None, row_group.as_ref()).map_err(|err| {
+                    SamplerError::SourceUnavailable {
+                        source_id: self.config.source_id.clone(),
+                        reason: format!(
+                            "failed iterating parquet row group {} for {}: {err}",
+                            group_pos,
+                            shard.path.display()
+                        ),
+                    }
+                })?;
+
+                for (position, row_result) in iter.enumerate() {
+                    if position > max_target {
+                        break;
+                    }
+                    let Some(indices_for_position) = targets.remove(&position) else {
+                        continue;
+                    };
+                    let row_value = row_result.map_err(|err| SamplerError::SourceUnavailable {
+                        source_id: self.config.source_id.clone(),
+                        reason: format!(
+                            "failed reading parquet row {} in shard {} row_group {}: {err}",
+                            position,
+                            shard.path.display(),
+                            group_pos
+                        ),
+                    })?;
+                    let row_value = row_value.to_json_value();
+
+                    for idx in indices_for_position {
+                        let row = self.parse_row(idx, &row_value)?;
+                        let record = self.row_to_record(&row, idx as u64)?;
+                        self.cache
+                            .lock()
+                            .map_err(|_| SamplerError::SourceUnavailable {
+                                source_id: self.config.source_id.clone(),
+                                reason: "huggingface row cache lock poisoned".to_string(),
+                            })?
+                            .insert(idx, row, self.config.cache_capacity);
+                        fetched.insert(idx, record);
+                    }
+
+                    if targets.is_empty() {
+                        break;
+                    }
+                }
+
+                if !targets.is_empty() {
+                    let missing = targets
+                        .into_keys()
+                        .map(|value| value.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    return Err(SamplerError::SourceUnavailable {
+                        source_id: self.config.source_id.clone(),
+                        reason: format!(
+                            "parquet rows missing in shard {} row_group {} at local offsets [{}]",
+                            shard.path.display(),
+                            group_pos,
+                            missing
+                        ),
+                    });
+                }
+            }
         }
 
         for idx in indices {
@@ -2071,36 +2168,6 @@ impl HuggingFaceRowSource {
         Some(1)
     }
 
-    fn row_at(&self, idx: usize) -> Result<Option<RowView>, SamplerError> {
-        if !self.ensure_row_available(idx)? {
-            return Ok(None);
-        }
-
-        if let Some(row) = self
-            .cache
-            .lock()
-            .map_err(|_| SamplerError::SourceUnavailable {
-                source_id: self.config.source_id.clone(),
-                reason: "huggingface row cache lock poisoned".to_string(),
-            })?
-            .get(idx)
-        {
-            return Ok(Some(row));
-        }
-
-        let row_value = self.read_row_json(idx)?;
-        let row = self.parse_row(idx, &row_value)?;
-
-        let mut cache = self
-            .cache
-            .lock()
-            .map_err(|_| SamplerError::SourceUnavailable {
-                source_id: self.config.source_id.clone(),
-                reason: "huggingface row cache lock poisoned".to_string(),
-            })?;
-        cache.insert(idx, row.clone(), self.config.cache_capacity);
-        Ok(Some(row))
-    }
 }
 
 impl DataSource for HuggingFaceRowSource {
@@ -2141,7 +2208,8 @@ impl DataSource for HuggingFaceRowSource {
         let mut permutation = super::IndexPermutation::new(total, seed, start as u64);
 
         let mut records = Vec::new();
-        let mut pending_indices = Vec::with_capacity(HUGGINGFACE_REFRESH_BATCH);
+        let read_batch_target = max.max(HUGGINGFACE_REFRESH_BATCH);
+        let mut pending_indices = Vec::with_capacity(read_batch_target);
         let should_report = total >= 10_000 || max >= 1_024;
         let report_every = Duration::from_millis(750);
         let refresh_start = Instant::now();
@@ -2154,42 +2222,47 @@ impl DataSource for HuggingFaceRowSource {
             );
         }
 
-        for _ in 0..total {
-            if records.len() >= max {
+        while attempts < total && records.len() < max {
+            pending_indices.clear();
+            let remaining_attempts = total.saturating_sub(attempts);
+            let to_collect = read_batch_target.min(remaining_attempts);
+            for _ in 0..to_collect {
+                if records.len() + pending_indices.len() >= max {
+                    break;
+                }
+                pending_indices.push(permutation.next());
+                attempts += 1;
+            }
+
+            if pending_indices.is_empty() {
                 break;
             }
-            pending_indices.push(permutation.next());
-            attempts += 1;
-            if pending_indices.len() == HUGGINGFACE_REFRESH_BATCH {
-                if should_report {
-                    eprintln!(
-                        "[triplets:source] refresh batch source='{}' batch_size={} attempted={} fetched={} elapsed={:.1}s",
-                        source_id,
-                        pending_indices.len(),
-                        attempts,
-                        records.len(),
-                        refresh_start.elapsed().as_secs_f64()
-                    );
-                }
-                self.read_row_batch(&pending_indices, &mut records, Some(max))?;
-                pending_indices.clear();
-                if should_report && last_report.elapsed() >= report_every {
-                    eprintln!(
-                        "[triplets:source] refresh progress source='{}' attempted={}/{} fetched={}/{} elapsed={:.1}s",
-                        source_id,
-                        attempts,
-                        total,
-                        records.len(),
-                        max,
-                        refresh_start.elapsed().as_secs_f64()
-                    );
-                    last_report = Instant::now();
-                }
-            }
-        }
 
-        if !pending_indices.is_empty() && records.len() < max {
+            if should_report {
+                eprintln!(
+                    "[triplets:source] refresh batch source='{}' batch_size={} attempted={} fetched={} elapsed={:.1}s",
+                    source_id,
+                    pending_indices.len(),
+                    attempts,
+                    records.len(),
+                    refresh_start.elapsed().as_secs_f64()
+                );
+            }
+
             self.read_row_batch(&pending_indices, &mut records, Some(max))?;
+
+            if should_report && last_report.elapsed() >= report_every {
+                eprintln!(
+                    "[triplets:source] refresh progress source='{}' attempted={}/{} fetched={}/{} elapsed={:.1}s",
+                    source_id,
+                    attempts,
+                    total,
+                    records.len(),
+                    max,
+                    refresh_start.elapsed().as_secs_f64()
+                );
+                last_report = Instant::now();
+            }
         }
 
         if should_report {
