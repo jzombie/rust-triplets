@@ -436,7 +436,7 @@ fn huggingface_reads_local_parquet_snapshot() {
 }
 
 #[test]
-fn huggingface_role_columns_mode_errors_when_context_missing() {
+fn huggingface_role_columns_mode_skips_when_context_missing() {
     let temp = tempfile::tempdir().expect("failed creating tempdir");
     let shard_path = temp.path().join("part-00006.ndjson");
     write_lines(
@@ -459,11 +459,10 @@ fn huggingface_role_columns_mode_errors_when_context_missing() {
 
     let source = HuggingFaceRowSource::new(config).expect("failed creating huggingface source");
     let seed = seeded_config(41);
-    let err = source
+    let snapshot = source
         .refresh(&seed, None, Some(1))
-        .expect_err("refresh should fail when required context column is missing");
-    let message = err.to_string();
-    assert!(message.contains("missing") || message.contains("inconsistent"));
+        .expect("refresh should skip rows with missing required context column");
+    assert!(snapshot.records.is_empty());
 }
 
 #[test]
