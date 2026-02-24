@@ -1,0 +1,15 @@
+# Format:
+# hf://org/dataset/config/split anchor=<field> positive=<field> context=<f1,f2,...> text=<f1,f2,...>
+# Rules:
+# - Provide at least one of: anchor=, positive=, context=, text=
+# - Use anchor/positive/context for role-based extraction
+# - Use text= for ordered text-columns mode
+
+# Conversational tech
+hf://labofsahil/hackernews-vector-search-dataset/default/train anchor=title positive=text
+
+# Skeleton of most embedding spaces
+hf://wikimedia/wikipedia/20231101.en/train anchor=title positive=text
+
+# Small wordlist snapshot source
+hf://pfox/71k-English-uncleaned-wordlist/default/train text=text

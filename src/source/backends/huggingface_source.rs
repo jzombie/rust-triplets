@@ -5,7 +5,7 @@ use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::record::reader::RowIter;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -62,6 +62,225 @@ struct RowView {
     text_fields: Vec<RowTextField>,
 }
 
+/// Parsed Hugging Face source-list entry with explicit field mappings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HfSourceEntry {
+    /// Full hf:// URI for dataset/config/split.
+    pub uri: String,
+    /// Optional anchor column name.
+    pub anchor_column: Option<String>,
+    /// Optional positive column name.
+    pub positive_column: Option<String>,
+    /// Optional context columns (ordered).
+    pub context_columns: Vec<String>,
+    /// Optional text columns (ordered) for text-columns mode.
+    pub text_columns: Vec<String>,
+}
+
+/// Parsed Hugging Face source list with explicit mappings and caps.
+#[derive(Debug, Clone)]
+pub struct HfListRoots {
+    /// The source list file path used for loading.
+    pub source_list: String,
+    /// Parsed sources with explicit field mappings.
+    pub sources: Vec<HfSourceEntry>,
+    /// Optional maximum rows per source.
+    pub max_rows_per_source: Option<usize>,
+}
+
+/// Split a comma-delimited field list into trimmed column names.
+pub fn parse_csv_fields(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// Parse a single source-list line of the form:
+/// `hf://org/dataset/config/split anchor=... positive=... context=a,b text=x,y`.
+pub fn parse_hf_source_line(line: &str) -> Result<HfSourceEntry, String> {
+    let mut parts = line.split_whitespace();
+    let Some(uri) = parts.next() else {
+        return Err("empty source line".to_string());
+    };
+    if !uri.starts_with("hf://") {
+        return Err(format!("unsupported source URI (expected hf://...): {uri}"));
+    }
+
+    let mut entry = HfSourceEntry {
+        uri: uri.to_string(),
+        anchor_column: None,
+        positive_column: None,
+        context_columns: Vec::new(),
+        text_columns: Vec::new(),
+    };
+
+    for token in parts {
+        let Some((raw_key, raw_value)) = token.split_once('=') else {
+            return Err(format!(
+                "invalid mapping token '{token}' (expected key=value)"
+            ));
+        };
+        let key = raw_key.trim().to_ascii_lowercase();
+        let value = raw_value.trim();
+        match key.as_str() {
+            "anchor" => {
+                entry.anchor_column = (!value.is_empty()).then(|| value.to_string());
+            }
+            "positive" => {
+                entry.positive_column = (!value.is_empty()).then(|| value.to_string());
+            }
+            "context" => {
+                entry.context_columns = parse_csv_fields(value);
+            }
+            "text" | "text_columns" => {
+                entry.text_columns = parse_csv_fields(value);
+            }
+            _ => {
+                return Err(format!("unsupported mapping key '{raw_key}'"));
+            }
+        }
+    }
+
+    let has_explicit_mapping = entry.anchor_column.is_some()
+        || entry.positive_column.is_some()
+        || !entry.context_columns.is_empty()
+        || !entry.text_columns.is_empty();
+    if !has_explicit_mapping {
+        return Err(format!(
+            "source '{}' has no field mapping; expected at least one of anchor=, positive=, context=, text=",
+            entry.uri
+        ));
+    }
+
+    Ok(entry)
+}
+
+/// Parse an hf:// URI into dataset/config/split components.
+pub fn parse_hf_uri(uri: &str) -> Result<(String, String, String), String> {
+    let trimmed = uri.trim();
+    let Some(rest) = trimmed.strip_prefix("hf://") else {
+        return Err(format!(
+            "unsupported source URI (expected hf://...): {trimmed}"
+        ));
+    };
+
+    let parts = rest
+        .split('/')
+        .filter(|part| !part.trim().is_empty())
+        .collect::<Vec<_>>();
+
+    if parts.len() < 2 {
+        return Err(format!("invalid hf URI (need hf://org/dataset): {trimmed}"));
+    }
+
+    let dataset = format!("{}/{}", parts[0], parts[1]);
+    let config = parts.get(2).copied().unwrap_or("default").to_string();
+    let split = parts.get(3).copied().unwrap_or("train").to_string();
+
+    Ok((dataset, config, split))
+}
+
+/// Load a Hugging Face source list file containing explicit field mappings.
+pub fn load_hf_sources_from_list(path: &str) -> Result<Vec<HfSourceEntry>, String> {
+    let body = fs::read_to_string(path).map_err(|err| format!("{err}"))?;
+    let mut out = Vec::new();
+    for (line_no, raw) in body.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let parsed = parse_hf_source_line(line).map_err(|err| {
+            format!(
+                "invalid source-list entry at {}:{} -> {}",
+                path,
+                line_no + 1,
+                err
+            )
+        })?;
+        out.push(parsed);
+    }
+    Ok(out)
+}
+
+/// Resolve parsed Hugging Face source list entries and caps into a structured root.
+pub fn resolve_hf_list_roots(
+    source_list: String,
+    max_rows_per_source: Option<usize>,
+) -> Result<HfListRoots, String> {
+    let sources = load_hf_sources_from_list(&source_list)?;
+    if sources.is_empty() {
+        return Err(format!("no hf:// entries found in {}", source_list));
+    }
+    Ok(HfListRoots {
+        source_list,
+        sources,
+        max_rows_per_source,
+    })
+}
+
+/// Build Hugging Face row sources from a parsed source list.
+pub fn build_hf_sources(roots: &HfListRoots) -> Vec<Box<dyn DataSource + 'static>> {
+    roots
+        .sources
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, source)| {
+            let (dataset, config, split) = match parse_hf_uri(&source.uri) {
+                Ok(parsed) => parsed,
+                Err(err) => {
+                    eprintln!("Skipping invalid source URI '{}': {}", source.uri, err);
+                    return None;
+                }
+            };
+
+            let source_id = format!("hf_list_{idx}");
+            let snapshot_dir = PathBuf::from(".hf-snapshots")
+                .join("source-list")
+                .join(dataset.replace('/', "__"))
+                .join(&config)
+                .join(&split)
+                .join(format!("replica_{idx}"));
+
+            let mut hf = HuggingFaceRowsConfig::new(
+                source_id,
+                dataset,
+                config,
+                split,
+                snapshot_dir,
+            );
+            hf.anchor_column = source.anchor_column.clone();
+            hf.positive_column = source.positive_column.clone();
+            hf.context_columns = source.context_columns.clone();
+            hf.text_columns = source.text_columns.clone();
+            println!(
+                "source {idx}: hf://{}/{}/{} -> anchor={:?}, positive={:?}, context={:?}, text_columns={:?}",
+                hf.dataset,
+                hf.config,
+                hf.split,
+                hf.anchor_column,
+                hf.positive_column,
+                hf.context_columns,
+                hf.text_columns
+            );
+            hf.max_rows = roots.max_rows_per_source;
+
+            match HuggingFaceRowSource::new(hf) {
+                Ok(source) => Some(Box::new(source) as Box<dyn DataSource + 'static>),
+                Err(err) => {
+                    eprintln!(
+                        "Skipping Hugging Face source initialization for '{}': {}",
+                        source.uri, err
+                    );
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
 /// Configuration for a bulk Hugging Face row source backed by local snapshot files.
 #[derive(Clone, Debug)]
 pub struct HuggingFaceRowsConfig {
@@ -76,6 +295,10 @@ pub struct HuggingFaceRowsConfig {
     /// Local path to a snapshot directory for this split.
     pub snapshot_dir: PathBuf,
     /// File extensions accepted as shard files.
+    ///
+    /// Non-parquet files are read as line-delimited entries. Each line may be:
+    /// - a JSON object row (for example JSONL/NDJSON), or
+    /// - plain text, which is wrapped as `{ "text": "..." }`.
     pub shard_extensions: Vec<String>,
     /// Number of rows between seek checkpoints while indexing a shard.
     pub checkpoint_stride: usize,
@@ -1977,7 +2200,11 @@ impl HuggingFaceRowSource {
     }
 
     /// Parse a raw row payload into normalized `RowView` fields.
-    fn parse_row(&self, absolute_idx: usize, row_value: &Value) -> Result<RowView, SamplerError> {
+    fn parse_row(
+        &self,
+        absolute_idx: usize,
+        row_value: &Value,
+    ) -> Result<Option<RowView>, SamplerError> {
         let row_payload = row_value.get("row").unwrap_or(row_value);
         let row_obj = row_payload
             .as_object()
@@ -2006,17 +2233,12 @@ impl HuggingFaceRowSource {
 
         if use_role_columns {
             if let Some(name) = &self.config.anchor_column {
-                let value = row_obj
-                    .get(name)
-                    .ok_or_else(|| SamplerError::SourceInconsistent {
-                        source_id: self.config.source_id.clone(),
-                        details: format!("missing configured anchor column '{name}'"),
-                    })?;
-                let text =
-                    Self::value_to_text(value).ok_or_else(|| SamplerError::SourceInconsistent {
-                        source_id: self.config.source_id.clone(),
-                        details: format!("configured anchor column '{name}' has null/empty value"),
-                    })?;
+                let Some(value) = row_obj.get(name) else {
+                    return Ok(None);
+                };
+                let Some(text) = Self::value_to_text(value) else {
+                    return Ok(None);
+                };
                 text_fields.push(RowTextField {
                     name: name.clone(),
                     text,
@@ -2024,19 +2246,12 @@ impl HuggingFaceRowSource {
             }
 
             if let Some(name) = &self.config.positive_column {
-                let value = row_obj
-                    .get(name)
-                    .ok_or_else(|| SamplerError::SourceInconsistent {
-                        source_id: self.config.source_id.clone(),
-                        details: format!("missing configured positive column '{name}'"),
-                    })?;
-                let text =
-                    Self::value_to_text(value).ok_or_else(|| SamplerError::SourceInconsistent {
-                        source_id: self.config.source_id.clone(),
-                        details: format!(
-                            "configured positive column '{name}' has null/empty value"
-                        ),
-                    })?;
+                let Some(value) = row_obj.get(name) else {
+                    return Ok(None);
+                };
+                let Some(text) = Self::value_to_text(value) else {
+                    return Ok(None);
+                };
                 text_fields.push(RowTextField {
                     name: name.clone(),
                     text,
@@ -2044,17 +2259,12 @@ impl HuggingFaceRowSource {
             }
 
             for name in &self.config.context_columns {
-                let value = row_obj
-                    .get(name)
-                    .ok_or_else(|| SamplerError::SourceInconsistent {
-                        source_id: self.config.source_id.clone(),
-                        details: format!("missing configured context column '{name}'"),
-                    })?;
-                let text =
-                    Self::value_to_text(value).ok_or_else(|| SamplerError::SourceInconsistent {
-                        source_id: self.config.source_id.clone(),
-                        details: format!("configured context column '{name}' has null/empty value"),
-                    })?;
+                let Some(value) = row_obj.get(name) else {
+                    return Ok(None);
+                };
+                let Some(text) = Self::value_to_text(value) else {
+                    return Ok(None);
+                };
                 text_fields.push(RowTextField {
                     name: name.clone(),
                     text,
@@ -2074,17 +2284,12 @@ impl HuggingFaceRowSource {
             }
         } else {
             for name in &self.config.text_columns {
-                let value = row_obj
-                    .get(name)
-                    .ok_or_else(|| SamplerError::SourceInconsistent {
-                        source_id: self.config.source_id.clone(),
-                        details: format!("missing configured text column '{name}'"),
-                    })?;
-                let text =
-                    Self::value_to_text(value).ok_or_else(|| SamplerError::SourceInconsistent {
-                        source_id: self.config.source_id.clone(),
-                        details: format!("configured text column '{name}' has null/empty value"),
-                    })?;
+                let Some(value) = row_obj.get(name) else {
+                    return Ok(None);
+                };
+                let Some(text) = Self::value_to_text(value) else {
+                    return Ok(None);
+                };
                 text_fields.push(RowTextField {
                     name: name.clone(),
                     text,
@@ -2093,17 +2298,76 @@ impl HuggingFaceRowSource {
         }
 
         if text_fields.is_empty() {
-            return Err(SamplerError::SourceInconsistent {
-                source_id: self.config.source_id.clone(),
-                details: "row resolved to zero text fields".to_string(),
-            });
+            return Ok(None);
         }
 
-        Ok(RowView {
+        Ok(Some(RowView {
             row_id: Some(row_id),
             timestamp: None,
             text_fields,
-        })
+        }))
+    }
+
+    /// Decode one line from a non-parquet shard into an object-like row payload.
+    fn parse_non_parquet_line(
+        &self,
+        shard: &ShardIndex,
+        local_idx: usize,
+        line: &str,
+    ) -> Result<Value, SamplerError> {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return Err(SamplerError::SourceInconsistent {
+                source_id: self.config.source_id.clone(),
+                details: format!(
+                    "empty row in shard {} at local index {}",
+                    shard.path.display(),
+                    local_idx
+                ),
+            });
+        }
+
+        let is_strict_json_lines = shard
+            .path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| {
+                ext.eq_ignore_ascii_case("jsonl") || ext.eq_ignore_ascii_case("ndjson")
+            });
+
+        match serde_json::from_str::<Value>(trimmed) {
+            Ok(value) => {
+                let payload = value.get("row").unwrap_or(&value);
+                if payload.is_object() {
+                    Ok(value)
+                } else if let Some(text) = Self::value_to_text(payload) {
+                    Ok(json!({ "text": text }))
+                } else {
+                    Err(SamplerError::SourceInconsistent {
+                        source_id: self.config.source_id.clone(),
+                        details: format!(
+                            "non-object JSON row in shard {} at local index {} could not be converted to text",
+                            shard.path.display(),
+                            local_idx
+                        ),
+                    })
+                }
+            }
+            Err(err) => {
+                if is_strict_json_lines {
+                    Err(SamplerError::SourceInconsistent {
+                        source_id: self.config.source_id.clone(),
+                        details: format!(
+                            "failed decoding JSON row from shard {} at local index {}: {err}",
+                            shard.path.display(),
+                            local_idx
+                        ),
+                    })
+                } else {
+                    Ok(json!({ "text": trimmed }))
+                }
+            }
+        }
     }
 
     /// Convert a `RowView` into a sampler `DataRecord`.
@@ -2234,26 +2498,21 @@ impl HuggingFaceRowSource {
                 }
 
                 let line = self.read_line_at(&shard, local_idx)?;
-                let row_value = serde_json::from_str::<Value>(line.trim()).map_err(|err| {
-                    SamplerError::SourceInconsistent {
-                        source_id: self.config.source_id.clone(),
-                        details: format!(
-                            "failed decoding JSON row from shard {} at local index {}: {err}",
-                            shard.path.display(),
-                            local_idx
-                        ),
-                    }
-                })?;
+                let row_value = self.parse_non_parquet_line(&shard, local_idx, &line)?;
                 let row = self.parse_row(idx, &row_value)?;
-                let record = self.row_to_record(&row, idx as u64)?;
-                self.cache
-                    .lock()
-                    .map_err(|_| SamplerError::SourceUnavailable {
-                        source_id: self.config.source_id.clone(),
-                        reason: "huggingface row cache lock poisoned".to_string(),
-                    })?
-                    .insert(idx, row, self.config.cache_capacity);
-                fetched.insert(idx, record);
+                if let Some(row) = row {
+                    let record = self.row_to_record(&row, idx as u64)?;
+                    self.cache
+                        .lock()
+                        .map_err(|_| SamplerError::SourceUnavailable {
+                            source_id: self.config.source_id.clone(),
+                            reason: "huggingface row cache lock poisoned".to_string(),
+                        })?
+                        .insert(idx, row, self.config.cache_capacity);
+                    fetched.insert(idx, record);
+                } else {
+                    fetched.insert(idx, None);
+                }
             }
 
             for ((shard_path, group_pos), mut requested) in parquet_groups {
@@ -2326,15 +2585,19 @@ impl HuggingFaceRowSource {
 
                     for idx in indices_for_position {
                         let row = self.parse_row(idx, &row_value)?;
-                        let record = self.row_to_record(&row, idx as u64)?;
-                        self.cache
-                            .lock()
-                            .map_err(|_| SamplerError::SourceUnavailable {
-                                source_id: self.config.source_id.clone(),
-                                reason: "huggingface row cache lock poisoned".to_string(),
-                            })?
-                            .insert(idx, row, self.config.cache_capacity);
-                        fetched.insert(idx, record);
+                        if let Some(row) = row {
+                            let record = self.row_to_record(&row, idx as u64)?;
+                            self.cache
+                                .lock()
+                                .map_err(|_| SamplerError::SourceUnavailable {
+                                    source_id: self.config.source_id.clone(),
+                                    reason: "huggingface row cache lock poisoned".to_string(),
+                                })?
+                                .insert(idx, row, self.config.cache_capacity);
+                            fetched.insert(idx, record);
+                        } else {
+                            fetched.insert(idx, None);
+                        }
                     }
 
                     if targets.is_empty() {
@@ -2978,6 +3241,7 @@ mod tests {
                 2,
                 &json!({"id":"r","anchor":"a","positive":"p","ctx1":"c1","ctx2":2}),
             )
+            .unwrap()
             .unwrap();
         assert_eq!(row.text_fields.len(), 4);
         assert_eq!(row.text_fields[0].name, "anchor");
@@ -2985,7 +3249,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_row_role_columns_mode_errors_on_missing_or_empty_values() {
+    fn parse_row_role_columns_mode_skips_missing_or_empty_values() {
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path().to_path_buf());
         config.anchor_column = Some("anchor".into());
@@ -2993,10 +3257,10 @@ mod tests {
         let source = test_source(config);
 
         let missing = source.parse_row(0, &json!({"anchor":"a"}));
-        assert!(missing.is_err());
+        assert!(missing.unwrap().is_none());
 
         let empty_anchor = source.parse_row(1, &json!({"anchor":"   ", "ctx":"ok"}));
-        assert!(empty_anchor.is_err());
+        assert!(empty_anchor.unwrap().is_none());
     }
 
     #[test]
@@ -3106,7 +3370,10 @@ mod tests {
         config.id_column = Some("id".into());
         let source = test_source(config);
 
-        let row = source.parse_row(42, &json!({"text": "hello"})).unwrap();
+        let row = source
+            .parse_row(42, &json!({"text": "hello"}))
+            .unwrap()
+            .unwrap();
         assert_eq!(row.row_id, Some("org/dataset:train:42".to_string()));
     }
 
@@ -3991,7 +4258,10 @@ mod tests {
         config.text_columns = vec!["score".into()];
         let source = test_source(config);
 
-        let row = source.parse_row(0, &json!({"score": 123})).unwrap();
+        let row = source
+            .parse_row(0, &json!({"score": 123}))
+            .unwrap()
+            .unwrap();
         assert_eq!(row.text_fields.len(), 1);
         assert_eq!(row.text_fields[0].text, "123");
     }
@@ -4816,6 +5086,7 @@ mod tests {
                     "flag": true
                 }),
             )
+            .unwrap()
             .unwrap();
 
         assert_eq!(row.row_id.as_deref(), Some("row-5"));
@@ -4825,7 +5096,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_row_with_required_columns_errors_when_missing() {
+    fn parse_row_with_required_columns_skips_when_missing() {
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path().to_path_buf());
         config.anchor_column = Some("anchor".into());
@@ -4833,8 +5104,8 @@ mod tests {
         config.context_columns = vec!["context".into()];
         let source = test_source(config);
 
-        let err = source.parse_row(0, &json!({"anchor": "x", "context": "z"}));
-        assert!(err.is_err());
+        let parsed = source.parse_row(0, &json!({"anchor": "x", "context": "z"}));
+        assert!(parsed.unwrap().is_none());
     }
 
     #[test]
@@ -5212,6 +5483,7 @@ mod tests {
                 0,
                 &json!({"row": {"rid": "r-1", "headline": "h", "body": "b"}}),
             )
+            .unwrap()
             .unwrap();
 
         assert_eq!(parsed.row_id.as_deref(), Some("r-1"));
