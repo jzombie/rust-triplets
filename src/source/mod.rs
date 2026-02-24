@@ -228,6 +228,7 @@ impl IndexablePager {
     }
 
     /// Build a deterministic seed for a source/total pair with explicit sampler seed.
+    #[cfg(any(test, feature = "huggingface"))]
     pub(crate) fn seed_for_sampler(source_id: &SourceId, total: usize, sampler_seed: u64) -> u64 {
         Self::seed_for(source_id, total)
             ^ stable_hash_with(|hasher| {
