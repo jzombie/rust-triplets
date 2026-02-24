@@ -1,7 +1,6 @@
 use triplets::{
-    DataSource, DeterministicSplitStore, HuggingFaceRowSource, HuggingFaceRowsConfig,
-    MappedRowViewAdapter, PairSampler, RowFieldMapping, RowViewDataSourceAdapter, Sampler,
-    SamplerConfig, SplitLabel, SplitRatios, TextFieldPolicy,
+    DataSource, DeterministicSplitStore, HuggingFaceRowSource, HuggingFaceRowsConfig, PairSampler,
+    Sampler, SamplerConfig, SplitLabel, SplitRatios,
 };
 use std::path::PathBuf;
 
@@ -30,6 +29,7 @@ fn print_chunk(label: &str, chunk: &triplets::RecordChunk) {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let sample_seed = 13u64;
     let source_id = "hf_rows".to_string();
     let dataset = "HuggingFaceFW/fineweb".to_string();
     let config_name = "default".to_string();
@@ -49,7 +49,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         snapshot_dir.clone(),
     );
     hf.shard_extensions = vec!["parquet".to_string(), "jsonl".to_string(), "ndjson".to_string()];
-    hf.text_columns = text_columns.clone();
+    hf.anchor_column = Some(text_columns[0].clone());
+    hf.positive_column = Some(text_columns[1].clone());
+    hf.context_columns = Vec::new();
 
     println!(
         "Using Hugging Face bulk snapshot rows from: {} ({}) split={} dir={}",
@@ -60,16 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let source = HuggingFaceRowSource::new(hf)?;
-
-    let mapping = RowFieldMapping {
-        anchor: TextFieldPolicy::Explicit(vec![text_columns[0].clone()]),
-        positive: TextFieldPolicy::Explicit(vec![text_columns[1].clone()]),
-        context: TextFieldPolicy::RemainingTextColumns,
-        ..RowFieldMapping::default()
-    };
-
-    let mapper = MappedRowViewAdapter::new(source_id, mapping);
-    let data_source: Box<dyn DataSource> = Box::new(RowViewDataSourceAdapter::new(source, mapper));
+    let data_source: Box<dyn DataSource> = Box::new(source);
 
     let split = SplitRatios {
         train: 1.0,
@@ -78,7 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let split_store = DeterministicSplitStore::new(split, 13)?;
     let config = SamplerConfig {
-        seed: 13,
+        seed: sample_seed,
         batch_size: 2,
         split,
         allowed_splits: vec![SplitLabel::Train],

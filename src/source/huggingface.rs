@@ -3,6 +3,7 @@ use hf_hub::RepoType;
 use hf_hub::api::sync::ApiBuilder;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::record::reader::RowIter;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
@@ -13,15 +14,19 @@ use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 use walkdir::WalkDir;
 
 use crate::SamplerError;
+use crate::config::{NegativeStrategy, Selector, TripletRecipe};
+use crate::data::{DataRecord, QualityScore, SectionRole};
+use crate::utils::make_section;
+use chrono::{DateTime, Utc};
 
-use super::{RowView, RowViewSource, TextField};
+use super::{DataSource, SourceCursor, SourceSnapshot};
 
 const REMOTE_URL_PREFIX: &str = "url::";
 /// Extra row-index headroom above currently materialized rows exposed via `len_hint`.
@@ -31,6 +36,31 @@ const REMOTE_URL_PREFIX: &str = "url::";
 /// global row domain at once.
 const REMOTE_EXPANSION_HEADROOM_ROWS: usize = 8192;
 const REMOTE_BOOTSTRAP_SHARDS: usize = 4;
+const HUGGINGFACE_REFRESH_BATCH: usize = 128;
+const SHARD_SEQUENCE_STATE_VERSION: u32 = 1;
+const SHARD_SEQUENCE_STATE_FILE: &str = "_sequence_state.json";
+
+static SAMPLER_SEED_BY_SOURCE: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+
+
+fn sampler_seed_for_source(source_id: &str) -> Option<u64> {
+    let registry = SAMPLER_SEED_BY_SOURCE.get_or_init(|| Mutex::new(HashMap::new()));
+    let lock = registry.lock().ok()?;
+    lock.get(source_id).copied()
+}
+
+#[derive(Clone, Debug)]
+struct RowTextField {
+    name: String,
+    text: String,
+}
+
+#[derive(Clone, Debug)]
+struct RowView {
+    row_id: Option<String>,
+    timestamp: Option<DateTime<Utc>>,
+    text_fields: Vec<RowTextField>,
+}
 
 /// Configuration for a bulk Hugging Face row source backed by local snapshot files.
 #[derive(Clone, Debug)]
@@ -65,6 +95,19 @@ pub struct HuggingFaceRowsConfig {
     pub id_column: Option<String>,
     /// Text columns to extract. Empty means auto-detect textual scalar columns.
     pub text_columns: Vec<String>,
+    /// Optional column used for anchor text.
+    ///
+    /// When set (or when `positive_column`/`context_columns` are set), role-based
+    /// extraction is used instead of `text_columns`/auto-detect mode.
+    pub anchor_column: Option<String>,
+    /// Optional column used for positive text.
+    ///
+    /// Positive text is emitted as a `SectionRole::Context` section.
+    pub positive_column: Option<String>,
+    /// Optional ordered context columns.
+    ///
+    /// Used only in role-based extraction mode.
+    pub context_columns: Vec<String>,
 }
 
 impl HuggingFaceRowsConfig {
@@ -91,6 +134,9 @@ impl HuggingFaceRowsConfig {
             min_resident_shards: REMOTE_BOOTSTRAP_SHARDS,
             id_column: Some("id".to_string()),
             text_columns: Vec::new(),
+            anchor_column: None,
+            positive_column: None,
+            context_columns: Vec::new(),
         }
     }
 }
@@ -163,7 +209,7 @@ impl RowCache {
     }
 }
 
-/// Bulk-oriented `RowViewSource` backed by hf-hub snapshot shard files.
+/// Bulk-oriented Hugging Face source backed by local shard files.
 pub struct HuggingFaceRowSource {
     config: HuggingFaceRowsConfig,
     state: Mutex<SourceState>,
@@ -178,6 +224,20 @@ struct SourceState {
     shards: Vec<ShardIndex>,
     remote_candidates: Option<Vec<String>>,
     remote_candidate_sizes: HashMap<String, u64>,
+    next_remote_idx: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PersistedShardSequence {
+    version: u32,
+    source_id: String,
+    dataset: String,
+    config: String,
+    split: String,
+    #[serde(default)]
+    sampler_seed: Option<u64>,
+    candidates: Vec<String>,
+    candidate_sizes: HashMap<String, u64>,
     next_remote_idx: usize,
 }
 
@@ -385,6 +445,111 @@ impl HuggingFaceRowSource {
         Ok((candidates, HashMap::new()))
     }
 
+    fn shard_sequence_state_path(config: &HuggingFaceRowsConfig) -> PathBuf {
+        config
+            .snapshot_dir
+            .join("_parquet_manifest")
+            .join(SHARD_SEQUENCE_STATE_FILE)
+    }
+
+    fn load_persisted_shard_sequence(
+        config: &HuggingFaceRowsConfig,
+    ) -> Result<Option<PersistedShardSequence>, SamplerError> {
+        let path = Self::shard_sequence_state_path(config);
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        let raw = fs::read_to_string(&path).map_err(|err| SamplerError::SourceUnavailable {
+            source_id: config.source_id.clone(),
+            reason: format!("failed reading shard-sequence state {}: {err}", path.display()),
+        })?;
+
+        let mut persisted: PersistedShardSequence =
+            serde_json::from_str(&raw).map_err(|err| SamplerError::SourceUnavailable {
+                source_id: config.source_id.clone(),
+                reason: format!(
+                    "failed parsing shard-sequence state {}: {err}",
+                    path.display()
+                ),
+            })?;
+
+        let current_sampler_seed = sampler_seed_for_source(&config.source_id);
+        if persisted.version != SHARD_SEQUENCE_STATE_VERSION
+            || persisted.source_id != config.source_id
+            || persisted.dataset != config.dataset
+            || persisted.config != config.config
+            || persisted.split != config.split
+            || persisted.sampler_seed != current_sampler_seed
+        {
+            eprintln!(
+                "[triplets:hf] shard-sequence state mismatch for {}; rebuilding candidate order",
+                path.display()
+            );
+            return Ok(None);
+        }
+
+        if persisted.next_remote_idx > persisted.candidates.len() {
+            persisted.next_remote_idx = persisted.candidates.len();
+        }
+
+        Ok(Some(persisted))
+    }
+
+    fn persist_shard_sequence_locked(&self, state: &SourceState) -> Result<(), SamplerError> {
+        let Some(candidates) = state.remote_candidates.as_ref() else {
+            return Ok(());
+        };
+
+        let path = Self::shard_sequence_state_path(&self.config);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|err| SamplerError::SourceUnavailable {
+                source_id: self.config.source_id.clone(),
+                reason: format!(
+                    "failed creating shard-sequence state dir {}: {err}",
+                    parent.display()
+                ),
+            })?;
+        }
+
+        let persisted = PersistedShardSequence {
+            version: SHARD_SEQUENCE_STATE_VERSION,
+            source_id: self.config.source_id.clone(),
+            dataset: self.config.dataset.clone(),
+            config: self.config.config.clone(),
+            split: self.config.split.clone(),
+            sampler_seed: sampler_seed_for_source(&self.config.source_id),
+            candidates: candidates.clone(),
+            candidate_sizes: state.remote_candidate_sizes.clone(),
+            next_remote_idx: state.next_remote_idx.min(candidates.len()),
+        };
+
+        let raw = serde_json::to_vec_pretty(&persisted).map_err(|err| {
+            SamplerError::SourceUnavailable {
+                source_id: self.config.source_id.clone(),
+                reason: format!("failed encoding shard-sequence state {}: {err}", path.display()),
+            }
+        })?;
+
+        let tmp_path = path.with_extension("tmp");
+        fs::write(&tmp_path, raw).map_err(|err| SamplerError::SourceUnavailable {
+            source_id: self.config.source_id.clone(),
+            reason: format!(
+                "failed writing shard-sequence state temp {}: {err}",
+                tmp_path.display()
+            ),
+        })?;
+        fs::rename(&tmp_path, &path).map_err(|err| SamplerError::SourceUnavailable {
+            source_id: self.config.source_id.clone(),
+            reason: format!(
+                "failed replacing shard-sequence state {}: {err}",
+                path.display()
+            ),
+        })?;
+
+        Ok(())
+    }
+
     fn rotate_candidates_deterministically(config: &HuggingFaceRowsConfig, candidates: &mut Vec<String>) {
         if candidates.len() <= 1 {
             return;
@@ -396,6 +561,21 @@ impl HuggingFaceRowSource {
         config.split.hash(&mut hasher);
         let offset = (hasher.finish() as usize) % candidates.len();
         candidates.rotate_left(offset);
+    }
+
+    fn shard_candidate_seed(config: &HuggingFaceRowsConfig, total_candidates: usize) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        "hf_shard_candidate_sequence_v1".hash(&mut hasher);
+        if let Some(seed) = sampler_seed_for_source(&config.source_id) {
+            seed.hash(&mut hasher);
+        } else {
+            config.source_id.hash(&mut hasher);
+            config.dataset.hash(&mut hasher);
+            config.config.hash(&mut hasher);
+            config.split.hash(&mut hasher);
+        }
+        total_candidates.hash(&mut hasher);
+        hasher.finish()
     }
 
     fn list_remote_candidates_from_parquet_manifest(
@@ -455,11 +635,29 @@ impl HuggingFaceRowSource {
                 }
 
                 let candidate = format!("{REMOTE_URL_PREFIX}{url}");
+                let expected_size = entry.get("size").and_then(Value::as_u64);
                 let target = Self::candidate_target_path(config, &candidate);
                 if target.exists() {
-                    continue;
+                    if Self::target_matches_expected_size(&target, expected_size) {
+                        continue;
+                    }
+                    eprintln!(
+                        "[triplets:hf] incomplete cached shard detected (will redownload): {}",
+                        target.display()
+                    );
+                    if let Err(err) = fs::remove_file(&target)
+                        && err.kind() != std::io::ErrorKind::NotFound
+                    {
+                        return Err(SamplerError::SourceUnavailable {
+                            source_id: config.source_id.clone(),
+                            reason: format!(
+                                "failed removing incomplete shard {}: {err}",
+                                target.display()
+                            ),
+                        });
+                    }
                 }
-                if let Some(size) = entry.get("size").and_then(Value::as_u64) {
+                if let Some(size) = expected_size {
                     candidate_sizes.insert(candidate.clone(), size);
                 }
                 candidates.push(candidate);
@@ -481,6 +679,20 @@ impl HuggingFaceRowSource {
             return config.snapshot_dir.join("_parquet_manifest").join(suffix);
         }
         config.snapshot_dir.join(candidate)
+    }
+
+    fn target_matches_expected_size(path: &Path, expected_bytes: Option<u64>) -> bool {
+        if !path.exists() {
+            return false;
+        }
+        if let Some(expected) = expected_bytes
+            && expected > 0
+        {
+            return fs::metadata(path)
+                .map(|meta| meta.len() == expected)
+                .unwrap_or(false);
+        }
+        true
     }
 
     fn manifest_cache_root(&self) -> PathBuf {
@@ -719,100 +931,126 @@ impl HuggingFaceRowSource {
     ) -> Result<PathBuf, SamplerError> {
         if let Some(remote_url) = remote_path.strip_prefix(REMOTE_URL_PREFIX) {
             let target = Self::candidate_target_path(config, remote_path);
-            if !target.exists() {
-                if let Some(parent) = target.parent() {
-                    fs::create_dir_all(parent).map_err(|err| SamplerError::SourceUnavailable {
-                        source_id: config.source_id.clone(),
-                        reason: format!("failed creating snapshot subdir {}: {err}", parent.display()),
-                    })?;
+            if target.exists() {
+                if Self::target_matches_expected_size(&target, expected_bytes) {
+                    return Ok(target);
                 }
-
-                let response = ureq::get(remote_url).call().map_err(|err| {
-                    SamplerError::SourceUnavailable {
-                        source_id: config.source_id.clone(),
-                        reason: format!("failed downloading shard URL '{}': {err}", remote_url),
-                    }
-                })?;
-                let mut reader = response.into_body().into_reader();
-                let mut file = File::create(&target).map_err(|err| SamplerError::SourceUnavailable {
-                    source_id: config.source_id.clone(),
-                    reason: format!("failed creating target shard {}: {err}", target.display()),
-                })?;
                 eprintln!(
-                    "[triplets:hf] downloading shard payload -> {}",
+                    "[triplets:hf] replacing incomplete shard before retry: {}",
                     target.display()
                 );
-                let started = Instant::now();
-                let mut total_bytes = 0u64;
-                let mut buffer = vec![0u8; 8 * 1024 * 1024];
-                let mut last_report = Instant::now();
-                loop {
-                    let read = reader.read(&mut buffer).map_err(|err| SamplerError::SourceUnavailable {
-                        source_id: config.source_id.clone(),
-                        reason: format!("failed reading shard stream '{}': {err}", remote_url),
-                    })?;
-                    if read == 0 {
-                        break;
-                    }
-                    file.write_all(&buffer[..read]).map_err(|err| SamplerError::SourceUnavailable {
-                        source_id: config.source_id.clone(),
-                        reason: format!("failed writing target shard {}: {err}", target.display()),
-                    })?;
-                    total_bytes = total_bytes.saturating_add(read as u64);
-                    if last_report.elapsed() >= Duration::from_secs(2) {
-                        let elapsed = started.elapsed().as_secs_f64();
-                        if let Some(expected) = expected_bytes
-                            && expected > 0
-                        {
-                            let pct = ((total_bytes as f64 / expected as f64) * 100.0).clamp(0.0, 100.0);
-                            let rate = if elapsed > 0.0 { total_bytes as f64 / elapsed } else { 0.0 };
-                            let eta_secs = if rate > 0.0 && total_bytes < expected {
-                                (expected.saturating_sub(total_bytes) as f64) / rate
-                            } else {
-                                0.0
-                            };
-                            eprintln!(
-                                "[triplets:hf] download progress {}: {:.1}/{:.1} MiB ({:.1}%, {:.1}s elapsed, ETA {:.1}s)",
-                                target.display(),
-                                total_bytes as f64 / (1024.0 * 1024.0),
-                                expected as f64 / (1024.0 * 1024.0),
-                                pct,
-                                elapsed,
-                                eta_secs.max(0.0)
-                            );
-                        } else {
-                            eprintln!(
-                                "[triplets:hf] download progress {}: {:.1} MiB ({:.1}s)",
-                                target.display(),
-                                total_bytes as f64 / (1024.0 * 1024.0),
-                                elapsed
-                            );
-                        }
-                        last_report = Instant::now();
-                    }
+                fs::remove_file(&target).map_err(|err| SamplerError::SourceUnavailable {
+                    source_id: config.source_id.clone(),
+                    reason: format!("failed removing incomplete shard {}: {err}", target.display()),
+                })?;
+            }
+
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).map_err(|err| SamplerError::SourceUnavailable {
+                    source_id: config.source_id.clone(),
+                    reason: format!("failed creating snapshot subdir {}: {err}", parent.display()),
+                })?;
+            }
+
+            let temp_target = target.with_extension("part");
+            if temp_target.exists() {
+                let _ = fs::remove_file(&temp_target);
+            }
+
+            let response = ureq::get(remote_url).call().map_err(|err| {
+                SamplerError::SourceUnavailable {
+                    source_id: config.source_id.clone(),
+                    reason: format!("failed downloading shard URL '{}': {err}", remote_url),
                 }
-                let elapsed = started.elapsed().as_secs_f64();
-                if let Some(expected) = expected_bytes
-                    && expected > 0
-                {
-                    let pct = ((total_bytes as f64 / expected as f64) * 100.0).clamp(0.0, 100.0);
-                    eprintln!(
-                        "[triplets:hf] download complete {}: {:.1}/{:.1} MiB ({:.1}%) in {:.1}s",
-                        target.display(),
-                        total_bytes as f64 / (1024.0 * 1024.0),
-                        expected as f64 / (1024.0 * 1024.0),
-                        pct,
-                        elapsed
-                    );
-                } else {
-                    eprintln!(
-                        "[triplets:hf] download complete {}: {:.1} MiB in {:.1}s",
-                        target.display(),
-                        total_bytes as f64 / (1024.0 * 1024.0),
-                        elapsed
-                    );
+            })?;
+            let mut reader = response.into_body().into_reader();
+            let mut file = File::create(&temp_target).map_err(|err| SamplerError::SourceUnavailable {
+                source_id: config.source_id.clone(),
+                reason: format!("failed creating target shard {}: {err}", temp_target.display()),
+            })?;
+            eprintln!(
+                "[triplets:hf] downloading shard payload -> {}",
+                target.display()
+            );
+            let started = Instant::now();
+            let mut total_bytes = 0u64;
+            let mut buffer = vec![0u8; 8 * 1024 * 1024];
+            let mut last_report = Instant::now();
+            loop {
+                let read = reader.read(&mut buffer).map_err(|err| SamplerError::SourceUnavailable {
+                    source_id: config.source_id.clone(),
+                    reason: format!("failed reading shard stream '{}': {err}", remote_url),
+                })?;
+                if read == 0 {
+                    break;
+                }
+                file.write_all(&buffer[..read]).map_err(|err| SamplerError::SourceUnavailable {
+                    source_id: config.source_id.clone(),
+                    reason: format!("failed writing target shard {}: {err}", temp_target.display()),
+                })?;
+                total_bytes = total_bytes.saturating_add(read as u64);
+                if last_report.elapsed() >= Duration::from_secs(2) {
+                    let elapsed = started.elapsed().as_secs_f64();
+                    if let Some(expected) = expected_bytes
+                        && expected > 0
+                    {
+                        let pct = ((total_bytes as f64 / expected as f64) * 100.0).clamp(0.0, 100.0);
+                        let rate = if elapsed > 0.0 { total_bytes as f64 / elapsed } else { 0.0 };
+                        let eta_secs = if rate > 0.0 && total_bytes < expected {
+                            (expected.saturating_sub(total_bytes) as f64) / rate
+                        } else {
+                            0.0
+                        };
+                        eprintln!(
+                            "[triplets:hf] download progress {}: {:.1}/{:.1} MiB ({:.1}%, {:.1}s elapsed, ETA {:.1}s)",
+                            target.display(),
+                            total_bytes as f64 / (1024.0 * 1024.0),
+                            expected as f64 / (1024.0 * 1024.0),
+                            pct,
+                            elapsed,
+                            eta_secs.max(0.0)
+                        );
+                    } else {
+                        eprintln!(
+                            "[triplets:hf] download progress {}: {:.1} MiB ({:.1}s)",
+                            target.display(),
+                            total_bytes as f64 / (1024.0 * 1024.0),
+                            elapsed
+                        );
+                    }
+                    last_report = Instant::now();
                 }
             }
+            let elapsed = started.elapsed().as_secs_f64();
+            if let Some(expected) = expected_bytes
+                && expected > 0
+            {
+                let pct = ((total_bytes as f64 / expected as f64) * 100.0).clamp(0.0, 100.0);
+                eprintln!(
+                    "[triplets:hf] download complete {}: {:.1}/{:.1} MiB ({:.1}%) in {:.1}s",
+                    target.display(),
+                    total_bytes as f64 / (1024.0 * 1024.0),
+                    expected as f64 / (1024.0 * 1024.0),
+                    pct,
+                    elapsed
+                );
+            } else {
+                eprintln!(
+                    "[triplets:hf] download complete {}: {:.1} MiB in {:.1}s",
+                    target.display(),
+                    total_bytes as f64 / (1024.0 * 1024.0),
+                    elapsed
+                );
+            }
+
+            fs::rename(&temp_target, &target).map_err(|err| SamplerError::SourceUnavailable {
+                source_id: config.source_id.clone(),
+                reason: format!(
+                    "failed moving downloaded shard {} -> {}: {err}",
+                    temp_target.display(),
+                    target.display()
+                ),
+            })?;
             return Ok(target);
         }
 
@@ -999,20 +1237,43 @@ impl HuggingFaceRowSource {
             };
 
             if need_candidates {
-                let (mut candidates, candidate_sizes) = Self::list_remote_candidates(&self.config)?;
-                Self::rotate_candidates_deterministically(&self.config, &mut candidates);
-                let candidate_count = candidates.len();
                 let mut state = self.state.lock().map_err(|_| SamplerError::SourceUnavailable {
                     source_id: self.config.source_id.clone(),
                     reason: "huggingface source state lock poisoned".to_string(),
                 })?;
-                let bootstrap_needed = state.materialized_rows == 0 && candidate_count > 0;
                 if state.remote_candidates.is_none() {
+                    if let Some(persisted) = Self::load_persisted_shard_sequence(&self.config)? {
+                        let candidate_count = persisted.candidates.len();
+                        state.remote_candidates = Some(persisted.candidates);
+                        state.remote_candidate_sizes = persisted.candidate_sizes;
+                        state.next_remote_idx = persisted.next_remote_idx.min(candidate_count);
+                        eprintln!(
+                            "[triplets:hf] resumed shard sequence state: next={}/{}",
+                            state.next_remote_idx,
+                            candidate_count
+                        );
+                    } else {
+                        let (mut candidates, candidate_sizes) = Self::list_remote_candidates(&self.config)?;
+                        Self::rotate_candidates_deterministically(&self.config, &mut candidates);
+                        state.remote_candidates = Some(candidates);
+                        state.remote_candidate_sizes = candidate_sizes;
+                        state.next_remote_idx = 0;
+                    }
+
+                    self.persist_shard_sequence_locked(&state)?;
+
+                    let candidate_count = state
+                        .remote_candidates
+                        .as_ref()
+                        .map(|values| values.len())
+                        .unwrap_or(0);
+                    let bootstrap_needed =
+                        state.materialized_rows == 0 && candidate_count > 0 && state.next_remote_idx == 0;
                     let known_rows = state.materialized_rows;
                     let shard_count = state.shards.len();
                     eprintln!(
                         "[triplets:hf] state: candidates={} known_rows={} active_shards={} disk_cap={} min_resident_shards={}",
-                        candidates.len(),
+                        candidate_count,
                         known_rows,
                         shard_count,
                         self.config
@@ -1021,29 +1282,28 @@ impl HuggingFaceRowSource {
                             .unwrap_or_else(|| "disabled".to_string()),
                         self.config.min_resident_shards,
                     );
-                    state.remote_candidates = Some(candidates);
-                    state.remote_candidate_sizes = candidate_sizes;
-                    state.next_remote_idx = 0;
-                }
-                drop(state);
+                    drop(state);
 
-                if bootstrap_needed {
-                    let bootstrap_target = REMOTE_BOOTSTRAP_SHARDS.min(candidate_count);
-                    eprintln!(
-                        "[triplets:hf] bootstrapping remote shard diversity: target={} shard(s)",
-                        bootstrap_target
-                    );
-                    for step in 0..bootstrap_target {
+                    if bootstrap_needed {
+                        let bootstrap_target = REMOTE_BOOTSTRAP_SHARDS.min(candidate_count);
                         eprintln!(
-                            "[triplets:hf] bootstrap progress: {}/{}",
-                            step + 1,
+                            "[triplets:hf] bootstrapping remote shard diversity: target={} shard(s)",
                             bootstrap_target
                         );
-                        if !self.download_next_remote_shard()? {
-                            break;
+                        for step in 0..bootstrap_target {
+                            eprintln!(
+                                "[triplets:hf] bootstrap progress: {}/{}",
+                                step + 1,
+                                bootstrap_target
+                            );
+                            if !self.download_next_remote_shard()? {
+                                break;
+                            }
                         }
+                        eprintln!("[triplets:hf] bootstrap complete");
                     }
-                    eprintln!("[triplets:hf] bootstrap complete");
+                } else {
+                    drop(state);
                 }
                 continue;
             }
@@ -1065,9 +1325,13 @@ impl HuggingFaceRowSource {
             if state.next_remote_idx >= candidates.len() {
                 return Ok(false);
             }
-            let remote_ordinal = state.next_remote_idx + 1;
+            let sequence_pos = state.next_remote_idx;
+            let remote_ordinal = sequence_pos + 1;
             let remote_total = candidates.len();
-            let remote_path = candidates[state.next_remote_idx].clone();
+            let seed = Self::shard_candidate_seed(&self.config, remote_total);
+            let mut permutation = super::IndexPermutation::new(remote_total, seed, sequence_pos as u64);
+            let candidate_idx = permutation.next();
+            let remote_path = candidates[candidate_idx].clone();
             let expected_bytes = state.remote_candidate_sizes.get(&remote_path).copied();
             state.next_remote_idx += 1;
             (remote_ordinal, remote_total, remote_path, expected_bytes)
@@ -1136,6 +1400,7 @@ impl HuggingFaceRowSource {
         state.shards.push(shard);
 
         let evicted_any = self.enforce_disk_cap_locked(&mut state, &local_path)?;
+        self.persist_shard_sequence_locked(&state)?;
         let materialized_rows = state.materialized_rows;
         let shard_count = state.shards.len();
         let remaining_candidates = state
@@ -1586,13 +1851,68 @@ impl HuggingFaceRowSource {
             });
 
         let mut text_fields = Vec::new();
-        if self.config.text_columns.is_empty() {
+        let use_role_columns = self.config.anchor_column.is_some()
+            || self.config.positive_column.is_some()
+            || !self.config.context_columns.is_empty();
+
+        if use_role_columns {
+            if let Some(name) = &self.config.anchor_column {
+                let value = row_obj
+                    .get(name)
+                    .ok_or_else(|| SamplerError::SourceInconsistent {
+                        source_id: self.config.source_id.clone(),
+                        details: format!("missing configured anchor column '{name}'"),
+                    })?;
+                let text = Self::value_to_text(value).ok_or_else(|| SamplerError::SourceInconsistent {
+                    source_id: self.config.source_id.clone(),
+                    details: format!("configured anchor column '{name}' has null/empty value"),
+                })?;
+                text_fields.push(RowTextField {
+                    name: name.clone(),
+                    text,
+                });
+            }
+
+            if let Some(name) = &self.config.positive_column {
+                let value = row_obj
+                    .get(name)
+                    .ok_or_else(|| SamplerError::SourceInconsistent {
+                        source_id: self.config.source_id.clone(),
+                        details: format!("missing configured positive column '{name}'"),
+                    })?;
+                let text = Self::value_to_text(value).ok_or_else(|| SamplerError::SourceInconsistent {
+                    source_id: self.config.source_id.clone(),
+                    details: format!("configured positive column '{name}' has null/empty value"),
+                })?;
+                text_fields.push(RowTextField {
+                    name: name.clone(),
+                    text,
+                });
+            }
+
+            for name in &self.config.context_columns {
+                let value = row_obj
+                    .get(name)
+                    .ok_or_else(|| SamplerError::SourceInconsistent {
+                        source_id: self.config.source_id.clone(),
+                        details: format!("missing configured context column '{name}'"),
+                    })?;
+                let text = Self::value_to_text(value).ok_or_else(|| SamplerError::SourceInconsistent {
+                    source_id: self.config.source_id.clone(),
+                    details: format!("configured context column '{name}' has null/empty value"),
+                })?;
+                text_fields.push(RowTextField {
+                    name: name.clone(),
+                    text,
+                });
+            }
+        } else if self.config.text_columns.is_empty() {
             for (name, value) in row_obj {
                 if self.config.id_column.as_ref().is_some_and(|id| id == name) {
                     continue;
                 }
                 if let Some(text) = Self::value_to_text(value) {
-                    text_fields.push(TextField {
+                    text_fields.push(RowTextField {
                         name: name.clone(),
                         text,
                     });
@@ -1610,7 +1930,7 @@ impl HuggingFaceRowSource {
                     source_id: self.config.source_id.clone(),
                     details: format!("configured text column '{name}' has null/empty value"),
                 })?;
-                text_fields.push(TextField {
+                text_fields.push(RowTextField {
                     name: name.clone(),
                     text,
                 });
@@ -1630,11 +1950,86 @@ impl HuggingFaceRowSource {
             text_fields,
         })
     }
-}
 
-impl RowViewSource for HuggingFaceRowSource {
-    fn id(&self) -> &str {
-        &self.config.source_id
+    fn row_to_record(&self, row: &RowView, row_index: u64) -> Result<Option<DataRecord>, SamplerError> {
+        if row.text_fields.is_empty() {
+            return Ok(None);
+        }
+
+        let record_id = row
+            .row_id
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| format!("row_{row_index}"));
+        let id = format!("{}::{}", self.config.source_id, record_id);
+
+        let mut sections = Vec::new();
+        let anchor = &row.text_fields[0];
+        sections.push(make_section(
+            SectionRole::Anchor,
+            Some(anchor.name.as_str()),
+            anchor.text.as_str(),
+        ));
+
+        let positive = row.text_fields.get(1).unwrap_or(anchor);
+        sections.push(make_section(
+            SectionRole::Context,
+            Some(positive.name.as_str()),
+            positive.text.as_str(),
+        ));
+
+        for field in row.text_fields.iter().skip(2) {
+            sections.push(make_section(
+                SectionRole::Context,
+                Some(field.name.as_str()),
+                field.text.as_str(),
+            ));
+        }
+
+        let timestamp = row.timestamp.unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
+        Ok(Some(DataRecord {
+            id,
+            source: self.config.source_id.clone(),
+            created_at: timestamp,
+            updated_at: timestamp,
+            quality: QualityScore::default(),
+            taxonomy: vec![
+                format!("dataset={}", self.config.dataset),
+                format!("config={}", self.config.config),
+                format!("split={}", self.config.split),
+            ],
+            sections,
+            meta_prefix: None,
+        }))
+    }
+
+    fn read_row_batch(
+        &self,
+        indices: &[usize],
+        out: &mut Vec<DataRecord>,
+        limit: Option<usize>,
+    ) -> Result<(), SamplerError> {
+        let mut sorted = indices.to_vec();
+        sorted.sort_unstable();
+
+        let mut fetched = HashMap::with_capacity(sorted.len());
+        for idx in sorted {
+            let record = match self.row_at(idx)? {
+                Some(row) => self.row_to_record(&row, idx as u64)?,
+                None => None,
+            };
+            fetched.insert(idx, record);
+        }
+
+        for idx in indices {
+            if limit.is_some_and(|max| out.len() >= max) {
+                break;
+            }
+            if let Some(record) = fetched.remove(idx).flatten() {
+                out.push(record);
+            }
+        }
+        Ok(())
     }
 
     fn len_hint(&self) -> Option<usize> {
@@ -1705,5 +2100,142 @@ impl RowViewSource for HuggingFaceRowSource {
             })?;
         cache.insert(idx, row.clone(), self.config.cache_capacity);
         Ok(Some(row))
+    }
+}
+
+impl DataSource for HuggingFaceRowSource {
+    fn id(&self) -> &str {
+        &self.config.source_id
+    }
+
+    fn refresh(
+        &self,
+        cursor: Option<&SourceCursor>,
+        limit: Option<usize>,
+    ) -> Result<SourceSnapshot, SamplerError> {
+        let total = self
+            .len_hint()
+            .ok_or_else(|| SamplerError::SourceInconsistent {
+                source_id: self.config.source_id.clone(),
+                details: "huggingface source did not provide len_hint".to_string(),
+            })?;
+
+        if total == 0 {
+            return Ok(SourceSnapshot {
+                records: Vec::new(),
+                cursor: SourceCursor {
+                    last_seen: Utc::now(),
+                    revision: 0,
+                },
+            });
+        }
+
+        let max = limit.unwrap_or(total);
+        let mut start = cursor.map(|state| state.revision as usize).unwrap_or(0);
+        if start >= total {
+            start = 0;
+        }
+
+        let source_id = self.config.source_id.clone();
+        let seed = super::IndexablePager::seed_for(&source_id, total);
+        let mut permutation = super::IndexPermutation::new(total, seed, start as u64);
+
+        let mut records = Vec::new();
+        let mut pending_indices = Vec::with_capacity(HUGGINGFACE_REFRESH_BATCH);
+        let should_report = total >= 10_000 || max >= 1_024;
+        let report_every = Duration::from_millis(750);
+        let refresh_start = Instant::now();
+        let mut last_report = refresh_start;
+        let mut attempts = 0usize;
+        if should_report {
+            eprintln!(
+                "[triplets:source] refresh start source='{}' total={} target={}",
+                source_id, total, max
+            );
+        }
+
+        for _ in 0..total {
+            if records.len() >= max {
+                break;
+            }
+            pending_indices.push(permutation.next());
+            attempts += 1;
+            if pending_indices.len() == HUGGINGFACE_REFRESH_BATCH {
+                if should_report {
+                    eprintln!(
+                        "[triplets:source] refresh batch source='{}' batch_size={} attempted={} fetched={} elapsed={:.1}s",
+                        source_id,
+                        pending_indices.len(),
+                        attempts,
+                        records.len(),
+                        refresh_start.elapsed().as_secs_f64()
+                    );
+                }
+                self.read_row_batch(&pending_indices, &mut records, Some(max))?;
+                pending_indices.clear();
+                if should_report && last_report.elapsed() >= report_every {
+                    eprintln!(
+                        "[triplets:source] refresh progress source='{}' attempted={}/{} fetched={}/{} elapsed={:.1}s",
+                        source_id,
+                        attempts,
+                        total,
+                        records.len(),
+                        max,
+                        refresh_start.elapsed().as_secs_f64()
+                    );
+                    last_report = Instant::now();
+                }
+            }
+        }
+
+        if !pending_indices.is_empty() && records.len() < max {
+            self.read_row_batch(&pending_indices, &mut records, Some(max))?;
+        }
+
+        if should_report {
+            eprintln!(
+                "[triplets:source] refresh done source='{}' attempted={} fetched={} elapsed={:.2}s",
+                source_id,
+                attempts,
+                records.len(),
+                refresh_start.elapsed().as_secs_f64()
+            );
+        }
+
+        let next_start = permutation.cursor();
+        let last_seen = records
+            .iter()
+            .map(|record| record.updated_at)
+            .max()
+            .unwrap_or_else(Utc::now);
+
+        Ok(SourceSnapshot {
+            records,
+            cursor: SourceCursor {
+                last_seen,
+                revision: next_start as u64,
+            },
+        })
+    }
+
+    fn reported_record_count(&self) -> Result<u128, SamplerError> {
+        self.len_hint().map(|count| count as u128).ok_or_else(|| {
+            SamplerError::SourceInconsistent {
+                source_id: self.config.source_id.clone(),
+                details: "huggingface source did not provide len_hint".to_string(),
+            }
+        })
+    }
+
+    fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {
+        vec![TripletRecipe {
+            name: "huggingface_anchor_context".into(),
+            anchor: Selector::Role(SectionRole::Anchor),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 1.0,
+            instruction: None,
+        }]
     }
 }

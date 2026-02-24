@@ -24,15 +24,9 @@ pub mod file_corpus;
 #[cfg(feature = "huggingface")]
 /// Hugging Face bulk snapshot-backed row source.
 pub mod huggingface;
-/// Source-agnostic row/text contracts and field mapping policies.
-pub mod row_view;
 
 #[cfg(feature = "huggingface")]
 pub use huggingface::{HuggingFaceRowSource, HuggingFaceRowsConfig};
-pub use row_view::{
-    MappedRowViewAdapter, ResolvedFieldSets, RowFieldMapping, RowView, RowViewAdapter,
-    RowViewDataSourceAdapter, RowViewSource, TextField, TextFieldPolicy, TextView, TextViewSource,
-};
 
 pub(crate) mod grouping;
 
