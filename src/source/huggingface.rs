@@ -6,8 +6,8 @@ use parquet::record::reader::RowIter;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
@@ -41,7 +41,6 @@ const SHARD_SEQUENCE_STATE_VERSION: u32 = 1;
 const SHARD_SEQUENCE_STATE_FILE: &str = "_sequence_state.json";
 
 static SAMPLER_SEED_BY_SOURCE: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
-
 
 fn sampler_seed_for_source(source_id: &str) -> Option<u64> {
     let registry = SAMPLER_SEED_BY_SOURCE.get_or_init(|| Mutex::new(HashMap::new()));
@@ -125,7 +124,11 @@ impl HuggingFaceRowsConfig {
             config: config.into(),
             split: split.into(),
             snapshot_dir: snapshot_dir.into(),
-            shard_extensions: vec!["parquet".to_string(), "jsonl".to_string(), "ndjson".to_string()],
+            shard_extensions: vec![
+                "parquet".to_string(),
+                "jsonl".to_string(),
+                "ndjson".to_string(),
+            ],
             checkpoint_stride: 4096,
             cache_capacity: 2048,
             parquet_row_group_cache_capacity: 8,
@@ -160,10 +163,11 @@ impl ParquetCache {
             source_id: source_id.to_string(),
             reason: format!("failed opening parquet shard {}: {err}", path.display()),
         })?;
-        let reader = SerializedFileReader::new(file).map_err(|err| SamplerError::SourceUnavailable {
-            source_id: source_id.to_string(),
-            reason: format!("failed reading parquet shard {}: {err}", path.display()),
-        })?;
+        let reader =
+            SerializedFileReader::new(file).map_err(|err| SamplerError::SourceUnavailable {
+                source_id: source_id.to_string(),
+                reason: format!("failed reading parquet shard {}: {err}", path.display()),
+            })?;
         let reader = Arc::new(reader);
         self.readers.insert(path.to_path_buf(), reader.clone());
         Ok(reader)
@@ -227,6 +231,9 @@ struct SourceState {
     next_remote_idx: usize,
 }
 
+type ParquetGroupKey = (PathBuf, usize);
+type ParquetGroupRequest = (usize, usize, ShardIndex);
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct PersistedShardSequence {
     version: u32,
@@ -251,22 +258,21 @@ impl HuggingFaceRowSource {
             ));
         }
 
-        fs::create_dir_all(&config.snapshot_dir).map_err(|err| SamplerError::SourceUnavailable {
-            source_id: config.source_id.clone(),
-            reason: format!(
-                "failed creating snapshot_dir {}: {err}",
-                config.snapshot_dir.display()
-            ),
+        fs::create_dir_all(&config.snapshot_dir).map_err(|err| {
+            SamplerError::SourceUnavailable {
+                source_id: config.source_id.clone(),
+                reason: format!(
+                    "failed creating snapshot_dir {}: {err}",
+                    config.snapshot_dir.display()
+                ),
+            }
         })?;
 
         eprintln!(
             "[triplets:hf] indexing local shards in {}",
             config.snapshot_dir.display()
         );
-        let (shards, discovered) = match Self::build_shard_index(&config) {
-            Ok(found) => found,
-            Err(_) => (Vec::new(), 0),
-        };
+        let (shards, discovered) = Self::build_shard_index(&config).unwrap_or_default();
         if discovered == 0 {
             eprintln!(
                 "[triplets:hf] no local shards found in {} — lazy remote download enabled",
@@ -274,7 +280,10 @@ impl HuggingFaceRowSource {
             );
         }
 
-        let materialized_rows = config.max_rows.map(|cap| cap.min(discovered)).unwrap_or(discovered);
+        let materialized_rows = config
+            .max_rows
+            .map(|cap| cap.min(discovered))
+            .unwrap_or(discovered);
         let total_rows = match Self::fetch_global_row_count(&config) {
             Ok(value) => value,
             Err(err) => {
@@ -289,8 +298,7 @@ impl HuggingFaceRowSource {
         if let Some(global_total) = total_rows {
             eprintln!(
                 "[triplets:hf] global split row count reported: {} (known_local_rows={})",
-                global_total,
-                materialized_rows
+                global_total, materialized_rows
             );
         }
 
@@ -319,7 +327,8 @@ impl HuggingFaceRowSource {
     fn list_remote_candidates(
         config: &HuggingFaceRowsConfig,
     ) -> Result<(Vec<String>, HashMap<String, u64>), SamplerError> {
-        if let Ok((candidates, candidate_sizes)) = Self::list_remote_candidates_from_parquet_manifest(config)
+        if let Ok((candidates, candidate_sizes)) =
+            Self::list_remote_candidates_from_parquet_manifest(config)
             && !candidates.is_empty()
         {
             eprintln!(
@@ -346,10 +355,12 @@ impl HuggingFaceRowSource {
             "[triplets:hf] reading remote file list for dataset {}",
             config.dataset
         );
-        let info = repo_api.info().map_err(|err| SamplerError::SourceUnavailable {
-            source_id: config.source_id.clone(),
-            reason: format!("failed reading hf-hub repository info: {err}"),
-        })?;
+        let info = repo_api
+            .info()
+            .map_err(|err| SamplerError::SourceUnavailable {
+                source_id: config.source_id.clone(),
+                reason: format!("failed reading hf-hub repository info: {err}"),
+            })?;
 
         let accepted = config
             .shard_extensions
@@ -428,16 +439,13 @@ impl HuggingFaceRowSource {
                     source_id: config.source_id.clone(),
                     reason: format!(
                         "dataset '{}' appears to be parquet-only, but shard_extensions does not include parquet ({:?}).",
-                        config.dataset,
-                        config.shard_extensions
+                        config.dataset, config.shard_extensions
                     ),
                 });
             }
             eprintln!(
                 "[triplets:hf] no remote candidates found for dataset='{}' split='{}' extensions={:?}; source will be treated as exhausted",
-                config.dataset,
-                config.split,
-                config.shard_extensions
+                config.dataset, config.split, config.shard_extensions
             );
             return Ok((Vec::new(), HashMap::new()));
         }
@@ -462,7 +470,10 @@ impl HuggingFaceRowSource {
 
         let raw = fs::read_to_string(&path).map_err(|err| SamplerError::SourceUnavailable {
             source_id: config.source_id.clone(),
-            reason: format!("failed reading shard-sequence state {}: {err}", path.display()),
+            reason: format!(
+                "failed reading shard-sequence state {}: {err}",
+                path.display()
+            ),
         })?;
 
         let mut persisted: PersistedShardSequence =
@@ -527,7 +538,10 @@ impl HuggingFaceRowSource {
         let raw = serde_json::to_vec_pretty(&persisted).map_err(|err| {
             SamplerError::SourceUnavailable {
                 source_id: self.config.source_id.clone(),
-                reason: format!("failed encoding shard-sequence state {}: {err}", path.display()),
+                reason: format!(
+                    "failed encoding shard-sequence state {}: {err}",
+                    path.display()
+                ),
             }
         })?;
 
@@ -550,7 +564,10 @@ impl HuggingFaceRowSource {
         Ok(())
     }
 
-    fn rotate_candidates_deterministically(config: &HuggingFaceRowsConfig, candidates: &mut Vec<String>) {
+    fn rotate_candidates_deterministically(
+        config: &HuggingFaceRowsConfig,
+        candidates: &mut [String],
+    ) {
         if candidates.len() <= 1 {
             return;
         }
@@ -596,18 +613,18 @@ impl HuggingFaceRowSource {
                 reason: format!("failed querying datasets-server parquet endpoint: {err}"),
             })?;
 
-        let body = response
-            .into_body()
-            .read_to_string()
-            .map_err(|err| SamplerError::SourceUnavailable {
+        let body = response.into_body().read_to_string().map_err(|err| {
+            SamplerError::SourceUnavailable {
                 source_id: config.source_id.clone(),
                 reason: format!("failed reading datasets-server parquet response body: {err}"),
-            })?;
-
-        let json: Value = serde_json::from_str(&body).map_err(|err| SamplerError::SourceUnavailable {
-            source_id: config.source_id.clone(),
-            reason: format!("failed parsing datasets-server parquet response: {err}"),
+            }
         })?;
+
+        let json: Value =
+            serde_json::from_str(&body).map_err(|err| SamplerError::SourceUnavailable {
+                source_id: config.source_id.clone(),
+                reason: format!("failed parsing datasets-server parquet response: {err}"),
+            })?;
 
         let accepted = config
             .shard_extensions
@@ -808,13 +825,13 @@ impl HuggingFaceRowSource {
             .sum::<u64>()
     }
 
-    fn fetch_global_row_count(config: &HuggingFaceRowsConfig) -> Result<Option<usize>, SamplerError> {
+    fn fetch_global_row_count(
+        config: &HuggingFaceRowsConfig,
+    ) -> Result<Option<usize>, SamplerError> {
         let endpoint = "https://datasets-server.huggingface.co/size";
         eprintln!(
             "[triplets:hf] requesting global row count dataset='{}' config='{}' split='{}'",
-            config.dataset,
-            config.config,
-            config.split
+            config.dataset, config.config, config.split
         );
 
         let response = ureq::get(endpoint)
@@ -827,20 +844,21 @@ impl HuggingFaceRowSource {
                 reason: format!("failed querying datasets-server size endpoint: {err}"),
             })?;
 
-        let body = response
-            .into_body()
-            .read_to_string()
-            .map_err(|err| SamplerError::SourceUnavailable {
-            source_id: config.source_id.clone(),
-            reason: format!("failed reading datasets-server size response body: {err}"),
+        let body = response.into_body().read_to_string().map_err(|err| {
+            SamplerError::SourceUnavailable {
+                source_id: config.source_id.clone(),
+                reason: format!("failed reading datasets-server size response body: {err}"),
+            }
         })?;
 
-        let json: Value = serde_json::from_str(&body).map_err(|err| SamplerError::SourceUnavailable {
-            source_id: config.source_id.clone(),
-            reason: format!("failed parsing datasets-server size response: {err}"),
-        })?;
+        let json: Value =
+            serde_json::from_str(&body).map_err(|err| SamplerError::SourceUnavailable {
+                source_id: config.source_id.clone(),
+                reason: format!("failed parsing datasets-server size response: {err}"),
+            })?;
 
-        let mut count = Self::extract_split_row_count_from_size_response(&json, &config.config, &config.split);
+        let mut count =
+            Self::extract_split_row_count_from_size_response(&json, &config.config, &config.split);
         if let (Some(max_rows), Some(rows)) = (config.max_rows, count) {
             count = Some(rows.min(max_rows));
         }
@@ -852,11 +870,7 @@ impl HuggingFaceRowSource {
         config_name: &str,
         split_name: &str,
     ) -> Option<usize> {
-        let to_usize = |value: &Value| {
-            value
-                .as_u64()
-                .and_then(|raw| usize::try_from(raw).ok())
-        };
+        let to_usize = |value: &Value| value.as_u64().and_then(|raw| usize::try_from(raw).ok());
 
         let size = json.get("size")?;
 
@@ -872,10 +886,11 @@ impl HuggingFaceRowSource {
                     .or_else(|| entry.get("name"))
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                if entry_config == config_name && entry_split == split_name {
-                    if let Some(rows) = entry.get("num_rows").and_then(to_usize) {
-                        return Some(rows);
-                    }
+                if entry_config == config_name
+                    && entry_split == split_name
+                    && let Some(rows) = entry.get("num_rows").and_then(to_usize)
+                {
+                    return Some(rows);
                 }
             }
         }
@@ -898,18 +913,18 @@ impl HuggingFaceRowSource {
                             .or_else(|| split_entry.get("name"))
                             .and_then(Value::as_str)
                             .unwrap_or_default();
-                        if entry_split == split_name {
-                            if let Some(rows) = split_entry.get("num_rows").and_then(to_usize) {
-                                return Some(rows);
-                            }
+                        if entry_split == split_name
+                            && let Some(rows) = split_entry.get("num_rows").and_then(to_usize)
+                        {
+                            return Some(rows);
                         }
                     }
                 }
 
-                if split_name.is_empty() {
-                    if let Some(rows) = config_entry.get("num_rows").and_then(to_usize) {
-                        return Some(rows);
-                    }
+                if split_name.is_empty()
+                    && let Some(rows) = config_entry.get("num_rows").and_then(to_usize)
+                {
+                    return Some(rows);
                 }
             }
         }
@@ -941,14 +956,20 @@ impl HuggingFaceRowSource {
                 );
                 fs::remove_file(&target).map_err(|err| SamplerError::SourceUnavailable {
                     source_id: config.source_id.clone(),
-                    reason: format!("failed removing incomplete shard {}: {err}", target.display()),
+                    reason: format!(
+                        "failed removing incomplete shard {}: {err}",
+                        target.display()
+                    ),
                 })?;
             }
 
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent).map_err(|err| SamplerError::SourceUnavailable {
                     source_id: config.source_id.clone(),
-                    reason: format!("failed creating snapshot subdir {}: {err}", parent.display()),
+                    reason: format!(
+                        "failed creating snapshot subdir {}: {err}",
+                        parent.display()
+                    ),
                 })?;
             }
 
@@ -957,17 +978,22 @@ impl HuggingFaceRowSource {
                 let _ = fs::remove_file(&temp_target);
             }
 
-            let response = ureq::get(remote_url).call().map_err(|err| {
-                SamplerError::SourceUnavailable {
-                    source_id: config.source_id.clone(),
-                    reason: format!("failed downloading shard URL '{}': {err}", remote_url),
-                }
-            })?;
+            let response =
+                ureq::get(remote_url)
+                    .call()
+                    .map_err(|err| SamplerError::SourceUnavailable {
+                        source_id: config.source_id.clone(),
+                        reason: format!("failed downloading shard URL '{}': {err}", remote_url),
+                    })?;
             let mut reader = response.into_body().into_reader();
-            let mut file = File::create(&temp_target).map_err(|err| SamplerError::SourceUnavailable {
-                source_id: config.source_id.clone(),
-                reason: format!("failed creating target shard {}: {err}", temp_target.display()),
-            })?;
+            let mut file =
+                File::create(&temp_target).map_err(|err| SamplerError::SourceUnavailable {
+                    source_id: config.source_id.clone(),
+                    reason: format!(
+                        "failed creating target shard {}: {err}",
+                        temp_target.display()
+                    ),
+                })?;
             eprintln!(
                 "[triplets:hf] downloading shard payload -> {}",
                 target.display()
@@ -977,25 +1003,37 @@ impl HuggingFaceRowSource {
             let mut buffer = vec![0u8; 8 * 1024 * 1024];
             let mut last_report = Instant::now();
             loop {
-                let read = reader.read(&mut buffer).map_err(|err| SamplerError::SourceUnavailable {
-                    source_id: config.source_id.clone(),
-                    reason: format!("failed reading shard stream '{}': {err}", remote_url),
-                })?;
+                let read =
+                    reader
+                        .read(&mut buffer)
+                        .map_err(|err| SamplerError::SourceUnavailable {
+                            source_id: config.source_id.clone(),
+                            reason: format!("failed reading shard stream '{}': {err}", remote_url),
+                        })?;
                 if read == 0 {
                     break;
                 }
-                file.write_all(&buffer[..read]).map_err(|err| SamplerError::SourceUnavailable {
-                    source_id: config.source_id.clone(),
-                    reason: format!("failed writing target shard {}: {err}", temp_target.display()),
-                })?;
+                file.write_all(&buffer[..read])
+                    .map_err(|err| SamplerError::SourceUnavailable {
+                        source_id: config.source_id.clone(),
+                        reason: format!(
+                            "failed writing target shard {}: {err}",
+                            temp_target.display()
+                        ),
+                    })?;
                 total_bytes = total_bytes.saturating_add(read as u64);
                 if last_report.elapsed() >= Duration::from_secs(2) {
                     let elapsed = started.elapsed().as_secs_f64();
                     if let Some(expected) = expected_bytes
                         && expected > 0
                     {
-                        let pct = ((total_bytes as f64 / expected as f64) * 100.0).clamp(0.0, 100.0);
-                        let rate = if elapsed > 0.0 { total_bytes as f64 / elapsed } else { 0.0 };
+                        let pct =
+                            ((total_bytes as f64 / expected as f64) * 100.0).clamp(0.0, 100.0);
+                        let rate = if elapsed > 0.0 {
+                            total_bytes as f64 / elapsed
+                        } else {
+                            0.0
+                        };
                         let eta_secs = if rate > 0.0 && total_bytes < expected {
                             (expected.saturating_sub(total_bytes) as f64) / rate
                         } else {
@@ -1067,10 +1105,13 @@ impl HuggingFaceRowSource {
         let repo = Repo::new(config.dataset.clone(), RepoType::Dataset);
         let repo_api = api.repo(repo);
 
-        let mut local_cached = repo_api.get(remote_path).map_err(|err| SamplerError::SourceUnavailable {
-            source_id: config.source_id.clone(),
-            reason: format!("failed downloading '{}' from hf-hub: {err}", remote_path),
-        })?;
+        let mut local_cached =
+            repo_api
+                .get(remote_path)
+                .map_err(|err| SamplerError::SourceUnavailable {
+                    source_id: config.source_id.clone(),
+                    reason: format!("failed downloading '{}' from hf-hub: {err}", remote_path),
+                })?;
         if !local_cached.exists() {
             for _ in 0..5 {
                 local_cached = repo_api.download(remote_path).map_err(|err| {
@@ -1133,10 +1174,13 @@ impl HuggingFaceRowSource {
                     checkpoints.push(offset);
                 }
                 line.clear();
-                let bytes = reader.read_line(&mut line).map_err(|err| SamplerError::SourceUnavailable {
-                    source_id: config.source_id.clone(),
-                    reason: format!("failed reading shard {}: {err}", path.display()),
-                })?;
+                let bytes =
+                    reader
+                        .read_line(&mut line)
+                        .map_err(|err| SamplerError::SourceUnavailable {
+                            source_id: config.source_id.clone(),
+                            reason: format!("failed reading shard {}: {err}", path.display()),
+                        })?;
                 if bytes == 0 {
                     break;
                 }
@@ -1169,20 +1213,20 @@ impl HuggingFaceRowSource {
             source_id: config.source_id.clone(),
             reason: format!("failed opening parquet shard {}: {err}", path.display()),
         })?;
-        let reader = SerializedFileReader::new(file).map_err(|err| SamplerError::SourceUnavailable {
-            source_id: config.source_id.clone(),
-            reason: format!("failed reading parquet metadata {}: {err}", path.display()),
-        })?;
+        let reader =
+            SerializedFileReader::new(file).map_err(|err| SamplerError::SourceUnavailable {
+                source_id: config.source_id.clone(),
+                reason: format!("failed reading parquet metadata {}: {err}", path.display()),
+            })?;
 
         let mut row_groups = Vec::new();
         let mut running = 0usize;
         for meta in reader.metadata().row_groups() {
-            let group_rows = usize::try_from(meta.num_rows()).map_err(|_| {
-                SamplerError::SourceUnavailable {
+            let group_rows =
+                usize::try_from(meta.num_rows()).map_err(|_| SamplerError::SourceUnavailable {
                     source_id: config.source_id.clone(),
                     reason: format!("parquet row group size overflow in {}", path.display()),
-                }
-            })?;
+                })?;
             if group_rows == 0 {
                 continue;
             }
@@ -1193,12 +1237,13 @@ impl HuggingFaceRowSource {
             return Ok((running, row_groups));
         }
 
-        let total_rows = usize::try_from(reader.metadata().file_metadata().num_rows()).map_err(|_| {
-            SamplerError::SourceUnavailable {
-                source_id: config.source_id.clone(),
-                reason: format!("parquet row count overflow in {}", path.display()),
-            }
-        })?;
+        let total_rows =
+            usize::try_from(reader.metadata().file_metadata().num_rows()).map_err(|_| {
+                SamplerError::SourceUnavailable {
+                    source_id: config.source_id.clone(),
+                    reason: format!("parquet row count overflow in {}", path.display()),
+                }
+            })?;
         if total_rows == 0 {
             return Ok((0, Vec::new()));
         }
@@ -1208,10 +1253,13 @@ impl HuggingFaceRowSource {
     fn ensure_row_available(&self, idx: usize) -> Result<bool, SamplerError> {
         loop {
             {
-                let state = self.state.lock().map_err(|_| SamplerError::SourceUnavailable {
-                    source_id: self.config.source_id.clone(),
-                    reason: "huggingface source state lock poisoned".to_string(),
-                })?;
+                let state = self
+                    .state
+                    .lock()
+                    .map_err(|_| SamplerError::SourceUnavailable {
+                        source_id: self.config.source_id.clone(),
+                        reason: "huggingface source state lock poisoned".to_string(),
+                    })?;
 
                 if idx < state.materialized_rows {
                     return Ok(true);
@@ -1229,18 +1277,24 @@ impl HuggingFaceRowSource {
             }
 
             let need_candidates = {
-                let state = self.state.lock().map_err(|_| SamplerError::SourceUnavailable {
-                    source_id: self.config.source_id.clone(),
-                    reason: "huggingface source state lock poisoned".to_string(),
-                })?;
+                let state = self
+                    .state
+                    .lock()
+                    .map_err(|_| SamplerError::SourceUnavailable {
+                        source_id: self.config.source_id.clone(),
+                        reason: "huggingface source state lock poisoned".to_string(),
+                    })?;
                 state.remote_candidates.is_none()
             };
 
             if need_candidates {
-                let mut state = self.state.lock().map_err(|_| SamplerError::SourceUnavailable {
-                    source_id: self.config.source_id.clone(),
-                    reason: "huggingface source state lock poisoned".to_string(),
-                })?;
+                let mut state = self
+                    .state
+                    .lock()
+                    .map_err(|_| SamplerError::SourceUnavailable {
+                        source_id: self.config.source_id.clone(),
+                        reason: "huggingface source state lock poisoned".to_string(),
+                    })?;
                 if state.remote_candidates.is_none() {
                     if let Some(persisted) = Self::load_persisted_shard_sequence(&self.config)? {
                         let candidate_count = persisted.candidates.len();
@@ -1249,11 +1303,11 @@ impl HuggingFaceRowSource {
                         state.next_remote_idx = persisted.next_remote_idx.min(candidate_count);
                         eprintln!(
                             "[triplets:hf] resumed shard sequence state: next={}/{}",
-                            state.next_remote_idx,
-                            candidate_count
+                            state.next_remote_idx, candidate_count
                         );
                     } else {
-                        let (mut candidates, candidate_sizes) = Self::list_remote_candidates(&self.config)?;
+                        let (mut candidates, candidate_sizes) =
+                            Self::list_remote_candidates(&self.config)?;
                         Self::rotate_candidates_deterministically(&self.config, &mut candidates);
                         state.remote_candidates = Some(candidates);
                         state.remote_candidate_sizes = candidate_sizes;
@@ -1267,8 +1321,9 @@ impl HuggingFaceRowSource {
                         .as_ref()
                         .map(|values| values.len())
                         .unwrap_or(0);
-                    let bootstrap_needed =
-                        state.materialized_rows == 0 && candidate_count > 0 && state.next_remote_idx == 0;
+                    let bootstrap_needed = state.materialized_rows == 0
+                        && candidate_count > 0
+                        && state.next_remote_idx == 0;
                     let known_rows = state.materialized_rows;
                     let shard_count = state.shards.len();
                     eprintln!(
@@ -1278,7 +1333,10 @@ impl HuggingFaceRowSource {
                         shard_count,
                         self.config
                             .local_disk_cap_bytes
-                            .map(|bytes| format!("{:.2} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0)))
+                            .map(|bytes| format!(
+                                "{:.2} GiB",
+                                bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+                            ))
                             .unwrap_or_else(|| "disabled".to_string()),
                         self.config.min_resident_shards,
                     );
@@ -1315,10 +1373,13 @@ impl HuggingFaceRowSource {
 
     fn download_next_remote_shard(&self) -> Result<bool, SamplerError> {
         let (remote_ordinal, remote_total, remote_path, expected_bytes) = {
-            let mut state = self.state.lock().map_err(|_| SamplerError::SourceUnavailable {
-                source_id: self.config.source_id.clone(),
-                reason: "huggingface source state lock poisoned".to_string(),
-            })?;
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| SamplerError::SourceUnavailable {
+                    source_id: self.config.source_id.clone(),
+                    reason: "huggingface source state lock poisoned".to_string(),
+                })?;
             let Some(candidates) = &state.remote_candidates else {
                 return Ok(false);
             };
@@ -1329,7 +1390,8 @@ impl HuggingFaceRowSource {
             let remote_ordinal = sequence_pos + 1;
             let remote_total = candidates.len();
             let seed = Self::shard_candidate_seed(&self.config, remote_total);
-            let mut permutation = super::IndexPermutation::new(remote_total, seed, sequence_pos as u64);
+            let mut permutation =
+                super::IndexPermutation::new(remote_total, seed, sequence_pos as u64);
             let candidate_idx = permutation.next();
             let remote_path = candidates[candidate_idx].clone();
             let expected_bytes = state.remote_candidate_sizes.get(&remote_path).copied();
@@ -1339,21 +1401,19 @@ impl HuggingFaceRowSource {
 
         eprintln!(
             "[triplets:hf] lazy downloading shard {}/{}: {}",
-            remote_ordinal,
-            remote_total,
-            remote_path
+            remote_ordinal, remote_total, remote_path
         );
-        let local_path = Self::download_and_materialize_shard(
-            &self.config,
-            &remote_path,
-            expected_bytes,
-        )?;
+        let local_path =
+            Self::download_and_materialize_shard(&self.config, &remote_path, expected_bytes)?;
 
         let global_start = {
-            let state = self.state.lock().map_err(|_| SamplerError::SourceUnavailable {
-                source_id: self.config.source_id.clone(),
-                reason: "huggingface source state lock poisoned".to_string(),
-            })?;
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| SamplerError::SourceUnavailable {
+                    source_id: self.config.source_id.clone(),
+                    reason: "huggingface source state lock poisoned".to_string(),
+                })?;
             state.materialized_rows
         };
 
@@ -1365,10 +1425,13 @@ impl HuggingFaceRowSource {
             return Ok(true);
         };
 
-        let mut state = self.state.lock().map_err(|_| SamplerError::SourceUnavailable {
-            source_id: self.config.source_id.clone(),
-            reason: "huggingface source state lock poisoned".to_string(),
-        })?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| SamplerError::SourceUnavailable {
+                source_id: self.config.source_id.clone(),
+                reason: "huggingface source state lock poisoned".to_string(),
+            })?;
 
         if self
             .config
@@ -1390,7 +1453,9 @@ impl HuggingFaceRowSource {
         shard.global_start = state.materialized_rows;
         shard.row_count = rows_to_add;
         if shard.is_parquet {
-            shard.parquet_row_groups.retain(|(start, _)| *start < rows_to_add);
+            shard
+                .parquet_row_groups
+                .retain(|(start, _)| *start < rows_to_add);
             if let Some((start, count)) = shard.parquet_row_groups.last_mut() {
                 let allowed = rows_to_add.saturating_sub(*start);
                 *count = (*count).min(allowed);
@@ -1429,11 +1494,7 @@ impl HuggingFaceRowSource {
 
         eprintln!(
             "[triplets:hf] state: rows={} shards={} remaining_candidates={} disk_usage={:.2} GiB cap={}",
-            materialized_rows,
-            shard_count,
-            remaining_candidates,
-            usage_gib,
-            cap_str,
+            materialized_rows, shard_count, remaining_candidates, usage_gib, cap_str,
         );
 
         Ok(true)
@@ -1444,30 +1505,45 @@ impl HuggingFaceRowSource {
         source_path: &Path,
         target_path: &Path,
     ) -> Result<(), SamplerError> {
-        let resolved_source = fs::canonicalize(source_path).unwrap_or_else(|_| source_path.to_path_buf());
+        let resolved_source =
+            fs::canonicalize(source_path).unwrap_or_else(|_| source_path.to_path_buf());
 
         if let Some(parent) = target_path.parent() {
             fs::create_dir_all(parent).map_err(|err| SamplerError::SourceUnavailable {
                 source_id: config.source_id.clone(),
-                reason: format!("failed creating snapshot subdir {}: {err}", parent.display()),
+                reason: format!(
+                    "failed creating snapshot subdir {}: {err}",
+                    parent.display()
+                ),
             })?;
         }
 
         if target_path.exists() {
-            let src_meta = fs::metadata(&resolved_source).map_err(|err| SamplerError::SourceUnavailable {
-                source_id: config.source_id.clone(),
-                reason: format!("failed reading source metadata {}: {err}", resolved_source.display()),
-            })?;
-            let dst_meta = fs::metadata(target_path).map_err(|err| SamplerError::SourceUnavailable {
-                source_id: config.source_id.clone(),
-                reason: format!("failed reading target metadata {}: {err}", target_path.display()),
-            })?;
+            let src_meta =
+                fs::metadata(&resolved_source).map_err(|err| SamplerError::SourceUnavailable {
+                    source_id: config.source_id.clone(),
+                    reason: format!(
+                        "failed reading source metadata {}: {err}",
+                        resolved_source.display()
+                    ),
+                })?;
+            let dst_meta =
+                fs::metadata(target_path).map_err(|err| SamplerError::SourceUnavailable {
+                    source_id: config.source_id.clone(),
+                    reason: format!(
+                        "failed reading target metadata {}: {err}",
+                        target_path.display()
+                    ),
+                })?;
             if src_meta.len() == dst_meta.len() {
                 return Ok(());
             }
             fs::remove_file(target_path).map_err(|err| SamplerError::SourceUnavailable {
                 source_id: config.source_id.clone(),
-                reason: format!("failed replacing target file {}: {err}", target_path.display()),
+                reason: format!(
+                    "failed replacing target file {}: {err}",
+                    target_path.display()
+                ),
             })?;
         }
 
@@ -1482,7 +1558,9 @@ impl HuggingFaceRowSource {
         Ok(())
     }
 
-    fn build_shard_index(config: &HuggingFaceRowsConfig) -> Result<(Vec<ShardIndex>, usize), SamplerError> {
+    fn build_shard_index(
+        config: &HuggingFaceRowsConfig,
+    ) -> Result<(Vec<ShardIndex>, usize), SamplerError> {
         let start_index = Instant::now();
         let mut shard_paths = Vec::new();
         let accepted = config
@@ -1506,7 +1584,10 @@ impl HuggingFaceRowSource {
             if ext.eq_ignore_ascii_case("parquet") {
                 saw_parquet = true;
             }
-            if accepted.iter().any(|allowed| allowed == &ext.to_ascii_lowercase()) {
+            if accepted
+                .iter()
+                .any(|allowed| allowed == &ext.to_ascii_lowercase())
+            {
                 shard_paths.push(entry.path().to_path_buf());
             }
         }
@@ -1553,7 +1634,8 @@ impl HuggingFaceRowSource {
                 .is_some_and(|ext| ext.eq_ignore_ascii_case("parquet"));
 
             let (rows, parquet_row_groups, checkpoints) = if is_parquet {
-                let (mut rows, mut parquet_row_groups) = Self::parquet_row_group_map(config, &path)?;
+                let (mut rows, mut parquet_row_groups) =
+                    Self::parquet_row_group_map(config, &path)?;
                 if let Some(max_rows) = config.max_rows {
                     rows = rows.min(max_rows.saturating_sub(running_total));
                     let covered = parquet_row_groups
@@ -1585,9 +1667,11 @@ impl HuggingFaceRowSource {
                         checkpoints.push(offset);
                     }
                     line.clear();
-                    let bytes = reader.read_line(&mut line).map_err(|err| SamplerError::SourceUnavailable {
-                        source_id: config.source_id.clone(),
-                        reason: format!("failed reading shard {}: {err}", path.display()),
+                    let bytes = reader.read_line(&mut line).map_err(|err| {
+                        SamplerError::SourceUnavailable {
+                            source_id: config.source_id.clone(),
+                            reason: format!("failed reading shard {}: {err}", path.display()),
+                        }
                     })?;
                     if bytes == 0 {
                         break;
@@ -1663,19 +1747,23 @@ impl HuggingFaceRowSource {
             source_id: self.config.source_id.clone(),
             reason: format!("failed opening shard {}: {err}", shard.path.display()),
         })?;
-        file.seek(SeekFrom::Start(seek_offset)).map_err(|err| SamplerError::SourceUnavailable {
-            source_id: self.config.source_id.clone(),
-            reason: format!("failed seeking shard {}: {err}", shard.path.display()),
-        })?;
+        file.seek(SeekFrom::Start(seek_offset))
+            .map_err(|err| SamplerError::SourceUnavailable {
+                source_id: self.config.source_id.clone(),
+                reason: format!("failed seeking shard {}: {err}", shard.path.display()),
+            })?;
 
         let mut reader = BufReader::new(file);
         let mut line = String::new();
         for _ in checkpoint_line..local_idx {
             line.clear();
-            let bytes = reader.read_line(&mut line).map_err(|err| SamplerError::SourceUnavailable {
-                source_id: self.config.source_id.clone(),
-                reason: format!("failed scanning shard {}: {err}", shard.path.display()),
-            })?;
+            let bytes =
+                reader
+                    .read_line(&mut line)
+                    .map_err(|err| SamplerError::SourceUnavailable {
+                        source_id: self.config.source_id.clone(),
+                        reason: format!("failed scanning shard {}: {err}", shard.path.display()),
+                    })?;
             if bytes == 0 {
                 return Err(SamplerError::SourceUnavailable {
                     source_id: self.config.source_id.clone(),
@@ -1689,10 +1777,12 @@ impl HuggingFaceRowSource {
         }
 
         line.clear();
-        let bytes = reader.read_line(&mut line).map_err(|err| SamplerError::SourceUnavailable {
-            source_id: self.config.source_id.clone(),
-            reason: format!("failed reading shard {}: {err}", shard.path.display()),
-        })?;
+        let bytes = reader
+            .read_line(&mut line)
+            .map_err(|err| SamplerError::SourceUnavailable {
+                source_id: self.config.source_id.clone(),
+                reason: format!("failed reading shard {}: {err}", shard.path.display()),
+            })?;
         if bytes == 0 {
             return Err(SamplerError::SourceUnavailable {
                 source_id: self.config.source_id.clone(),
@@ -1785,10 +1875,11 @@ impl HuggingFaceRowSource {
                         source_id: self.config.source_id.clone(),
                         details: format!("missing configured anchor column '{name}'"),
                     })?;
-                let text = Self::value_to_text(value).ok_or_else(|| SamplerError::SourceInconsistent {
-                    source_id: self.config.source_id.clone(),
-                    details: format!("configured anchor column '{name}' has null/empty value"),
-                })?;
+                let text =
+                    Self::value_to_text(value).ok_or_else(|| SamplerError::SourceInconsistent {
+                        source_id: self.config.source_id.clone(),
+                        details: format!("configured anchor column '{name}' has null/empty value"),
+                    })?;
                 text_fields.push(RowTextField {
                     name: name.clone(),
                     text,
@@ -1802,10 +1893,13 @@ impl HuggingFaceRowSource {
                         source_id: self.config.source_id.clone(),
                         details: format!("missing configured positive column '{name}'"),
                     })?;
-                let text = Self::value_to_text(value).ok_or_else(|| SamplerError::SourceInconsistent {
-                    source_id: self.config.source_id.clone(),
-                    details: format!("configured positive column '{name}' has null/empty value"),
-                })?;
+                let text =
+                    Self::value_to_text(value).ok_or_else(|| SamplerError::SourceInconsistent {
+                        source_id: self.config.source_id.clone(),
+                        details: format!(
+                            "configured positive column '{name}' has null/empty value"
+                        ),
+                    })?;
                 text_fields.push(RowTextField {
                     name: name.clone(),
                     text,
@@ -1819,10 +1913,11 @@ impl HuggingFaceRowSource {
                         source_id: self.config.source_id.clone(),
                         details: format!("missing configured context column '{name}'"),
                     })?;
-                let text = Self::value_to_text(value).ok_or_else(|| SamplerError::SourceInconsistent {
-                    source_id: self.config.source_id.clone(),
-                    details: format!("configured context column '{name}' has null/empty value"),
-                })?;
+                let text =
+                    Self::value_to_text(value).ok_or_else(|| SamplerError::SourceInconsistent {
+                        source_id: self.config.source_id.clone(),
+                        details: format!("configured context column '{name}' has null/empty value"),
+                    })?;
                 text_fields.push(RowTextField {
                     name: name.clone(),
                     text,
@@ -1848,10 +1943,11 @@ impl HuggingFaceRowSource {
                         source_id: self.config.source_id.clone(),
                         details: format!("missing configured text column '{name}'"),
                     })?;
-                let text = Self::value_to_text(value).ok_or_else(|| SamplerError::SourceInconsistent {
-                    source_id: self.config.source_id.clone(),
-                    details: format!("configured text column '{name}' has null/empty value"),
-                })?;
+                let text =
+                    Self::value_to_text(value).ok_or_else(|| SamplerError::SourceInconsistent {
+                        source_id: self.config.source_id.clone(),
+                        details: format!("configured text column '{name}' has null/empty value"),
+                    })?;
                 text_fields.push(RowTextField {
                     name: name.clone(),
                     text,
@@ -1873,7 +1969,11 @@ impl HuggingFaceRowSource {
         })
     }
 
-    fn row_to_record(&self, row: &RowView, row_index: u64) -> Result<Option<DataRecord>, SamplerError> {
+    fn row_to_record(
+        &self,
+        row: &RowView,
+        row_index: u64,
+    ) -> Result<Option<DataRecord>, SamplerError> {
         if row.text_fields.is_empty() {
             return Ok(None);
         }
@@ -1960,29 +2060,33 @@ impl HuggingFaceRowSource {
         }
 
         if !pending.is_empty() {
-            let resolutions = {
-                let state = self.state.lock().map_err(|_| SamplerError::SourceUnavailable {
-                    source_id: self.config.source_id.clone(),
-                    reason: "huggingface source state lock poisoned".to_string(),
-                })?;
-                let mut resolved = Vec::with_capacity(pending.len());
-                for idx in &pending {
-                    let (shard, local_idx) = Self::locate_shard(&state.shards, *idx).ok_or_else(|| {
-                        SamplerError::SourceUnavailable {
+            let resolutions =
+                {
+                    let state = self
+                        .state
+                        .lock()
+                        .map_err(|_| SamplerError::SourceUnavailable {
                             source_id: self.config.source_id.clone(),
-                            reason: format!("row index out of range: {idx}"),
-                        }
-                    })?;
-                    resolved.push((*idx, shard.clone(), local_idx));
-                }
-                resolved
-            };
+                            reason: "huggingface source state lock poisoned".to_string(),
+                        })?;
+                    let mut resolved = Vec::with_capacity(pending.len());
+                    for idx in &pending {
+                        let (shard, local_idx) = Self::locate_shard(&state.shards, *idx)
+                            .ok_or_else(|| SamplerError::SourceUnavailable {
+                                source_id: self.config.source_id.clone(),
+                                reason: format!("row index out of range: {idx}"),
+                            })?;
+                        resolved.push((*idx, shard.clone(), local_idx));
+                    }
+                    resolved
+                };
 
-            let mut parquet_groups: HashMap<(PathBuf, usize), Vec<(usize, usize, ShardIndex)>> =
+            let mut parquet_groups: HashMap<ParquetGroupKey, Vec<ParquetGroupRequest>> =
                 HashMap::new();
             for (idx, shard, local_idx) in resolutions {
                 if shard.is_parquet {
-                    let (group_pos, local_in_group) = self.locate_parquet_group(&shard, local_idx)?;
+                    let (group_pos, local_in_group) =
+                        self.locate_parquet_group(&shard, local_idx)?;
                     parquet_groups
                         .entry((shard.path.clone(), group_pos))
                         .or_default()
@@ -2167,7 +2271,6 @@ impl HuggingFaceRowSource {
 
         Some(1)
     }
-
 }
 
 impl DataSource for HuggingFaceRowSource {
@@ -2292,12 +2395,12 @@ impl DataSource for HuggingFaceRowSource {
     }
 
     fn reported_record_count(&self) -> Result<u128, SamplerError> {
-        self.len_hint().map(|count| count as u128).ok_or_else(|| {
-            SamplerError::SourceInconsistent {
+        self.len_hint()
+            .map(|count| count as u128)
+            .ok_or_else(|| SamplerError::SourceInconsistent {
                 source_id: self.config.source_id.clone(),
                 details: "huggingface source did not provide len_hint".to_string(),
-            }
-        })
+            })
     }
 
     fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {

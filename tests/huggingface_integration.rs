@@ -46,11 +46,18 @@ fn huggingface_reads_local_jsonl_snapshot() {
         .expect("refresh should read jsonl rows");
 
     assert_eq!(snapshot.records.len(), 2);
-    assert!(snapshot.records.iter().all(|record| record.source == "hf_local_jsonl"));
-    assert!(snapshot
-        .records
-        .iter()
-        .any(|record| record.id.ends_with("::r1") || record.id.ends_with("::r2")));
+    assert!(
+        snapshot
+            .records
+            .iter()
+            .all(|record| record.source == "hf_local_jsonl")
+    );
+    assert!(
+        snapshot
+            .records
+            .iter()
+            .any(|record| record.id.ends_with("::r1") || record.id.ends_with("::r2"))
+    );
 }
 
 #[test]
@@ -84,7 +91,12 @@ fn huggingface_reads_local_ndjson_snapshot() {
         .expect("refresh should read ndjson rows");
 
     assert_eq!(snapshot.records.len(), 2);
-    assert!(snapshot.records.iter().all(|record| record.source == "hf_local_ndjson"));
+    assert!(
+        snapshot
+            .records
+            .iter()
+            .all(|record| record.source == "hf_local_ndjson")
+    );
     assert!(snapshot.records.iter().all(|record| {
         record
             .sections
@@ -116,8 +128,10 @@ fn huggingface_reads_live_remote_dataset() {
 
     assert!(!snapshot.records.is_empty());
     assert!(snapshot.records.len() <= 4);
-    assert!(snapshot
-        .records
-        .iter()
-        .all(|record| record.source == "hf_live_rotten_tomatoes"));
+    assert!(
+        snapshot
+            .records
+            .iter()
+            .all(|record| record.source == "hf_live_rotten_tomatoes")
+    );
 }
