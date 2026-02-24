@@ -131,3 +131,43 @@ impl Default for SamplerConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunking_strategy_defaults_are_stable() {
+        let cfg = ChunkingStrategy::default();
+        assert_eq!(cfg.max_window_tokens, 4096);
+        assert_eq!(cfg.overlap_tokens, vec![64, 128]);
+        assert_eq!(cfg.summary_fallback_weight, 0.35);
+        assert_eq!(cfg.summary_fallback_tokens, 512);
+        assert_eq!(cfg.chunk_weight_floor, 0.1);
+    }
+
+    #[test]
+    fn sampler_config_defaults_are_expected() {
+        let cfg = SamplerConfig::default();
+        assert_eq!(cfg.seed, 42);
+        assert_eq!(cfg.batch_size, 128);
+        assert_eq!(cfg.ingestion_max_records, 2048);
+        assert!(cfg.recipes.is_empty());
+        assert!(cfg.text_recipes.is_empty());
+        assert_eq!(cfg.allowed_splits, vec![SplitLabel::Train]);
+        assert_eq!(cfg.chunking.max_window_tokens, 4096);
+    }
+
+    #[test]
+    fn selector_variants_can_be_constructed() {
+        let role = Selector::Role(SectionRole::Anchor);
+        let paragraph = Selector::Paragraph(3);
+        let temporal = Selector::TemporalOffset(-2);
+        let random = Selector::Random;
+
+        assert!(matches!(role, Selector::Role(SectionRole::Anchor)));
+        assert!(matches!(paragraph, Selector::Paragraph(3)));
+        assert!(matches!(temporal, Selector::TemporalOffset(-2)));
+        assert!(matches!(random, Selector::Random));
+    }
+}

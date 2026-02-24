@@ -315,4 +315,17 @@ mod tests {
             .unwrap();
         assert_eq!(snapshot.records.len(), 1);
     }
+
+    #[test]
+    fn stream_incremental_empty_directory_keeps_zero_cursor() {
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+
+        let snapshot = FileStream::new(root)
+            .stream_incremental(None, Some(3), |_path| Ok(Some(build_record(_path))))
+            .unwrap();
+
+        assert!(snapshot.records.is_empty());
+        assert_eq!(snapshot.cursor.revision, 0);
+    }
 }
