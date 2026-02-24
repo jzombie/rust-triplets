@@ -4,11 +4,23 @@
 
 **WORK IN PROGRESS.**
 
-Composable data sampling primitives for deterministic multi-source ML/AI training-data orchestration.
+`triplets` is a reusable core of composable data sampling primitives for deterministic multi-source ML/AI training-data orchestration, with sampler primitives, split/state persistence, chunking and weighting mechanics, and source abstractions (`DataSource`, `DataRecord`) that avoid tying behavior to proprietary corpora.
 
-`triplets` is a reusable core for ML/AI training-data orchestration. It provides sampler primitives, split/state persistence, chunking and weighting mechanics, and source abstractions (`DataSource`, `DataRecord`) without tying behavior to proprietary corpora.
+**Note:** This crate is intended primarily for textual (or textualized) data — records that can be represented as text (for example: documents, QA pairs, logs, or metadata-prefixed chunks) suitable for model training.
 
-CI is configured to run tests/linting on macOS, Linux, and Windows.
+> _CI is configured to run tests/linting on macOS, Linux, and Windows._
+
+## What are triplets?
+
+In metric learning, a triplet is a training example composed of:
+
+- **Anchor**: a reference example.
+- **Positive**: another example that should be close to the anchor.
+- **Negative**: an example that should be farther from the anchor.
+
+Training on many `(anchor, positive, negative)` groups helps a model learn useful embedding space structure (similar items closer together, dissimilar items farther apart).
+
+`triplets` focuses on building these training examples deterministically across multiple data sources, with reproducible split assignment, weighting, chunking, and resume-friendly state.
 
 ## High-level features
 
