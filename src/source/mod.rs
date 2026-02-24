@@ -402,11 +402,16 @@ mod tests {
     use super::*;
     use crate::data::{QualityScore, RecordSection, SectionRole};
     use crate::types::RecordId;
+    use chrono::Duration;
 
     /// Minimal `IndexableSource` test fixture.
     struct IndexableStub {
         id: SourceId,
         count: usize,
+    }
+
+    struct NoLenHintStub {
+        id: SourceId,
     }
 
     impl IndexableStub {
@@ -415,6 +420,12 @@ mod tests {
                 id: id.to_string(),
                 count,
             }
+        }
+    }
+
+    impl NoLenHintStub {
+        fn new(id: &str) -> Self {
+            Self { id: id.to_string() }
         }
     }
 
@@ -447,6 +458,20 @@ mod tests {
                 }],
                 meta_prefix: None,
             }))
+        }
+    }
+
+    impl IndexableSource for NoLenHintStub {
+        fn id(&self) -> &str {
+            &self.id
+        }
+
+        fn len_hint(&self) -> Option<usize> {
+            None
+        }
+
+        fn record_at(&self, _idx: usize) -> Result<Option<DataRecord>, SamplerError> {
+            Ok(None)
         }
     }
 
@@ -501,5 +526,85 @@ mod tests {
             max_idx - min_idx >= total / 2,
             "expected spread across the index space, got min={min_idx} max={max_idx}"
         );
+    }
+
+    #[test]
+    fn indexable_pager_errors_when_len_hint_missing() {
+        let pager = IndexablePager::new("no_len_hint");
+        let source = NoLenHintStub::new("no_len_hint");
+        let result = pager.refresh(&source, None, Some(3));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn indexable_adapter_reported_count_errors_when_len_hint_missing() {
+        let adapter = IndexableAdapter::new(NoLenHintStub::new("no_len_hint"));
+        let result = adapter.reported_record_count();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn indexable_pager_refresh_with_zero_total_returns_empty_snapshot() {
+        let pager = IndexablePager::new("empty");
+        let snapshot = pager
+            .refresh_with(0, None, Some(4), |_idx| Ok(None))
+            .unwrap();
+        assert!(snapshot.records.is_empty());
+        assert_eq!(snapshot.cursor.revision, 0);
+    }
+
+    #[test]
+    fn in_memory_source_refresh_wraps_cursor_and_uses_latest_timestamp() {
+        let now = Utc::now();
+        let older = now - Duration::seconds(5);
+        let newer = now + Duration::seconds(5);
+        let mk = |id: &str, ts: chrono::DateTime<Utc>| DataRecord {
+            id: id.to_string(),
+            source: "mem".to_string(),
+            created_at: ts,
+            updated_at: ts,
+            quality: QualityScore { trust: 1.0 },
+            taxonomy: Vec::new(),
+            sections: vec![RecordSection {
+                role: SectionRole::Anchor,
+                heading: None,
+                text: id.to_string(),
+                sentences: vec![id.to_string()],
+            }],
+            meta_prefix: None,
+        };
+
+        let source = InMemorySource::new("mem", vec![mk("a", older), mk("b", newer)]);
+        let cursor = SourceCursor {
+            last_seen: now,
+            revision: 7,
+        };
+
+        let snapshot = source.refresh(Some(&cursor), Some(1)).unwrap();
+        assert_eq!(snapshot.records.len(), 1);
+        assert_eq!(snapshot.records[0].id, "a");
+        assert_eq!(snapshot.cursor.revision, 1);
+        assert_eq!(snapshot.cursor.last_seen, older);
+    }
+
+    #[test]
+    fn index_permutation_permute_bits_handles_zero_bits_and_zero_seed_path() {
+        assert_eq!(IndexPermutation::permute_bits(123, 0, 99), 0);
+
+        let bits = 1;
+        let value = 1;
+        let out = IndexPermutation::permute_bits(value, bits, 0);
+        assert!(out <= 1);
+    }
+
+    #[test]
+    fn index_permutation_next_stays_within_total_and_cursor_advances() {
+        let mut perm = IndexPermutation::new(3, 7, 0);
+        let mut seen = Vec::new();
+        for _ in 0..8 {
+            seen.push(perm.next());
+        }
+        assert!(seen.iter().all(|idx| *idx < 3));
+        assert!(perm.cursor() < 3);
     }
 }

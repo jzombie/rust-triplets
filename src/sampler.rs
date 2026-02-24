@@ -2079,7 +2079,7 @@ mod tests {
         PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH, PRIMARY_SOURCE_ID, SECONDARY_SOURCE_ID,
         TEXT_BATCH_SEQUENCE_HASH, TRIPLET_BATCH_SEQUENCE_HASH,
     };
-    use crate::data::{ChunkView, QualityScore, RecordSection};
+    use crate::data::{ChunkView, QualityScore, RecordChunk, RecordSection};
     use crate::kvp::{KvpField, KvpPrefixSampler};
     use crate::metadata::META_FIELD_DATE;
     use crate::source::{DataSource, InMemorySource, SourceCursor, SourceSnapshot};
@@ -2096,6 +2096,89 @@ mod tests {
     struct RecipeSource {
         inner: InMemorySource,
         triplet_recipes: Vec<TripletRecipe>,
+    }
+
+    #[test]
+    fn role_helpers_and_taxonomy_value_cover_branches() {
+        assert!(roles_match(&SectionRole::Anchor, &SectionRole::Anchor));
+        assert!(!roles_match(&SectionRole::Anchor, &SectionRole::Context));
+
+        let key = role_cursor_key(&"rec-1".to_string(), &SectionRole::Anchor);
+        assert_eq!(key.0, "rec-1");
+        assert_eq!(key.1, role_label(&SectionRole::Anchor));
+        assert_ne!(
+            role_label(&SectionRole::Anchor),
+            role_label(&SectionRole::Context)
+        );
+
+        let mut record = sample_record();
+        record.taxonomy = vec!["source_a".into(), META_FIELD_DATE.encode("2026-02-23")];
+        assert_eq!(taxonomy_value(&record, META_FIELD_DATE), Some("2026-02-23"));
+
+        record.taxonomy = vec!["source_a".into(), "other=value".into()];
+        assert_eq!(taxonomy_value(&record, META_FIELD_DATE), None);
+    }
+
+    #[test]
+    fn strategy_reason_and_chunk_key_cover_all_variants() {
+        let reason_a = strategy_reason(&NegativeStrategy::WrongPublicationDate);
+        let reason_b = strategy_reason(&NegativeStrategy::WrongArticle);
+        let reason_c = strategy_reason(&NegativeStrategy::QuestionAnswerMismatch);
+        assert!(!reason_a.is_empty());
+        assert!(!reason_b.is_empty());
+        assert!(!reason_c.is_empty());
+        assert_ne!(reason_a, reason_b);
+        assert_ne!(reason_b, reason_c);
+
+        let base = RecordChunk {
+            record_id: "r1".into(),
+            section_idx: 0,
+            view: ChunkView::Window {
+                index: 2,
+                overlap: 0,
+                span: 8,
+                start_ratio: 0.25,
+            },
+            text: "window".into(),
+            tokens_estimate: 8,
+            quality: QualityScore { trust: 1.0 },
+        };
+        let key_window = chunk_key(&base);
+        assert!(key_window.contains("|w|2"));
+
+        let summary = RecordChunk {
+            view: ChunkView::SummaryFallback {
+                strategy: "summary".into(),
+                weight: 0.8,
+            },
+            ..base
+        };
+        let key_summary = chunk_key(&summary);
+        assert!(key_summary.contains("|s|summary"));
+    }
+
+    #[test]
+    fn deterministic_rng_state_roundtrip_and_fill_bytes_are_stable() {
+        let mut rng_a = DeterministicRng::new(123);
+        let first = rng_a.next_u64();
+        let saved = rng_a.state();
+
+        let mut rng_b = DeterministicRng::from_state(saved);
+        assert_eq!(rng_a.next_u64(), rng_b.next_u64());
+        assert_ne!(first, 0);
+
+        let mut bytes_a = [0u8; 13];
+        let mut bytes_b = [0u8; 13];
+        let mut rng_c = DeterministicRng::new(999);
+        let mut rng_d = DeterministicRng::new(999);
+        rng_c.fill_bytes(&mut bytes_a);
+        rng_d.fill_bytes(&mut bytes_b);
+        assert_eq!(bytes_a, bytes_b);
+        assert!(bytes_a.iter().any(|b| *b != 0));
+
+        let mut rng_e = DeterministicRng::new(999);
+        let mut rng_f = DeterministicRng::new(999);
+        assert_eq!(rng_e.next_u32() as u64, (rng_f.next_u64() as u32) as u64);
     }
 
     #[test]
