@@ -53,43 +53,16 @@ This crate does **not** perform semantic mining/retrieval scoring by itself; ins
 
 ## Integrated sources
 
-`triplets` currently includes two integrated source backends:
+`triplets` ships with two built-in sources and deterministic paging is always on for both (`FileSource`, `HuggingFaceRowSource`).
 
-- **Non-optional determinism guarantee:** built-in deterministic source paging is always on for integrated deterministic sources (`FileSource`, `HuggingFaceRowSource`) and is keyed by sampler seed.
+- **File source (`FileSource`)**: local files and folders.
+- **Hugging Face source (`HuggingFaceRowSource`)** *(feature: `huggingface`)*: HF dataset rows.
 
-- **File source (`FileSource`)**
-  - Indexes local filesystem content and converts files into `DataRecord`s.
-  - Supports configurable taxonomy extraction and section construction (anchor/context shaping), category-level trust overrides, and deterministic paging through `FileCorpusIndex`.
-  - Best when your corpus already lives in local folders (for example docs, QA exports, notes, logs) and you want deterministic, metadata-aware sampling without a separate ingestion service.
+### Hugging Face source lists (recommended)
 
-- **Hugging Face source (`HuggingFaceRowSource`)** *(feature: `huggingface`)*
-  - Reads split/config-scoped dataset rows from Hugging Face (including remote shard discovery, local materialization, and lazy row access).
-  - Supports deterministic row paging, local shard caching, optional disk-cap controls, and conversion from row payloads into sampler-ready records.
-  - Best when your training data is hosted as HF datasets and you want to combine remote corpus slices with local sources in the same deterministic batch pipeline.
+Define HF sources in a text file and pass it to the demo or your own loader. The `hf://` prefix is a `triplets`-specific shorthand used only in these lists:
 
-### Hugging Face field mapping and row formats
-
-`HuggingFaceRowSource` supports three mapping modes:
-
-1. **Role-column mode** (explicit anchor/positive/context columns)
-  - Enabled when any of these are set: `anchor_column`, `positive_column`, `context_columns`.
-  - Use this when you want full control over which fields become anchor/context text.
-
-2. **Selected text-columns mode** (explicit text field list)
-  - Set `text_columns = vec![...]`.
-  - First selected field becomes anchor; second+ become context sections.
-
-3. **Auto-detect mode**
-  - Used when role columns are unset and `text_columns` is empty.
-  - All non-id scalar/object/array fields are textified and used.
-
-> _Rows that are missing required mapped columns, or where required fields are empty/blank after textification, are skipped instead of erroring._
-
-#### Hugging Face source lists
-
-For multi-source runs, you can provide an explicit source list file instead of hardcoding field mappings in code. Each line is a single dataset entry with a required mapping. The `hf://` prefix is a `triplets`-specific shorthand (not an official Hugging Face URI scheme) used only in these lists:
-
-```
+```text
 hf://org/dataset/config/split anchor=... positive=... context=a,b text=x,y
 ```
 
@@ -97,12 +70,13 @@ Rules:
 
 - Lines are whitespace-delimited; comments start with `#`.
 - `anchor=`, `positive=`, `context=`, and `text=` are the only accepted keys.
-- At least one mapping key is required per line (no schema inference or heuristics).
+- At least one mapping key is required per line.
 - `context=` and `text=` accept comma-delimited column lists.
+- Rows with missing/blank required fields are skipped.
 
 Example list (see [examples/common/hf_sources.txt](examples/common/hf_sources.txt)):
 
-```
+```text
 # role columns
 hf://labofsahil/hackernews-vector-search-dataset/default/train anchor=title positive=text
 hf://wikimedia/wikipedia/20231101.en/train anchor=title positive=text
@@ -111,191 +85,57 @@ hf://wikimedia/wikipedia/20231101.en/train anchor=title positive=text
 hf://pfox/71k-English-uncleaned-wordlist/default/train text=text
 ```
 
-Helpers (feature `huggingface`) are exposed from the crate root:
+Row formats supported by the HF backend:
 
-- `parse_hf_source_line`
-- `load_hf_sources_from_list`
-- `resolve_hf_list_roots`
-- `build_hf_sources`
-
-The list helpers create snapshot directories under `.hf-snapshots/source-list/<dataset>/<config>/<split>/replica_N`.
-
-Minimal role-column example:
-
-```rust,no_run
-use triplets::{HuggingFaceRowSource, HuggingFaceRowsConfig};
-
-# let snapshot_dir = std::path::PathBuf::from(".hf-snapshots/local");
-let mut hf = HuggingFaceRowsConfig::new(
-   "hf_rows",
-   "org/dataset",
-   "default",
-   "train",
-   snapshot_dir,
-);
-hf.anchor_column = Some("question".to_string());
-hf.positive_column = Some("answer".to_string());
-hf.context_columns = vec!["title".to_string(), "tags".to_string()];
-
-let _source = HuggingFaceRowSource::new(hf)?;
-# Ok::<(), triplets::SamplerError>(())
-```
-
-Minimal selected text-columns example:
-
-```rust,no_run
-use triplets::{HuggingFaceRowSource, HuggingFaceRowsConfig};
-
-# let snapshot_dir = std::path::PathBuf::from(".hf-snapshots/local");
-let mut hf = HuggingFaceRowsConfig::new(
-   "hf_rows",
-   "org/dataset",
-   "default",
-   "train",
-   snapshot_dir,
-);
-hf.text_columns = vec!["title".to_string(), "body".to_string()];
-
-let _source = HuggingFaceRowSource::new(hf)?;
-# Ok::<(), triplets::SamplerError>(())
-```
-
-Supported shard formats:
-
-- **Parquet** (`.parquet`)
-- **Line-delimited JSON** (`.jsonl`, `.ndjson`) where each line is a row object
-- **Plain text lines** (for example `.txt`) where each non-empty line is treated as `{ "text": "..." }`
-
-Important: this source is row-oriented, so non-parquet inputs must be line-delimited. If your corpus is free-form files/documents (not row lines), prefer `FileSource`.
+- `.parquet`
+- `.jsonl` / `.ndjson` (one JSON object per line)
+- plain text lines (each non-empty line becomes `{ "text": "..." }`)
 
 ## Adding new sources
 
-You can extend `triplets` by implementing one of the source interfaces and registering it with the sampler.
+Use one of these two paths:
 
-- **Path 1: implement `DataSource` directly**
-  - Use this when your backend already has its own paging/cursor model (API pagination, DB cursors, streaming offsets, etc.).
-  - Implement `id()`, `refresh(&SamplerConfig, cursor, limit)`, and `reported_record_count(&SamplerConfig)`.
-  - Return `DataRecord` values with stable record IDs and the sections/taxonomy your recipes need.
+- **Implement `DataSource`** when your backend has its own paging/cursor model.
+- **Implement `IndexableSource`** when you can fetch rows by a stable integer index, then wrap with `IndexableAdapter`.
 
-- **Path 2: implement `IndexableSource` and wrap with `IndexableAdapter`**
-  - Use this when your backend can fetch records by stable integer index.
-  - Implement `len_hint()` and `record_at(idx)`; then register `IndexableAdapter::new(your_source)`.
-  - This reuses the built-in deterministic paging/cursor behavior automatically.
-
-Recommended implementation checklist:
-
-1. Define source configuration (connection/root path/filtering options).
-2. Implement source-to-`DataRecord` mapping (sections, taxonomy, trust).
-3. Keep `refresh(...)` and `reported_record_count()` aligned to the same corpus scope.
-4. Register with `sampler.register_source(...)`.
-5. Validate with batch calls (`next_triplet_batch`, `next_pair_batch`, `next_text_batch`) and persistence (`persist_state()`).
-
-Seed/configuration contract:
-
-- `DataSource` receives `&SamplerConfig` directly in `refresh(...)` and `reported_record_count(...)`.
-- `FileSource` and `HuggingFaceRowSource` use that runtime sampler config for deterministic behavior.
-- For direct source usage outside sampler registration, pass the intended `SamplerConfig` into each `refresh(...)` / `reported_record_count(...)` call.
-
-### Seed behavior summary
-
-For built-in deterministic sources (`FileSource`, `HuggingFaceRowSource`), a fixed seed gives the same sample order across runs.
-
-This holds when source configuration, sampler seed, dataset snapshot/content, split/config selection, and refresh limit/cursor pattern are unchanged.
-
-Using a different seed changes deterministic permutation state; very small/degenerate sample windows can still overlap.
-
-Minimal direct-source example:
+Minimal `IndexableSource` example:
 
 ```rust,no_run
-use triplets::{DataSource, SamplerConfig};
-use triplets::source::{FileSource, FileSourceConfig};
+use triplets::{DataRecord, SamplerError};
+use triplets::source::{IndexableAdapter, IndexableSource};
+use chrono::Utc;
 
-# let root = std::path::PathBuf::from("/tmp/corpus");
-let base = FileSourceConfig::new("docs", &root);
+struct MySource {
+  id: String,
+}
 
-let seed_7 = SamplerConfig { seed: 7, ..SamplerConfig::default() };
-let seed_123 = SamplerConfig { seed: 123, ..SamplerConfig::default() };
+impl IndexableSource for MySource {
+  fn id(&self) -> &str {
+    &self.id
+  }
 
-let source_a = FileSource::new(base.clone());
-let source_b = FileSource::new(base.clone());
-let source_c = FileSource::new(base);
+  fn len_hint(&self) -> Option<usize> {
+    Some(0)
+  }
 
-let ids_a: Vec<String> = source_a
-  .refresh(&seed_7, None, Some(8))?
-  .records
-  .into_iter()
-  .map(|record| record.id)
-  .collect();
-let ids_b: Vec<String> = source_b
-  .refresh(&seed_7, None, Some(8))?
-  .records
-  .into_iter()
-  .map(|record| record.id)
-  .collect();
-let ids_c: Vec<String> = source_c
-  .refresh(&seed_123, None, Some(8))?
-  .records
-  .into_iter()
-  .map(|record| record.id)
-  .collect();
+  fn record_at(&self, _idx: usize) -> Result<Option<DataRecord>, SamplerError> {
+    Ok(Some(DataRecord {
+      id: format!("{}::0", self.id),
+      source: self.id.clone(),
+      created_at: Utc::now(),
+      updated_at: Utc::now(),
+      quality: Default::default(),
+      taxonomy: Vec::new(),
+      sections: Vec::new(),
+      meta_prefix: None,
+    }))
+  }
+}
 
-assert_eq!(ids_a, ids_b);
-assert_ne!(ids_a, ids_c);
-# Ok::<(), triplets::SamplerError>(())
+let source = IndexableAdapter::new(MySource { id: "my_source".into() });
 ```
 
-For deeper implementation templates (including indexable and manual paging patterns), see [Advanced source implementation examples](#advanced-source-implementation-examples).
-
-### Metadata-driven sampling flow
-
-Use `triplets` to build deterministic training batches that carry metadata context:
-
-- Put structural tags in `DataRecord.taxonomy` (source/date/category/etc.) for filtering and analysis.
-- Use recipes/selectors to choose which sections become anchor/positive/negative text.
-- Attach optional KVP metadata prefixes (below) so sampled text can include lightweight context headers.
-- Keep split assignment deterministic while changing recipe or weighting behavior at runtime.
-
-This gives you metadata-aware sampling orchestration, while semantic retrieval/mining logic stays in your downstream pipeline.
-
-### KVP data decorator
-
-- Each `DataRecord` can carry an optional `meta_prefix` sampler (`KvpPrefixSampler`).
-- At sample time, the sampler can prepend a header line to chunk text, formatted like: `meta: key=value | key2=value2`.
-- `KvpField` supports multiple value renderings per key and optional per-field presence probability.
-- `KvpPrefixSampler` supports variant selection and overall dropout (emit prefix sometimes, or always).
-- This is designed to give the model useful context signals (date/source/category/etc.) without making a single rigid header pattern easy to memorize.
-- Multi-render values, per-field presence control, field-order variation, and prefix dropout reduce shortcut learning and encourage reliance on the underlying content.
-- KVP prefixes decorate sampled text; they do not change deterministic split assignment.
-
-## Getting started
-
-Add `triplets` to a downstream crate:
-
-```bash
-cargo add triplets
-```
-
-To run the included examples in this repository (for exploration/contributor workflow):
-
-```bash
-cargo run --example multi_source_demo -- --help
-```
-
-For contributors (development check):
-
-```bash
-cargo test
-```
-
-Minimal shape:
-
-1. Implement one or more `DataSource` backends.
-2. Create `SamplerConfig` (chunking, recipes, split policy).
-3. Open a split store (`DeterministicSplitStore` or `FileSplitStore`).
-4. Construct `TripletSampler` and register sources.
-  - If you call a source directly (without registering), pass the intended `SamplerConfig` into source calls.
-5. Call one of the batch APIs: `next_triplet_batch(split)`, `next_pair_batch(split)`, or `next_text_batch(split)`.
-6. Call `persist_state()` when you want restart-resume behavior.
+Then register the source with your sampler and call `next_triplet_batch`, `next_pair_batch`, or `next_text_batch`.
 
 ## Examples
 
