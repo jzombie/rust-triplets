@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
+use tracing::{info, warn};
 use walkdir::WalkDir;
 
 use crate::SamplerError;
@@ -160,6 +161,7 @@ struct ParquetCache {
 }
 
 impl ParquetCache {
+    /// Return a cached parquet reader for `path`, opening and caching it when missing.
     fn reader_for(
         &mut self,
         source_id: &str,
@@ -201,10 +203,12 @@ struct RowCache {
 }
 
 impl RowCache {
+    /// Return a cloned cached row by absolute index.
     fn get(&self, idx: usize) -> Option<RowView> {
         self.rows.get(&idx).cloned()
     }
 
+    /// Insert or refresh a cached row and evict oldest entries over `capacity`.
     fn insert(&mut self, idx: usize, row: RowView, capacity: usize) {
         if capacity == 0 {
             return;
@@ -279,13 +283,13 @@ impl HuggingFaceRowSource {
             }
         })?;
 
-        eprintln!(
+        info!(
             "[triplets:hf] indexing local shards in {}",
             config.snapshot_dir.display()
         );
         let (shards, discovered) = Self::build_shard_index(&config).unwrap_or_default();
         if discovered == 0 {
-            eprintln!(
+            info!(
                 "[triplets:hf] no local shards found in {} — lazy remote download enabled",
                 config.snapshot_dir.display()
             );
@@ -298,7 +302,7 @@ impl HuggingFaceRowSource {
         let total_rows = match Self::fetch_global_row_count(&config) {
             Ok(value) => value,
             Err(err) => {
-                eprintln!(
+                warn!(
                     "[triplets:hf] global row count request failed; continuing with discovered rows only: {}",
                     err
                 );
@@ -307,13 +311,13 @@ impl HuggingFaceRowSource {
         };
 
         if let Some(global_total) = total_rows {
-            eprintln!(
+            info!(
                 "[triplets:hf] global split row count reported: {} (known_local_rows={})",
                 global_total, materialized_rows
             );
         }
 
-        eprintln!(
+        info!(
             "[triplets:hf] source ready in {:.2}s (rows={}, shards={})",
             start_new.elapsed().as_secs_f64(),
             materialized_rows,
@@ -336,11 +340,13 @@ impl HuggingFaceRowSource {
         })
     }
 
+    /// Compute the effective internal row read target from refresh `limit`.
     fn effective_refresh_batch_target(&self, limit: usize) -> usize {
         let multiplier = self.config.refresh_batch_multiplier.max(1);
         limit.saturating_mul(multiplier)
     }
 
+    /// Compute dynamic `len_hint` headroom rows based on sampler and source config.
     fn effective_expansion_headroom_rows(&self) -> usize {
         let multiplier = self.config.remote_expansion_headroom_multiplier.max(1);
         let base = self
@@ -353,6 +359,7 @@ impl HuggingFaceRowSource {
         base.saturating_mul(multiplier)
     }
 
+    /// Resolve and filter remote shard candidates from manifest or repository listing.
     fn list_remote_candidates(
         config: &HuggingFaceRowsConfig,
     ) -> Result<(Vec<String>, HashMap<String, u64>), SamplerError> {
@@ -360,7 +367,7 @@ impl HuggingFaceRowSource {
             Self::list_remote_candidates_from_parquet_manifest(config)
             && !candidates.is_empty()
         {
-            eprintln!(
+            info!(
                 "[triplets:hf] remote parquet manifest candidates matching {:?}: {}",
                 config.shard_extensions,
                 candidates.len()
@@ -380,7 +387,7 @@ impl HuggingFaceRowSource {
 
         let repo = Repo::new(config.dataset.clone(), RepoType::Dataset);
         let repo_api = api.repo(repo);
-        eprintln!(
+        info!(
             "[triplets:hf] reading remote file list for dataset {}",
             config.dataset
         );
@@ -447,7 +454,7 @@ impl HuggingFaceRowSource {
         if candidates.is_empty() && !config.split.is_empty() {
             let (fallback_candidates, fallback_saw_parquet) = collect_candidates(false);
             if !fallback_candidates.is_empty() {
-                eprintln!(
+                warn!(
                     "[triplets:hf] split filter '{}' matched no remote files; falling back to extension-only remote candidate scan",
                     config.split
                 );
@@ -457,7 +464,7 @@ impl HuggingFaceRowSource {
         }
 
         candidates.sort();
-        eprintln!(
+        info!(
             "[triplets:hf] remote candidates matching {:?}: {}",
             config.shard_extensions,
             candidates.len()
@@ -472,7 +479,7 @@ impl HuggingFaceRowSource {
                     ),
                 });
             }
-            eprintln!(
+            warn!(
                 "[triplets:hf] no remote candidates found for dataset='{}' split='{}' extensions={:?}; source will be treated as exhausted",
                 config.dataset, config.split, config.shard_extensions
             );
@@ -482,6 +489,7 @@ impl HuggingFaceRowSource {
         Ok((candidates, HashMap::new()))
     }
 
+    /// Return the persistence file path for shard sequence state.
     fn shard_sequence_state_path(config: &HuggingFaceRowsConfig) -> PathBuf {
         config
             .snapshot_dir
@@ -489,6 +497,7 @@ impl HuggingFaceRowSource {
             .join(SHARD_SEQUENCE_STATE_FILE)
     }
 
+    /// Load persisted shard candidate sequence when metadata and sampler seed match.
     fn load_persisted_shard_sequence(
         config: &HuggingFaceRowsConfig,
         current_sampler_seed: Option<u64>,
@@ -522,7 +531,7 @@ impl HuggingFaceRowSource {
             || persisted.split != config.split
             || persisted.sampler_seed != current_sampler_seed
         {
-            eprintln!(
+            warn!(
                 "[triplets:hf] shard-sequence state mismatch for {}; rebuilding candidate order",
                 path.display()
             );
@@ -536,6 +545,7 @@ impl HuggingFaceRowSource {
         Ok(Some(persisted))
     }
 
+    /// Persist current shard candidate sequence and position atomically.
     fn persist_shard_sequence_locked(&self, state: &SourceState) -> Result<(), SamplerError> {
         let Some(candidates) = state.remote_candidates.as_ref() else {
             return Ok(());
@@ -597,6 +607,7 @@ impl HuggingFaceRowSource {
         Ok(())
     }
 
+    /// Rotate candidate ordering deterministically using source identity.
     fn rotate_candidates_deterministically(
         config: &HuggingFaceRowsConfig,
         candidates: &mut [String],
@@ -613,6 +624,7 @@ impl HuggingFaceRowSource {
         candidates.rotate_left(offset);
     }
 
+    /// Build deterministic seed used to permute remote shard candidate order.
     fn shard_candidate_seed(
         config: &HuggingFaceRowsConfig,
         total_candidates: usize,
@@ -632,11 +644,12 @@ impl HuggingFaceRowSource {
         hasher.finish()
     }
 
+    /// Query datasets-server parquet manifest and derive shard candidates.
     fn list_remote_candidates_from_parquet_manifest(
         config: &HuggingFaceRowsConfig,
     ) -> Result<(Vec<String>, HashMap<String, u64>), SamplerError> {
         let endpoint = "https://datasets-server.huggingface.co/parquet";
-        eprintln!(
+        info!(
             "[triplets:hf] reading datasets-server parquet manifest for dataset {}",
             config.dataset
         );
@@ -695,7 +708,7 @@ impl HuggingFaceRowSource {
                     if Self::target_matches_expected_size(&target, expected_size) {
                         continue;
                     }
-                    eprintln!(
+                    warn!(
                         "[triplets:hf] incomplete cached shard detected (will redownload): {}",
                         target.display()
                     );
@@ -722,6 +735,7 @@ impl HuggingFaceRowSource {
         Ok((candidates, candidate_sizes))
     }
 
+    /// Map a candidate identifier to the local snapshot target path.
     fn candidate_target_path(config: &HuggingFaceRowsConfig, candidate: &str) -> PathBuf {
         if let Some(url) = candidate.strip_prefix(REMOTE_URL_PREFIX) {
             let suffix = url
@@ -735,6 +749,7 @@ impl HuggingFaceRowSource {
         config.snapshot_dir.join(candidate)
     }
 
+    /// Validate target file size against expected bytes when available.
     fn target_matches_expected_size(path: &Path, expected_bytes: Option<u64>) -> bool {
         if !path.exists() {
             return false;
@@ -749,14 +764,17 @@ impl HuggingFaceRowSource {
         true
     }
 
+    /// Return root directory used for manifest-cached remote shards.
     fn manifest_cache_root(&self) -> PathBuf {
         self.config.snapshot_dir.join("_parquet_manifest")
     }
 
+    /// Return on-disk size for a shard path, or 0 if metadata lookup fails.
     fn shard_size_bytes(path: &Path) -> u64 {
         fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
     }
 
+    /// Recompute shard `global_start` offsets and total materialized row count.
     fn recompute_shard_offsets(state: &mut SourceState) {
         let mut running = 0usize;
         for shard in &mut state.shards {
@@ -766,6 +784,7 @@ impl HuggingFaceRowSource {
         state.materialized_rows = running;
     }
 
+    /// Enforce local disk cap by evicting oldest manifest shards when possible.
     fn enforce_disk_cap_locked(
         &self,
         state: &mut SourceState,
@@ -825,7 +844,7 @@ impl HuggingFaceRowSource {
 
             usage_bytes = usage_bytes.saturating_sub(shard_size);
             evicted_any = true;
-            eprintln!(
+            warn!(
                 "[triplets:hf] evicted shard for disk cap: {} (usage={:.2} GiB cap={:.2} GiB)",
                 shard.path.display(),
                 usage_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
@@ -852,6 +871,7 @@ impl HuggingFaceRowSource {
         Ok(evicted_any)
     }
 
+    /// Return total on-disk bytes used by manifest-backed shards.
     fn manifest_usage_bytes_locked(&self, state: &SourceState) -> u64 {
         let manifest_root = self.manifest_cache_root();
         state
@@ -862,11 +882,12 @@ impl HuggingFaceRowSource {
             .sum::<u64>()
     }
 
+    /// Fetch exact split row count metadata from datasets-server size endpoint.
     fn fetch_global_row_count(
         config: &HuggingFaceRowsConfig,
     ) -> Result<Option<usize>, SamplerError> {
         let endpoint = "https://datasets-server.huggingface.co/size";
-        eprintln!(
+        info!(
             "[triplets:hf] requesting global row count dataset='{}' config='{}' split='{}'",
             config.dataset, config.config, config.split
         );
@@ -902,6 +923,7 @@ impl HuggingFaceRowSource {
         Ok(count)
     }
 
+    /// Extract split row count from datasets-server size payload variants.
     fn extract_split_row_count_from_size_response(
         json: &Value,
         config_name: &str,
@@ -976,6 +998,7 @@ impl HuggingFaceRowSource {
         None
     }
 
+    /// Download a shard (URL or hf-hub path) and materialize it under snapshot dir.
     fn download_and_materialize_shard(
         config: &HuggingFaceRowsConfig,
         remote_path: &str,
@@ -987,7 +1010,7 @@ impl HuggingFaceRowSource {
                 if Self::target_matches_expected_size(&target, expected_bytes) {
                     return Ok(target);
                 }
-                eprintln!(
+                warn!(
                     "[triplets:hf] replacing incomplete shard before retry: {}",
                     target.display()
                 );
@@ -1031,7 +1054,7 @@ impl HuggingFaceRowSource {
                         temp_target.display()
                     ),
                 })?;
-            eprintln!(
+            info!(
                 "[triplets:hf] downloading shard payload -> {}",
                 target.display()
             );
@@ -1076,7 +1099,7 @@ impl HuggingFaceRowSource {
                         } else {
                             0.0
                         };
-                        eprintln!(
+                        info!(
                             "[triplets:hf] download progress {}: {:.1}/{:.1} MiB ({:.1}%, {:.1}s elapsed, ETA {:.1}s)",
                             target.display(),
                             total_bytes as f64 / (1024.0 * 1024.0),
@@ -1086,7 +1109,7 @@ impl HuggingFaceRowSource {
                             eta_secs.max(0.0)
                         );
                     } else {
-                        eprintln!(
+                        info!(
                             "[triplets:hf] download progress {}: {:.1} MiB ({:.1}s)",
                             target.display(),
                             total_bytes as f64 / (1024.0 * 1024.0),
@@ -1101,7 +1124,7 @@ impl HuggingFaceRowSource {
                 && expected > 0
             {
                 let pct = ((total_bytes as f64 / expected as f64) * 100.0).clamp(0.0, 100.0);
-                eprintln!(
+                info!(
                     "[triplets:hf] download complete {}: {:.1}/{:.1} MiB ({:.1}%) in {:.1}s",
                     target.display(),
                     total_bytes as f64 / (1024.0 * 1024.0),
@@ -1110,7 +1133,7 @@ impl HuggingFaceRowSource {
                     elapsed
                 );
             } else {
-                eprintln!(
+                info!(
                     "[triplets:hf] download complete {}: {:.1} MiB in {:.1}s",
                     target.display(),
                     total_bytes as f64 / (1024.0 * 1024.0),
@@ -1182,6 +1205,7 @@ impl HuggingFaceRowSource {
         Ok(target)
     }
 
+    /// Build shard metadata for a single local file.
     fn index_single_shard(
         config: &HuggingFaceRowsConfig,
         path: &Path,
@@ -1242,6 +1266,7 @@ impl HuggingFaceRowSource {
         }))
     }
 
+    /// Build parquet row-group map for random-access row reads.
     fn parquet_row_group_map(
         config: &HuggingFaceRowsConfig,
         path: &Path,
@@ -1287,6 +1312,7 @@ impl HuggingFaceRowSource {
         Ok((total_rows, vec![(0, total_rows)]))
     }
 
+    /// Ensure row index is available, expanding remote shard set lazily if needed.
     fn ensure_row_available(&self, idx: usize) -> Result<bool, SamplerError> {
         loop {
             {
@@ -1345,7 +1371,7 @@ impl HuggingFaceRowSource {
                         state.remote_candidates = Some(persisted.candidates);
                         state.remote_candidate_sizes = persisted.candidate_sizes;
                         state.next_remote_idx = persisted.next_remote_idx.min(candidate_count);
-                        eprintln!(
+                        info!(
                             "[triplets:hf] resumed shard sequence state: next={}/{}",
                             state.next_remote_idx, candidate_count
                         );
@@ -1370,7 +1396,7 @@ impl HuggingFaceRowSource {
                         && state.next_remote_idx == 0;
                     let known_rows = state.materialized_rows;
                     let shard_count = state.shards.len();
-                    eprintln!(
+                    info!(
                         "[triplets:hf] state: candidates={} known_rows={} active_shards={} disk_cap={} min_resident_shards={}",
                         candidate_count,
                         known_rows,
@@ -1388,12 +1414,12 @@ impl HuggingFaceRowSource {
 
                     if bootstrap_needed {
                         let bootstrap_target = REMOTE_BOOTSTRAP_SHARDS.min(candidate_count);
-                        eprintln!(
+                        info!(
                             "[triplets:hf] bootstrapping remote shard diversity: target={} shard(s)",
                             bootstrap_target
                         );
                         for step in 0..bootstrap_target {
-                            eprintln!(
+                            info!(
                                 "[triplets:hf] bootstrap progress: {}/{}",
                                 step + 1,
                                 bootstrap_target
@@ -1402,7 +1428,7 @@ impl HuggingFaceRowSource {
                                 break;
                             }
                         }
-                        eprintln!("[triplets:hf] bootstrap complete");
+                        info!("[triplets:hf] bootstrap complete");
                     }
                 } else {
                     drop(state);
@@ -1415,6 +1441,7 @@ impl HuggingFaceRowSource {
         }
     }
 
+    /// Download and register the next remote shard candidate.
     fn download_next_remote_shard(&self) -> Result<bool, SamplerError> {
         let (remote_ordinal, remote_total, remote_path, expected_bytes) = {
             let mut state = self
@@ -1448,7 +1475,7 @@ impl HuggingFaceRowSource {
             (remote_ordinal, remote_total, remote_path, expected_bytes)
         };
 
-        eprintln!(
+        info!(
             "[triplets:hf] lazy downloading shard {}/{}: {}",
             remote_ordinal, remote_total, remote_path
         );
@@ -1467,7 +1494,7 @@ impl HuggingFaceRowSource {
         };
 
         let Some(shard) = Self::index_single_shard(&self.config, &local_path, global_start)? else {
-            eprintln!(
+            warn!(
                 "[triplets:hf] downloaded shard had zero rows and was skipped: {}",
                 local_path.display()
             );
@@ -1541,7 +1568,7 @@ impl HuggingFaceRowSource {
             }
         }
 
-        eprintln!(
+        info!(
             "[triplets:hf] state: rows={} shards={} remaining_candidates={} disk_usage={:.2} GiB cap={}",
             materialized_rows, shard_count, remaining_candidates, usage_gib, cap_str,
         );
@@ -1549,6 +1576,7 @@ impl HuggingFaceRowSource {
         Ok(true)
     }
 
+    /// Copy cached/downloaded source file into snapshot tree.
     fn materialize_local_file(
         config: &HuggingFaceRowsConfig,
         source_path: &Path,
@@ -1607,6 +1635,7 @@ impl HuggingFaceRowSource {
         Ok(())
     }
 
+    /// Build deterministic local shard index for accepted extensions.
     fn build_shard_index(
         config: &HuggingFaceRowsConfig,
     ) -> Result<(Vec<ShardIndex>, usize), SamplerError> {
@@ -1666,7 +1695,7 @@ impl HuggingFaceRowSource {
             .into_par_iter()
             .enumerate()
             .map(|(ordinal, path)| {
-                eprintln!(
+                info!(
                     "[triplets:hf] indexing shard {}: {}",
                     ordinal + 1,
                     path.display()
@@ -1713,7 +1742,7 @@ impl HuggingFaceRowSource {
             shards.push(shard);
         }
 
-        eprintln!(
+        info!(
             "[triplets:hf] indexing complete in {:.2}s (rows={}, shards={})",
             start_index.elapsed().as_secs_f64(),
             running_total,
@@ -1723,6 +1752,7 @@ impl HuggingFaceRowSource {
         Ok((shards, running_total))
     }
 
+    /// Locate containing shard and local offset for a global row index.
     fn locate_shard(shards: &[ShardIndex], idx: usize) -> Option<(&ShardIndex, usize)> {
         let pos = shards
             .binary_search_by(|shard| {
@@ -1739,6 +1769,7 @@ impl HuggingFaceRowSource {
         Some((shard, idx - shard.global_start))
     }
 
+    /// Read one JSONL/NDJSON line at a local row offset using checkpoints.
     fn read_line_at(&self, shard: &ShardIndex, local_idx: usize) -> Result<String, SamplerError> {
         let checkpoint_idx = local_idx / self.config.checkpoint_stride;
         let checkpoint_line = checkpoint_idx * self.config.checkpoint_stride;
@@ -1806,6 +1837,7 @@ impl HuggingFaceRowSource {
         Ok(line)
     }
 
+    /// Locate parquet row-group and in-group row offset for a local row index.
     fn locate_parquet_group(
         &self,
         shard: &ShardIndex,
@@ -1834,6 +1866,7 @@ impl HuggingFaceRowSource {
         Ok((group_pos, local_idx.saturating_sub(group_start)))
     }
 
+    /// Convert a serde JSON value into non-empty text when possible.
     fn value_to_text(value: &Value) -> Option<String> {
         match value {
             Value::Null => None,
@@ -1850,6 +1883,7 @@ impl HuggingFaceRowSource {
         }
     }
 
+    /// Parse a raw row payload into normalized `RowView` fields.
     fn parse_row(&self, absolute_idx: usize, row_value: &Value) -> Result<RowView, SamplerError> {
         let row_payload = row_value.get("row").unwrap_or(row_value);
         let row_obj = row_payload
@@ -1979,6 +2013,7 @@ impl HuggingFaceRowSource {
         })
     }
 
+    /// Convert a `RowView` into a sampler `DataRecord`.
     fn row_to_record(
         &self,
         row: &RowView,
@@ -2035,6 +2070,7 @@ impl HuggingFaceRowSource {
         }))
     }
 
+    /// Materialize records for requested indices into output buffer.
     fn read_row_batch(
         &self,
         indices: &[usize],
@@ -2243,6 +2279,7 @@ impl HuggingFaceRowSource {
         Ok(())
     }
 
+    /// Return the current index-domain upper bound for refresh paging.
     fn len_hint(&self) -> Option<usize> {
         let state = self.state.lock().ok()?;
         let known = state.materialized_rows;
@@ -2282,16 +2319,19 @@ impl HuggingFaceRowSource {
 }
 
 impl DataSource for HuggingFaceRowSource {
+    /// Return stable source id.
     fn id(&self) -> &str {
         &self.config.source_id
     }
 
+    /// Store active sampler configuration for runtime behavior alignment.
     fn configure_sampler(&self, config: &SamplerConfig) {
         if let Ok(mut slot) = self.sampler_config.lock() {
             *slot = Some(config.clone());
         }
     }
 
+    /// Refresh source records for the requested cursor and row limit.
     fn refresh(
         &self,
         cursor: Option<&SourceCursor>,
@@ -2334,7 +2374,7 @@ impl DataSource for HuggingFaceRowSource {
         let mut attempts = 0usize;
 
         if should_report {
-            eprintln!(
+            info!(
                 "[triplets:source] refresh start source='{}' total={} target={}",
                 source_id, total, max
             );
@@ -2357,7 +2397,7 @@ impl DataSource for HuggingFaceRowSource {
             }
 
             if should_report {
-                eprintln!(
+                info!(
                     "[triplets:source] refresh batch source='{}' batch_size={} attempted={} fetched={} elapsed={:.1}s",
                     source_id,
                     pending_indices.len(),
@@ -2370,7 +2410,7 @@ impl DataSource for HuggingFaceRowSource {
             self.read_row_batch(&pending_indices, &mut records, Some(max))?;
 
             if should_report && last_report.elapsed() >= report_every {
-                eprintln!(
+                info!(
                     "[triplets:source] refresh progress source='{}' attempted={}/{} fetched={}/{} elapsed={:.1}s",
                     source_id,
                     attempts,
@@ -2384,7 +2424,7 @@ impl DataSource for HuggingFaceRowSource {
         }
 
         if should_report {
-            eprintln!(
+            info!(
                 "[triplets:source] refresh done source='{}' attempted={} fetched={} elapsed={:.2}s",
                 source_id,
                 attempts,
@@ -2409,6 +2449,7 @@ impl DataSource for HuggingFaceRowSource {
         })
     }
 
+    /// Return exact reported record count from current len hint.
     fn reported_record_count(&self) -> Result<u128, SamplerError> {
         self.len_hint()
             .map(|count| count as u128)
@@ -2418,6 +2459,7 @@ impl DataSource for HuggingFaceRowSource {
             })
     }
 
+    /// Return default triplet recipe used by Hugging Face row sources.
     fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {
         vec![TripletRecipe {
             name: "huggingface_anchor_context".into(),
