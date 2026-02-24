@@ -371,10 +371,14 @@ mod tests {
         )
         .unwrap();
 
-        let source_default = FileSource::new(FileSourceConfig::new("qa_title_default", temp.path()));
+        let source_default =
+            FileSource::new(FileSourceConfig::new("qa_title_default", temp.path()));
         let default_snapshot = source_default.refresh(None, Some(1)).unwrap();
         assert_eq!(default_snapshot.records.len(), 1);
-        assert_eq!(default_snapshot.records[0].sections[0].text, "What is delta");
+        assert_eq!(
+            default_snapshot.records[0].sections[0].text,
+            "What is delta"
+        );
 
         let source_preserve = FileSource::new(
             FileSourceConfig::new("qa_title_preserve", temp.path())
@@ -382,7 +386,10 @@ mod tests {
         );
         let preserve_snapshot = source_preserve.refresh(None, Some(1)).unwrap();
         assert_eq!(preserve_snapshot.records.len(), 1);
-        assert_eq!(preserve_snapshot.records[0].sections[0].text, "What_is_delta");
+        assert_eq!(
+            preserve_snapshot.records[0].sections[0].text,
+            "What_is_delta"
+        );
     }
 
     #[test]
