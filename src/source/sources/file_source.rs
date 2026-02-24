@@ -336,4 +336,89 @@ mod tests {
         assert_eq!(snapshot.records[0].sections.len(), 2);
         assert_eq!(source.default_triplet_recipes().len(), recipes.len());
     }
+
+    #[test]
+    fn taxonomy_from_path_handles_nested_and_non_descendant_paths() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("root");
+        std::fs::create_dir_all(root.join("topic/subtopic")).unwrap();
+
+        let nested = root.join("topic/subtopic/doc.txt");
+        let taxonomy = taxonomy_from_path(&root, &nested, &"qa_tax".to_string());
+        assert_eq!(taxonomy, vec!["qa_tax", "topic", "subtopic"]);
+
+        let outside = temp.path().join("outside.txt");
+        let outside_taxonomy = taxonomy_from_path(&root, &outside, &"qa_tax".to_string());
+        assert_eq!(outside_taxonomy, vec!["qa_tax"]);
+    }
+
+    #[test]
+    fn anchor_context_sections_build_expected_roles_and_text() {
+        let sections = anchor_context_sections("What is delta", "Delta is change over time.");
+        assert_eq!(sections.len(), 2);
+        assert_eq!(sections[0].role, SectionRole::Anchor);
+        assert_eq!(sections[0].text, "What is delta");
+        assert_eq!(sections[1].role, SectionRole::Context);
+        assert_eq!(sections[1].text, "Delta is change over time.");
+    }
+
+    #[test]
+    fn title_replace_underscores_toggle_changes_anchor_title_text() {
+        let temp = tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("What_is_delta.txt"),
+            "Delta captures directional change.",
+        )
+        .unwrap();
+
+        let source_default = FileSource::new(FileSourceConfig::new("qa_title_default", temp.path()));
+        let default_snapshot = source_default.refresh(None, Some(1)).unwrap();
+        assert_eq!(default_snapshot.records.len(), 1);
+        assert_eq!(default_snapshot.records[0].sections[0].text, "What is delta");
+
+        let source_preserve = FileSource::new(
+            FileSourceConfig::new("qa_title_preserve", temp.path())
+                .with_title_replace_underscores(false),
+        );
+        let preserve_snapshot = source_preserve.refresh(None, Some(1)).unwrap();
+        assert_eq!(preserve_snapshot.records.len(), 1);
+        assert_eq!(preserve_snapshot.records[0].sections[0].text, "What_is_delta");
+    }
+
+    #[test]
+    fn refresh_skips_non_txt_files_even_when_text_only_disabled() {
+        let temp = tempdir().unwrap();
+        std::fs::write(temp.path().join("notes.md"), "markdown should be skipped").unwrap();
+        std::fs::write(temp.path().join("doc.txt"), "plain text should be indexed").unwrap();
+
+        let source = FileSource::new(
+            FileSourceConfig::new("qa_filtering", temp.path()).with_text_files_only(false),
+        );
+        let snapshot = source.refresh(None, None).unwrap();
+        assert_eq!(snapshot.records.len(), 1);
+        assert!(snapshot.records[0].id.contains("doc.txt"));
+    }
+
+    #[test]
+    fn trust_falls_back_to_default_and_count_and_id_are_exposed() {
+        let temp = tempdir().unwrap();
+        let docs = temp.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("alpha.txt"), "Alpha body.").unwrap();
+
+        let source = FileSource::new(
+            FileSourceConfig::new("qa_count", temp.path())
+                .with_trust(0.42)
+                .with_category_trust("factual", 0.95)
+                .with_taxonomy_builder(Arc::new(|_, _, source_id| {
+                    vec![source_id.clone(), "UNMATCHED".to_string()]
+                })),
+        );
+
+        let snapshot = source.refresh(None, None).unwrap();
+        assert_eq!(snapshot.records.len(), 1);
+        assert_eq!(snapshot.records[0].quality.trust, 0.42);
+        assert_eq!(source.id(), "qa_count");
+        assert_eq!(source.reported_record_count().unwrap(), 1);
+    }
 }
