@@ -942,7 +942,7 @@ mod tests {
         );
 
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("did not report a record count"));
+        assert!(err.contains("failed to report exact record count"));
     }
 
     #[test]
