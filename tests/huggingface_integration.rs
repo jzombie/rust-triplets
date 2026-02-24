@@ -9,7 +9,11 @@ use parquet::file::properties::WriterProperties;
 use parquet::file::writer::SerializedFileWriter;
 use parquet::schema::parser::parse_message_type;
 use triplets::source::backends::huggingface_source::load_hf_sources_from_list;
-use triplets::{DataSource, HuggingFaceRowSource, HuggingFaceRowsConfig, SamplerConfig};
+use triplets::{
+    DataSource, HfListRoots, HfSourceEntry, HuggingFaceRowSource, HuggingFaceRowsConfig,
+    SamplerConfig, build_hf_sources, parse_csv_fields, parse_hf_source_line, parse_hf_uri,
+    resolve_hf_list_roots,
+};
 
 fn seeded_config(seed: u64) -> SamplerConfig {
     SamplerConfig {
@@ -264,6 +268,47 @@ fn huggingface_role_columns_mode_and_synthetic_ids_work() {
 }
 
 #[test]
+fn huggingface_role_columns_mode_skips_missing_rows_and_keeps_valid() {
+    let temp = tempfile::tempdir().expect("failed creating tempdir");
+    let shard_path = temp.path().join("part-00001.ndjson");
+
+    write_lines(
+        &shard_path,
+        &[
+            r#"{"anchor":"headline a","positive":"summary a"}"#,
+            r#"{"anchor":"headline b","positive":"summary b","ctx":"context b"}"#,
+        ],
+    );
+
+    let mut config = HuggingFaceRowsConfig::new(
+        "hf_role_columns_skip",
+        "local/test-dataset",
+        "default",
+        "train",
+        temp.path(),
+    );
+    config.shard_extensions = vec!["ndjson".to_string()];
+    config.anchor_column = Some("anchor".to_string());
+    config.positive_column = Some("positive".to_string());
+    config.context_columns = vec!["ctx".to_string()];
+    config.max_rows = Some(2);
+
+    let source = HuggingFaceRowSource::new(config).expect("failed creating huggingface source");
+    let seed = seeded_config(23);
+    let snapshot = source
+        .refresh(&seed, None, Some(2))
+        .expect("refresh should skip missing required context rows");
+
+    assert_eq!(snapshot.records.len(), 1);
+    assert!(
+        snapshot.records[0]
+            .sections
+            .iter()
+            .any(|section| section.text.contains("context b"))
+    );
+}
+
+#[test]
 fn huggingface_parses_source_list_with_explicit_mappings() {
     let temp = tempfile::tempdir().expect("failed creating tempdir");
     let list_path = temp.path().join("hf_sources.txt");
@@ -289,6 +334,67 @@ fn huggingface_parses_source_list_with_explicit_mappings() {
         vec!["ctx1".to_string(), "ctx2".to_string()]
     );
     assert_eq!(entry.text_columns, vec!["text".to_string()]);
+}
+
+#[test]
+fn huggingface_helper_parsers_cover_success_and_error_paths() {
+    assert_eq!(
+        parse_csv_fields(" title, body , , tags "),
+        vec!["title".to_string(), "body".to_string(), "tags".to_string()]
+    );
+
+    let parsed = parse_hf_source_line(
+        "hf://org/dataset/default/train anchor=title positive=body context=c1,c2 text_columns=body",
+    )
+    .expect("line should parse");
+    assert_eq!(parsed.uri, "hf://org/dataset/default/train");
+    assert_eq!(parsed.anchor_column.as_deref(), Some("title"));
+    assert_eq!(parsed.positive_column.as_deref(), Some("body"));
+    assert_eq!(parsed.context_columns, vec!["c1", "c2"]);
+    assert_eq!(parsed.text_columns, vec!["body"]);
+
+    assert!(parse_hf_source_line("").is_err());
+    assert!(parse_hf_source_line("file://foo anchor=a").is_err());
+    assert!(parse_hf_source_line("hf://org/dataset/default/train badtoken").is_err());
+    assert!(parse_hf_source_line("hf://org/dataset/default/train nope=field").is_err());
+    assert!(parse_hf_source_line("hf://org/dataset/default/train").is_err());
+
+    let defaults = parse_hf_uri("hf://org/dataset").expect("uri should parse with defaults");
+    assert_eq!(
+        defaults,
+        (
+            "org/dataset".to_string(),
+            "default".to_string(),
+            "train".to_string()
+        )
+    );
+    assert!(parse_hf_uri("hf://org").is_err());
+    assert!(parse_hf_uri("https://huggingface.co").is_err());
+}
+
+#[test]
+fn huggingface_list_root_and_builder_helpers_cover_invalid_inputs() {
+    let temp = tempfile::tempdir().expect("failed creating tempdir");
+    let list_path = temp.path().join("hf_sources_invalid.txt");
+    fs::write(&list_path, "# no sources\n\n").expect("failed writing list file");
+
+    let err = resolve_hf_list_roots(list_path.to_str().expect("utf8 path").to_string(), Some(8))
+        .expect_err("empty list should fail");
+    assert!(err.contains("no hf:// entries found"));
+
+    let roots = HfListRoots {
+        source_list: "manual".to_string(),
+        sources: vec![HfSourceEntry {
+            uri: "hf://org".to_string(),
+            anchor_column: Some("a".to_string()),
+            positive_column: None,
+            context_columns: Vec::new(),
+            text_columns: Vec::new(),
+        }],
+        max_rows_per_source: Some(1),
+    };
+    let built = build_hf_sources(&roots);
+    assert!(built.is_empty());
 }
 
 #[test]
@@ -462,6 +568,60 @@ fn huggingface_role_columns_mode_skips_when_context_missing() {
     let snapshot = source
         .refresh(&seed, None, Some(1))
         .expect("refresh should skip rows with missing required context column");
+    assert!(snapshot.records.is_empty());
+}
+
+#[test]
+fn huggingface_text_columns_mode_skips_when_required_column_missing() {
+    let temp = tempfile::tempdir().expect("failed creating tempdir");
+    let shard_path = temp.path().join("part-00007.ndjson");
+    write_lines(&shard_path, &[r#"{"id":"t1","title":"headline only"}"#]);
+
+    let mut config = HuggingFaceRowsConfig::new(
+        "hf_text_columns_skip",
+        "local/test-dataset",
+        "default",
+        "train",
+        temp.path(),
+    );
+    config.shard_extensions = vec!["ndjson".to_string()];
+    config.text_columns = vec!["title".to_string(), "body".to_string()];
+    config.max_rows = Some(1);
+
+    let source = HuggingFaceRowSource::new(config).expect("failed creating huggingface source");
+    let seed = seeded_config(43);
+    let snapshot = source
+        .refresh(&seed, None, Some(1))
+        .expect("refresh should skip rows missing required text columns");
+
+    assert!(snapshot.records.is_empty());
+}
+
+#[test]
+fn huggingface_parquet_role_columns_skip_missing_context_without_error() {
+    let temp = tempfile::tempdir().expect("failed creating tempdir");
+    let shard_path = temp.path().join("part-00008.parquet");
+    write_parquet_fixture(&shard_path, &[("p1", "parquet body")]);
+
+    let mut config = HuggingFaceRowsConfig::new(
+        "hf_parquet_role_skip",
+        "local/test-dataset",
+        "default",
+        "train",
+        temp.path(),
+    );
+    config.shard_extensions = vec!["parquet".to_string()];
+    config.anchor_column = Some("text".to_string());
+    config.positive_column = Some("text".to_string());
+    config.context_columns = vec!["ctx".to_string()];
+    config.max_rows = Some(1);
+
+    let source = HuggingFaceRowSource::new(config).expect("failed creating huggingface source");
+    let seed = seeded_config(47);
+    let snapshot = source
+        .refresh(&seed, None, Some(1))
+        .expect("refresh should skip parquet rows with missing context");
+
     assert!(snapshot.records.is_empty());
 }
 
