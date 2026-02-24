@@ -64,7 +64,7 @@ This crate does **not** perform semantic mining/retrieval scoring by itself; ins
 
 - **Hugging Face source (`HuggingFaceRowSource`)** *(feature: `huggingface`)*
   - Reads split/config-scoped dataset rows from Hugging Face (including remote shard discovery, local materialization, and lazy row access).
-  - Supports deterministic row paging, local shard caching, optional disk-cap controls, resume-friendly shard sequence state, and conversion from row payloads into sampler-ready records.
+  - Supports deterministic row paging, local shard caching, optional disk-cap controls, and conversion from row payloads into sampler-ready records.
   - Best when your training data is hosted as HF datasets and you want to combine remote corpus slices with local sources in the same deterministic batch pipeline.
 
 ## Adding new sources
@@ -97,12 +97,11 @@ Seed/configuration contract:
 
 ### Seed behavior summary
 
-Deterministic source paging is always enabled for built-in deterministic sources, and ordering is deterministic for a given sampler seed and source scope:
+For built-in deterministic sources (`FileSource`, `HuggingFaceRowSource`), a fixed seed gives the same sample order across runs.
 
-- Same source + same sampler seed + same dataset state => same refresh order.
-- Same source + different sampler seed => different refresh order.
-- Split assignment also stays deterministic from `record_id + sampler seed + split ratios`.
-- This behavior is not optional for built-in deterministic sources (`FileSource`, `HuggingFaceRowSource`).
+This holds when source configuration, sampler seed, dataset snapshot/content, split/config selection, and refresh limit/cursor pattern are unchanged.
+
+Using a different seed changes deterministic permutation state; very small/degenerate sample windows can still overlap.
 
 Minimal direct-source example:
 

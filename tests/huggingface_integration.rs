@@ -2,7 +2,9 @@
 
 use std::fs;
 
-use triplets::{DataSource, HuggingFaceRowSource, HuggingFaceRowsConfig, configured_source_with_seed};
+use triplets::{
+    DataSource, HuggingFaceRowSource, HuggingFaceRowsConfig, configured_source_with_seed,
+};
 
 fn write_lines(path: &std::path::Path, lines: &[&str]) {
     let mut body = lines.join("\n");

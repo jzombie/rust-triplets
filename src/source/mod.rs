@@ -252,19 +252,15 @@ impl IndexablePager {
             ^ Self::stable_index_shuffle_key(source_id, total)
     }
 
-    /// Build a deterministic seed that incorporates sampler seed.
-    pub(crate) fn seed_for_sampler(
-        source_id: &SourceId,
-        total: usize,
-        sampler_seed: u64,
-    ) -> u64 {
-        let base = Self::seed_for(source_id, total);
-        base ^ stable_hash_with(|hasher| {
-            "triplets_sampler_seed".hash(hasher);
-            source_id.hash(hasher);
-            total.hash(hasher);
-            sampler_seed.hash(hasher);
-        })
+    /// Build a deterministic seed for a source/total pair with explicit sampler seed.
+    pub(crate) fn seed_for_sampler(source_id: &SourceId, total: usize, sampler_seed: u64) -> u64 {
+        Self::seed_for(source_id, total)
+            ^ stable_hash_with(|hasher| {
+                "triplets_sampler_seed".hash(hasher);
+                source_id.hash(hasher);
+                total.hash(hasher);
+                sampler_seed.hash(hasher);
+            })
     }
 
     fn stable_index_shuffle_key(source_id: &SourceId, idx: usize) -> u64 {

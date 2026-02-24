@@ -359,8 +359,7 @@ impl HuggingFaceRowSource {
     }
 
     fn configured_sampler_seed(&self) -> Result<u64, SamplerError> {
-        self
-            .sampler_config
+        self.sampler_config
             .lock()
             .map_err(|_| SamplerError::SourceUnavailable {
                 source_id: self.config.source_id.clone(),
@@ -600,6 +599,7 @@ impl HuggingFaceRowSource {
     }
 
     /// Load persisted shard candidate sequence when metadata and sampler seed match.
+    #[cfg(test)]
     fn load_persisted_shard_sequence(
         config: &HuggingFaceRowsConfig,
         current_sampler_seed: u64,
@@ -1412,26 +1412,12 @@ impl HuggingFaceRowSource {
                         reason: "huggingface source state lock poisoned".to_string(),
                     })?;
                 if state.remote_candidates.is_none() {
-                    let sampler_seed = self.configured_sampler_seed()?;
-                    if let Some(persisted) =
-                        Self::load_persisted_shard_sequence(&self.config, sampler_seed)?
-                    {
-                        let candidate_count = persisted.candidates.len();
-                        state.remote_candidates = Some(persisted.candidates);
-                        state.remote_candidate_sizes = persisted.candidate_sizes;
-                        state.next_remote_idx = persisted.next_remote_idx.min(candidate_count);
-                        info!(
-                            "[triplets:hf] resumed shard sequence state: next={}/{}",
-                            state.next_remote_idx, candidate_count
-                        );
-                    } else {
-                        let (mut candidates, candidate_sizes) =
-                            Self::list_remote_candidates(&self.config)?;
-                        Self::rotate_candidates_deterministically(&self.config, &mut candidates);
-                        state.remote_candidates = Some(candidates);
-                        state.remote_candidate_sizes = candidate_sizes;
-                        state.next_remote_idx = 0;
-                    }
+                    let (mut candidates, candidate_sizes) =
+                        Self::list_remote_candidates(&self.config)?;
+                    Self::rotate_candidates_deterministically(&self.config, &mut candidates);
+                    state.remote_candidates = Some(candidates);
+                    state.remote_candidate_sizes = candidate_sizes;
+                    state.next_remote_idx = 0;
 
                     self.persist_shard_sequence_locked(&state)?;
 
@@ -1688,6 +1674,7 @@ impl HuggingFaceRowSource {
     ) -> Result<(Vec<ShardIndex>, usize), SamplerError> {
         let start_index = Instant::now();
         let mut shard_paths = Vec::new();
+        let manifest_root = config.snapshot_dir.join("_parquet_manifest");
         let accepted = config
             .shard_extensions
             .iter()
@@ -1701,6 +1688,9 @@ impl HuggingFaceRowSource {
             .filter_map(Result::ok)
         {
             if !entry.file_type().is_file() {
+                continue;
+            }
+            if entry.path().starts_with(&manifest_root) {
                 continue;
             }
             let Some(ext) = entry.path().extension().and_then(|v| v.to_str()) else {
@@ -2552,18 +2542,18 @@ mod tests {
         };
         crate::source::configured_source(
             HuggingFaceRowSource {
-            config,
-            sampler_config: Mutex::new(None),
-            state: Mutex::new(SourceState {
-                materialized_rows: 0,
-                total_rows: None,
-                shards: Vec::new(),
-                remote_candidates: None,
-                remote_candidate_sizes: HashMap::new(),
-                next_remote_idx: 0,
-            }),
-            cache: Mutex::new(RowCache::default()),
-            parquet_cache: Mutex::new(ParquetCache::default()),
+                config,
+                sampler_config: Mutex::new(None),
+                state: Mutex::new(SourceState {
+                    materialized_rows: 0,
+                    total_rows: None,
+                    shards: Vec::new(),
+                    remote_candidates: None,
+                    remote_candidate_sizes: HashMap::new(),
+                    next_remote_idx: 0,
+                }),
+                cache: Mutex::new(RowCache::default()),
+                parquet_cache: Mutex::new(ParquetCache::default()),
             },
             &sampler,
         )
@@ -3593,7 +3583,7 @@ mod tests {
     }
 
     #[test]
-    fn ensure_row_available_resumes_persisted_sequence_and_bootstraps() {
+    fn ensure_row_available_bootstraps_from_in_memory_candidates() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
         let source = test_source(config.clone());
@@ -3604,24 +3594,11 @@ mod tests {
         let candidate =
             format!("url::{base_url}/datasets/org/ds/resolve/main/train/persisted.ndjson");
 
-        let state_path = HuggingFaceRowSource::shard_sequence_state_path(&config);
-        fs::create_dir_all(state_path.parent().unwrap()).unwrap();
-        fs::write(
-            &state_path,
-            serde_json::to_vec_pretty(&json!({
-                "version": 1,
-                "source_id": config.source_id,
-                "dataset": config.dataset,
-                "config": config.config,
-                "split": config.split,
-                "sampler_seed": 1,
-                "candidates": [candidate],
-                "candidate_sizes": {},
-                "next_remote_idx": 0
-            }))
-            .unwrap(),
-        )
-        .unwrap();
+        {
+            let mut state = source.state.lock().unwrap();
+            state.remote_candidates = Some(vec![candidate]);
+            state.next_remote_idx = 0;
+        }
 
         assert!(source.ensure_row_available(0).unwrap());
         server.join().unwrap();
@@ -3657,7 +3634,7 @@ mod tests {
     }
 
     #[test]
-    fn refresh_can_bootstrap_from_persisted_remote_sequence() {
+    fn refresh_ignores_persisted_remote_sequence_state() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
         let source = test_source(config.clone());
@@ -3680,11 +3657,19 @@ mod tests {
                 "sampler_seed": 1,
                 "candidates": [candidate],
                 "candidate_sizes": {},
-                "next_remote_idx": 0
+                "next_remote_idx": 1
             }))
             .unwrap(),
         )
         .unwrap();
+
+        {
+            let mut state = source.state.lock().unwrap();
+            state.remote_candidates = Some(vec![format!(
+                "url::{base_url}/datasets/org/ds/resolve/main/train/refresh.ndjson"
+            )]);
+            state.next_remote_idx = 0;
+        }
 
         let snapshot = source.refresh(None, Some(1)).unwrap();
         server.join().unwrap();
@@ -3994,6 +3979,51 @@ mod tests {
     }
 
     #[test]
+    fn remote_shard_permutation_is_deterministic_by_sampler_seed() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let total = 8usize;
+
+        let seed_a = HuggingFaceRowSource::shard_candidate_seed(&config, total, 7);
+        let seed_b = HuggingFaceRowSource::shard_candidate_seed(&config, total, 7);
+        let seed_c = HuggingFaceRowSource::shard_candidate_seed(&config, total, 123);
+
+        let mut perm_a = crate::source::IndexPermutation::new(total, seed_a, 0);
+        let mut perm_b = crate::source::IndexPermutation::new(total, seed_b, 0);
+        let mut perm_c = crate::source::IndexPermutation::new(total, seed_c, 0);
+
+        let take = 6usize;
+        let order_a: Vec<usize> = (0..take).map(|_| perm_a.next()).collect();
+        let order_b: Vec<usize> = (0..take).map(|_| perm_b.next()).collect();
+        let order_c: Vec<usize> = (0..take).map(|_| perm_c.next()).collect();
+
+        assert_eq!(order_a, order_b);
+        assert_ne!(order_a, order_c);
+    }
+
+    #[test]
+    fn build_shard_index_ignores_manifest_cache_artifacts() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.shard_extensions = vec!["ndjson".to_string()];
+
+        let local = dir.path().join("local.ndjson");
+        fs::write(&local, b"{\"id\":\"l1\",\"text\":\"x\"}\n").unwrap();
+
+        let manifest_cached = dir
+            .path()
+            .join("_parquet_manifest")
+            .join("main/train/cached.ndjson");
+        fs::create_dir_all(manifest_cached.parent().unwrap()).unwrap();
+        fs::write(&manifest_cached, b"{\"id\":\"r1\",\"text\":\"y\"}\n").unwrap();
+
+        let (shards, discovered) = HuggingFaceRowSource::build_shard_index(&config).unwrap();
+        assert_eq!(discovered, 1);
+        assert_eq!(shards.len(), 1);
+        assert_eq!(shards[0].path, local);
+    }
+
+    #[test]
     fn expansion_headroom_uses_sampler_ingestion_max_records_when_configured() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
@@ -4041,15 +4071,13 @@ mod tests {
 
         source.persist_shard_sequence_locked(&state).unwrap();
 
-        let restored =
-            HuggingFaceRowSource::load_persisted_shard_sequence(&config, 4242).unwrap();
+        let restored = HuggingFaceRowSource::load_persisted_shard_sequence(&config, 4242).unwrap();
         assert!(restored.is_some());
         let restored = restored.unwrap();
         assert_eq!(restored.next_remote_idx, 1);
         assert_eq!(restored.candidates.len(), 2);
 
-        let rejected =
-            HuggingFaceRowSource::load_persisted_shard_sequence(&config, 9999).unwrap();
+        let rejected = HuggingFaceRowSource::load_persisted_shard_sequence(&config, 9999).unwrap();
         assert!(rejected.is_none());
     }
 
@@ -4743,12 +4771,18 @@ mod tests {
             state.shards = vec![shard.clone()];
         }
 
-        let mut seed_1 = SamplerConfig::default();
-        seed_1.seed = 7;
-        let mut seed_2 = SamplerConfig::default();
-        seed_2.seed = 7;
-        let mut seed_3 = SamplerConfig::default();
-        seed_3.seed = 123;
+        let seed_1 = SamplerConfig {
+            seed: 7,
+            ..SamplerConfig::default()
+        };
+        let seed_2 = SamplerConfig {
+            seed: 7,
+            ..SamplerConfig::default()
+        };
+        let seed_3 = SamplerConfig {
+            seed: 123,
+            ..SamplerConfig::default()
+        };
 
         source_a.configure_sampler(&seed_1);
         source_b.configure_sampler(&seed_2);

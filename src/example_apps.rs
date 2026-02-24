@@ -185,6 +185,9 @@ where
     };
 
     let sources = build_sources(&roots);
+    for source in &sources {
+        source.configure_sampler(&config);
+    }
 
     let mut inventories = Vec::new();
     for source in &sources {
