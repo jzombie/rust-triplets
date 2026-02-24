@@ -87,7 +87,7 @@ This crate does **not** perform semantic mining/retrieval scoring by itself; ins
 
 #### Hugging Face source lists
 
-For multi-source runs, you can provide an explicit source list file instead of hardcoding field mappings in code. Each line is a single dataset entry with a required mapping:
+For multi-source runs, you can provide an explicit source list file instead of hardcoding field mappings in code. Each line is a single dataset entry with a required mapping. The `hf://` prefix is a `triplets`-specific shorthand (not an official Hugging Face URI scheme) used only in these lists:
 
 ```
 hf://org/dataset/config/split anchor=... positive=... context=a,b text=x,y
