@@ -2468,3 +2468,719 @@ impl DataSource for HuggingFaceRowSource {
         }]
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::io::Write;
+    use tempfile::tempdir;
+
+    fn test_config(snapshot_dir: PathBuf) -> HuggingFaceRowsConfig {
+        let mut config = HuggingFaceRowsConfig::new(
+            "hf_test",
+            "org/dataset",
+            "default",
+            "train",
+            snapshot_dir,
+        );
+        config.cache_capacity = 10;
+        config.remote_expansion_headroom_multiplier = 3;
+        config
+    }
+
+    fn test_source(config: HuggingFaceRowsConfig) -> HuggingFaceRowSource {
+        HuggingFaceRowSource {
+            config,
+            sampler_config: Mutex::new(None),
+            state: Mutex::new(SourceState {
+                materialized_rows: 0,
+                total_rows: None,
+                shards: Vec::new(),
+                remote_candidates: None,
+                remote_candidate_sizes: HashMap::new(),
+                next_remote_idx: 0,
+            }),
+            cache: Mutex::new(RowCache::default()),
+            parquet_cache: Mutex::new(ParquetCache::default()),
+        }
+    }
+
+    #[test]
+    fn candidate_target_path_maps_remote_urls_under_manifest_root() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let candidate = "url::https://huggingface.co/datasets/org/ds/resolve/main/train/part-000.parquet";
+        let target = HuggingFaceRowSource::candidate_target_path(&config, candidate);
+        assert!(target.ends_with("_parquet_manifest/main/train/part-000.parquet"));
+    }
+
+    #[test]
+    fn candidate_target_path_keeps_local_candidates_relative() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let candidate = "train/part-001.ndjson";
+        let target = HuggingFaceRowSource::candidate_target_path(&config, candidate);
+        assert_eq!(target, config.snapshot_dir.join(candidate));
+    }
+
+    #[test]
+    fn target_matches_expected_size_validates_when_expected_is_provided() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("payload.bin");
+        fs::write(&path, vec![0u8; 5]).unwrap();
+
+        assert!(HuggingFaceRowSource::target_matches_expected_size(&path, Some(5)));
+        assert!(!HuggingFaceRowSource::target_matches_expected_size(&path, Some(4)));
+        assert!(HuggingFaceRowSource::target_matches_expected_size(&path, None));
+    }
+
+    #[test]
+    fn extract_split_row_count_reads_split_entries() {
+        let payload = json!({
+            "size": {
+                "splits": [
+                    {"config": "default", "split": "train", "num_rows": 123u64},
+                    {"config": "default", "split": "validation", "num_rows": 45u64}
+                ]
+            }
+        });
+
+        let count = HuggingFaceRowSource::extract_split_row_count_from_size_response(
+            &payload,
+            "default",
+            "validation",
+        );
+        assert_eq!(count, Some(45));
+    }
+
+    #[test]
+    fn extract_split_row_count_reads_config_fallback_and_dataset_total() {
+        let payload = json!({
+            "size": {
+                "configs": [
+                    {
+                        "config": "default",
+                        "splits": [{"name": "test", "num_rows": 77u64}],
+                        "num_rows": 200u64
+                    }
+                ],
+                "dataset": {"num_rows": 999u64}
+            }
+        });
+
+        let split_count = HuggingFaceRowSource::extract_split_row_count_from_size_response(
+            &payload,
+            "default",
+            "test",
+        );
+        assert_eq!(split_count, Some(77));
+
+        let empty_split_count = HuggingFaceRowSource::extract_split_row_count_from_size_response(
+            &payload,
+            "default",
+            "",
+        );
+        assert_eq!(empty_split_count, Some(200));
+    }
+
+    #[test]
+    fn shard_candidate_seed_uses_sampler_seed_when_provided() {
+        let dir = tempdir().unwrap();
+        let mut a = test_config(dir.path().join("a"));
+        let mut b = test_config(dir.path().join("b"));
+        a.source_id = "source_a".to_string();
+        b.source_id = "source_b".to_string();
+
+        let with_seed_a = HuggingFaceRowSource::shard_candidate_seed(&a, 100, Some(42));
+        let with_seed_b = HuggingFaceRowSource::shard_candidate_seed(&b, 100, Some(42));
+        assert_eq!(with_seed_a, with_seed_b);
+
+        let without_seed_a = HuggingFaceRowSource::shard_candidate_seed(&a, 100, None);
+        let without_seed_b = HuggingFaceRowSource::shard_candidate_seed(&b, 100, None);
+        assert_ne!(without_seed_a, without_seed_b);
+    }
+
+    #[test]
+    fn expansion_headroom_uses_sampler_ingestion_max_records_when_configured() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config);
+
+        assert_eq!(source.effective_expansion_headroom_rows(), 30);
+
+        let mut sampler = SamplerConfig::default();
+        sampler.ingestion_max_records = 7;
+        source.configure_sampler(&sampler);
+        assert_eq!(source.effective_expansion_headroom_rows(), 21);
+    }
+
+    #[test]
+    fn persisted_shard_sequence_roundtrip_respects_sampler_seed() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config.clone());
+
+        {
+            let mut sampler = SamplerConfig::default();
+            sampler.seed = 4242;
+            source.configure_sampler(&sampler);
+        }
+
+        let mut state = SourceState {
+            materialized_rows: 0,
+            total_rows: None,
+            shards: Vec::new(),
+            remote_candidates: Some(vec![
+                "url::https://x/resolve/main/train/000.parquet".to_string(),
+                "url::https://x/resolve/main/train/001.parquet".to_string(),
+            ]),
+            remote_candidate_sizes: HashMap::new(),
+            next_remote_idx: 1,
+        };
+        state.remote_candidate_sizes.insert(
+            "url::https://x/resolve/main/train/000.parquet".to_string(),
+            10,
+        );
+
+        source.persist_shard_sequence_locked(&state).unwrap();
+
+        let restored =
+            HuggingFaceRowSource::load_persisted_shard_sequence(&config, Some(4242)).unwrap();
+        assert!(restored.is_some());
+        let restored = restored.unwrap();
+        assert_eq!(restored.next_remote_idx, 1);
+        assert_eq!(restored.candidates.len(), 2);
+
+        let rejected =
+            HuggingFaceRowSource::load_persisted_shard_sequence(&config, Some(9999)).unwrap();
+        assert!(rejected.is_none());
+    }
+
+    #[test]
+    fn value_to_text_handles_scalar_and_structured_values() {
+        assert_eq!(HuggingFaceRowSource::value_to_text(&json!(null)), None);
+        assert_eq!(HuggingFaceRowSource::value_to_text(&json!("   ")), None);
+        assert_eq!(HuggingFaceRowSource::value_to_text(&json!("hello")), Some("hello".into()));
+        assert_eq!(HuggingFaceRowSource::value_to_text(&json!(true)), Some("true".into()));
+        assert_eq!(HuggingFaceRowSource::value_to_text(&json!(3.5)), Some("3.5".into()));
+        assert_eq!(
+            HuggingFaceRowSource::value_to_text(&json!([1, 2])),
+            Some("[1,2]".into())
+        );
+    }
+
+    #[test]
+    fn parse_row_auto_detects_text_fields_and_skips_id() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.id_column = Some("id".into());
+        let source = test_source(config);
+
+        let row = source
+            .parse_row(
+                5,
+                &json!({
+                    "id": "row-5",
+                    "title": "Anchor text",
+                    "body": "Context text",
+                    "flag": true
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(row.row_id.as_deref(), Some("row-5"));
+        assert!(row.text_fields.iter().any(|f| f.name == "title"));
+        assert!(row.text_fields.iter().any(|f| f.name == "body"));
+        assert!(row.text_fields.iter().all(|f| f.name != "id"));
+    }
+
+    #[test]
+    fn parse_row_with_required_columns_errors_when_missing() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.anchor_column = Some("anchor".into());
+        config.positive_column = Some("positive".into());
+        config.context_columns = vec!["context".into()];
+        let source = test_source(config);
+
+        let err = source.parse_row(0, &json!({"anchor": "x", "context": "z"}));
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn row_to_record_builds_expected_sections() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config);
+        let row = RowView {
+            row_id: Some("abc".into()),
+            timestamp: Some(Utc::now()),
+            text_fields: vec![
+                RowTextField {
+                    name: "title".into(),
+                    text: "anchor".into(),
+                },
+                RowTextField {
+                    name: "pos".into(),
+                    text: "positive".into(),
+                },
+                RowTextField {
+                    name: "ctx".into(),
+                    text: "extra".into(),
+                },
+            ],
+        };
+
+        let record = source.row_to_record(&row, 1).unwrap().unwrap();
+        assert_eq!(record.sections.len(), 3);
+        assert_eq!(record.sections[0].role, SectionRole::Anchor);
+        assert_eq!(record.sections[1].role, SectionRole::Context);
+        assert_eq!(record.id, "hf_test::abc");
+    }
+
+    #[test]
+    fn effective_refresh_batch_target_uses_multiplier_floor_of_one() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.refresh_batch_multiplier = 0;
+        let source = test_source(config);
+        assert_eq!(source.effective_refresh_batch_target(7), 7);
+    }
+
+    #[test]
+    fn locate_shard_and_recompute_offsets_work() {
+        let mut shards = vec![
+            ShardIndex {
+                path: PathBuf::from("a"),
+                global_start: 10,
+                row_count: 3,
+                is_parquet: false,
+                parquet_row_groups: Vec::new(),
+                checkpoints: vec![0],
+            },
+            ShardIndex {
+                path: PathBuf::from("b"),
+                global_start: 20,
+                row_count: 2,
+                is_parquet: false,
+                parquet_row_groups: Vec::new(),
+                checkpoints: vec![0],
+            },
+        ];
+        let hit = HuggingFaceRowSource::locate_shard(&shards, 11).unwrap();
+        assert_eq!(hit.1, 1);
+
+        let mut state = SourceState {
+            materialized_rows: 0,
+            total_rows: None,
+            shards: std::mem::take(&mut shards),
+            remote_candidates: None,
+            remote_candidate_sizes: HashMap::new(),
+            next_remote_idx: 0,
+        };
+        HuggingFaceRowSource::recompute_shard_offsets(&mut state);
+        assert_eq!(state.shards[0].global_start, 0);
+        assert_eq!(state.shards[1].global_start, 3);
+        assert_eq!(state.materialized_rows, 5);
+    }
+
+    #[test]
+    fn len_hint_covers_known_and_empty_paths() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.max_rows = Some(9);
+        let source = test_source(config);
+
+        {
+            let mut state = source.state.lock().unwrap();
+            state.materialized_rows = 5;
+            state.total_rows = Some(100);
+        }
+        assert_eq!(source.len_hint(), Some(9));
+
+        {
+            let mut state = source.state.lock().unwrap();
+            state.materialized_rows = 0;
+            state.total_rows = Some(0);
+        }
+        assert_eq!(source.len_hint(), Some(0));
+    }
+
+    #[test]
+    fn read_line_at_reads_expected_row_with_checkpoints() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("rows.jsonl");
+        let mut file = File::create(&path).unwrap();
+        file.write_all(b"{\"text\":\"a\"}\n").unwrap();
+        file.write_all(b"{\"text\":\"b\"}\n").unwrap();
+        file.write_all(b"{\"text\":\"c\"}\n").unwrap();
+
+        let mut config = test_config(dir.path().to_path_buf());
+        config.checkpoint_stride = 1;
+        let source = test_source(config.clone());
+        let shard = HuggingFaceRowSource::index_single_shard(&config, &path, 0)
+            .unwrap()
+            .unwrap();
+
+        let line = source.read_line_at(&shard, 2).unwrap();
+        assert!(line.contains("\"c\""));
+    }
+
+    #[test]
+    fn materialize_local_file_copies_and_is_idempotent_when_size_matches() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let src = dir.path().join("src.ndjson");
+        let dst = dir.path().join("nested/dst.ndjson");
+
+        fs::write(&src, b"line\n").unwrap();
+        HuggingFaceRowSource::materialize_local_file(&config, &src, &dst).unwrap();
+        let first = fs::read(&dst).unwrap();
+        HuggingFaceRowSource::materialize_local_file(&config, &src, &dst).unwrap();
+        let second = fs::read(&dst).unwrap();
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn enforce_disk_cap_evicts_old_manifest_shards() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.local_disk_cap_bytes = Some(10);
+        config.min_resident_shards = 0;
+        let source = test_source(config);
+
+        let manifest_root = source.manifest_cache_root();
+        fs::create_dir_all(&manifest_root).unwrap();
+        let evict_path = manifest_root.join("a.parquet");
+        let keep_path = manifest_root.join("b.parquet");
+        fs::write(&evict_path, vec![1u8; 8]).unwrap();
+        fs::write(&keep_path, vec![2u8; 8]).unwrap();
+
+        let mut state = SourceState {
+            materialized_rows: 16,
+            total_rows: None,
+            shards: vec![
+                ShardIndex {
+                    path: evict_path.clone(),
+                    global_start: 0,
+                    row_count: 8,
+                    is_parquet: true,
+                    parquet_row_groups: vec![(0, 8)],
+                    checkpoints: Vec::new(),
+                },
+                ShardIndex {
+                    path: keep_path.clone(),
+                    global_start: 8,
+                    row_count: 8,
+                    is_parquet: true,
+                    parquet_row_groups: vec![(0, 8)],
+                    checkpoints: Vec::new(),
+                },
+            ],
+            remote_candidates: None,
+            remote_candidate_sizes: HashMap::new(),
+            next_remote_idx: 0,
+        };
+
+        let evicted = source
+            .enforce_disk_cap_locked(&mut state, &keep_path)
+            .unwrap();
+        assert!(evicted);
+        assert!(!evict_path.exists());
+        assert!(keep_path.exists());
+        assert_eq!(state.shards.len(), 1);
+    }
+
+    #[test]
+    fn enforce_disk_cap_errors_when_min_resident_prevents_eviction() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.local_disk_cap_bytes = Some(4);
+        config.min_resident_shards = 1;
+        let source = test_source(config);
+
+        let manifest_root = source.manifest_cache_root();
+        fs::create_dir_all(&manifest_root).unwrap();
+        let protected = manifest_root.join("only.parquet");
+        fs::write(&protected, vec![1u8; 8]).unwrap();
+
+        let mut state = SourceState {
+            materialized_rows: 8,
+            total_rows: None,
+            shards: vec![ShardIndex {
+                path: protected.clone(),
+                global_start: 0,
+                row_count: 8,
+                is_parquet: true,
+                parquet_row_groups: vec![(0, 8)],
+                checkpoints: Vec::new(),
+            }],
+            remote_candidates: None,
+            remote_candidate_sizes: HashMap::new(),
+            next_remote_idx: 0,
+        };
+
+        let err = source.enforce_disk_cap_locked(&mut state, &protected);
+        assert!(err.is_err());
+        assert!(!protected.exists());
+    }
+
+    #[test]
+    fn build_shard_index_discovers_local_jsonl_shards() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        fs::write(root.join("a.jsonl"), b"{\"text\":\"a\"}\n").unwrap();
+        fs::write(root.join("b.ndjson"), b"{\"text\":\"b\"}\n").unwrap();
+
+        let config = test_config(root.clone());
+        let (shards, discovered) = HuggingFaceRowSource::build_shard_index(&config).unwrap();
+        assert_eq!(discovered, 2);
+        assert_eq!(shards.len(), 2);
+    }
+
+    #[test]
+    fn index_single_shard_returns_none_for_empty_file() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let path = dir.path().join("empty.jsonl");
+        fs::write(&path, b"").unwrap();
+        let shard = HuggingFaceRowSource::index_single_shard(&config, &path, 0).unwrap();
+        assert!(shard.is_none());
+    }
+
+    #[test]
+    fn refresh_reads_local_rows_and_advances_cursor() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("rows.jsonl");
+        fs::write(
+            &path,
+            b"{\"id\":\"r1\",\"text\":\"alpha\"}\n{\"id\":\"r2\",\"text\":\"beta\"}\n{\"id\":\"r3\",\"text\":\"gamma\"}\n",
+        )
+        .unwrap();
+
+        let mut config = test_config(dir.path().to_path_buf());
+        config.checkpoint_stride = 1;
+        config.refresh_batch_multiplier = 1;
+        let source = test_source(config.clone());
+        let shard = HuggingFaceRowSource::index_single_shard(&config, &path, 0)
+            .unwrap()
+            .unwrap();
+        {
+            let mut state = source.state.lock().unwrap();
+            state.materialized_rows = shard.row_count;
+            state.total_rows = Some(shard.row_count);
+            state.shards = vec![shard];
+        }
+
+        let snapshot = source.refresh(None, Some(2)).unwrap();
+        assert_eq!(snapshot.records.len(), 2);
+        assert!(snapshot.cursor.revision > 0);
+    }
+
+    #[test]
+    fn reported_record_count_uses_len_hint_for_local_state() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config);
+        {
+            let mut state = source.state.lock().unwrap();
+            state.materialized_rows = 4;
+            state.total_rows = Some(4);
+        }
+        assert_eq!(source.reported_record_count().unwrap(), 4);
+    }
+
+    #[test]
+    fn rotate_candidates_deterministically_preserves_membership() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let original = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let mut rotated = original.clone();
+        HuggingFaceRowSource::rotate_candidates_deterministically(&config, &mut rotated);
+        let mut sorted_original = original;
+        let mut sorted_rotated = rotated;
+        sorted_original.sort();
+        sorted_rotated.sort();
+        assert_eq!(sorted_rotated, sorted_original);
+    }
+
+    #[test]
+    fn parse_row_supports_row_wrapped_payload_and_text_columns() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.text_columns = vec!["headline".into(), "body".into()];
+        config.id_column = Some("rid".into());
+        let source = test_source(config);
+
+        let parsed = source
+            .parse_row(
+                0,
+                &json!({"row": {"rid": "r-1", "headline": "h", "body": "b"}}),
+            )
+            .unwrap();
+
+        assert_eq!(parsed.row_id.as_deref(), Some("r-1"));
+        assert_eq!(parsed.text_fields.len(), 2);
+        assert_eq!(parsed.text_fields[0].name, "headline");
+    }
+
+    #[test]
+    fn row_to_record_returns_none_for_empty_fields() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config);
+        let row = RowView {
+            row_id: Some("x".into()),
+            timestamp: None,
+            text_fields: Vec::new(),
+        };
+        assert!(source.row_to_record(&row, 0).unwrap().is_none());
+    }
+
+    #[test]
+    fn ensure_row_available_handles_materialized_max_and_exhausted_candidates() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.max_rows = Some(2);
+        let source = test_source(config);
+        {
+            let mut state = source.state.lock().unwrap();
+            state.materialized_rows = 1;
+            state.remote_candidates = Some(vec![]);
+            state.next_remote_idx = 0;
+        }
+
+        assert!(source.ensure_row_available(0).unwrap());
+        assert!(!source.ensure_row_available(3).unwrap());
+        assert!(!source.ensure_row_available(1).unwrap());
+    }
+
+    #[test]
+    fn read_row_batch_uses_cached_rows_and_respects_limit() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config.clone());
+
+        {
+            let mut state = source.state.lock().unwrap();
+            state.materialized_rows = 2;
+            state.total_rows = Some(2);
+        }
+
+        let row0 = RowView {
+            row_id: Some("r0".into()),
+            timestamp: Some(Utc::now()),
+            text_fields: vec![RowTextField {
+                name: "text".into(),
+                text: "alpha".into(),
+            }],
+        };
+        let row1 = RowView {
+            row_id: Some("r1".into()),
+            timestamp: Some(Utc::now()),
+            text_fields: vec![RowTextField {
+                name: "text".into(),
+                text: "beta".into(),
+            }],
+        };
+        {
+            let mut cache = source.cache.lock().unwrap();
+            cache.insert(0, row0, config.cache_capacity);
+            cache.insert(1, row1, config.cache_capacity);
+        }
+
+        let mut out = Vec::new();
+        source.read_row_batch(&[0, 1], &mut out, Some(1)).unwrap();
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn read_row_batch_errors_on_invalid_json_line() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("broken.jsonl");
+        fs::write(&path, b"not-json\n").unwrap();
+
+        let mut config = test_config(dir.path().to_path_buf());
+        config.checkpoint_stride = 1;
+        let source = test_source(config.clone());
+        let shard = HuggingFaceRowSource::index_single_shard(&config, &path, 0)
+            .unwrap()
+            .unwrap();
+        {
+            let mut state = source.state.lock().unwrap();
+            state.materialized_rows = 1;
+            state.total_rows = Some(1);
+            state.shards = vec![shard];
+        }
+
+        let mut out = Vec::new();
+        let result = source.read_row_batch(&[0], &mut out, Some(1));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn build_shard_index_errors_when_no_matching_extensions() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("data.txt"), b"x\n").unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let result = HuggingFaceRowSource::build_shard_index(&config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn build_shard_index_honors_max_rows() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("rows.jsonl"),
+            b"{\"text\":\"1\"}\n{\"text\":\"2\"}\n{\"text\":\"3\"}\n",
+        )
+        .unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.max_rows = Some(2);
+
+        let (_, discovered) = HuggingFaceRowSource::build_shard_index(&config).unwrap();
+        assert_eq!(discovered, 2);
+    }
+
+    #[test]
+    fn refresh_handles_empty_total_and_cursor_wrap() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config.clone());
+
+        {
+            let mut state = source.state.lock().unwrap();
+            state.materialized_rows = 0;
+            state.total_rows = Some(0);
+        }
+        let empty = source.refresh(None, Some(5)).unwrap();
+        assert!(empty.records.is_empty());
+        assert_eq!(empty.cursor.revision, 0);
+
+        let path = dir.path().join("rows.jsonl");
+        fs::write(
+            &path,
+            b"{\"id\":\"a\",\"text\":\"A\"}\n{\"id\":\"b\",\"text\":\"B\"}\n",
+        )
+        .unwrap();
+        let mut cfg2 = config;
+        cfg2.checkpoint_stride = 1;
+        let source2 = test_source(cfg2.clone());
+        let shard = HuggingFaceRowSource::index_single_shard(&cfg2, &path, 0)
+            .unwrap()
+            .unwrap();
+        {
+            let mut state = source2.state.lock().unwrap();
+            state.materialized_rows = 2;
+            state.total_rows = Some(2);
+            state.shards = vec![shard];
+        }
+        let cursor = SourceCursor {
+            last_seen: Utc::now(),
+            revision: 99,
+        };
+        let snapshot = source2.refresh(Some(&cursor), Some(1)).unwrap();
+        assert_eq!(snapshot.records.len(), 1);
+    }
+}
