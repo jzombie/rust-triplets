@@ -28,7 +28,9 @@ In metric learning, a triplet is a training example composed of:
 
 Training on many `(anchor, positive, negative)` groups helps a model learn useful embedding space structure (similar items closer together, dissimilar items farther apart).
 
-`triplets` helps automatically construct these triplets from multiple data sources using a metadata-driven approach: you define recipes/selectors for how anchor/positive/negative sections are chosen, and the sampler applies them deterministically with reproducible split assignment, weighting, chunking, and resume-friendly state.
+In this crate, those triplets are built automatically from one or more data sources using metadata-driven, user-defined recipes/selectors for anchor/positive/negative section choice.
+
+It is designed for multi-source training pipelines where each batch can mix records from several sources, while source contribution is controlled independently (for example, over/under-sampling frequency and trust/quality weighting per source) to rebalance representation and reduce source-driven bias. Because source weights can be set per batch call, they can be wired to training-time loss/metric signals and adjusted dynamically during training.
 
 ## High-level features
 
@@ -36,6 +38,9 @@ Training on many `(anchor, positive, negative)` groups helps a model learn usefu
 - **Runtime batch sampling** via `next_triplet_batch`, `next_pair_batch`, and `next_text_batch`.
 - **Recipe-driven sample construction** for triplet/pair/text generation (anchor/positive/negative selectors).
 - **Weight-aware sampling controls** across source weights, recipe weights, and chunk trust/quality weighting.
+- **Per-source batch mixing controls** so multiple sources can contribute to the same batch, with independent source frequency controls (including over/under-sampling).
+- **Per-source trust controls** to weight quality/trust independently by source/taxonomy and help mitigate bias from uneven source quality.
+- **Per-batch dynamic source reweighting** so source weights can be changed across batches (for example from loss/metric feedback) while training.
 - **Resume support** via `persist_state()` and split-store persistence.
 - **Source-agnostic backends** (`DataSource` or `IndexableSource` + `IndexableAdapter`).
 - **Supply-chain style orchestration (core layer):** multi-source intake (`refresh`) with per-call parallel ingest, optional per-source weighting, staged buffering, deterministic split routing, and batch assembly into train-ready outputs.
