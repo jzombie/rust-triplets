@@ -93,6 +93,8 @@ let _batch = sampler.next_triplet_batch(SplitLabel::Train)?;
 # Ok::<(), triplets::SamplerError>(())
 ```
 
+> _`DataRecord` is the core sampling primitive, but this in-memory example is only for illustration and not a scalable or memory-efficient pattern. For real datasets, prefer the built-in integrated sources or an `IndexableSource` implementation._
+
 ## Integrated sources
 
 `triplets` ships with two built-in sources; if you use either, deterministic paging is always enabled (`FileSource`, `HuggingFaceRowSource`).
