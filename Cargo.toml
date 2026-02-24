@@ -36,7 +36,3 @@ thiserror = "2.0.18"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 walkdir = "2.5.0"
-
-[[example]]
-name = "huggingface_row_view_demo"
-required-features = ["huggingface"]
