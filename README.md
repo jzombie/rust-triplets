@@ -267,6 +267,94 @@ let batch = prefetcher.next().unwrap();
 let _ = batch;
 ```
 
+### Expected batch output (assertion-style)
+
+The most useful checks are shape/invariants, not exact record order. `next_triplet_batch`, `next_pair_batch`, and `next_text_batch` return exactly `batch_size` samples.
+
+A minimal assertion pattern:
+
+```rust,no_run
+use std::borrow::Cow;
+use std::sync::Arc;
+
+use chrono::Utc;
+use triplets::data::RecordSection;
+use triplets::source::InMemorySource;
+use triplets::{
+  DataRecord, DeterministicSplitStore, NegativeStrategy, PairLabel, Sampler, SamplerConfig,
+  SectionRole, Selector, SplitLabel, SplitRatios, TripletRecipe, TripletSampler,
+};
+
+fn record(id: &str) -> DataRecord {
+  DataRecord {
+    id: id.into(),
+    source: "demo".into(),
+    created_at: Utc::now(),
+    updated_at: Utc::now(),
+    quality: Default::default(),
+    taxonomy: Vec::new(),
+    sections: vec![
+      RecordSection {
+        role: SectionRole::Anchor,
+        heading: Some("title".into()),
+        text: format!("anchor {id}"),
+        sentences: vec![format!("anchor {id}")],
+      },
+      RecordSection {
+        role: SectionRole::Context,
+        heading: Some("body".into()),
+        text: format!("context {id}"),
+        sentences: vec![format!("context {id}")],
+      },
+    ],
+    meta_prefix: None,
+  }
+}
+
+let source = InMemorySource::new("demo", vec![record("r1"), record("r2"), record("r3")]);
+
+let split = SplitRatios {
+  train: 1.0,
+  validation: 0.0,
+  test: 0.0,
+};
+let store = Arc::new(DeterministicSplitStore::new(split, 42)?);
+
+let mut config = SamplerConfig::default();
+config.batch_size = 2;
+config.recipes = vec![TripletRecipe {
+  name: Cow::Borrowed("title_ctx"),
+  anchor: Selector::Role(SectionRole::Anchor),
+  positive_selector: Selector::Role(SectionRole::Context),
+  negative_selector: Selector::Role(SectionRole::Context),
+  negative_strategy: NegativeStrategy::WrongArticle,
+  weight: 1.0,
+  instruction: None,
+}];
+
+let sampler = TripletSampler::new(config, Arc::clone(&store));
+sampler.register_source(Box::new(source));
+
+let triplets = sampler.next_triplet_batch(SplitLabel::Train)?;
+assert_eq!(triplets.triplets.len(), 2);
+assert!(triplets.triplets.iter().all(|t| t.recipe == "title_ctx"));
+
+let pairs = sampler.next_pair_batch(SplitLabel::Train)?;
+assert_eq!(pairs.pairs.len(), 2);
+assert!(pairs
+  .pairs
+  .iter()
+  .all(|p| matches!(p.label, PairLabel::Positive | PairLabel::Negative)));
+
+let text = sampler.next_text_batch(SplitLabel::Train)?;
+assert_eq!(text.samples.len(), 2);
+assert!(text.samples.iter().all(|s| s.recipe.starts_with("title_ctx_")));
+
+# Ok::<(), triplets::SamplerError>(())
+```
+
+If a `next_*_batch` call fails to produce `batch_size` samples, the call returns an error.
+
 - For per-call source weighting, use `next_triplet_batch_with_weights(...)`, `next_pair_batch_with_weights(...)`, or `next_text_batch_with_weights(...)`.
 - Missing source ids default to `1.0`; `0.0` disables a source for that call.
 
@@ -319,9 +407,12 @@ This reflects the built-in file-corpus helpers (`FileCorpusIndex`) used by files
 - **Order note**: index batching preserves permutation order; chunked index reads do not remove deterministic shuffling.
 - **Manual epoch control**: `sampler.set_epoch(n)` resets per-source cursors and reshuffles deterministically for that epoch.
 - **Persisted state scope**: epoch tracking is split-aware, but sampler/source cursors + RNG/round-robin state are persisted per store file.
-- **Triplet recipe behavior**: per-source recipes are scanned from per-source round-robin hints until a match is found.
+- **Triplet recipe behavior**: if `SamplerConfig.recipes` is non-empty, those recipes are used for all sources; otherwise each source's `default_triplet_recipes()` is used (if any).
 - **Pair batches**: derived from triplets and follow the same source/recipe selection behavior.
-- **Text recipes**: follow per-source behavior when provided; otherwise config recipes are used.
+- **Text recipe behavior**:
+  - If `SamplerConfig.text_recipes` is non-empty, those are used directly.
+  - Else if triplet recipes are configured/available, text recipes are derived as `{triplet_name}_anchor`, `{triplet_name}_positive`, `{triplet_name}_negative`.
+  - Else per-source text recipes are used when available.
 - **Oversampling**: when sources run dry, cached records may be reused (no global no-repeat guarantee).
 
 ### Advanced source implementation examples

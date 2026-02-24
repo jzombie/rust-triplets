@@ -1384,6 +1384,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 self.triplet_recipe_rr_idx =
                     self.triplet_recipe_rr_idx.saturating_add(recipe_steps);
             }
+            pad_with_reuse(&mut pairs, self.config.batch_size);
             if pairs.len() == self.config.batch_size {
                 return Ok(SampleBatch { pairs });
             }
@@ -1505,6 +1506,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         if recipe_steps > 0 {
             self.triplet_recipe_rr_idx = self.triplet_recipe_rr_idx.saturating_add(recipe_steps);
         }
+        pad_with_reuse(&mut pairs, self.config.batch_size);
         if pairs.len() == self.config.batch_size {
             self.source_cycle_idx = self.source_cycle_idx.saturating_add(source_steps);
             self.source_state_dirty = sources.len() > 1;
@@ -1558,6 +1560,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             if recipe_steps > 0 {
                 self.text_recipe_rr_idx = self.text_recipe_rr_idx.saturating_add(recipe_steps);
             }
+            pad_with_reuse(&mut samples, self.config.batch_size);
             if samples.len() == self.config.batch_size {
                 return Ok(TextBatch { samples });
             }
@@ -1639,6 +1642,9 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             }
         }
         if samples.len() != self.config.batch_size {
+            pad_with_reuse(&mut samples, self.config.batch_size);
+        }
+        if samples.len() != self.config.batch_size {
             return Err(SamplerError::Exhausted(RECIPE_LABEL_TEXT.into()));
         }
         self.source_cycle_idx = self.source_cycle_idx.saturating_add(source_steps);
@@ -1709,6 +1715,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 self.triplet_recipe_rr_idx =
                     self.triplet_recipe_rr_idx.saturating_add(recipe_steps);
             }
+            pad_with_reuse(&mut triplets, self.config.batch_size);
             if triplets.len() == self.config.batch_size {
                 return Ok(TripletBatch { triplets });
             }
@@ -1801,6 +1808,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         if recipe_steps > 0 {
             self.triplet_recipe_rr_idx = self.triplet_recipe_rr_idx.saturating_add(recipe_steps);
         }
+        pad_with_reuse(&mut triplets, self.config.batch_size);
         if triplets.len() == self.config.batch_size {
             self.source_cycle_idx = self.source_cycle_idx.saturating_add(source_steps);
             self.source_state_dirty = sources.len() > 1;
@@ -2062,6 +2070,17 @@ fn chunk_key(chunk: &RecordChunk) -> String {
         ChunkView::SummaryFallback { strategy, .. } => {
             format!("{}|{}|s|{}", chunk.record_id, chunk.section_idx, strategy)
         }
+    }
+}
+
+fn pad_with_reuse<T: Clone>(items: &mut Vec<T>, target: usize) {
+    if items.is_empty() || items.len() >= target {
+        return;
+    }
+    let seed = items.clone();
+    let base_len = seed.len();
+    for idx in 0..(target - items.len()) {
+        items.push(seed[idx % base_len].clone());
     }
 }
 
@@ -2560,6 +2579,111 @@ mod tests {
         assert!(batch.triplets[0].anchor.record_id.starts_with("healthy_"));
         assert!(batch.triplets[0].positive.record_id.starts_with("healthy_"));
         assert!(batch.triplets[0].negative.record_id.starts_with("healthy_"));
+    }
+
+    #[test]
+    fn triplet_batch_is_padded_to_batch_size_when_unique_pool_is_small() {
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let store = Arc::new(DeterministicSplitStore::new(split, 9001).unwrap());
+
+        let mut config = base_config();
+        config.seed = 101;
+        config.batch_size = 8;
+        config.ingestion_max_records = 4;
+        config.allowed_splits = vec![SplitLabel::Train];
+        config.split = split;
+        config.recipes = vec![TripletRecipe {
+            name: "fixed_size_triplet".into(),
+            anchor: Selector::Role(SectionRole::Anchor),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 1.0,
+            instruction: None,
+        }];
+
+        let records = vec![
+            trader_record("pad_a", "2025-01-01", "A", "Body A"),
+            trader_record("pad_b", "2025-01-02", "B", "Body B"),
+        ];
+
+        let sampler = TripletSampler::new(config, store);
+        sampler.register_source(Box::new(InMemorySource::new("pad_source", records)));
+
+        let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
+        assert_eq!(batch.triplets.len(), 8);
+    }
+
+    #[test]
+    fn pair_batch_is_padded_to_batch_size_when_unique_pool_is_small() {
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let store = Arc::new(DeterministicSplitStore::new(split, 9002).unwrap());
+
+        let mut config = base_config();
+        config.seed = 202;
+        config.batch_size = 9;
+        config.ingestion_max_records = 4;
+        config.allowed_splits = vec![SplitLabel::Train];
+        config.split = split;
+        config.recipes = vec![TripletRecipe {
+            name: "fixed_size_pairs".into(),
+            anchor: Selector::Role(SectionRole::Anchor),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 1.0,
+            instruction: None,
+        }];
+
+        let records = vec![
+            trader_record("pair_a", "2025-02-01", "A", "Body A"),
+            trader_record("pair_b", "2025-02-02", "B", "Body B"),
+        ];
+
+        let sampler = TripletSampler::new(config, store);
+        sampler.register_source(Box::new(InMemorySource::new("pair_source", records)));
+
+        let batch = sampler.next_pair_batch(SplitLabel::Train).unwrap();
+        assert_eq!(batch.pairs.len(), 9);
+    }
+
+    #[test]
+    fn text_batch_is_padded_to_batch_size_when_unique_pool_is_small() {
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let store = Arc::new(DeterministicSplitStore::new(split, 9003).unwrap());
+
+        let mut config = base_config();
+        config.seed = 303;
+        config.batch_size = 7;
+        config.ingestion_max_records = 2;
+        config.allowed_splits = vec![SplitLabel::Train];
+        config.split = split;
+        config.text_recipes = vec![TextRecipe {
+            name: "fixed_size_text".into(),
+            selector: Selector::Role(SectionRole::Context),
+            weight: 1.0,
+            instruction: None,
+        }];
+
+        let records = vec![trader_record("text_a", "2025-03-01", "A", "Body A")];
+
+        let sampler = TripletSampler::new(config, store);
+        sampler.register_source(Box::new(InMemorySource::new("text_source", records)));
+
+        let batch = sampler.next_text_batch(SplitLabel::Train).unwrap();
+        assert_eq!(batch.samples.len(), 7);
     }
 
     #[test]
