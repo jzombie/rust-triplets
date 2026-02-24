@@ -2285,7 +2285,10 @@ impl HuggingFaceRowSource {
         let known = state.materialized_rows;
         if known > 0 {
             let mut upper = known;
-            if state.total_rows.is_some_and(|total_rows| total_rows > known) {
+            if state
+                .total_rows
+                .is_some_and(|total_rows| total_rows > known)
+            {
                 let headroom = self.effective_expansion_headroom_rows();
                 upper = known.saturating_add(headroom);
                 if let Some(total_rows) = state.total_rows {
@@ -2481,13 +2484,8 @@ mod tests {
     use tempfile::tempdir;
 
     fn test_config(snapshot_dir: PathBuf) -> HuggingFaceRowsConfig {
-        let mut config = HuggingFaceRowsConfig::new(
-            "hf_test",
-            "org/dataset",
-            "default",
-            "train",
-            snapshot_dir,
-        );
+        let mut config =
+            HuggingFaceRowsConfig::new("hf_test", "org/dataset", "default", "train", snapshot_dir);
         config.cache_capacity = 10;
         config.remote_expansion_headroom_multiplier = 3;
         config
@@ -2514,7 +2512,8 @@ mod tests {
     fn candidate_target_path_maps_remote_urls_under_manifest_root() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
-        let candidate = "url::https://huggingface.co/datasets/org/ds/resolve/main/train/part-000.parquet";
+        let candidate =
+            "url::https://huggingface.co/datasets/org/ds/resolve/main/train/part-000.parquet";
         let target = HuggingFaceRowSource::candidate_target_path(&config, candidate);
         assert!(target.ends_with("_parquet_manifest/main/train/part-000.parquet"));
     }
@@ -2534,9 +2533,17 @@ mod tests {
         let path = dir.path().join("payload.bin");
         fs::write(&path, vec![0u8; 5]).unwrap();
 
-        assert!(HuggingFaceRowSource::target_matches_expected_size(&path, Some(5)));
-        assert!(!HuggingFaceRowSource::target_matches_expected_size(&path, Some(4)));
-        assert!(HuggingFaceRowSource::target_matches_expected_size(&path, None));
+        assert!(HuggingFaceRowSource::target_matches_expected_size(
+            &path,
+            Some(5)
+        ));
+        assert!(!HuggingFaceRowSource::target_matches_expected_size(
+            &path,
+            Some(4)
+        ));
+        assert!(HuggingFaceRowSource::target_matches_expected_size(
+            &path, None
+        ));
     }
 
     #[test]
@@ -2574,16 +2581,12 @@ mod tests {
         });
 
         let split_count = HuggingFaceRowSource::extract_split_row_count_from_size_response(
-            &payload,
-            "default",
-            "test",
+            &payload, "default", "test",
         );
         assert_eq!(split_count, Some(77));
 
         let empty_split_count = HuggingFaceRowSource::extract_split_row_count_from_size_response(
-            &payload,
-            "default",
-            "",
+            &payload, "default", "",
         );
         assert_eq!(empty_split_count, Some(200));
     }
@@ -2613,8 +2616,10 @@ mod tests {
 
         assert_eq!(source.effective_expansion_headroom_rows(), 30);
 
-        let mut sampler = SamplerConfig::default();
-        sampler.ingestion_max_records = 7;
+        let sampler = SamplerConfig {
+            ingestion_max_records: 7,
+            ..SamplerConfig::default()
+        };
         source.configure_sampler(&sampler);
         assert_eq!(source.effective_expansion_headroom_rows(), 21);
     }
@@ -2626,8 +2631,10 @@ mod tests {
         let source = test_source(config.clone());
 
         {
-            let mut sampler = SamplerConfig::default();
-            sampler.seed = 4242;
+            let sampler = SamplerConfig {
+                seed: 4242,
+                ..SamplerConfig::default()
+            };
             source.configure_sampler(&sampler);
         }
 
@@ -2665,9 +2672,18 @@ mod tests {
     fn value_to_text_handles_scalar_and_structured_values() {
         assert_eq!(HuggingFaceRowSource::value_to_text(&json!(null)), None);
         assert_eq!(HuggingFaceRowSource::value_to_text(&json!("   ")), None);
-        assert_eq!(HuggingFaceRowSource::value_to_text(&json!("hello")), Some("hello".into()));
-        assert_eq!(HuggingFaceRowSource::value_to_text(&json!(true)), Some("true".into()));
-        assert_eq!(HuggingFaceRowSource::value_to_text(&json!(3.5)), Some("3.5".into()));
+        assert_eq!(
+            HuggingFaceRowSource::value_to_text(&json!("hello")),
+            Some("hello".into())
+        );
+        assert_eq!(
+            HuggingFaceRowSource::value_to_text(&json!(true)),
+            Some("true".into())
+        );
+        assert_eq!(
+            HuggingFaceRowSource::value_to_text(&json!(3.5)),
+            Some("3.5".into())
+        );
         assert_eq!(
             HuggingFaceRowSource::value_to_text(&json!([1, 2])),
             Some("[1,2]".into())
