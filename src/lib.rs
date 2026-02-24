@@ -46,7 +46,7 @@ pub use data::{
 pub use errors::SamplerError;
 pub use ingestion::{IngestionManager, RecordCache};
 pub use kvp::{KvpField, KvpPrefixSampler};
-pub use sampler::{BatchPrefetcher, PairSampler, Sampler};
+pub use sampler::{BatchPrefetcher, TripletSampler, Sampler};
 pub use source::{DataSource, SourceCursor};
 #[cfg(feature = "huggingface")]
 pub use source::{HuggingFaceRowSource, HuggingFaceRowsConfig};

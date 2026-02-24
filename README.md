@@ -191,7 +191,7 @@ Minimal shape:
 1. Implement one or more `DataSource` backends.
 2. Create `SamplerConfig` (chunking, recipes, split policy).
 3. Open a split store (`DeterministicSplitStore` or `FileSplitStore`).
-4. Construct `PairSampler` and register sources.
+4. Construct `TripletSampler` and register sources.
   - If you call a source directly (without registering), pass the intended `SamplerConfig` into source calls.
 5. Call one of the batch APIs: `next_triplet_batch(split)`, `next_pair_batch(split)`, or `next_text_batch(split)`.
 6. Call `persist_state()` when you want restart-resume behavior.
@@ -267,13 +267,13 @@ Example:
 ```rust,no_run
 use std::sync::Arc;
 use triplets::{
-  DeterministicSplitStore, PairSampler, Sampler, SamplerConfig, SplitLabel, SplitRatios,
+  DeterministicSplitStore, TripletSampler, Sampler, SamplerConfig, SplitLabel, SplitRatios,
 };
 
 # let split = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
 # let store = Arc::new(DeterministicSplitStore::new(split, 123).unwrap());
 # let config = SamplerConfig::default();
-let sampler = Arc::new(PairSampler::new(config, store));
+let sampler = Arc::new(TripletSampler::new(config, store));
 // register sources...
 
 let prefetcher = Arc::clone(&sampler).prefetch_triplet_batches(SplitLabel::Train, 4);
@@ -290,13 +290,13 @@ Example (different source mix across consecutive batches):
 use std::collections::HashMap;
 use std::sync::Arc;
 use triplets::{
-  DeterministicSplitStore, PairSampler, Sampler, SamplerConfig, SplitLabel, SplitRatios,
+  DeterministicSplitStore, TripletSampler, Sampler, SamplerConfig, SplitLabel, SplitRatios,
 };
 
 # let split = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
 # let store = Arc::new(DeterministicSplitStore::new(split, 123).unwrap());
 # let config = SamplerConfig::default();
-# let sampler = Arc::new(PairSampler::new(config, store));
+# let sampler = Arc::new(TripletSampler::new(config, store));
 
 let mut weights_a = HashMap::new();
 weights_a.insert("source_a".to_string(), 1.0);

@@ -5,7 +5,7 @@ use chrono::{TimeZone, Utc};
 use triplets::source::InMemorySource;
 use triplets::utils::make_section;
 use triplets::{
-    DataRecord, DeterministicSplitStore, NegativeStrategy, PairSampler, QualityScore, RecordId,
+    DataRecord, DeterministicSplitStore, NegativeStrategy, TripletSampler, QualityScore, RecordId,
     Sampler, SamplerConfig, SectionRole, Selector, SplitLabel, SplitRatios, TripletRecipe,
 };
 
@@ -72,7 +72,7 @@ fn run_samples(batch_size: usize, total_samples: usize) -> Vec<RecordId> {
         build_record("source_b", "b3", 3),
     ];
 
-    let sampler = PairSampler::new(config, store);
+    let sampler = TripletSampler::new(config, store);
     sampler.register_source(Box::new(InMemorySource::new("source_a", source_a)));
     sampler.register_source(Box::new(InMemorySource::new("source_b", source_b)));
 

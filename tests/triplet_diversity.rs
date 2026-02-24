@@ -6,7 +6,7 @@ use chrono::{Duration, TimeZone, Utc};
 use triplets::source::InMemorySource;
 use triplets::utils::make_section;
 use triplets::{
-    DataRecord, DeterministicSplitStore, NegativeStrategy, PairSampler, QualityScore, RecordId,
+    DataRecord, DeterministicSplitStore, NegativeStrategy, TripletSampler, QualityScore, RecordId,
     Sampler, SamplerConfig, SectionRole, Selector, SplitLabel, SplitRatios, TripletRecipe,
 };
 
@@ -60,7 +60,7 @@ fn assert_diversity_for_seed_and_split(seed: u64, allowed_split: SplitLabel) {
 
     let records: Vec<DataRecord> = (0..300).map(|idx| build_record("unit", idx)).collect();
     let store = Arc::new(DeterministicSplitStore::new(split, 77).unwrap());
-    let sampler = PairSampler::new(config, store);
+    let sampler = TripletSampler::new(config, store);
     sampler.register_source(Box::new(InMemorySource::new("unit", records)));
 
     let mut anchor_counts: HashMap<RecordId, usize> = HashMap::new();

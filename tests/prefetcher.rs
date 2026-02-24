@@ -5,7 +5,7 @@ use chrono::{TimeZone, Utc};
 
 use triplets::source::InMemorySource;
 use triplets::{
-    DataRecord, DeterministicSplitStore, NegativeStrategy, PairSampler, QualityScore,
+    DataRecord, DeterministicSplitStore, NegativeStrategy, TripletSampler, QualityScore,
     SamplerConfig, SectionRole, Selector, SplitLabel, SplitRatios, TripletRecipe,
 };
 
@@ -74,7 +74,7 @@ fn prefetcher_yields_triplet_batches() {
         build_record("source_b", "b4", 4),
     ];
 
-    let sampler = Arc::new(PairSampler::new(config, store));
+    let sampler = Arc::new(TripletSampler::new(config, store));
     sampler.register_source(Box::new(InMemorySource::new("source_a", records_a)));
     sampler.register_source(Box::new(InMemorySource::new("source_b", records_b)));
 

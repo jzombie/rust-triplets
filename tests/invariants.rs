@@ -8,7 +8,7 @@ use chrono::{TimeZone, Utc};
 use triplets::NegativeStrategy;
 use triplets::config::{SamplerConfig, Selector, TripletRecipe};
 use triplets::data::{DataRecord, QualityScore, SectionRole};
-use triplets::sampler::{PairSampler, Sampler};
+use triplets::sampler::{TripletSampler, Sampler};
 use triplets::source::InMemorySource;
 use triplets::splits::{
     EpochStateStore, PersistedSamplerState, PersistedSplitHashes, PersistedSplitMeta,
@@ -209,7 +209,7 @@ fn single_source_shuffled_cycles_records_before_repeat() {
         test: 0.0,
     };
     let store = Arc::new(CountingSplitStore::new(split, 7));
-    let sampler = PairSampler::new(build_config(7, 2, split), store);
+    let sampler = TripletSampler::new(build_config(7, 2, split), store);
 
     let records = vec![
         build_record("only", "a", 1),
@@ -236,7 +236,7 @@ fn multi_source_shuffled_visits_all_sources() {
         test: 0.0,
     };
     let store = Arc::new(CountingSplitStore::new(split, 9));
-    let sampler = PairSampler::new(build_config(9, 4, split), store);
+    let sampler = TripletSampler::new(build_config(9, 4, split), store);
 
     let source_a = vec![build_record("a", "a1", 1), build_record("a", "a2", 2)];
     let source_b = vec![build_record("b", "b1", 1), build_record("b", "b2", 2)];
@@ -264,7 +264,7 @@ fn restart_with_persisted_state_continues_sequence() {
         test: 0.0,
     };
     let store = Arc::new(CountingSplitStore::new(split, 11));
-    let sampler = PairSampler::new(build_config(11, 4, split), Arc::clone(&store));
+    let sampler = TripletSampler::new(build_config(11, 4, split), Arc::clone(&store));
 
     let source_a = vec![build_record("a", "a1", 1), build_record("a", "a2", 2)];
     let source_b = vec![build_record("b", "b1", 1), build_record("b", "b2", 2)];
@@ -275,7 +275,7 @@ fn restart_with_persisted_state_continues_sequence() {
     let first = first_batch.triplets[0].anchor.record_id.clone();
     sampler.persist_state().unwrap();
     // Restart from persisted state: should continue from the stored sequence.
-    let resumed = PairSampler::new(build_config(11, 4, split), Arc::clone(&store));
+    let resumed = TripletSampler::new(build_config(11, 4, split), Arc::clone(&store));
     resumed.register_source(Box::new(InMemorySource::new("a", source_a.clone())));
     resumed.register_source(Box::new(InMemorySource::new("b", source_b.clone())));
 
@@ -283,7 +283,7 @@ fn restart_with_persisted_state_continues_sequence() {
     let next = next_batch.triplets[0].anchor.record_id.clone();
 
     // Second restart to assert determinism from storage alone.
-    let resumed_again = PairSampler::new(build_config(11, 4, split), store);
+    let resumed_again = TripletSampler::new(build_config(11, 4, split), store);
     resumed_again.register_source(Box::new(InMemorySource::new("a", source_a)));
     resumed_again.register_source(Box::new(InMemorySource::new("b", source_b)));
 
@@ -301,7 +301,7 @@ fn negatives_change_after_restart_when_state_is_persisted() {
         test: 0.0,
     };
     let store = Arc::new(CountingSplitStore::new(split, 13));
-    let sampler = PairSampler::new(build_config(13, 4, split), Arc::clone(&store));
+    let sampler = TripletSampler::new(build_config(13, 4, split), Arc::clone(&store));
 
     let source_a = vec![
         build_record("a", "a1", 1),
@@ -324,7 +324,7 @@ fn negatives_change_after_restart_when_state_is_persisted() {
         .collect();
     sampler.persist_state().unwrap();
 
-    let resumed = PairSampler::new(build_config(13, 4, split), store);
+    let resumed = TripletSampler::new(build_config(13, 4, split), store);
     resumed.register_source(Box::new(InMemorySource::new("a", source_a)));
     resumed.register_source(Box::new(InMemorySource::new("b", source_b)));
 
@@ -360,7 +360,7 @@ fn batch_size_invariance_matches_sequence() {
         let store = Arc::new(CountingSplitStore::new(split, 17));
         let mut config = build_config(17, batch_size, split);
         config.ingestion_max_records = 6;
-        let sampler = PairSampler::new(config, store);
+        let sampler = TripletSampler::new(config, store);
         sampler.register_source(Box::new(InMemorySource::new("a", source_a.clone())));
         sampler.register_source(Box::new(InMemorySource::new("b", source_b.clone())));
         let mut ids = Vec::new();
@@ -387,7 +387,7 @@ fn negatives_are_not_positive_record() {
         test: 0.0,
     };
     let store = Arc::new(CountingSplitStore::new(split, 19));
-    let sampler = PairSampler::new(build_config(19, 2, split), store);
+    let sampler = TripletSampler::new(build_config(19, 2, split), store);
 
     let source_a = vec![build_record("a", "a1", 1), build_record("a", "a2", 2)];
     sampler.register_source(Box::new(InMemorySource::new("a", source_a)));
@@ -407,7 +407,7 @@ fn refresh_only_writes_new_split_assignments() {
         test: 0.0,
     };
     let store = Arc::new(CountingSplitStore::new(split, 23));
-    let sampler = PairSampler::new(build_config(23, 1, split), Arc::clone(&store));
+    let sampler = TripletSampler::new(build_config(23, 1, split), Arc::clone(&store));
 
     let source_a = vec![build_record("a", "a1", 1), build_record("a", "a2", 2)];
     sampler.register_source(Box::new(InMemorySource::new("a", source_a.clone())));
@@ -440,7 +440,7 @@ fn deterministic_order_with_fixed_seed_and_unchanged_dataset() {
         let store = Arc::new(CountingSplitStore::new(split, 31));
         let mut config = build_config(31, 4, split);
         config.ingestion_max_records = 6;
-        let sampler = PairSampler::new(config, store);
+        let sampler = TripletSampler::new(config, store);
         sampler.register_source(Box::new(InMemorySource::new("a", source_a.clone())));
         sampler.register_source(Box::new(InMemorySource::new("b", source_b.clone())));
         let mut ids = Vec::new();
@@ -466,7 +466,7 @@ fn zero_test_split_still_cycles_all_records_when_train_and_validation_allowed() 
     let mut config = build_config(53, 2, split);
     config.allowed_splits = vec![SplitLabel::Train, SplitLabel::Validation];
     config.ingestion_max_records = 6;
-    let sampler = PairSampler::new(config, Arc::clone(&store));
+    let sampler = TripletSampler::new(config, Arc::clone(&store));
 
     let mut train_suffixes = Vec::new();
     let mut validation_suffixes = Vec::new();
@@ -583,7 +583,7 @@ fn allowed_split_records_eventually_sampled_across_ratio_matrix() {
         let mut config = build_config(seed, 2, split);
         config.allowed_splits = allowed_splits.clone();
         config.ingestion_max_records = target_per_split * allowed_splits.len();
-        let sampler = PairSampler::new(config, Arc::clone(&store));
+        let sampler = TripletSampler::new(config, Arc::clone(&store));
 
         let mut expected: HashMap<SplitLabel, std::collections::HashSet<RecordId>> = HashMap::new();
         let mut records = Vec::new();
@@ -694,7 +694,7 @@ fn allowed_split_records_eventually_sampled_across_ratio_matrix_via_generic_trip
         let mut config = build_config(seed, 2, split);
         config.allowed_splits = allowed_splits.clone();
         config.ingestion_max_records = target_per_split * allowed_splits.len();
-        let sampler = PairSampler::new(config, Arc::clone(&store));
+        let sampler = TripletSampler::new(config, Arc::clone(&store));
 
         let mut expected: HashMap<SplitLabel, std::collections::HashSet<RecordId>> = HashMap::new();
         let mut records = Vec::new();
@@ -780,7 +780,7 @@ fn per_epoch_shuffle_changes_source_order() {
         test: 0.0,
     };
     let store = Arc::new(CountingSplitStore::new(split, 41));
-    let sampler = PairSampler::new(build_config(41, 3, split), store);
+    let sampler = TripletSampler::new(build_config(41, 3, split), store);
 
     let records = vec![
         build_record("only", "a", 1),

@@ -18,7 +18,7 @@ use crate::sampler::chunk_weight;
 use crate::source::DataSource;
 use crate::splits::{FileSplitStore, SplitLabel, SplitRatios, SplitStore};
 use crate::{
-    PairSampler, RecordChunk, SampleBatch, Sampler, SamplerError, SourceId, TextBatch, TextRecipe,
+    TripletSampler, RecordChunk, SampleBatch, Sampler, SamplerError, SourceId, TextBatch, TextRecipe,
     TripletBatch,
 };
 
@@ -431,7 +431,7 @@ where
 /// Run the multi-source demo CLI with injectable root resolution/source builders.
 ///
 /// `build_sources` is construction-only. Source sampler configuration is owned
-/// by sampler registration (`PairSampler::register_source`).
+/// by sampler registration (`TripletSampler::register_source`).
 pub fn run_multi_source_demo<R, Resolve, Build, I>(
     args_iter: I,
     resolve_roots: Resolve,
@@ -476,7 +476,7 @@ where
     );
     let sources = build_sources(&roots);
     let split_store = Arc::new(FileSplitStore::open(&split_store_path, config.split, 99)?);
-    let sampler = PairSampler::new(config, split_store.clone());
+    let sampler = TripletSampler::new(config, split_store.clone());
     for source in sources {
         sampler.register_source(source);
     }
