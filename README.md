@@ -51,9 +51,49 @@ It is designed for multi-source training pipelines where each batch can mix reco
 
 This crate does **not** perform semantic mining/retrieval scoring by itself; instead, it gives you deterministic, metadata-driven sampling primitives you can feed into your downstream mining/retrieval stack.
 
+## Using a source for sampling
+
+Create a sampler, register your source, then ask for a batch:
+
+```rust,no_run
+use std::sync::Arc;
+
+use chrono::Utc;
+use triplets::{
+  DataRecord, DeterministicSplitStore, SamplerConfig, SplitLabel, SplitRatios, TripletSampler,
+};
+use triplets::source::InMemorySource;
+
+let record = DataRecord {
+  id: "r1".into(),
+  source: "demo".into(),
+  created_at: Utc::now(),
+  updated_at: Utc::now(),
+  quality: Default::default(),
+  taxonomy: Vec::new(),
+  sections: Vec::new(),
+  meta_prefix: None,
+};
+
+let source = InMemorySource::new("demo", vec![record]);
+
+let split = SplitRatios {
+  train: 1.0,
+  validation: 0.0,
+  test: 0.0,
+};
+let store = Arc::new(DeterministicSplitStore::new(split, 7)?);
+let sampler = TripletSampler::new(SamplerConfig::default(), Arc::clone(&store));
+
+sampler.register_source(Box::new(source));
+
+let _batch = sampler.next_triplet_batch(SplitLabel::Train)?;
+# Ok::<(), triplets::SamplerError>(())
+```
+
 ## Integrated sources
 
-`triplets` ships with two built-in sources and deterministic paging is always on for both (`FileSource`, `HuggingFaceRowSource`).
+`triplets` ships with two built-in sources; if you use either, deterministic paging is always enabled (`FileSource`, `HuggingFaceRowSource`).
 
 - **File source (`FileSource`)**: local files and folders.
 - **Hugging Face source (`HuggingFaceRowSource`)** *(feature: `huggingface`)*: HF dataset rows.
@@ -133,6 +173,7 @@ impl IndexableSource for MySource {
 }
 
 let source = IndexableAdapter::new(MySource { id: "my_source".into() });
+# let _ = source;
 ```
 
 Then register the source with your sampler and call `next_triplet_batch`, `next_pair_batch`, or `next_text_batch`.
