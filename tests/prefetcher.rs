@@ -5,8 +5,8 @@ use chrono::{TimeZone, Utc};
 
 use triplets::source::InMemorySource;
 use triplets::{
-    DataRecord, DeterministicSplitStore, NegativeStrategy, TripletSampler, QualityScore,
-    SamplerConfig, SectionRole, Selector, SplitLabel, SplitRatios, TripletRecipe,
+    DataRecord, DeterministicSplitStore, NegativeStrategy, QualityScore, SamplerConfig,
+    SectionRole, Selector, SplitLabel, SplitRatios, TripletRecipe, TripletSampler,
 };
 
 fn build_record(source: &str, suffix: &str, day_offset: u32) -> DataRecord {

@@ -18,8 +18,8 @@ use crate::sampler::chunk_weight;
 use crate::source::DataSource;
 use crate::splits::{FileSplitStore, SplitLabel, SplitRatios, SplitStore};
 use crate::{
-    TripletSampler, RecordChunk, SampleBatch, Sampler, SamplerError, SourceId, TextBatch, TextRecipe,
-    TripletBatch,
+    RecordChunk, SampleBatch, Sampler, SamplerError, SourceId, TextBatch, TextRecipe, TripletBatch,
+    TripletSampler,
 };
 
 type DynSource = Box<dyn DataSource + 'static>;

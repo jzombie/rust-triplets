@@ -380,7 +380,8 @@ mod tests {
         )
         .unwrap();
 
-        let source_default = FileSource::new(FileSourceConfig::new("qa_title_default", temp.path()));
+        let source_default =
+            FileSource::new(FileSourceConfig::new("qa_title_default", temp.path()));
         let default_snapshot = source_default
             .refresh(&sampler_config(101), None, Some(1))
             .unwrap();

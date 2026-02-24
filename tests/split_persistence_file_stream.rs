@@ -8,8 +8,8 @@ use triplets::source::indexing::file_corpus::FileCorpusIndex;
 use triplets::splits::{FileSplitStore, SplitRatios, SplitStore};
 use triplets::utils::make_section;
 use triplets::{
-    DataRecord, NegativeStrategy, TripletSampler, QualityScore, RecordId, Sampler, SamplerConfig,
-    SectionRole, Selector, SourceId, SplitLabel, TripletRecipe,
+    DataRecord, NegativeStrategy, QualityScore, RecordId, Sampler, SamplerConfig, SectionRole,
+    Selector, SourceId, SplitLabel, TripletRecipe, TripletSampler,
 };
 
 fn write_qa_file(dir: &std::path::Path, name: &str, answer: &str) {

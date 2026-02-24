@@ -8,7 +8,7 @@ use chrono::{TimeZone, Utc};
 use triplets::NegativeStrategy;
 use triplets::config::{SamplerConfig, Selector, TripletRecipe};
 use triplets::data::{DataRecord, QualityScore, SectionRole};
-use triplets::sampler::{TripletSampler, Sampler};
+use triplets::sampler::{Sampler, TripletSampler};
 use triplets::source::InMemorySource;
 use triplets::splits::{
     EpochStateStore, PersistedSamplerState, PersistedSplitHashes, PersistedSplitMeta,

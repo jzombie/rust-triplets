@@ -6,8 +6,8 @@ use chrono::{Duration, TimeZone, Utc};
 use triplets::source::InMemorySource;
 use triplets::utils::make_section;
 use triplets::{
-    DataRecord, DeterministicSplitStore, NegativeStrategy, TripletSampler, QualityScore, RecordId,
-    Sampler, SamplerConfig, SectionRole, Selector, SplitLabel, SplitRatios, TripletRecipe,
+    DataRecord, DeterministicSplitStore, NegativeStrategy, QualityScore, RecordId, Sampler,
+    SamplerConfig, SectionRole, Selector, SplitLabel, SplitRatios, TripletRecipe, TripletSampler,
 };
 
 fn build_record(source: &str, idx: usize) -> DataRecord {

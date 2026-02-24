@@ -1,6 +1,6 @@
+use crate::config::SamplerConfig;
 use crate::data::DataRecord;
 use crate::errors::SamplerError;
-use crate::config::SamplerConfig;
 use crate::source::{DataSource, SourceCursor, SourceSnapshot};
 use crate::types::{RecordId, SourceId};
 use chrono::Utc;
@@ -340,11 +340,8 @@ impl IngestionManager {
                         *idx,
                         scope.spawn(move || {
                             let start = std::time::Instant::now();
-                            let result = source.refresh(
-                                &sampler_config,
-                                cursor.as_ref(),
-                                Some(fetch_limit),
-                            );
+                            let result =
+                                source.refresh(&sampler_config, cursor.as_ref(), Some(fetch_limit));
                             let elapsed = start.elapsed();
                             (result, elapsed)
                         }),
