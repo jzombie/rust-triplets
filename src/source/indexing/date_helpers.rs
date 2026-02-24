@@ -138,6 +138,10 @@ mod tests {
             NaiveDate::from_ymd_opt(2025, 4, 14)
         );
         assert_eq!(
+            parse_publication_date_from_year_folder("2026", "2025-04-14"),
+            NaiveDate::from_ymd_opt(2025, 4, 14)
+        );
+        assert_eq!(
             parse_publication_date_from_year_folder("2026", " 02-14 "),
             NaiveDate::from_ymd_opt(2026, 2, 14)
         );

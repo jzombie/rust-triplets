@@ -167,4 +167,11 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn sentences_keep_ellipsis_together() {
+        let text = "Wait... really? Yes.";
+        let result = sentences(text);
+        assert_eq!(result, vec!["Wait...", "really?", "Yes."]);
+    }
 }

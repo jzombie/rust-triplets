@@ -82,5 +82,8 @@ mod tests {
         assert_eq!(CUSTOM.encode(42), "custom=42");
         assert_eq!(CUSTOM.strip("custom=42"), Some("42"));
         assert_eq!(CUSTOM.strip("custom42"), None);
+
+        let runtime_key = MetadataKey::new("runtime");
+        assert_eq!(runtime_key.as_str(), "runtime");
     }
 }
