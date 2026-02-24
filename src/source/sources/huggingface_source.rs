@@ -755,7 +755,6 @@ impl HuggingFaceRowSource {
         config: &HuggingFaceRowsConfig,
         body: &str,
     ) -> Result<(Vec<String>, HashMap<String, u64>), SamplerError> {
-
         let json: Value =
             serde_json::from_str(body).map_err(|err| SamplerError::SourceUnavailable {
                 source_id: config.source_id.clone(),
@@ -946,7 +945,6 @@ impl HuggingFaceRowSource {
         config: &HuggingFaceRowsConfig,
         body: &str,
     ) -> Result<Option<usize>, SamplerError> {
-
         let json: Value =
             serde_json::from_str(body).map_err(|err| SamplerError::SourceUnavailable {
                 source_id: config.source_id.clone(),
@@ -2674,8 +2672,10 @@ mod tests {
         assert_eq!(source.effective_refresh_batch_target(5), 5);
         assert_eq!(source.effective_expansion_headroom_rows(), 9);
 
-        let mut sampler = SamplerConfig::default();
-        sampler.ingestion_max_records = 4;
+        let sampler = SamplerConfig {
+            ingestion_max_records: 4,
+            ..SamplerConfig::default()
+        };
         *source.sampler_config.lock().unwrap() = Some(sampler);
         assert_eq!(source.effective_expansion_headroom_rows(), 4);
     }
@@ -2734,8 +2734,7 @@ mod tests {
         });
 
         let (candidates, sizes) =
-            HuggingFaceRowSource::candidates_from_parquet_manifest_json(&config, &payload)
-                .unwrap();
+            HuggingFaceRowSource::candidates_from_parquet_manifest_json(&config, &payload).unwrap();
         assert_eq!(candidates.len(), 2);
         assert!(
             candidates
@@ -2776,8 +2775,7 @@ mod tests {
         });
 
         let (candidates, sizes) =
-            HuggingFaceRowSource::candidates_from_parquet_manifest_json(&config, &payload)
-                .unwrap();
+            HuggingFaceRowSource::candidates_from_parquet_manifest_json(&config, &payload).unwrap();
         assert_eq!(candidates.len(), 1);
         assert!(candidates[0].ends_with(stale_url));
         assert!(!stale_target.exists());
@@ -2810,7 +2808,10 @@ mod tests {
         let mut config = test_config(dir.path().to_path_buf());
         config.shard_extensions = vec![".PARQUET".into(), " ndjson ".into()];
         let normalized = HuggingFaceRowSource::normalized_shard_extensions(&config);
-        assert_eq!(normalized, vec!["parquet".to_string(), "ndjson".to_string()]);
+        assert_eq!(
+            normalized,
+            vec!["parquet".to_string(), "ndjson".to_string()]
+        );
     }
 
     #[test]
@@ -3029,10 +3030,7 @@ mod tests {
         let source = test_source(config);
 
         let row = source.parse_row(42, &json!({"text": "hello"})).unwrap();
-        assert_eq!(
-            row.row_id,
-            Some("org/dataset:train:42".to_string())
-        );
+        assert_eq!(row.row_id, Some("org/dataset:train:42".to_string()));
     }
 
     #[test]
@@ -3113,9 +3111,11 @@ mod tests {
             next_remote_idx: 0,
         };
         let protected = dir.path().join("p");
-        assert!(!source
-            .enforce_disk_cap_locked(&mut state, &protected)
-            .unwrap());
+        assert!(
+            !source
+                .enforce_disk_cap_locked(&mut state, &protected)
+                .unwrap()
+        );
 
         let mut config2 = test_config(dir.path().to_path_buf());
         config2.local_disk_cap_bytes = Some(10_000);
@@ -3139,9 +3139,11 @@ mod tests {
             remote_candidate_sizes: HashMap::new(),
             next_remote_idx: 0,
         };
-        assert!(!source2
-            .enforce_disk_cap_locked(&mut state2, &protected)
-            .unwrap());
+        assert!(
+            !source2
+                .enforce_disk_cap_locked(&mut state2, &protected)
+                .unwrap()
+        );
     }
 
     #[test]
@@ -3197,7 +3199,8 @@ mod tests {
         let source = test_source(config);
         let payload = b"{\"text\":\"x\"}\n".to_vec();
         let (base_url, server) = spawn_one_shot_http(payload);
-        let candidate = format!("url::{base_url}/datasets/org/ds/resolve/main/train/part-200.ndjson");
+        let candidate =
+            format!("url::{base_url}/datasets/org/ds/resolve/main/train/part-200.ndjson");
 
         {
             let mut state = source.state.lock().unwrap();
@@ -3220,7 +3223,8 @@ mod tests {
         let source = test_source(config);
         let payload = Vec::<u8>::new();
         let (base_url, server) = spawn_one_shot_http(payload);
-        let candidate = format!("url::{base_url}/datasets/org/ds/resolve/main/train/part-empty.ndjson");
+        let candidate =
+            format!("url::{base_url}/datasets/org/ds/resolve/main/train/part-empty.ndjson");
 
         {
             let mut state = source.state.lock().unwrap();
@@ -3321,9 +3325,7 @@ mod tests {
     fn extract_split_row_count_returns_none_when_missing_entries() {
         let payload = json!({"size": {"configs": [{"config": "other", "splits": []}]}});
         let rows = HuggingFaceRowSource::extract_split_row_count_from_size_response(
-            &payload,
-            "default",
-            "train",
+            &payload, "default", "train",
         );
         assert!(rows.is_none());
     }
@@ -3334,8 +3336,7 @@ mod tests {
         let config = test_config(dir.path().to_path_buf());
         let payload = json!({"other": []});
         let (candidates, sizes) =
-            HuggingFaceRowSource::candidates_from_parquet_manifest_json(&config, &payload)
-                .unwrap();
+            HuggingFaceRowSource::candidates_from_parquet_manifest_json(&config, &payload).unwrap();
         assert!(candidates.is_empty());
         assert!(sizes.is_empty());
     }
@@ -3381,10 +3382,13 @@ mod tests {
         };
 
         source.persist_shard_sequence_locked(&state).unwrap();
-        let raw = fs::read_to_string(HuggingFaceRowSource::shard_sequence_state_path(&config))
-            .unwrap();
+        let raw =
+            fs::read_to_string(HuggingFaceRowSource::shard_sequence_state_path(&config)).unwrap();
         let parsed: Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(parsed.get("next_remote_idx").and_then(Value::as_u64), Some(2));
+        assert_eq!(
+            parsed.get("next_remote_idx").and_then(Value::as_u64),
+            Some(2)
+        );
     }
 
     #[test]
@@ -3530,7 +3534,8 @@ mod tests {
         write_parquet_fixture(&path, &[("r1", "alpha"), ("r2", "beta"), ("r3", "gamma")]);
         let config = test_config(dir.path().to_path_buf());
 
-        let (total_rows, groups) = HuggingFaceRowSource::parquet_row_group_map(&config, &path).unwrap();
+        let (total_rows, groups) =
+            HuggingFaceRowSource::parquet_row_group_map(&config, &path).unwrap();
         assert_eq!(total_rows, 3);
         assert!(!groups.is_empty());
 
@@ -3576,11 +3581,11 @@ mod tests {
         let config = test_config(dir.path().to_path_buf());
         let source = test_source(config.clone());
 
-        let payload = b"{\"id\":\"r1\",\"text\":\"alpha\"}\n{\"id\":\"r2\",\"text\":\"beta\"}\n".to_vec();
+        let payload =
+            b"{\"id\":\"r1\",\"text\":\"alpha\"}\n{\"id\":\"r2\",\"text\":\"beta\"}\n".to_vec();
         let (base_url, server) = spawn_one_shot_http(payload);
-        let candidate = format!(
-            "url::{base_url}/datasets/org/ds/resolve/main/train/persisted.ndjson"
-        );
+        let candidate =
+            format!("url::{base_url}/datasets/org/ds/resolve/main/train/persisted.ndjson");
 
         let state_path = HuggingFaceRowSource::shard_sequence_state_path(&config);
         fs::create_dir_all(state_path.parent().unwrap()).unwrap();
@@ -3625,8 +3630,10 @@ mod tests {
 
         assert_eq!(source.reported_record_count().unwrap(), 35);
 
-        let mut sampler = SamplerConfig::default();
-        sampler.ingestion_max_records = 2;
+        let sampler = SamplerConfig {
+            ingestion_max_records: 2,
+            ..SamplerConfig::default()
+        };
         source.configure_sampler(&sampler);
 
         assert_eq!(source.reported_record_count().unwrap(), 11);
@@ -3640,9 +3647,8 @@ mod tests {
 
         let payload = b"{\"id\":\"rr\",\"text\":\"hello\"}\n".to_vec();
         let (base_url, server) = spawn_one_shot_http(payload);
-        let candidate = format!(
-            "url::{base_url}/datasets/org/ds/resolve/main/train/refresh.ndjson"
-        );
+        let candidate =
+            format!("url::{base_url}/datasets/org/ds/resolve/main/train/refresh.ndjson");
 
         let state_path = HuggingFaceRowSource::shard_sequence_state_path(&config);
         fs::create_dir_all(state_path.parent().unwrap()).unwrap();
@@ -3678,9 +3684,7 @@ mod tests {
         let source = test_source(config);
         let payload = b"{\"text\":\"a\"}\n{\"text\":\"b\"}\n".to_vec();
         let (base_url, server) = spawn_one_shot_http(payload);
-        let candidate = format!(
-            "url::{base_url}/datasets/org/ds/resolve/main/train/trim.ndjson"
-        );
+        let candidate = format!("url::{base_url}/datasets/org/ds/resolve/main/train/trim.ndjson");
 
         {
             let mut state = source.state.lock().unwrap();
@@ -3819,9 +3823,8 @@ mod tests {
         let config = test_config(dir.path().to_path_buf());
         let payload = b"{\"text\":\"a\"}\n{\"text\":\"b\"}\n".to_vec();
         let (base_url, server) = spawn_one_shot_http(payload.clone());
-        let candidate = format!(
-            "url::{base_url}/datasets/org/ds/resolve/main/train/part-000.ndjson"
-        );
+        let candidate =
+            format!("url::{base_url}/datasets/org/ds/resolve/main/train/part-000.ndjson");
 
         let target =
             HuggingFaceRowSource::download_and_materialize_shard(&config, &candidate, None)
@@ -3838,9 +3841,8 @@ mod tests {
         let config = test_config(dir.path().to_path_buf());
         let payload = b"{\"text\":\"a\"}\n".to_vec();
         let (base_url, server) = spawn_one_shot_http(payload.clone());
-        let candidate = format!(
-            "url::{base_url}/datasets/org/ds/resolve/main/train/part-009.ndjson"
-        );
+        let candidate =
+            format!("url::{base_url}/datasets/org/ds/resolve/main/train/part-009.ndjson");
 
         let target = HuggingFaceRowSource::candidate_target_path(&config, &candidate);
         fs::create_dir_all(target.parent().unwrap()).unwrap();
@@ -3865,9 +3867,8 @@ mod tests {
         let source = test_source(config);
         let payload = b"{\"text\":\"a\"}\n{\"text\":\"b\"}\n".to_vec();
         let (base_url, server) = spawn_one_shot_http(payload);
-        let candidate = format!(
-            "url::{base_url}/datasets/org/ds/resolve/main/train/part-001.ndjson"
-        );
+        let candidate =
+            format!("url::{base_url}/datasets/org/ds/resolve/main/train/part-001.ndjson");
 
         {
             let mut state = source.state.lock().unwrap();
@@ -3892,9 +3893,8 @@ mod tests {
         let source = test_source(config);
         let payload = b"{\"text\":\"x\"}\n{\"text\":\"y\"}\n".to_vec();
         let (base_url, server) = spawn_one_shot_http(payload);
-        let candidate = format!(
-            "url::{base_url}/datasets/org/ds/resolve/main/train/part-002.ndjson"
-        );
+        let candidate =
+            format!("url::{base_url}/datasets/org/ds/resolve/main/train/part-002.ndjson");
 
         {
             let mut state = source.state.lock().unwrap();
@@ -4676,11 +4676,8 @@ mod tests {
             }
         });
 
-        let rows = HuggingFaceRowSource::extract_split_row_count_from_size_response(
-            &payload,
-            "main",
-            "",
-        );
+        let rows =
+            HuggingFaceRowSource::extract_split_row_count_from_size_response(&payload, "main", "");
         assert_eq!(rows, Some(123));
     }
 
@@ -4694,11 +4691,8 @@ mod tests {
             }
         });
 
-        let rows = HuggingFaceRowSource::extract_split_row_count_from_size_response(
-            &payload,
-            "main",
-            "",
-        );
+        let rows =
+            HuggingFaceRowSource::extract_split_row_count_from_size_response(&payload, "main", "");
         assert_eq!(rows, Some(77));
     }
 }
