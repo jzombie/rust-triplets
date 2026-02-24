@@ -35,6 +35,7 @@ It is designed for multi-source training pipelines where each batch can mix reco
 ## High-level features
 
 - **Automatic deterministic splits** (train/validation/test) from record IDs + seed.
+- **Sampler-seed-driven source determinism** for built-in deterministic source ordering (file + Hugging Face).
 - **Runtime batch sampling** via `next_triplet_batch`, `next_pair_batch`, and `next_text_batch`.
 - **Recipe-driven sample construction** for triplet/pair/text generation (anchor/positive/negative selectors).
 - **Weight-aware sampling controls** across source weights, recipe weights, and chunk trust/quality weighting.
@@ -54,6 +55,8 @@ This crate does **not** perform semantic mining/retrieval scoring by itself; ins
 
 `triplets` currently includes two integrated source backends:
 
+- **Non-optional determinism guarantee:** built-in deterministic source paging is always on for integrated deterministic sources (`FileSource`, `HuggingFaceRowSource`) and is keyed by sampler seed.
+
 - **File source (`FileSource`)**
   - Indexes local filesystem content and converts files into `DataRecord`s.
   - Supports configurable taxonomy extraction and section construction (anchor/context shaping), category-level trust overrides, and deterministic paging through `FileCorpusIndex`.
@@ -70,7 +73,7 @@ You can extend `triplets` by implementing one of the source interfaces and regis
 
 - **Path 1: implement `DataSource` directly**
   - Use this when your backend already has its own paging/cursor model (API pagination, DB cursors, streaming offsets, etc.).
-  - Implement `id()`, `refresh(cursor, limit)`, and `reported_record_count()`.
+  - Implement `id()`, `refresh(cursor, limit)`, `reported_record_count()`, and `configure_sampler(&SamplerConfig)`.
   - Return `DataRecord` values with stable record IDs and the sections/taxonomy your recipes need.
 
 - **Path 2: implement `IndexableSource` and wrap with `IndexableAdapter`**
@@ -85,6 +88,58 @@ Recommended implementation checklist:
 3. Keep `refresh(...)` and `reported_record_count()` aligned to the same corpus scope.
 4. Register with `sampler.register_source(...)`.
 5. Validate with batch calls (`next_triplet_batch`, `next_pair_batch`, `next_text_batch`) and persistence (`persist_state()`).
+
+Seed/configuration contract:
+
+- `configure_sampler(...)` is mandatory on `DataSource` and is called by `sampler.register_source(...)`.
+- `FileSource` and `HuggingFaceRowSource` require sampler configuration before `refresh(...)` / `reported_record_count()`.
+- For direct source usage outside sampler registration, use `configured_source(...)` or `configured_source_with_seed(...)`.
+
+### Seed behavior summary
+
+Deterministic source paging is always enabled for built-in deterministic sources, and ordering is deterministic for a given sampler seed and source scope:
+
+- Same source + same sampler seed + same dataset state => same refresh order.
+- Same source + different sampler seed => different refresh order.
+- Split assignment also stays deterministic from `record_id + sampler seed + split ratios`.
+- This behavior is not optional for built-in deterministic sources (`FileSource`, `HuggingFaceRowSource`).
+
+Minimal direct-source example:
+
+```rust,no_run
+use triplets::{DataSource, configured_source_with_seed};
+use triplets::source::{FileSource, FileSourceConfig};
+
+# let root = std::path::PathBuf::from("/tmp/corpus");
+let base = FileSourceConfig::new("docs", &root);
+
+let source_a = configured_source_with_seed(FileSource::new(base.clone()), 7);
+let source_b = configured_source_with_seed(FileSource::new(base.clone()), 7);
+let source_c = configured_source_with_seed(FileSource::new(base), 123);
+
+let ids_a: Vec<String> = source_a
+  .refresh(None, Some(8))?
+  .records
+  .into_iter()
+  .map(|record| record.id)
+  .collect();
+let ids_b: Vec<String> = source_b
+  .refresh(None, Some(8))?
+  .records
+  .into_iter()
+  .map(|record| record.id)
+  .collect();
+let ids_c: Vec<String> = source_c
+  .refresh(None, Some(8))?
+  .records
+  .into_iter()
+  .map(|record| record.id)
+  .collect();
+
+assert_eq!(ids_a, ids_b);
+assert_ne!(ids_a, ids_c);
+# Ok::<(), triplets::SamplerError>(())
+```
 
 For deeper implementation templates (including indexable and manual paging patterns), see [Advanced source implementation examples](#advanced-source-implementation-examples).
 
@@ -135,6 +190,7 @@ Minimal shape:
 2. Create `SamplerConfig` (chunking, recipes, split policy).
 3. Open a split store (`DeterministicSplitStore` or `FileSplitStore`).
 4. Construct `PairSampler` and register sources.
+  - If you call a source directly (without registering), configure it first via `configured_source(...)` or `configured_source_with_seed(...)`.
 5. Call one of the batch APIs: `next_triplet_batch(split)`, `next_pair_batch(split)`, or `next_text_batch(split)`.
 6. Call `persist_state()` when you want restart-resume behavior.
 
@@ -289,11 +345,26 @@ Why this matters: capacity estimates and runtime sampling stay aligned only when
 File-backed pattern:
 
 ```rust,ignore
-fn source_index(&self) -> FileCorpusIndex {
-  FileCorpusIndex::new(&self.root, &self.id)
+fn configured_sampler_seed(&self) -> Result<u64, SamplerError> {
+  self.sampler_seed
+    .lock()
+    .map_err(|_| SamplerError::SourceUnavailable {
+      source_id: self.id.clone(),
+      reason: "sampler-seed lock poisoned".to_string(),
+    })?
+    .ok_or_else(|| SamplerError::SourceInconsistent {
+    source_id: self.id.clone(),
+    details: "sampler configuration not provided".to_string(),
+  })
+}
+
+fn source_index(&self) -> Result<FileCorpusIndex, SamplerError> {
+  let sampler_seed = self.configured_sampler_seed()?;
+  Ok(FileCorpusIndex::new(&self.root, &self.id)
+    .with_sampler_seed(sampler_seed)
     .with_follow_links(true)
     .with_text_files_only(true)
-    .with_directory_grouping(true)
+    .with_directory_grouping(true))
 }
 
 fn refresh(
@@ -301,12 +372,18 @@ fn refresh(
   cursor: Option<&SourceCursor>,
   limit: Option<usize>,
 ) -> Result<SourceSnapshot, SamplerError> {
-  self.source_index()
+  self.source_index()?
     .refresh_indexable(cursor, limit, |path| self.build_record(path))
 }
 
-fn reported_record_count(&self) -> Option<u128> {
-  self.source_index().indexed_record_count().ok().map(|n| n as u128)
+fn reported_record_count(&self) -> Result<u128, SamplerError> {
+  self.source_index()?.indexed_record_count().map(|n| n as u128)
+}
+
+fn configure_sampler(&self, config: &SamplerConfig) {
+  if let Ok(mut slot) = self.sampler_seed.lock() {
+    *slot = Some(config.seed);
+  }
 }
 ```
 
