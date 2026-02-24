@@ -94,8 +94,16 @@ pub struct SamplerConfig {
     pub batch_size: usize,
     /// Max number of records kept in the ingestion cache for candidate sampling.
     ///
-    /// This is intentionally decoupled from `batch_size` so negatives are sampled
-    /// from a broader pool and repeated negatives are less likely.
+    /// This is intentionally decoupled from `batch_size` so anchors/negatives can
+    /// be drawn from a broader rolling pool.
+    ///
+    /// Practical tuning: values above `batch_size` usually improve diversity and
+    /// reduce short-horizon repetition; gains taper off as source/recipe/split
+    /// constraints become the limiting factor. Higher values also increase memory.
+    ///
+    /// For remote shard-backed sources (for example Hugging Face), larger initial
+    /// targets may require fetching more shards before the first batch, so startup
+    /// latency can increase based on shard sizes and network throughput.
     pub ingestion_max_records: usize,
     /// Chunking behavior for long sections.
     pub chunking: ChunkingStrategy,
