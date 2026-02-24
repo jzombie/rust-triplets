@@ -777,20 +777,20 @@ impl HuggingFaceRowSource {
 
     fn parquet_manifest_endpoint() -> String {
         #[cfg(test)]
-        if let Ok(value) = std::env::var("TRIPLETS_HF_PARQUET_ENDPOINT") {
-            if !value.trim().is_empty() {
-                return value;
-            }
+        if let Ok(value) = std::env::var("TRIPLETS_HF_PARQUET_ENDPOINT")
+            && !value.trim().is_empty()
+        {
+            return value;
         }
         "https://datasets-server.huggingface.co/parquet".to_string()
     }
 
     fn size_endpoint() -> String {
         #[cfg(test)]
-        if let Ok(value) = std::env::var("TRIPLETS_HF_SIZE_ENDPOINT") {
-            if !value.trim().is_empty() {
-                return value;
-            }
+        if let Ok(value) = std::env::var("TRIPLETS_HF_SIZE_ENDPOINT")
+            && !value.trim().is_empty()
+        {
+            return value;
         }
         "https://datasets-server.huggingface.co/size".to_string()
     }
