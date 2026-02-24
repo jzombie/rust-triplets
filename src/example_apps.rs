@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::path::PathBuf;
+use std::sync::Once;
 use std::sync::Arc;
 
 use clap::{Parser, ValueEnum, error::ErrorKind};
@@ -22,6 +23,15 @@ use crate::{
 };
 
 type DynSource = Box<dyn DataSource + 'static>;
+
+fn init_example_tracing() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("triplets=debug"));
+        let _ = tracing_subscriber::fmt().with_env_filter(env_filter).try_init();
+    });
+}
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 /// CLI split selector mapped onto `SplitLabel`.
@@ -155,6 +165,8 @@ where
     Build: FnOnce(&R) -> Vec<DynSource>,
     I: Iterator<Item = String>,
 {
+    init_example_tracing();
+
     let Some(cli) = parse_cli::<EstimateCapacityCli, _>(
         std::iter::once("estimate_capacity".to_string()).chain(args_iter),
     )?
@@ -422,9 +434,7 @@ where
     Build: FnOnce(&R) -> Vec<DynSource>,
     I: Iterator<Item = String>,
 {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .try_init();
+    init_example_tracing();
 
     let Some(cli) = parse_cli::<MultiSourceDemoCli, _>(
         std::iter::once("multi_source_demo".to_string()).chain(args_iter),

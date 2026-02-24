@@ -26,7 +26,7 @@ pub use sources::file_source::{
     taxonomy_from_path,
 };
 #[cfg(feature = "huggingface")]
-pub use sources::huggingface::{HuggingFaceRowSource, HuggingFaceRowsConfig};
+pub use sources::huggingface_source::{HuggingFaceRowSource, HuggingFaceRowsConfig};
 
 /// Source-owned incremental refresh position.
 ///
