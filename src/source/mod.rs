@@ -21,6 +21,10 @@ use crate::types::SourceId;
 pub mod utilities;
 /// Source implementation modules.
 pub mod sources;
+pub use sources::file_source::{
+    FileSource, FileSourceConfig, SectionBuilder, TaxonomyBuilder, anchor_context_sections,
+    taxonomy_from_path,
+};
 #[cfg(feature = "huggingface")]
 pub use sources::huggingface::{HuggingFaceRowSource, HuggingFaceRowsConfig};
 
