@@ -2237,6 +2237,10 @@ mod tests {
             <InMemorySource as DataSource>::reported_record_count(&self.inner)
         }
 
+        fn configure_sampler(&self, config: &SamplerConfig) {
+            <InMemorySource as DataSource>::configure_sampler(&self.inner, config)
+        }
+
         fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {
             self.triplet_recipes.clone()
         }
@@ -2287,6 +2291,8 @@ mod tests {
         fn reported_record_count(&self) -> Result<u128, SamplerError> {
             Ok(self.records.len() as u128)
         }
+
+        fn configure_sampler(&self, _config: &SamplerConfig) {}
     }
 
     /// Test source that always returns a refresh error.
@@ -2352,6 +2358,8 @@ mod tests {
         fn reported_record_count(&self) -> Result<u128, SamplerError> {
             Ok(self.records.len() as u128)
         }
+
+        fn configure_sampler(&self, _config: &SamplerConfig) {}
     }
 
     impl DataSource for FailingSource {
@@ -2376,6 +2384,8 @@ mod tests {
                 reason: "forced failure".into(),
             })
         }
+
+        fn configure_sampler(&self, _config: &SamplerConfig) {}
     }
 
     fn sample_record() -> DataRecord {
@@ -2678,6 +2688,8 @@ mod tests {
         fn reported_record_count(&self) -> Result<u128, crate::errors::SamplerError> {
             Ok(self.records.len() as u128)
         }
+
+        fn configure_sampler(&self, _config: &SamplerConfig) {}
 
         fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {
             self.recipes.clone()

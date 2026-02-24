@@ -256,8 +256,7 @@ struct PersistedShardSequence {
     dataset: String,
     config: String,
     split: String,
-    #[serde(default)]
-    sampler_seed: Option<u64>,
+    sampler_seed: u64,
     candidates: Vec<String>,
     candidate_sizes: HashMap<String, u64>,
     next_remote_idx: usize,
@@ -357,6 +356,31 @@ impl HuggingFaceRowSource {
             .unwrap_or(self.config.cache_capacity)
             .max(1);
         base.saturating_mul(multiplier)
+    }
+
+    fn configured_sampler_seed(&self) -> Result<u64, SamplerError> {
+        self
+            .sampler_config
+            .lock()
+            .map_err(|_| SamplerError::SourceUnavailable {
+                source_id: self.config.source_id.clone(),
+                reason: "huggingface sampler-config lock poisoned".to_string(),
+            })?
+            .as_ref()
+            .map(|config| config.seed)
+            .ok_or_else(|| SamplerError::SourceInconsistent {
+                source_id: self.config.source_id.clone(),
+                details: "huggingface source sampler configuration not provided".to_string(),
+            })
+    }
+
+    fn paging_seed(&self, total: usize) -> Result<u64, SamplerError> {
+        let sampler_seed = self.configured_sampler_seed()?;
+        Ok(crate::source::IndexablePager::seed_for_sampler(
+            &self.config.source_id,
+            total,
+            sampler_seed,
+        ))
     }
 
     fn normalized_shard_extensions(config: &HuggingFaceRowsConfig) -> Vec<String> {
@@ -578,7 +602,7 @@ impl HuggingFaceRowSource {
     /// Load persisted shard candidate sequence when metadata and sampler seed match.
     fn load_persisted_shard_sequence(
         config: &HuggingFaceRowsConfig,
-        current_sampler_seed: Option<u64>,
+        current_sampler_seed: u64,
     ) -> Result<Option<PersistedShardSequence>, SamplerError> {
         let path = Self::shard_sequence_state_path(config);
         if !path.exists() {
@@ -646,11 +670,7 @@ impl HuggingFaceRowSource {
             dataset: self.config.dataset.clone(),
             config: self.config.config.clone(),
             split: self.config.split.clone(),
-            sampler_seed: self
-                .sampler_config
-                .lock()
-                .ok()
-                .and_then(|config| config.as_ref().map(|value| value.seed)),
+            sampler_seed: self.configured_sampler_seed()?,
             candidates: candidates.clone(),
             candidate_sizes: state.remote_candidate_sizes.clone(),
             next_remote_idx: state.next_remote_idx.min(candidates.len()),
@@ -706,18 +726,15 @@ impl HuggingFaceRowSource {
     fn shard_candidate_seed(
         config: &HuggingFaceRowsConfig,
         total_candidates: usize,
-        sampler_seed: Option<u64>,
+        sampler_seed: u64,
     ) -> u64 {
         let mut hasher = DefaultHasher::new();
         "hf_shard_candidate_sequence_v1".hash(&mut hasher);
-        if let Some(seed) = sampler_seed {
-            seed.hash(&mut hasher);
-        } else {
-            config.source_id.hash(&mut hasher);
-            config.dataset.hash(&mut hasher);
-            config.config.hash(&mut hasher);
-            config.split.hash(&mut hasher);
-        }
+        sampler_seed.hash(&mut hasher);
+        config.source_id.hash(&mut hasher);
+        config.dataset.hash(&mut hasher);
+        config.config.hash(&mut hasher);
+        config.split.hash(&mut hasher);
         total_candidates.hash(&mut hasher);
         hasher.finish()
     }
@@ -1395,11 +1412,7 @@ impl HuggingFaceRowSource {
                         reason: "huggingface source state lock poisoned".to_string(),
                     })?;
                 if state.remote_candidates.is_none() {
-                    let sampler_seed = self
-                        .sampler_config
-                        .lock()
-                        .ok()
-                        .and_then(|config| config.as_ref().map(|value| value.seed));
+                    let sampler_seed = self.configured_sampler_seed()?;
                     if let Some(persisted) =
                         Self::load_persisted_shard_sequence(&self.config, sampler_seed)?
                     {
@@ -1496,11 +1509,7 @@ impl HuggingFaceRowSource {
             let sequence_pos = state.next_remote_idx;
             let remote_ordinal = sequence_pos + 1;
             let remote_total = candidates.len();
-            let sampler_seed = self
-                .sampler_config
-                .lock()
-                .ok()
-                .and_then(|config| config.as_ref().map(|value| value.seed));
+            let sampler_seed = self.configured_sampler_seed()?;
             let seed = Self::shard_candidate_seed(&self.config, remote_total, sampler_seed);
             let mut permutation =
                 crate::source::IndexPermutation::new(remote_total, seed, sequence_pos as u64);
@@ -2402,7 +2411,7 @@ impl DataSource for HuggingFaceRowSource {
         }
 
         let source_id = self.config.source_id.clone();
-        let seed = crate::source::IndexablePager::seed_for(&source_id, total);
+        let seed = self.paging_seed(total)?;
         let mut permutation = crate::source::IndexPermutation::new(total, seed, start as u64);
 
         let mut records = Vec::new();
@@ -2536,7 +2545,13 @@ mod tests {
     }
 
     fn test_source(config: HuggingFaceRowsConfig) -> HuggingFaceRowSource {
-        HuggingFaceRowSource {
+        let sampler = SamplerConfig {
+            seed: 1,
+            ingestion_max_records: config.cache_capacity,
+            ..SamplerConfig::default()
+        };
+        crate::source::configured_source(
+            HuggingFaceRowSource {
             config,
             sampler_config: Mutex::new(None),
             state: Mutex::new(SourceState {
@@ -2549,7 +2564,9 @@ mod tests {
             }),
             cache: Mutex::new(RowCache::default()),
             parquet_cache: Mutex::new(ParquetCache::default()),
-        }
+            },
+            &sampler,
+        )
     }
 
     fn spawn_one_shot_http(payload: Vec<u8>) -> (String, thread::JoinHandle<()>) {
@@ -3009,7 +3026,7 @@ mod tests {
                 "dataset": config.dataset,
                 "config": config.config,
                 "split": config.split,
-                "sampler_seed": null,
+                "sampler_seed": 1,
                 "candidates": ["train/0.ndjson"],
                 "candidate_sizes": {},
                 "next_remote_idx": 0
@@ -3018,7 +3035,7 @@ mod tests {
         )
         .unwrap();
 
-        let loaded = HuggingFaceRowSource::load_persisted_shard_sequence(&config, None).unwrap();
+        let loaded = HuggingFaceRowSource::load_persisted_shard_sequence(&config, 1).unwrap();
         assert!(loaded.is_none());
     }
 
@@ -3308,7 +3325,7 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, b"{not-valid-json").unwrap();
 
-        let loaded = HuggingFaceRowSource::load_persisted_shard_sequence(&config, None);
+        let loaded = HuggingFaceRowSource::load_persisted_shard_sequence(&config, 1);
         assert!(loaded.is_err());
     }
 
@@ -3363,7 +3380,7 @@ mod tests {
     fn load_persisted_shard_sequence_returns_none_when_state_missing() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
-        let loaded = HuggingFaceRowSource::load_persisted_shard_sequence(&config, None).unwrap();
+        let loaded = HuggingFaceRowSource::load_persisted_shard_sequence(&config, 1).unwrap();
         assert!(loaded.is_none());
     }
 
@@ -3597,7 +3614,7 @@ mod tests {
                 "dataset": config.dataset,
                 "config": config.config,
                 "split": config.split,
-                "sampler_seed": null,
+                "sampler_seed": 1,
                 "candidates": [candidate],
                 "candidate_sizes": {},
                 "next_remote_idx": 0
@@ -3660,7 +3677,7 @@ mod tests {
                 "dataset": config.dataset,
                 "config": config.config,
                 "split": config.split,
-                "sampler_seed": null,
+                "sampler_seed": 1,
                 "candidates": [candidate],
                 "candidate_sizes": {},
                 "next_remote_idx": 0
@@ -3958,20 +3975,22 @@ mod tests {
     }
 
     #[test]
-    fn shard_candidate_seed_uses_sampler_seed_when_provided() {
+    fn shard_candidate_seed_is_seeded_and_source_scoped() {
         let dir = tempdir().unwrap();
         let mut a = test_config(dir.path().join("a"));
         let mut b = test_config(dir.path().join("b"));
         a.source_id = "source_a".to_string();
         b.source_id = "source_b".to_string();
 
-        let with_seed_a = HuggingFaceRowSource::shard_candidate_seed(&a, 100, Some(42));
-        let with_seed_b = HuggingFaceRowSource::shard_candidate_seed(&b, 100, Some(42));
-        assert_eq!(with_seed_a, with_seed_b);
+        let with_seed_a = HuggingFaceRowSource::shard_candidate_seed(&a, 100, 42);
+        let with_seed_a_again = HuggingFaceRowSource::shard_candidate_seed(&a, 100, 42);
+        assert_eq!(with_seed_a, with_seed_a_again);
 
-        let without_seed_a = HuggingFaceRowSource::shard_candidate_seed(&a, 100, None);
-        let without_seed_b = HuggingFaceRowSource::shard_candidate_seed(&b, 100, None);
-        assert_ne!(without_seed_a, without_seed_b);
+        let with_seed_b = HuggingFaceRowSource::shard_candidate_seed(&b, 100, 42);
+        assert_ne!(with_seed_a, with_seed_b);
+
+        let different_seed_a = HuggingFaceRowSource::shard_candidate_seed(&a, 100, 7);
+        assert_ne!(with_seed_a, different_seed_a);
     }
 
     #[test]
@@ -4023,14 +4042,14 @@ mod tests {
         source.persist_shard_sequence_locked(&state).unwrap();
 
         let restored =
-            HuggingFaceRowSource::load_persisted_shard_sequence(&config, Some(4242)).unwrap();
+            HuggingFaceRowSource::load_persisted_shard_sequence(&config, 4242).unwrap();
         assert!(restored.is_some());
         let restored = restored.unwrap();
         assert_eq!(restored.next_remote_idx, 1);
         assert_eq!(restored.candidates.len(), 2);
 
         let rejected =
-            HuggingFaceRowSource::load_persisted_shard_sequence(&config, Some(9999)).unwrap();
+            HuggingFaceRowSource::load_persisted_shard_sequence(&config, 9999).unwrap();
         assert!(rejected.is_none());
     }
 
@@ -4263,7 +4282,7 @@ mod tests {
                 "dataset": config.dataset,
                 "config": config.config,
                 "split": config.split,
-                "sampler_seed": null,
+                "sampler_seed": 1,
                 "candidates": ["url::http://x/resolve/main/train/000.ndjson"],
                 "candidate_sizes": {},
                 "next_remote_idx": 99
@@ -4272,7 +4291,7 @@ mod tests {
         )
         .unwrap();
 
-        let loaded = HuggingFaceRowSource::load_persisted_shard_sequence(&config, None)
+        let loaded = HuggingFaceRowSource::load_persisted_shard_sequence(&config, 1)
             .unwrap()
             .unwrap();
         assert_eq!(loaded.next_remote_idx, 1);
@@ -4694,5 +4713,70 @@ mod tests {
         let rows =
             HuggingFaceRowSource::extract_split_row_count_from_size_response(&payload, "main", "");
         assert_eq!(rows, Some(77));
+    }
+
+    #[test]
+    fn refresh_order_uses_sampler_seed_for_local_rows() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("rows.jsonl");
+        let mut payload = String::new();
+        for idx in 0..12 {
+            payload.push_str(&format!("{{\"id\":\"r{idx}\",\"text\":\"v{idx}\"}}\n"));
+        }
+        fs::write(&path, payload).unwrap();
+
+        let mut config = test_config(dir.path().to_path_buf());
+        config.checkpoint_stride = 1;
+        config.refresh_batch_multiplier = 1;
+
+        let source_a = test_source(config.clone());
+        let source_b = test_source(config.clone());
+        let source_c = test_source(config.clone());
+        let shard = HuggingFaceRowSource::index_single_shard(&config, &path, 0)
+            .unwrap()
+            .unwrap();
+
+        for source in [&source_a, &source_b, &source_c] {
+            let mut state = source.state.lock().unwrap();
+            state.materialized_rows = 12;
+            state.total_rows = Some(12);
+            state.shards = vec![shard.clone()];
+        }
+
+        let mut seed_1 = SamplerConfig::default();
+        seed_1.seed = 7;
+        let mut seed_2 = SamplerConfig::default();
+        seed_2.seed = 7;
+        let mut seed_3 = SamplerConfig::default();
+        seed_3.seed = 123;
+
+        source_a.configure_sampler(&seed_1);
+        source_b.configure_sampler(&seed_2);
+        source_c.configure_sampler(&seed_3);
+
+        let ids_a: Vec<String> = source_a
+            .refresh(None, Some(8))
+            .unwrap()
+            .records
+            .into_iter()
+            .map(|record| record.id)
+            .collect();
+        let ids_b: Vec<String> = source_b
+            .refresh(None, Some(8))
+            .unwrap()
+            .records
+            .into_iter()
+            .map(|record| record.id)
+            .collect();
+        let ids_c: Vec<String> = source_c
+            .refresh(None, Some(8))
+            .unwrap()
+            .records
+            .into_iter()
+            .map(|record| record.id)
+            .collect();
+
+        assert_eq!(ids_a, ids_b);
+        assert_ne!(ids_a, ids_c);
     }
 }

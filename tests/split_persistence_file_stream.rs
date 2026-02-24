@@ -41,7 +41,7 @@ fn build_qa_record(
 }
 
 fn ids_from_root(root: &Path, source_id: &SourceId) -> Vec<RecordId> {
-    let index = FileCorpusIndex::new(root, source_id.clone());
+    let index = FileCorpusIndex::new(root, source_id.clone()).with_sampler_seed(123);
     let snapshot = index
         .refresh_indexable(None, None, |path| build_qa_record(root, source_id, path))
         .unwrap();

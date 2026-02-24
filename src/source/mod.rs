@@ -82,7 +82,7 @@ pub trait DataSource: Send + Sync {
     ///
     /// Called when the source is registered with a sampler. Sources can use
     /// this to align internal heuristics with runtime sampler settings.
-    fn configure_sampler(&self, _config: &SamplerConfig) {}
+    fn configure_sampler(&self, config: &SamplerConfig);
 
     /// Optional source-provided default triplet recipes.
     ///
@@ -90,6 +90,26 @@ pub trait DataSource: Send + Sync {
     fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {
         Vec::new()
     }
+}
+
+/// Configure a source with a full sampler configuration and return it.
+///
+/// Useful for direct source usage outside `PairSampler::register_source`, where
+/// forgetting to call `configure_sampler` can otherwise cause runtime errors.
+pub fn configured_source<T: DataSource>(source: T, config: &SamplerConfig) -> T {
+    source.configure_sampler(config);
+    source
+}
+
+/// Configure a source with only a deterministic seed and return it.
+///
+/// This is a convenience wrapper for direct source usage in tests/examples.
+pub fn configured_source_with_seed<T: DataSource>(source: T, seed: u64) -> T {
+    let config = SamplerConfig {
+        seed,
+        ..SamplerConfig::default()
+    };
+    configured_source(source, &config)
 }
 
 /// Index-addressable source interface used by deterministic pagers.
@@ -232,6 +252,21 @@ impl IndexablePager {
             ^ Self::stable_index_shuffle_key(source_id, total)
     }
 
+    /// Build a deterministic seed that incorporates sampler seed.
+    pub(crate) fn seed_for_sampler(
+        source_id: &SourceId,
+        total: usize,
+        sampler_seed: u64,
+    ) -> u64 {
+        let base = Self::seed_for(source_id, total);
+        base ^ stable_hash_with(|hasher| {
+            "triplets_sampler_seed".hash(hasher);
+            source_id.hash(hasher);
+            total.hash(hasher);
+            sampler_seed.hash(hasher);
+        })
+    }
+
     fn stable_index_shuffle_key(source_id: &SourceId, idx: usize) -> u64 {
         stable_hash_with(|hasher| {
             source_id.hash(hasher);
@@ -275,6 +310,8 @@ impl<T: IndexableSource> DataSource for IndexableAdapter<T> {
                 details: "indexable source did not provide len_hint".into(),
             })
     }
+
+    fn configure_sampler(&self, _config: &SamplerConfig) {}
 }
 
 /// Internal permutation used by `IndexablePager`.
@@ -395,6 +432,8 @@ impl DataSource for InMemorySource {
     fn reported_record_count(&self) -> Result<u128, SamplerError> {
         Ok(self.records.len() as u128)
     }
+
+    fn configure_sampler(&self, _config: &SamplerConfig) {}
 }
 
 #[cfg(test)]

@@ -8,7 +8,7 @@ use triplets::data::{DataRecord, QualityScore, RecordSection, SectionRole};
 use triplets::ingestion::IngestionManager;
 use triplets::metrics::source_skew;
 use triplets::source::{DataSource, InMemorySource, SourceCursor, SourceSnapshot};
-use triplets::{RecordId, SamplerError};
+use triplets::{RecordId, SamplerConfig, SamplerError};
 
 fn create_dummy_record(id: &str) -> DataRecord {
     DataRecord {
@@ -80,6 +80,8 @@ impl DataSource for PagedSource {
     fn reported_record_count(&self) -> Result<u128, SamplerError> {
         Ok(self.pages.iter().map(|page| page.len() as u128).sum())
     }
+
+    fn configure_sampler(&self, _config: &SamplerConfig) {}
 }
 
 struct ThreadIdSource {
@@ -119,6 +121,8 @@ impl DataSource for FailingSource {
             reason: "forced failure".into(),
         })
     }
+
+    fn configure_sampler(&self, _config: &SamplerConfig) {}
 }
 
 impl ThreadIdSource {
@@ -156,6 +160,8 @@ impl DataSource for ThreadIdSource {
     fn reported_record_count(&self) -> Result<u128, SamplerError> {
         Ok(0)
     }
+
+    fn configure_sampler(&self, _config: &SamplerConfig) {}
 }
 
 /// Verify that when multiple sources are present, records that don't fit in the current

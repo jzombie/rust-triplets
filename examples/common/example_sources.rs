@@ -142,6 +142,10 @@ impl DataSource for ExampleFileSource {
         Ok(self.reported_records)
     }
 
+    fn configure_sampler(&self, config: &triplets::SamplerConfig) {
+        self.inner.configure_sampler(config);
+    }
+
     fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {
         self.triplet_recipes.clone()
     }

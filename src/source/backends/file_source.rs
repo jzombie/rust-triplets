@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use crate::config::TripletRecipe;
+use crate::config::{SamplerConfig, TripletRecipe};
 use crate::data::{DataRecord, QualityScore, RecordSection, SectionRole};
 use crate::errors::SamplerError;
 use crate::source::indexing::file_corpus::FileCorpusIndex;
@@ -122,16 +122,34 @@ impl FileSourceConfig {
 /// Generic filesystem-backed source with configurable taxonomy and section mapping.
 pub struct FileSource {
     config: FileSourceConfig,
+    sampler_seed: Mutex<Option<u64>>,
 }
 
 impl FileSource {
     /// Create a generic file source from configuration.
     pub fn new(config: FileSourceConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            sampler_seed: Mutex::new(None),
+        }
     }
 
-    fn file_corpus_index(&self) -> FileCorpusIndex {
+    fn configured_sampler_seed(&self) -> Result<u64, SamplerError> {
+        self.sampler_seed
+            .lock()
+            .map_err(|_| SamplerError::SourceUnavailable {
+                source_id: self.config.source_id.clone(),
+                reason: "file source sampler-seed lock poisoned".to_string(),
+            })?
+            .ok_or_else(|| SamplerError::SourceInconsistent {
+                source_id: self.config.source_id.clone(),
+                details: "file source sampler configuration not provided".to_string(),
+            })
+    }
+
+    fn file_corpus_index(&self, sampler_seed: u64) -> FileCorpusIndex {
         FileCorpusIndex::new(&self.config.root, &self.config.source_id)
+            .with_sampler_seed(sampler_seed)
             .with_follow_links(self.config.follow_links)
             .with_text_files_only(self.config.text_files_only)
             .with_directory_grouping(self.config.group_by_directory)
@@ -198,14 +216,22 @@ impl DataSource for FileSource {
         cursor: Option<&SourceCursor>,
         limit: Option<usize>,
     ) -> Result<SourceSnapshot, SamplerError> {
-        self.file_corpus_index()
+        let sampler_seed = self.configured_sampler_seed()?;
+        self.file_corpus_index(sampler_seed)
             .refresh_indexable(cursor, limit, |path| self.build_record(path))
     }
 
     fn reported_record_count(&self) -> Result<u128, SamplerError> {
-        self.file_corpus_index()
+        let sampler_seed = self.configured_sampler_seed()?;
+        self.file_corpus_index(sampler_seed)
             .indexed_record_count()
             .map(|count| count as u128)
+    }
+
+    fn configure_sampler(&self, config: &SamplerConfig) {
+        if let Ok(mut slot) = self.sampler_seed.lock() {
+            *slot = Some(config.seed);
+        }
     }
 
     fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {
@@ -240,7 +266,12 @@ pub fn anchor_context_sections(title: &str, body: &str) -> Vec<RecordSection> {
 mod tests {
     use super::*;
     use crate::config::{NegativeStrategy, Selector};
+    use crate::source::configured_source_with_seed;
     use tempfile::tempdir;
+
+    fn seeded_source(config: FileSourceConfig, seed: u64) -> FileSource {
+        configured_source_with_seed(FileSource::new(config), seed)
+    }
 
     #[test]
     fn reads_records_without_default_source_id() {
@@ -253,7 +284,7 @@ mod tests {
         )
         .unwrap();
 
-        let source = FileSource::new(FileSourceConfig::new("qa_custom", temp.path()));
+        let source = seeded_source(FileSourceConfig::new("qa_custom", temp.path()), 101);
         let snapshot = source.refresh(None, None).unwrap();
 
         assert_eq!(snapshot.records.len(), 1);
@@ -278,10 +309,11 @@ mod tests {
         )
         .unwrap();
 
-        let source = FileSource::new(
+        let source = seeded_source(
             FileSourceConfig::new("qa_weighted", temp.path())
                 .with_category_trust("factual", 0.95)
                 .with_category_trust("opinionated", 0.6),
+            101,
         );
         let snapshot = source.refresh(None, None).unwrap();
 
@@ -325,10 +357,11 @@ mod tests {
             instruction: None,
         }];
 
-        let source = FileSource::new(
+        let source = seeded_source(
             FileSourceConfig::new("qa_sections", temp.path())
                 .with_section_builder(sections)
                 .with_default_triplet_recipes(recipes.clone()),
+            101,
         );
 
         let snapshot = source.refresh(None, None).unwrap();
@@ -372,7 +405,7 @@ mod tests {
         .unwrap();
 
         let source_default =
-            FileSource::new(FileSourceConfig::new("qa_title_default", temp.path()));
+            seeded_source(FileSourceConfig::new("qa_title_default", temp.path()), 101);
         let default_snapshot = source_default.refresh(None, Some(1)).unwrap();
         assert_eq!(default_snapshot.records.len(), 1);
         assert_eq!(
@@ -380,9 +413,10 @@ mod tests {
             "What is delta"
         );
 
-        let source_preserve = FileSource::new(
+        let source_preserve = seeded_source(
             FileSourceConfig::new("qa_title_preserve", temp.path())
                 .with_title_replace_underscores(false),
+            101,
         );
         let preserve_snapshot = source_preserve.refresh(None, Some(1)).unwrap();
         assert_eq!(preserve_snapshot.records.len(), 1);
@@ -398,8 +432,9 @@ mod tests {
         std::fs::write(temp.path().join("notes.md"), "markdown should be skipped").unwrap();
         std::fs::write(temp.path().join("doc.txt"), "plain text should be indexed").unwrap();
 
-        let source = FileSource::new(
+        let source = seeded_source(
             FileSourceConfig::new("qa_filtering", temp.path()).with_text_files_only(false),
+            101,
         );
         let snapshot = source.refresh(None, None).unwrap();
         assert_eq!(snapshot.records.len(), 1);
@@ -413,13 +448,14 @@ mod tests {
         std::fs::create_dir_all(&docs).unwrap();
         std::fs::write(docs.join("alpha.txt"), "Alpha body.").unwrap();
 
-        let source = FileSource::new(
+        let source = seeded_source(
             FileSourceConfig::new("qa_count", temp.path())
                 .with_trust(0.42)
                 .with_category_trust("factual", 0.95)
                 .with_taxonomy_builder(Arc::new(|_, _, source_id| {
                     vec![source_id.clone(), "UNMATCHED".to_string()]
                 })),
+            101,
         );
 
         let snapshot = source.refresh(None, None).unwrap();
@@ -427,5 +463,46 @@ mod tests {
         assert_eq!(snapshot.records[0].quality.trust, 0.42);
         assert_eq!(source.id(), "qa_count");
         assert_eq!(source.reported_record_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn sampler_seed_controls_file_source_refresh_order() {
+        let temp = tempdir().unwrap();
+        for idx in 0..12 {
+            std::fs::write(
+                temp.path().join(format!("doc_{idx:02}.txt")),
+                format!("Body text for {idx}"),
+            )
+            .unwrap();
+        }
+
+        let source_a = seeded_source(FileSourceConfig::new("seeded_a", temp.path()), 11);
+        let source_b = seeded_source(FileSourceConfig::new("seeded_a", temp.path()), 11);
+        let source_c = seeded_source(FileSourceConfig::new("seeded_a", temp.path()), 29);
+
+        let ids_a: Vec<String> = source_a
+            .refresh(None, Some(8))
+            .unwrap()
+            .records
+            .into_iter()
+            .map(|record| record.id)
+            .collect();
+        let ids_b: Vec<String> = source_b
+            .refresh(None, Some(8))
+            .unwrap()
+            .records
+            .into_iter()
+            .map(|record| record.id)
+            .collect();
+        let ids_c: Vec<String> = source_c
+            .refresh(None, Some(8))
+            .unwrap()
+            .records
+            .into_iter()
+            .map(|record| record.id)
+            .collect();
+
+        assert_eq!(ids_a, ids_b);
+        assert_ne!(ids_a, ids_c);
     }
 }

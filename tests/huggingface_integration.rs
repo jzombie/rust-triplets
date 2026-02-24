@@ -2,7 +2,7 @@
 
 use std::fs;
 
-use triplets::{DataSource, HuggingFaceRowSource, HuggingFaceRowsConfig};
+use triplets::{DataSource, HuggingFaceRowSource, HuggingFaceRowsConfig, configured_source_with_seed};
 
 fn write_lines(path: &std::path::Path, lines: &[&str]) {
     let mut body = lines.join("\n");
@@ -34,7 +34,10 @@ fn huggingface_reads_local_jsonl_snapshot() {
     config.text_columns = vec!["title".to_string(), "body".to_string()];
     config.max_rows = Some(2);
 
-    let source = HuggingFaceRowSource::new(config).expect("failed creating huggingface source");
+    let source = configured_source_with_seed(
+        HuggingFaceRowSource::new(config).expect("failed creating huggingface source"),
+        7,
+    );
 
     let count = source
         .reported_record_count()
@@ -84,7 +87,10 @@ fn huggingface_reads_local_ndjson_snapshot() {
     config.text_columns = vec!["text".to_string()];
     config.max_rows = Some(2);
 
-    let source = HuggingFaceRowSource::new(config).expect("failed creating huggingface source");
+    let source = configured_source_with_seed(
+        HuggingFaceRowSource::new(config).expect("failed creating huggingface source"),
+        13,
+    );
 
     let snapshot = source
         .refresh(None, Some(2))
@@ -121,7 +127,10 @@ fn huggingface_reads_live_remote_dataset() {
     config.text_columns = vec!["text".to_string()];
     config.max_rows = Some(8);
 
-    let source = HuggingFaceRowSource::new(config).expect("failed creating huggingface source");
+    let source = configured_source_with_seed(
+        HuggingFaceRowSource::new(config).expect("failed creating huggingface source"),
+        17,
+    );
     let snapshot = source
         .refresh(None, Some(4))
         .expect("refresh should download and read live huggingface rows");

@@ -880,6 +880,8 @@ mod tests {
             })
         }
 
+        fn configure_sampler(&self, _config: &SamplerConfig) {}
+
         fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {
             self.recipes.clone()
         }
