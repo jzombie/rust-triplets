@@ -352,7 +352,7 @@ where
                 format_replay_factor(split_longest_records, split_records)
             );
             println!(
-                "      suggested undersampling batch weight (0-1): {:.4}",
+                "      suggested proportional-size batch weight (0-1): {:.4}",
                 suggested_balancing_weight(split_longest_records, split_records)
             );
             let split_smallest_nonzero = min_nonzero_records_by_split
@@ -360,7 +360,7 @@ where
                 .copied()
                 .unwrap_or(0);
             println!(
-                "      suggested oversampling batch weight (0-1): {:.4}",
+                "      suggested small-source-boost batch weight (0-1): {:.4}",
                 suggested_oversampling_weight(split_smallest_nonzero, split_records)
             );
             println!();
@@ -394,11 +394,11 @@ where
             format_replay_factor(longest_source_total, source_total_records)
         );
         println!(
-            "      suggested undersampling batch weight (0-1): {:.4}",
+            "      suggested proportional-size batch weight (0-1): {:.4}",
             suggested_balancing_weight(longest_source_total, source_total_records)
         );
         println!(
-            "      suggested oversampling batch weight (0-1): {:.4}",
+            "      suggested small-source-boost batch weight (0-1): {:.4}",
             suggested_oversampling_weight(min_nonzero_records_all_splits, source_total_records)
         );
         println!();
@@ -471,10 +471,13 @@ where
         "Oversample loops are not inferred from this static report. To measure true oversampling (how many times sampling loops through the combination space), use observed sampled draw counts from an actual run."
     );
     println!(
-        "Suggested undersampling batch weight (0-1) is longest-source normalized by record count: 1.0 for the largest source in scope, smaller values for smaller sources (equivalent to the inverse replay factor)."
+        "Suggested proportional-size batch weight (0-1) is source/max_source by record count: 1.0 for the largest source in scope, smaller values for smaller sources."
     );
     println!(
-        "Suggested oversampling batch weight (0-1) is inverse-size normalized by record count: 1.0 for the smallest non-zero source in scope, smaller values for larger sources."
+        "Suggested small-source-boost batch weight (0-1) is min_nonzero_source/source by record count: 1.0 for the smallest non-zero source in scope, smaller values for larger sources."
+    );
+    println!(
+        "When passed to next_*_batch_with_weights, higher weight means that source is sampled more often relative to lower-weight sources."
     );
 
     Ok(())
