@@ -40,7 +40,7 @@ It is designed for multi-source training pipelines where each batch can mix reco
 - **Sampler-seed-driven source determinism** for built-in deterministic source ordering (file + Hugging Face).
 - **Runtime batch sampling** via `next_triplet_batch`, `next_pair_batch`, and `next_text_batch`.
 - **Recipe-driven sample construction** for triplet/pair/text generation (anchor/positive/negative selectors).
-- **Deterministic long-section chunking**: short text stays as one chunk; long text becomes multiple chunk candidates (sliding windows) sampled over time. Chunks are not emitted as one grouped bundle; each sampled triplet/pair/text item uses one selected chunk at a time. Defaults are `max_window_tokens=4096`, `overlap_tokens=[64,128]`, and `summary_fallback_tokens=512` (all configurable via `SamplerConfig.chunking`).
+- **Deterministic long-section chunking**: short text stays as one chunk; long text becomes multiple chunk candidates (sliding windows) sampled over time. Chunks are not emitted as one grouped bundle; each sampled triplet/pair/text item uses one selected chunk at a time. Defaults are `max_window_tokens=1024`, `overlap_tokens=[64]`, and `summary_fallback_tokens=512` (all configurable via `SamplerConfig.chunking`).
 - **Weight-aware sampling controls** across source weights, recipe weights, and chunk trust/quality weighting.
 - **Anti-shortcut metadata-prefix variation** via `KvpPrefixSampler` (variant choice, per-field presence probabilities, field-order shuffle, and prefix dropout) to reduce rigid header-pattern dependence.
 - **Per-source batch mixing controls** so multiple sources can contribute to the same batch, with independent source frequency controls (including over/under-sampling).
@@ -419,6 +419,7 @@ This reflects the built-in file-corpus helpers (`FileCorpusIndex`) used by files
   - Else if triplet recipes are configured/available, text recipes are derived as `{triplet_name}_anchor`, `{triplet_name}_positive`, `{triplet_name}_negative`.
   - Else per-source text recipes are used when available.
 - **Chunk progression**: for each `(record, section)` the sampler keeps a deterministic rotating cursor over that section's chunk windows, so repeated calls spread windows across the run instead of always taking the first window.
+- **Overlap materialization**: when multiple overlap values are configured, the sampler materializes windows for each configured overlap value and adds all of them to the chunk pool (in config order); it does not randomly choose a single overlap value.
 - **Oversampling**: when sources run dry, cached records may be reused (no global no-repeat guarantee).
 
 ### Reducing shortcut learning

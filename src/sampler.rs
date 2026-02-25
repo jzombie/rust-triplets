@@ -2935,6 +2935,61 @@ mod tests {
     }
 
     #[test]
+    fn chunk_windows_materialize_all_configured_overlaps() {
+        let split = SplitRatios::default();
+        let mut config = base_config();
+        config.chunking = ChunkingStrategy {
+            max_window_tokens: 4,
+            overlap_tokens: vec![1, 2],
+            summary_fallback_weight: 0.0,
+            summary_fallback_tokens: 0,
+            chunk_weight_floor: 0.0,
+        };
+        let store = Arc::new(DeterministicSplitStore::new(split, 23).unwrap());
+        let sampler = TripletSampler::new(config, store);
+
+        let section_text = "one two three four five six seven";
+        let record = DataRecord {
+            id: "overlap_record".into(),
+            source: "unit".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            quality: QualityScore { trust: 1.0 },
+            taxonomy: vec![],
+            sections: vec![RecordSection {
+                role: SectionRole::Context,
+                heading: None,
+                text: section_text.into(),
+                sentences: vec![section_text.into()],
+            }],
+            meta_prefix: None,
+        };
+
+        let section = &record.sections[0];
+        let chunks = sampler
+            .inner
+            .lock()
+            .unwrap()
+            .materialize_chunks(&record, 0, section);
+
+        let overlaps: Vec<usize> = chunks
+            .iter()
+            .filter_map(|chunk| match chunk.view {
+                ChunkView::Window { overlap, .. } => Some(overlap),
+                _ => None,
+            })
+            .collect();
+
+        let overlap_1_count = overlaps.iter().filter(|&&value| value == 1).count();
+        let overlap_2_count = overlaps.iter().filter(|&&value| value == 2).count();
+
+        assert!(overlap_1_count > 0);
+        assert!(overlap_2_count > 0);
+        assert_eq!(overlap_1_count, 2);
+        assert_eq!(overlap_2_count, 3);
+    }
+
+    #[test]
     fn chunk_weight_applies_linear_offset_and_floor() {
         let split = SplitRatios::default();
         let mut config = base_config();

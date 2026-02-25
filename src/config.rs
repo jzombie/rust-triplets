@@ -21,7 +21,7 @@ impl Default for ChunkingStrategy {
     fn default() -> Self {
         Self {
             max_window_tokens: 1024,
-            overlap_tokens: vec![64, 128],
+            overlap_tokens: vec![64],
             summary_fallback_weight: 0.35,
             summary_fallback_tokens: 512,
             chunk_weight_floor: 0.1,
@@ -140,7 +140,7 @@ mod tests {
     fn chunking_strategy_defaults_are_stable() {
         let cfg = ChunkingStrategy::default();
         assert_eq!(cfg.max_window_tokens, 1024);
-        assert_eq!(cfg.overlap_tokens, vec![64, 128]);
+        assert_eq!(cfg.overlap_tokens, vec![64]);
         assert_eq!(cfg.summary_fallback_weight, 0.35);
         assert_eq!(cfg.summary_fallback_tokens, 512);
         assert_eq!(cfg.chunk_weight_floor, 0.1);
