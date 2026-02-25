@@ -363,6 +363,7 @@ where
                 "      suggested oversampling batch weight (0-1): {:.4}",
                 suggested_oversampling_weight(split_smallest_nonzero, split_records)
             );
+            println!();
         }
         let longest_source_total = inventories
             .iter()
