@@ -253,6 +253,31 @@ where
         totals_by_split.insert(split_label, totals);
     }
 
+    let min_nonzero_records_by_split: HashMap<SplitLabel, u128> =
+        [SplitLabel::Train, SplitLabel::Validation, SplitLabel::Test]
+            .into_iter()
+            .map(|split_label| {
+                let min_nonzero = inventories
+                    .iter()
+                    .filter_map(|source| {
+                        per_source_split_counts
+                            .get(&(source.source_id.clone(), split_label))
+                            .copied()
+                    })
+                    .filter(|&records| records > 0)
+                    .min()
+                    .unwrap_or(0);
+                (split_label, min_nonzero)
+            })
+            .collect();
+
+    let min_nonzero_records_all_splits = inventories
+        .iter()
+        .map(|source| source.reported_records)
+        .filter(|&records| records > 0)
+        .min()
+        .unwrap_or(0);
+
     println!("=== capacity estimate (length-only) ===");
     println!("mode: metadata-only (no source.refresh calls)");
     println!("classification: heuristic approximation (not exact)");
@@ -326,6 +351,19 @@ where
                 "      replay factor vs longest source: {}",
                 format_replay_factor(split_longest_records, split_records)
             );
+            println!(
+                "      suggested proportional-size batch weight (0-1): {:.4}",
+                suggested_balancing_weight(split_longest_records, split_records)
+            );
+            let split_smallest_nonzero = min_nonzero_records_by_split
+                .get(&split_label)
+                .copied()
+                .unwrap_or(0);
+            println!(
+                "      suggested small-source-boost batch weight (0-1): {:.4}",
+                suggested_oversampling_weight(split_smallest_nonzero, split_records)
+            );
+            println!();
         }
         let longest_source_total = inventories
             .iter()
@@ -354,6 +392,14 @@ where
         println!(
             "      replay factor vs longest source: {}",
             format_replay_factor(longest_source_total, source_total_records)
+        );
+        println!(
+            "      suggested proportional-size batch weight (0-1): {:.4}",
+            suggested_balancing_weight(longest_source_total, source_total_records)
+        );
+        println!(
+            "      suggested small-source-boost batch weight (0-1): {:.4}",
+            suggested_oversampling_weight(min_nonzero_records_all_splits, source_total_records)
         );
         println!();
     }
@@ -417,12 +463,26 @@ where
     println!(
         "Note: counts are heuristic, length-based estimates from source-reported totals and recipe structure. They are approximate, not exact, and assume anchor-positive pairs=records (one positive per anchor by default), negatives=source_records_in_split-1 (anchor excluded as its own negative), and at most one chunk/window realization per sample. In real-world chunked sampling, practical combinations are often higher, so treat this as a floor-like baseline."
     );
+    println!();
     println!(
         "Effective sampled triplets apply a bounded training assumption: effective_triplets = records * p * k per triplet recipe, with defaults p={} positives per anchor and k={} negatives per anchor.",
         EFFECTIVE_POSITIVES_PER_ANCHOR, EFFECTIVE_NEGATIVES_PER_ANCHOR
     );
+    println!();
     println!(
         "Oversample loops are not inferred from this static report. To measure true oversampling (how many times sampling loops through the combination space), use observed sampled draw counts from an actual run."
+    );
+    println!();
+    println!(
+        "Suggested proportional-size batch weight (0-1) is source/max_source by record count: 1.0 for the largest source in scope, smaller values for smaller sources."
+    );
+    println!();
+    println!(
+        "Suggested small-source-boost batch weight (0-1) is min_nonzero_source/source by record count: 1.0 for the smallest non-zero source in scope, smaller values for larger sources."
+    );
+    println!();
+    println!(
+        "When passed to next_*_batch_with_weights, higher weight means that source is sampled more often relative to lower-weight sources."
     );
 
     Ok(())
@@ -564,6 +624,20 @@ fn parse_positive_usize(raw: &str) -> Result<usize, String> {
         return Err("--batch-size must be greater than zero".to_string());
     }
     Ok(parsed)
+}
+
+fn suggested_balancing_weight(max_baseline: u128, source_baseline: u128) -> f32 {
+    if max_baseline == 0 || source_baseline == 0 {
+        return 0.0;
+    }
+    (source_baseline as f64 / max_baseline as f64).clamp(0.0, 1.0) as f32
+}
+
+fn suggested_oversampling_weight(min_nonzero_baseline: u128, source_baseline: u128) -> f32 {
+    if min_nonzero_baseline == 0 || source_baseline == 0 {
+        return 0.0;
+    }
+    (min_nonzero_baseline as f64 / source_baseline as f64).clamp(0.0, 1.0) as f32
 }
 
 fn parse_cli<T, I>(args: I) -> Result<Option<T>, Box<dyn Error>>
@@ -960,6 +1034,24 @@ mod tests {
         assert!(parse_split_ratios_arg("0.8,0.1").is_err());
         assert!(parse_split_ratios_arg("1.0,0.0,0.1").is_err());
         assert!(parse_split_ratios_arg("-0.1,0.6,0.5").is_err());
+    }
+
+    #[test]
+    fn suggested_balancing_weight_is_longest_normalized_and_bounded() {
+        assert!((suggested_balancing_weight(100, 100) - 1.0).abs() < 1e-6);
+        assert!((suggested_balancing_weight(400, 100) - 0.25).abs() < 1e-6);
+        assert!((suggested_balancing_weight(400, 400) - 1.0).abs() < 1e-6);
+        assert_eq!(suggested_balancing_weight(0, 100), 0.0);
+        assert_eq!(suggested_balancing_weight(100, 0), 0.0);
+    }
+
+    #[test]
+    fn suggested_oversampling_weight_is_inverse_in_unit_interval() {
+        assert!((suggested_oversampling_weight(100, 100) - 1.0).abs() < 1e-6);
+        assert!((suggested_oversampling_weight(100, 400) - 0.25).abs() < 1e-6);
+        assert!((suggested_oversampling_weight(100, 1000) - 0.1).abs() < 1e-6);
+        assert_eq!(suggested_oversampling_weight(0, 100), 0.0);
+        assert_eq!(suggested_oversampling_weight(100, 0), 0.0);
     }
 
     #[test]

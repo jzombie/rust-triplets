@@ -20,8 +20,8 @@ pub struct ChunkingStrategy {
 impl Default for ChunkingStrategy {
     fn default() -> Self {
         Self {
-            max_window_tokens: 4096,
-            overlap_tokens: vec![64, 128],
+            max_window_tokens: 1024,
+            overlap_tokens: vec![64],
             summary_fallback_weight: 0.35,
             summary_fallback_tokens: 512,
             chunk_weight_floor: 0.1,
@@ -139,8 +139,8 @@ mod tests {
     #[test]
     fn chunking_strategy_defaults_are_stable() {
         let cfg = ChunkingStrategy::default();
-        assert_eq!(cfg.max_window_tokens, 4096);
-        assert_eq!(cfg.overlap_tokens, vec![64, 128]);
+        assert_eq!(cfg.max_window_tokens, 1024);
+        assert_eq!(cfg.overlap_tokens, vec![64]);
         assert_eq!(cfg.summary_fallback_weight, 0.35);
         assert_eq!(cfg.summary_fallback_tokens, 512);
         assert_eq!(cfg.chunk_weight_floor, 0.1);
@@ -155,7 +155,7 @@ mod tests {
         assert!(cfg.recipes.is_empty());
         assert!(cfg.text_recipes.is_empty());
         assert_eq!(cfg.allowed_splits, vec![SplitLabel::Train]);
-        assert_eq!(cfg.chunking.max_window_tokens, 4096);
+        assert_eq!(cfg.chunking.max_window_tokens, 1024);
     }
 
     #[test]
