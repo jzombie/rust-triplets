@@ -253,6 +253,31 @@ where
         totals_by_split.insert(split_label, totals);
     }
 
+    let min_nonzero_records_by_split: HashMap<SplitLabel, u128> =
+        [SplitLabel::Train, SplitLabel::Validation, SplitLabel::Test]
+            .into_iter()
+            .map(|split_label| {
+                let min_nonzero = inventories
+                    .iter()
+                    .filter_map(|source| {
+                        per_source_split_counts
+                            .get(&(source.source_id.clone(), split_label))
+                            .copied()
+                    })
+                    .filter(|&records| records > 0)
+                    .min()
+                    .unwrap_or(0);
+                (split_label, min_nonzero)
+            })
+            .collect();
+
+    let min_nonzero_records_all_splits = inventories
+        .iter()
+        .map(|source| source.reported_records)
+        .filter(|&records| records > 0)
+        .min()
+        .unwrap_or(0);
+
     println!("=== capacity estimate (length-only) ===");
     println!("mode: metadata-only (no source.refresh calls)");
     println!("classification: heuristic approximation (not exact)");
@@ -326,6 +351,18 @@ where
                 "      replay factor vs longest source: {}",
                 format_replay_factor(split_longest_records, split_records)
             );
+            println!(
+                "      suggested undersampling batch weight (0-1): {:.4}",
+                suggested_balancing_weight(split_longest_records, split_records)
+            );
+            let split_smallest_nonzero = min_nonzero_records_by_split
+                .get(&split_label)
+                .copied()
+                .unwrap_or(0);
+            println!(
+                "      suggested oversampling batch weight (0-1): {:.4}",
+                suggested_oversampling_weight(split_smallest_nonzero, split_records)
+            );
         }
         let longest_source_total = inventories
             .iter()
@@ -354,6 +391,14 @@ where
         println!(
             "      replay factor vs longest source: {}",
             format_replay_factor(longest_source_total, source_total_records)
+        );
+        println!(
+            "      suggested undersampling batch weight (0-1): {:.4}",
+            suggested_balancing_weight(longest_source_total, source_total_records)
+        );
+        println!(
+            "      suggested oversampling batch weight (0-1): {:.4}",
+            suggested_oversampling_weight(min_nonzero_records_all_splits, source_total_records)
         );
         println!();
     }
@@ -423,6 +468,12 @@ where
     );
     println!(
         "Oversample loops are not inferred from this static report. To measure true oversampling (how many times sampling loops through the combination space), use observed sampled draw counts from an actual run."
+    );
+    println!(
+        "Suggested undersampling batch weight (0-1) is longest-source normalized by record count: 1.0 for the largest source in scope, smaller values for smaller sources (equivalent to the inverse replay factor)."
+    );
+    println!(
+        "Suggested oversampling batch weight (0-1) is inverse-size normalized by record count: 1.0 for the smallest non-zero source in scope, smaller values for larger sources."
     );
 
     Ok(())
@@ -564,6 +615,20 @@ fn parse_positive_usize(raw: &str) -> Result<usize, String> {
         return Err("--batch-size must be greater than zero".to_string());
     }
     Ok(parsed)
+}
+
+fn suggested_balancing_weight(max_baseline: u128, source_baseline: u128) -> f32 {
+    if max_baseline == 0 || source_baseline == 0 {
+        return 0.0;
+    }
+    (source_baseline as f64 / max_baseline as f64).clamp(0.0, 1.0) as f32
+}
+
+fn suggested_oversampling_weight(min_nonzero_baseline: u128, source_baseline: u128) -> f32 {
+    if min_nonzero_baseline == 0 || source_baseline == 0 {
+        return 0.0;
+    }
+    (min_nonzero_baseline as f64 / source_baseline as f64).clamp(0.0, 1.0) as f32
 }
 
 fn parse_cli<T, I>(args: I) -> Result<Option<T>, Box<dyn Error>>
@@ -960,6 +1025,24 @@ mod tests {
         assert!(parse_split_ratios_arg("0.8,0.1").is_err());
         assert!(parse_split_ratios_arg("1.0,0.0,0.1").is_err());
         assert!(parse_split_ratios_arg("-0.1,0.6,0.5").is_err());
+    }
+
+    #[test]
+    fn suggested_balancing_weight_is_longest_normalized_and_bounded() {
+        assert!((suggested_balancing_weight(100, 100) - 1.0).abs() < 1e-6);
+        assert!((suggested_balancing_weight(400, 100) - 0.25).abs() < 1e-6);
+        assert!((suggested_balancing_weight(400, 400) - 1.0).abs() < 1e-6);
+        assert_eq!(suggested_balancing_weight(0, 100), 0.0);
+        assert_eq!(suggested_balancing_weight(100, 0), 0.0);
+    }
+
+    #[test]
+    fn suggested_oversampling_weight_is_inverse_in_unit_interval() {
+        assert!((suggested_oversampling_weight(100, 100) - 1.0).abs() < 1e-6);
+        assert!((suggested_oversampling_weight(100, 400) - 0.25).abs() < 1e-6);
+        assert!((suggested_oversampling_weight(100, 1000) - 0.1).abs() < 1e-6);
+        assert_eq!(suggested_oversampling_weight(0, 100), 0.0);
+        assert_eq!(suggested_oversampling_weight(100, 0), 0.0);
     }
 
     #[test]
