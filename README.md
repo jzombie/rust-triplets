@@ -2,7 +2,7 @@
 
 [![made-with-rust][rust-logo]][rust-src-page] [![crates.io][crates-badge]][crates-page] [![MIT licensed][mit-license-badge]][mit-license-page] [![Apache 2.0 licensed][apache-2.0-license-badge]][apache-2.0-license-page] [![Coverage][coveralls-badge]][coveralls-page]
 
-_Train on mixable asynchronous streams with automatic split assignment, configurable weighting, and reproducible batches._
+_Train models on mixable asynchronous, textual streams with automatic split assignment, configurable weighting, and reproducible batches._
 
 **WORK IN PROGRESS. THIS API IS BEING PROTOTYPED AND MAY CHANGE WITHOUT NOTICE.**
 
@@ -31,6 +31,8 @@ In metric learning, a triplet is a training example composed of:
 Training on many `(anchor, positive, negative)` groups helps a model learn useful embedding space structure (similar items closer together, dissimilar items farther apart).
 
 In this crate, those triplets are built automatically from one or more data sources using metadata-driven, user-defined recipes/selectors for anchor/positive/negative section choice.
+
+Note on "hard triplet" mining: mining hard triplets can be performed purely via metadata and recipe-driven selectors (no special semantic scorer is required in principle). Because negatives are selected dynamically per anchor/positive and recipes can vary which fields or records are eligible, a training run will naturally observe a mixture of easy and hard negatives as sampling, recipe configuration, and per-batch weighting evolve.
 
 It is designed for multi-source training pipelines where each batch can mix records from several sources, while source contribution is controlled independently (for example, over/under-sampling frequency and trust/quality weighting per source) to rebalance representation and reduce source-driven bias. Because source weights can be set per batch call, they can be wired to training-time loss/metric signals and adjusted dynamically during training.
 
