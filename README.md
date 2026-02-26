@@ -57,6 +57,30 @@ It is designed for multi-source training pipelines where each batch can mix reco
 
 This crate does **not** perform semantic mining/retrieval scoring by itself; instead, it gives you deterministic, metadata-driven sampling primitives you can feed into your downstream mining/retrieval stack.
 
+## Recipes
+
+### What is a recipe?
+
+A recipe defines how one training sample is assembled from eligible sections:
+
+- For **triplets**: selector for anchor, selector for positive, selector for negative, plus negative strategy and recipe weight.
+- For **pairs/text**: either derived from triplet recipes or explicitly configured text recipes.
+
+Recipes are metadata-driven selection rules; they define *what can be sampled*, while runtime sampling/weights decide *how often* each eligible path is drawn.
+
+Recipe origin can be user-defined, system-defined, or mixed in the same run.
+
+### How recipe selection works
+
+- If `SamplerConfig.recipes` is non-empty, those triplet recipes are used for all sources.
+- Otherwise, each source uses its own `default_triplet_recipes()` (if any).
+- System-defined recipes (for example, auto-injected long-section recipes) can be appended to source recipe pools, so effective sampling can use both user-defined and system-defined recipes.
+- Pair batches are derived from the selected triplet recipe stream.
+- Text recipes are resolved in this order:
+  - `SamplerConfig.text_recipes` (if explicitly set)
+  - derived from triplet recipes (`{triplet_name}_anchor|positive|negative`)
+  - source-provided text recipes (fallback)
+
 ### Auto-injected long-section recipe
 
 - Auto recipe name: `auto_injected_long_section_chunk_pair_wrong_article`.
