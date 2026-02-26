@@ -151,6 +151,7 @@ File source note:
 
 - `title_summary_wrong_date` is date-aware and is **gated** by `FileSourceConfig::with_date_aware_default_recipe(true)`.
 - Default `FileSourceConfig::new(...)` leaves date-aware defaults disabled.
+- Here, "date-aware" means publication date metadata (for example `META_FIELD_DATE` from taxonomy/record metadata), **not** filesystem modification/creation/access timestamps.
 
 Hugging Face source defaults additionally include:
 

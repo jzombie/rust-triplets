@@ -77,7 +77,10 @@ pub struct TextRecipe {
 /// Strategy for picking negatives for triplets/pairs.
 #[derive(Clone, Debug)]
 pub enum NegativeStrategy {
-    /// Choose a record with a different publication date.
+    /// Choose a record with a different publication date from record metadata.
+    ///
+    /// This refers to metadata/taxonomy publication-date values (for example
+    /// `META_FIELD_DATE`), not filesystem timestamps like mtime/ctime/atime.
     WrongPublicationDate,
     /// Choose a different record from the same source.
     WrongArticle,

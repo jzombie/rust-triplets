@@ -104,6 +104,9 @@ impl FileSourceConfig {
     }
 
     /// Enable/disable the date-aware default recipe lane (`WrongPublicationDate`).
+    ///
+    /// "Date-aware" here uses publication-date metadata on records (for example
+    /// taxonomy/meta date fields), not filesystem timestamps from source files.
     pub fn with_date_aware_default_recipe(mut self, include: bool) -> Self {
         self.include_date_aware_default_recipe = include;
         self.default_triplet_recipes = default_title_summary_triplet_recipes(include);
@@ -130,11 +133,15 @@ impl FileSourceConfig {
 }
 
 /// Default mixed-negative recipes used by `FileSource` title/body corpora.
+///
+/// When `include_date_aware` is enabled, the date-aware lane compares metadata
+/// publication dates, not filesystem mtime/ctime/atime values.
 pub fn default_title_summary_triplet_recipes(include_date_aware: bool) -> Vec<TripletRecipe> {
     let mut recipes = Vec::new();
     if include_date_aware {
         // Keep a small, date-aware anchor-negative lane to reduce false negatives
         // while still introducing temporal contrast for harder examples.
+        // Date-aware means publication-date metadata comparison, not file mtime.
         recipes.push(TripletRecipe {
             name: "title_summary_wrong_date".into(),
             anchor: Selector::Role(SectionRole::Anchor),
