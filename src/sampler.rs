@@ -32,6 +32,14 @@ use crate::splits::{
 };
 use crate::types::{RecipeKey, RecordId, SourceId};
 
+/// Auto-injected recipe name used when a source has at least one section whose
+/// token count exceeds `chunking.max_window_tokens` during normal ingest sync.
+///
+/// This recipe is appended for any eligible source during normal ingest sync, regardless
+/// if custom recipes are configured or not.
+const AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME: &str =
+    "auto_injected_long_section_chunk_pair_wrong_article";
+
 #[derive(Debug, Clone)]
 /// Small deterministic RNG used for reproducible sampler behavior.
 struct DeterministicRng {
@@ -251,6 +259,8 @@ struct TripletSamplerInner<S: SplitStore + EpochStateStore + SamplerStateStore +
     text_recipes: Vec<TextRecipe>,
     /// Per-source triplet recipes keyed by source id.
     source_triplet_recipes: HashMap<SourceId, Vec<TripletRecipe>>,
+    /// Sources that currently contain at least one section larger than the chunk window.
+    sources_with_long_sections: HashSet<SourceId>,
     /// Per-source text recipes keyed by source id.
     source_text_recipes: HashMap<SourceId, Vec<TextRecipe>>,
     /// True if triplet recipes came from config (no source defaults).
@@ -320,6 +330,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             triplet_recipes,
             text_recipes,
             source_triplet_recipes: HashMap::new(),
+            sources_with_long_sections: HashSet::new(),
             source_text_recipes: HashMap::new(),
             using_config_triplet_recipes,
             using_config_text_recipes,
@@ -579,7 +590,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         }
     }
 
-    fn triplet_recipes_for_source<'a>(&'a self, source: &str) -> &'a [TripletRecipe] {
+    fn configured_triplet_recipes_for_source<'a>(&'a self, source: &str) -> &'a [TripletRecipe] {
         if self.using_config_triplet_recipes {
             return &self.triplet_recipes;
         }
@@ -587,6 +598,65 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             .get(source)
             .map(|recipes| recipes.as_slice())
             .unwrap_or(&[])
+    }
+
+    fn source_supports_chunk_pair_recipe(&self, source: &str) -> bool {
+        if self.config.chunking.max_window_tokens == 0 {
+            return false;
+        }
+        self.sources_with_long_sections.contains(source)
+    }
+
+    /// Build the auto-injected long-section recipe.
+    ///
+    /// Semantics:
+    /// - Anchor selector: `Context`
+    /// - Positive selector: `Context`
+    /// - Negative selector: `Context` on a different record (`WrongArticle`)
+    ///
+    /// Anchor and positive are selected by two independent `select_chunk` calls
+    /// from the same context chunk candidate pool for the chosen record.
+    /// They are not concatenated and one is not derived from the other's text.
+    fn source_chunk_pair_recipe() -> TripletRecipe {
+        TripletRecipe {
+            name: Cow::Borrowed(AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME),
+            anchor: Selector::Role(SectionRole::Context),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 1.0,
+            instruction: None,
+        }
+    }
+
+    fn triplet_recipes_for_source(&self, source: &str) -> Vec<TripletRecipe> {
+        let mut recipes = self.configured_triplet_recipes_for_source(source).to_vec();
+        // Auto-injection augments the source recipe pool; it does not mutate
+        // `select_chunk` behavior. Recipe scheduling may choose this recipe or
+        // any other recipe in the pool according to normal ordering logic.
+        if self.source_supports_chunk_pair_recipe(source)
+            && !recipes.iter().any(|recipe| {
+                recipe.name.as_ref() == AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME
+            })
+        {
+            recipes.push(Self::source_chunk_pair_recipe());
+        }
+        recipes
+    }
+
+    fn triplet_recipe_count_for_source(&self, source: &str) -> usize {
+        let base = self.configured_triplet_recipes_for_source(source).len();
+        if self.source_supports_chunk_pair_recipe(source)
+            && !self
+                .configured_triplet_recipes_for_source(source)
+                .iter()
+                .any(|recipe| {
+                    recipe.name.as_ref() == AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME
+                })
+        {
+            return base.saturating_add(1);
+        }
+        base
     }
 
     fn text_recipes_for_source<'a>(&'a self, source: &str) -> &'a [TextRecipe] {
@@ -945,11 +1015,35 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         recipe: &TripletRecipe,
         record: &DataRecord,
     ) -> Option<SampleTriplet> {
+        // Anchor and positive are selected independently from selectors on the
+        // same input record. This is a second independent draw, not a transform
+        // of anchor text.
         let mut anchor_chunk = self.select_chunk(record, &recipe.anchor)?;
         self.decorate_chunk(record, &mut anchor_chunk);
-        // TODO: When anchor and positive selectors overlap, consider re-drawing positives
-        // to avoid identical chunks when multiple windows are available.
         let mut positive_chunk = self.select_chunk(record, &recipe.positive_selector)?;
+        if recipe.anchor == recipe.positive_selector {
+            let enforce_window_pair =
+                recipe.name.as_ref() == AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME;
+            let mut retries = 0usize;
+            while !same_selector_pair_is_valid(&anchor_chunk, &positive_chunk, enforce_window_pair)
+                && retries < 8
+            {
+                let Some(redraw_anchor) = self.select_chunk(record, &recipe.anchor) else {
+                    break;
+                };
+                let Some(redraw_positive) = self.select_chunk(record, &recipe.positive_selector)
+                else {
+                    break;
+                };
+                anchor_chunk = redraw_anchor;
+                positive_chunk = redraw_positive;
+                retries += 1;
+            }
+            // If we cannot find a valid pair, skip this sample.
+            if !same_selector_pair_is_valid(&anchor_chunk, &positive_chunk, enforce_window_pair) {
+                return None;
+            }
+        }
         self.decorate_chunk(record, &mut positive_chunk);
         let (negative_record, fallback_used) =
             self.select_negative_record(record, &recipe.negative_strategy)?;
@@ -1188,9 +1282,20 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         let mut snapshot = self.ingestion.cache().snapshot();
         snapshot.sort_by(|a, b| a.id.cmp(&b.id));
         self.records.clear();
+        self.sources_with_long_sections.clear();
+        let window = self.config.chunking.max_window_tokens;
         for record in snapshot {
             if self.split_store.label_for(&record.id).is_none() {
                 self.split_store.ensure(record.id.clone())?;
+            }
+            if window > 0
+                && record.sections.iter().any(|section| {
+                    matches!(section.role, SectionRole::Anchor | SectionRole::Context)
+                        && section.text.split_whitespace().count() > window
+                })
+            {
+                self.sources_with_long_sections
+                    .insert(record.source.clone());
             }
             self.records.insert(record.id.clone(), record);
         }
@@ -1406,7 +1511,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         let mut recipe_steps = 0usize;
         let max_recipe_len = sources
             .iter()
-            .map(|source| self.triplet_recipes_for_source(source).len())
+            .map(|source| self.triplet_recipe_count_for_source(source))
             .max()
             .unwrap_or(1)
             .max(1);
@@ -1416,7 +1521,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 break;
             }
             let source = cycle_sources[source_idx].as_str();
-            let recipes = self.triplet_recipes_for_source(source).to_vec();
+            let recipes = self.triplet_recipes_for_source(source);
             if recipes.is_empty() {
                 source_idx += 1;
                 source_steps += 1;
@@ -1737,7 +1842,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         let mut recipe_steps = 0usize;
         let max_recipe_len = sources
             .iter()
-            .map(|source| self.triplet_recipes_for_source(source).len())
+            .map(|source| self.triplet_recipe_count_for_source(source))
             .max()
             .unwrap_or(1)
             .max(1);
@@ -1747,7 +1852,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 break;
             }
             let source = cycle_sources[source_idx].as_str();
-            let recipes = self.triplet_recipes_for_source(source).to_vec();
+            let recipes = self.triplet_recipes_for_source(source);
             if recipes.is_empty() {
                 source_idx += 1;
                 source_steps += 1;
@@ -1817,6 +1922,23 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         }
         Err(SamplerError::Exhausted(RECIPE_LABEL_TRIPLETS.into()))
     }
+}
+
+fn same_selector_pair_is_valid(
+    anchor_chunk: &RecordChunk,
+    positive_chunk: &RecordChunk,
+    enforce_window_pair: bool,
+) -> bool {
+    if chunk_key(anchor_chunk) == chunk_key(positive_chunk) {
+        return false;
+    }
+    if !enforce_window_pair {
+        return true;
+    }
+    matches!(
+        (&anchor_chunk.view, &positive_chunk.view),
+        (ChunkView::Window { .. }, ChunkView::Window { .. })
+    )
 }
 
 impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampler<S> {
@@ -6594,6 +6716,632 @@ mod tests {
                 .unwrap();
             assert_eq!(label, SplitLabel::Train);
         }
+    }
+
+    #[test]
+    fn adds_dynamic_chunk_pair_recipe_for_long_section_sources() {
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let mut config = base_config();
+        config.batch_size = 1;
+        // Force chunking so a 4-token context section becomes multiple windows.
+        // This is the eligibility condition for adding the dynamic chunk-pair recipe.
+        config.chunking = ChunkingStrategy {
+            max_window_tokens: 2,
+            overlap_tokens: vec![0],
+            summary_fallback_weight: 0.0,
+            summary_fallback_tokens: 0,
+            chunk_weight_floor: 0.0,
+        };
+
+        let recipes = vec![TripletRecipe {
+            name: "base_title_context".into(),
+            anchor: Selector::Role(SectionRole::Anchor),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 1.0,
+            instruction: None,
+        }];
+
+        let now = Utc::now();
+        // Two records are provided so `WrongArticle` negatives can be formed.
+        // Context sections are intentionally longer than `max_window_tokens`.
+        let records = vec![
+            DataRecord {
+                id: "r1".into(),
+                source: "ignored_by_ingestion".into(),
+                created_at: now,
+                updated_at: now,
+                quality: QualityScore::default(),
+                taxonomy: vec![],
+                sections: vec![
+                    RecordSection {
+                        role: SectionRole::Anchor,
+                        heading: None,
+                        text: "Headline one".into(),
+                        sentences: vec!["Headline one".into()],
+                    },
+                    RecordSection {
+                        role: SectionRole::Context,
+                        heading: None,
+                        text: "one two three four".into(),
+                        sentences: vec!["one two three four".into()],
+                    },
+                ],
+                meta_prefix: None,
+            },
+            DataRecord {
+                id: "r2".into(),
+                source: "ignored_by_ingestion".into(),
+                created_at: now,
+                updated_at: now,
+                quality: QualityScore::default(),
+                taxonomy: vec![],
+                sections: vec![
+                    RecordSection {
+                        role: SectionRole::Anchor,
+                        heading: None,
+                        text: "Headline two".into(),
+                        sentences: vec!["Headline two".into()],
+                    },
+                    RecordSection {
+                        role: SectionRole::Context,
+                        heading: None,
+                        text: "alpha beta gamma delta".into(),
+                        sentences: vec!["alpha beta gamma delta".into()],
+                    },
+                ],
+                meta_prefix: None,
+            },
+        ];
+
+        let store = Arc::new(DeterministicSplitStore::new(split, 117).unwrap());
+        let sampler = TripletSampler::new(config, store);
+        // Source provides only a base recipe; dynamic augmentation should happen
+        // automatically during ingest based on observed section lengths.
+        sampler.register_source(Box::new(RecipeSource::new(records, recipes)));
+        sampler
+            .inner
+            .lock()
+            .unwrap()
+            .ingest_internal(SplitLabel::Train)
+            .unwrap();
+
+        let effective = sampler
+            .inner
+            .lock()
+            .unwrap()
+            .triplet_recipes_for_source("recipe_source");
+        // Verify the dynamic same-record chunk-pair recipe was injected.
+        assert!(effective.iter().any(|recipe| {
+            recipe.name.as_ref() == AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME
+        }));
+    }
+
+    #[test]
+    fn does_not_add_dynamic_chunk_pair_recipe_when_all_sections_fit_window() {
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let mut config = base_config();
+        config.batch_size = 1;
+        // Large window means all sections fit in a single chunk.
+        // This should disable dynamic chunk-pair recipe injection.
+        config.chunking = ChunkingStrategy {
+            max_window_tokens: 8,
+            overlap_tokens: vec![0],
+            summary_fallback_weight: 0.0,
+            summary_fallback_tokens: 0,
+            chunk_weight_floor: 0.0,
+        };
+
+        let recipes = vec![TripletRecipe {
+            name: "base_title_context".into(),
+            anchor: Selector::Role(SectionRole::Anchor),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 1.0,
+            instruction: None,
+        }];
+
+        let now = Utc::now();
+        // All context sections are short and should not be classified as
+        // chunk-window eligible for dynamic augmentation.
+        let records = vec![
+            DataRecord {
+                id: "short1".into(),
+                source: "ignored_by_ingestion".into(),
+                created_at: now,
+                updated_at: now,
+                quality: QualityScore::default(),
+                taxonomy: vec![],
+                sections: vec![
+                    RecordSection {
+                        role: SectionRole::Anchor,
+                        heading: None,
+                        text: "Headline one".into(),
+                        sentences: vec!["Headline one".into()],
+                    },
+                    RecordSection {
+                        role: SectionRole::Context,
+                        heading: None,
+                        text: "one two".into(),
+                        sentences: vec!["one two".into()],
+                    },
+                ],
+                meta_prefix: None,
+            },
+            DataRecord {
+                id: "short2".into(),
+                source: "ignored_by_ingestion".into(),
+                created_at: now,
+                updated_at: now,
+                quality: QualityScore::default(),
+                taxonomy: vec![],
+                sections: vec![
+                    RecordSection {
+                        role: SectionRole::Anchor,
+                        heading: None,
+                        text: "Headline two".into(),
+                        sentences: vec!["Headline two".into()],
+                    },
+                    RecordSection {
+                        role: SectionRole::Context,
+                        heading: None,
+                        text: "alpha beta".into(),
+                        sentences: vec!["alpha beta".into()],
+                    },
+                ],
+                meta_prefix: None,
+            },
+        ];
+
+        let store = Arc::new(DeterministicSplitStore::new(split, 118).unwrap());
+        let sampler = TripletSampler::new(config, store);
+        sampler.register_source(Box::new(RecipeSource::new(records, recipes)));
+        sampler
+            .inner
+            .lock()
+            .unwrap()
+            .ingest_internal(SplitLabel::Train)
+            .unwrap();
+
+        let effective = sampler
+            .inner
+            .lock()
+            .unwrap()
+            .triplet_recipes_for_source("recipe_source");
+        // Verify the dynamic recipe is absent when no oversized sections exist.
+        assert!(effective.iter().all(|recipe| {
+            recipe.name.as_ref() != AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME
+        }));
+    }
+
+    #[test]
+    fn adds_dynamic_chunk_pair_recipe_even_with_global_config_recipes() {
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let mut config = base_config();
+        config.batch_size = 1;
+        config.chunking = ChunkingStrategy {
+            max_window_tokens: 2,
+            overlap_tokens: vec![0],
+            summary_fallback_weight: 0.0,
+            summary_fallback_tokens: 0,
+            chunk_weight_floor: 0.0,
+        };
+        config.recipes = vec![TripletRecipe {
+            name: "global_anchor_context".into(),
+            anchor: Selector::Role(SectionRole::Anchor),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 1.0,
+            instruction: None,
+        }];
+
+        let now = Utc::now();
+        let records = vec![
+            DataRecord {
+                id: "cfg1".into(),
+                source: "ignored_by_ingestion".into(),
+                created_at: now,
+                updated_at: now,
+                quality: QualityScore::default(),
+                taxonomy: vec![],
+                sections: vec![
+                    RecordSection {
+                        role: SectionRole::Anchor,
+                        heading: None,
+                        text: "Headline one".into(),
+                        sentences: vec!["Headline one".into()],
+                    },
+                    RecordSection {
+                        role: SectionRole::Context,
+                        heading: None,
+                        text: "one two three four".into(),
+                        sentences: vec!["one two three four".into()],
+                    },
+                ],
+                meta_prefix: None,
+            },
+            DataRecord {
+                id: "cfg2".into(),
+                source: "ignored_by_ingestion".into(),
+                created_at: now,
+                updated_at: now,
+                quality: QualityScore::default(),
+                taxonomy: vec![],
+                sections: vec![
+                    RecordSection {
+                        role: SectionRole::Anchor,
+                        heading: None,
+                        text: "Headline two".into(),
+                        sentences: vec!["Headline two".into()],
+                    },
+                    RecordSection {
+                        role: SectionRole::Context,
+                        heading: None,
+                        text: "alpha beta gamma delta".into(),
+                        sentences: vec!["alpha beta gamma delta".into()],
+                    },
+                ],
+                meta_prefix: None,
+            },
+        ];
+
+        let store = Arc::new(DeterministicSplitStore::new(split, 121).unwrap());
+        let sampler = TripletSampler::new(config, store);
+        sampler.register_source(Box::new(RecipeSource::new(records, Vec::new())));
+        sampler
+            .inner
+            .lock()
+            .unwrap()
+            .ingest_internal(SplitLabel::Train)
+            .unwrap();
+
+        let effective = sampler
+            .inner
+            .lock()
+            .unwrap()
+            .triplet_recipes_for_source("recipe_source");
+
+        assert!(
+            effective
+                .iter()
+                .any(|recipe| recipe.name.as_ref() == "global_anchor_context")
+        );
+        assert!(effective.iter().any(|recipe| {
+            recipe.name.as_ref() == AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME
+        }));
+    }
+
+    #[test]
+    fn auto_injected_recipe_uses_distinct_context_chunks_for_anchor_and_positive() {
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let mut config = base_config();
+        config.batch_size = 1;
+        config.chunking = ChunkingStrategy {
+            // Force multi-window context sections so the injected recipe has
+            // at least two chunk candidates to draw from.
+            max_window_tokens: 2,
+            overlap_tokens: vec![0],
+            summary_fallback_weight: 0.0,
+            summary_fallback_tokens: 0,
+            chunk_weight_floor: 0.0,
+        };
+
+        let now = Utc::now();
+        // `long_anchor` is the only record with multiple context windows.
+        // `other_for_negative` exists only to satisfy WrongArticle negative selection.
+        // This makes the expected anchor/positive chunk texts deterministic.
+        let records = vec![
+            DataRecord {
+                id: "long_anchor".into(),
+                source: "ignored_by_ingestion".into(),
+                created_at: now,
+                updated_at: now,
+                quality: QualityScore::default(),
+                taxonomy: vec![],
+                sections: vec![RecordSection {
+                    role: SectionRole::Context,
+                    heading: None,
+                    text: "one two three four".into(),
+                    sentences: vec!["one two three four".into()],
+                }],
+                meta_prefix: None,
+            },
+            DataRecord {
+                id: "other_for_negative".into(),
+                source: "ignored_by_ingestion".into(),
+                created_at: now,
+                updated_at: now,
+                quality: QualityScore::default(),
+                taxonomy: vec![],
+                sections: vec![RecordSection {
+                    role: SectionRole::Context,
+                    heading: None,
+                    text: "other".into(),
+                    sentences: vec!["other".into()],
+                }],
+                meta_prefix: None,
+            },
+        ];
+
+        let store = Arc::new(DeterministicSplitStore::new(split, 119).unwrap());
+        let sampler = TripletSampler::new(config, store);
+        // Empty default recipes means the auto-injected recipe is the only
+        // recipe available for this source when long sections are detected.
+        sampler.register_source(Box::new(RecipeSource::new(records, Vec::new())));
+
+        let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
+        assert_eq!(batch.triplets.len(), 1);
+        let triplet = &batch.triplets[0];
+
+        // Confirms this sample came from the auto-injected recipe.
+        assert_eq!(
+            triplet.recipe,
+            AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME
+        );
+        // Anchor/positive should be different windows from the same record.
+        assert_eq!(triplet.anchor.record_id, "long_anchor");
+        assert_eq!(triplet.anchor.record_id, triplet.positive.record_id);
+        assert_ne!(chunk_key(&triplet.anchor), chunk_key(&triplet.positive));
+
+        // Hardcoded expected windows for long_anchor (4 tokens, window size 2).
+        let expected_a = "one two";
+        let expected_b = "three four";
+        let observed = [triplet.anchor.text.as_str(), triplet.positive.text.as_str()];
+        assert!(
+            observed.contains(&expected_a),
+            "expected one window '{expected_a}', got anchor='{}', positive='{}'",
+            triplet.anchor.text,
+            triplet.positive.text
+        );
+        assert!(
+            observed.contains(&expected_b),
+            "expected one window '{expected_b}', got anchor='{}', positive='{}'",
+            triplet.anchor.text,
+            triplet.positive.text
+        );
+        assert_ne!(
+            triplet.anchor.text, triplet.positive.text,
+            "anchor and positive should not use the same chunk text"
+        );
+    }
+
+    #[test]
+    fn auto_injected_recipe_never_uses_identical_anchor_and_positive_chunks() {
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let mut config = base_config();
+        config.batch_size = 1;
+        config.chunking = ChunkingStrategy {
+            // 4-token sections become two windows each, so there is always a
+            // distinct positive chunk available when selecting by context role.
+            max_window_tokens: 2,
+            overlap_tokens: vec![0],
+            summary_fallback_weight: 0.0,
+            summary_fallback_tokens: 0,
+            chunk_weight_floor: 0.0,
+        };
+
+        let now = Utc::now();
+        let records = vec![
+            DataRecord {
+                id: "long1".into(),
+                source: "ignored_by_ingestion".into(),
+                created_at: now,
+                updated_at: now,
+                quality: QualityScore::default(),
+                taxonomy: vec![],
+                sections: vec![RecordSection {
+                    role: SectionRole::Context,
+                    heading: None,
+                    text: "one two three four".into(),
+                    sentences: vec!["one two three four".into()],
+                }],
+                meta_prefix: None,
+            },
+            DataRecord {
+                id: "long2".into(),
+                source: "ignored_by_ingestion".into(),
+                created_at: now,
+                updated_at: now,
+                quality: QualityScore::default(),
+                taxonomy: vec![],
+                sections: vec![RecordSection {
+                    role: SectionRole::Context,
+                    heading: None,
+                    text: "alpha beta gamma delta".into(),
+                    sentences: vec!["alpha beta gamma delta".into()],
+                }],
+                meta_prefix: None,
+            },
+        ];
+
+        let store = Arc::new(DeterministicSplitStore::new(split, 120).unwrap());
+        let sampler = TripletSampler::new(config, store);
+        // No default source recipes: only the auto-injected recipe can run.
+        sampler.register_source(Box::new(RecipeSource::new(records, Vec::new())));
+
+        for _ in 0..32 {
+            let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
+            assert_eq!(batch.triplets.len(), 1);
+            let triplet = &batch.triplets[0];
+            assert_eq!(
+                triplet.recipe,
+                AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME
+            );
+            assert_eq!(triplet.anchor.record_id, triplet.positive.record_id);
+            assert_ne!(
+                chunk_key(&triplet.anchor),
+                chunk_key(&triplet.positive),
+                "anchor and positive chunk keys must differ; anchor='{}' positive='{}'",
+                triplet.anchor.text,
+                triplet.positive.text
+            );
+            assert_ne!(
+                triplet.anchor.text, triplet.positive.text,
+                "anchor and positive chunk text must differ"
+            );
+        }
+    }
+
+    #[test]
+    fn auto_injected_recipe_uses_window_chunks_for_anchor_and_positive() {
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let mut config = base_config();
+        config.batch_size = 1;
+        config.chunking = ChunkingStrategy {
+            max_window_tokens: 4,
+            overlap_tokens: vec![1],
+            summary_fallback_weight: 0.5,
+            summary_fallback_tokens: 2,
+            chunk_weight_floor: 0.0,
+        };
+
+        let now = Utc::now();
+        let records = vec![
+            DataRecord {
+                id: "long_w1".into(),
+                source: "ignored_by_ingestion".into(),
+                created_at: now,
+                updated_at: now,
+                quality: QualityScore::default(),
+                taxonomy: vec![],
+                sections: vec![RecordSection {
+                    role: SectionRole::Context,
+                    heading: None,
+                    text: "one two three four five six seven eight nine ten".into(),
+                    sentences: vec!["one two three four five six seven eight nine ten".into()],
+                }],
+                meta_prefix: None,
+            },
+            DataRecord {
+                id: "long_w2".into(),
+                source: "ignored_by_ingestion".into(),
+                created_at: now,
+                updated_at: now,
+                quality: QualityScore::default(),
+                taxonomy: vec![],
+                sections: vec![RecordSection {
+                    role: SectionRole::Context,
+                    heading: None,
+                    text: "alpha beta gamma delta epsilon zeta eta theta iota kappa".into(),
+                    sentences: vec![
+                        "alpha beta gamma delta epsilon zeta eta theta iota kappa".into(),
+                    ],
+                }],
+                meta_prefix: None,
+            },
+        ];
+
+        let store = Arc::new(DeterministicSplitStore::new(split, 123).unwrap());
+        let sampler = TripletSampler::new(config, store);
+        sampler.register_source(Box::new(RecipeSource::new(records, Vec::new())));
+
+        for _ in 0..16 {
+            let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
+            let triplet = &batch.triplets[0];
+            assert_eq!(
+                triplet.recipe,
+                AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME
+            );
+            assert!(matches!(triplet.anchor.view, ChunkView::Window { .. }));
+            assert!(matches!(triplet.positive.view, ChunkView::Window { .. }));
+            assert_ne!(chunk_key(&triplet.anchor), chunk_key(&triplet.positive));
+        }
+    }
+
+    #[test]
+    fn same_selector_triplet_returns_none_when_only_one_chunk_exists() {
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let mut config = base_config();
+        config.chunking = ChunkingStrategy {
+            max_window_tokens: 8,
+            overlap_tokens: vec![0],
+            summary_fallback_weight: 0.0,
+            summary_fallback_tokens: 0,
+            chunk_weight_floor: 0.0,
+        };
+        let store = Arc::new(DeterministicSplitStore::new(split, 122).unwrap());
+        let mut inner = TripletSamplerInner::new(config, store);
+
+        let now = Utc::now();
+        let anchor = DataRecord {
+            id: "single_chunk_anchor".into(),
+            source: "unit".into(),
+            created_at: now,
+            updated_at: now,
+            quality: QualityScore::default(),
+            taxonomy: vec![],
+            sections: vec![RecordSection {
+                role: SectionRole::Context,
+                heading: None,
+                text: "one two".into(),
+                sentences: vec!["one two".into()],
+            }],
+            meta_prefix: None,
+        };
+
+        let negative = DataRecord {
+            id: "single_chunk_negative".into(),
+            source: "unit".into(),
+            created_at: now,
+            updated_at: now,
+            quality: QualityScore::default(),
+            taxonomy: vec![],
+            sections: vec![RecordSection {
+                role: SectionRole::Context,
+                heading: None,
+                text: "alpha beta".into(),
+                sentences: vec!["alpha beta".into()],
+            }],
+            meta_prefix: None,
+        };
+
+        inner.records.insert(anchor.id.clone(), anchor.clone());
+        inner.records.insert(negative.id.clone(), negative.clone());
+        inner.rebuild_chunk_index();
+
+        let recipe = TripletRecipe {
+            name: "same_selector_context".into(),
+            anchor: Selector::Role(SectionRole::Context),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 1.0,
+            instruction: None,
+        };
+
+        let triplet = inner.make_triplet_with_anchor(&recipe, &anchor);
+        assert!(triplet.is_none());
     }
 
     #[test]

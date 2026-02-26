@@ -2814,17 +2814,32 @@ impl DataSource for HuggingFaceRowSource {
             })
     }
 
-    /// Return default triplet recipe used by Hugging Face row sources.
+    /// Return mixed default triplet recipes used by Hugging Face row sources.
     fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {
-        vec![TripletRecipe {
-            name: "huggingface_anchor_context".into(),
-            anchor: Selector::Role(SectionRole::Anchor),
-            positive_selector: Selector::Role(SectionRole::Context),
-            negative_selector: Selector::Role(SectionRole::Context),
-            negative_strategy: NegativeStrategy::WrongArticle,
-            weight: 1.0,
-            instruction: None,
-        }]
+        vec![
+            // Majority lane remains context negatives for broad coverage and
+            // stable optimization across varied HF schemas.
+            TripletRecipe {
+                name: "huggingface_anchor_context_wrong_article".into(),
+                anchor: Selector::Role(SectionRole::Anchor),
+                positive_selector: Selector::Role(SectionRole::Context),
+                negative_selector: Selector::Role(SectionRole::Context),
+                negative_strategy: NegativeStrategy::WrongArticle,
+                weight: 0.75,
+                instruction: None,
+            },
+            // Medium-hard lane adds anchor-as-negative pressure to improve
+            // discrimination between title-like anchor fields.
+            TripletRecipe {
+                name: "huggingface_anchor_anchor_wrong_article".into(),
+                anchor: Selector::Role(SectionRole::Anchor),
+                positive_selector: Selector::Role(SectionRole::Context),
+                negative_selector: Selector::Role(SectionRole::Anchor),
+                negative_strategy: NegativeStrategy::WrongArticle,
+                weight: 0.25,
+                instruction: None,
+            },
+        ]
     }
 }
 
@@ -3979,8 +3994,11 @@ mod tests {
         let config = test_config(dir.path().to_path_buf());
         let source = test_source(config);
         let recipes = source.default_triplet_recipes();
-        assert_eq!(recipes.len(), 1);
-        assert_eq!(recipes[0].name, "huggingface_anchor_context");
+        assert_eq!(recipes.len(), 2);
+        assert_eq!(recipes[0].name, "huggingface_anchor_context_wrong_article");
+        assert_eq!(recipes[1].name, "huggingface_anchor_anchor_wrong_article");
+        assert_eq!(recipes[0].weight, 0.75);
+        assert_eq!(recipes[1].weight, 0.25);
     }
 
     #[test]

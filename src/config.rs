@@ -49,7 +49,7 @@ pub struct TripletRecipe {
 }
 
 /// Selector for choosing a section or neighboring record.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Selector {
     /// Select a section by role.
     Role(SectionRole),
@@ -77,7 +77,10 @@ pub struct TextRecipe {
 /// Strategy for picking negatives for triplets/pairs.
 #[derive(Clone, Debug)]
 pub enum NegativeStrategy {
-    /// Choose a record with a different publication date.
+    /// Choose a record with a different publication date from record metadata.
+    ///
+    /// This refers to metadata/taxonomy publication-date values (for example
+    /// `META_FIELD_DATE`), not filesystem timestamps like mtime/ctime/atime.
     WrongPublicationDate,
     /// Choose a different record from the same source.
     WrongArticle,

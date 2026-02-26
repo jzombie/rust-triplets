@@ -3,12 +3,10 @@ use std::hash::Hash;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use crate::config::{NegativeStrategy, Selector, TripletRecipe};
 use crate::constants::file_corpus::{
     FILE_INDEX_META_KEY, FILE_INDEX_PATH_KEY_PREFIX, FILE_INDEX_READ_BATCH, FILE_INDEX_STORE_DIR,
     SKIP_UNREADABLE_MSG,
 };
-use crate::data::SectionRole;
 use crate::errors::SamplerError;
 use crate::hash::{stable_hash_path, stable_hash_with};
 use crate::source::{SourceCursor, SourceSnapshot};
@@ -213,30 +211,6 @@ impl FileCorpusIndex {
                 revision: next_start as u64,
             },
         })
-    }
-
-    /// Canonical 3-recipe set used by title/body corpora.
-    pub fn default_title_summary_triplet_recipes() -> Vec<TripletRecipe> {
-        vec![
-            TripletRecipe {
-                name: "title_summary_wrong_date".into(),
-                anchor: Selector::Role(SectionRole::Anchor),
-                positive_selector: Selector::Role(SectionRole::Context),
-                negative_selector: Selector::Role(SectionRole::Context),
-                negative_strategy: NegativeStrategy::WrongPublicationDate,
-                weight: 1.0,
-                instruction: None,
-            },
-            TripletRecipe {
-                name: "title_summary_wrong_article".into(),
-                anchor: Selector::Role(SectionRole::Anchor),
-                positive_selector: Selector::Role(SectionRole::Context),
-                negative_selector: Selector::Role(SectionRole::Context),
-                negative_strategy: NegativeStrategy::WrongArticle,
-                weight: 1.0,
-                instruction: None,
-            },
-        ]
     }
 
     /// Build a normalized title from a file stem (optionally replacing underscores).
@@ -1454,17 +1428,6 @@ mod tests {
 
         let seeded = index.with_sampler_seed(123);
         assert_eq!(seeded.required_sampler_seed().unwrap(), 123);
-
-        let recipes = FileCorpusIndex::default_title_summary_triplet_recipes();
-        assert_eq!(recipes.len(), 2);
-        assert!(matches!(
-            recipes[0].negative_strategy,
-            NegativeStrategy::WrongPublicationDate
-        ));
-        assert!(matches!(
-            recipes[1].negative_strategy,
-            NegativeStrategy::WrongArticle
-        ));
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 [![made-with-rust][rust-logo]][rust-src-page] [![crates.io][crates-badge]][crates-page] [![MIT licensed][mit-license-badge]][mit-license-page] [![Apache 2.0 licensed][apache-2.0-license-badge]][apache-2.0-license-page] [![Coverage][coveralls-badge]][coveralls-page]
 
-_Train models on mixable asynchronous, textual streams with automatic split assignment, configurable weighting, and reproducible batches._
+_Automate multi-source training data consumption and dynamically build reproducible, balanced learning batches from configurable rules as your data evolves._
 
 **WORK IN PROGRESS. THIS API IS BEING PROTOTYPED AND MAY CHANGE WITHOUT NOTICE.**
 
@@ -42,6 +42,7 @@ It is designed for multi-source training pipelines where each batch can mix reco
 - **Sampler-seed-driven source determinism** for built-in deterministic source ordering (file + Hugging Face).
 - **Runtime batch sampling** via `next_triplet_batch`, `next_pair_batch`, and `next_text_batch`.
 - **Recipe-driven sample construction** for triplet/pair/text generation (anchor/positive/negative selectors).
+- **Automatic long-section recipe injection**: for sources with sections longer than `chunking.max_window_tokens`, automatically adds `auto_injected_long_section_chunk_pair_wrong_article`, which builds anchor/positive from two different context windows of the same record and uses a context section from a different record as the negative.
 - **Deterministic long-section chunking**: short text stays as one chunk; long text becomes multiple chunk candidates (sliding windows) sampled over time. Chunks are not emitted as one grouped bundle; each sampled triplet/pair/text item uses one selected chunk at a time. Defaults are `max_window_tokens=1024`, `overlap_tokens=[64]`, and `summary_fallback_tokens=512` (all configurable via `SamplerConfig.chunking`).
 - **Weight-aware sampling controls** across source weights, recipe weights, and chunk trust/quality weighting.
 - **Anti-shortcut metadata-prefix variation** via `KvpPrefixSampler` (variant choice, per-field presence probabilities, field-order shuffle, and prefix dropout) to reduce rigid header-pattern dependence.
@@ -57,7 +58,79 @@ It is designed for multi-source training pipelines where each batch can mix reco
 
 This crate does **not** perform semantic mining/retrieval scoring by itself; instead, it gives you deterministic, metadata-driven sampling primitives you can feed into your downstream mining/retrieval stack.
 
-## Using a source for sampling
+## Sources
+
+`triplets` is source-first: sampling begins with one or more registered `DataSource`s, then recipe selection controls how samples are assembled from each source's records/sections.
+
+A **source** is any backend that yields `DataRecord`s (for example filesystem corpora, Hugging Face rows, or your own adapter). The sampler can mix multiple sources in the same run/batch.
+
+Why this matters:
+
+- You define rules (selectors, strategies, weights) once, and the sampler constructs triplets from those rules at runtime.
+- You do **not** have to precompute or hand-author every `(anchor, positive, negative)` combination.
+- Each source advances with its own cursor/progress, so sparse or slow sources do not block others.
+- Sources can be over/under-sampled independently via source weights (including per-batch reweighting).
+- When a source has limited fresh records, replay/oversampling can happen for that source without coupling all other sources to the same behavior.
+
+Key weighting concepts:
+
+- **Source weights** control how often each source contributes in a batch (`next_*_batch_with_weights`).
+- **Trust weights** (`DataRecord.quality.trust`, optional taxonomy overrides) scale sample influence by source/record quality.
+- **Recipe weights** (`TripletRecipe.weight`) control how often each recipe path is selected.
+- **Chunk weights** apply after section chunking to modulate long/short-window contribution.
+
+### Recipes
+
+### What is a recipe?
+
+A recipe defines how one training sample is assembled from eligible sections:
+
+- For **triplets**: selector for anchor, selector for positive, selector for negative, plus negative strategy and recipe weight.
+- For **pairs/text**: either derived from triplet recipes or explicitly configured text recipes.
+
+Recipes are metadata-driven selection rules; they define *what can be sampled*, while runtime sampling/weights decide *how often* each eligible path is drawn.
+
+Recipe origin can be user-defined, system-defined, or mixed in the same run.
+
+Basic recipe example:
+
+```rust,no_run
+use std::borrow::Cow;
+use triplets::{NegativeStrategy, SectionRole, Selector, TripletRecipe};
+
+let recipe = TripletRecipe {
+  name: Cow::Borrowed("title_context_wrong_article"),
+  anchor: Selector::Role(SectionRole::Anchor),
+  positive_selector: Selector::Role(SectionRole::Context),
+  negative_selector: Selector::Role(SectionRole::Context),
+  negative_strategy: NegativeStrategy::WrongArticle,
+  weight: 1.0,
+  instruction: None,
+};
+# let _ = recipe;
+```
+
+### How recipe selection works
+
+- If `SamplerConfig.recipes` is non-empty, those triplet recipes are used for all sources.
+- Otherwise, each source uses its own `default_triplet_recipes()` (if any).
+- System-defined recipes (for example, auto-injected long-section recipes) can be appended to source recipe pools, so effective sampling can use both user-defined and system-defined recipes.
+- Pair batches are derived from the selected triplet recipe stream.
+- Text recipes are resolved in this order:
+  - `SamplerConfig.text_recipes` (if explicitly set)
+  - derived from triplet recipes (`{triplet_name}_anchor|positive|negative`)
+  - source-provided text recipes (fallback)
+
+### Auto-injected long-section recipe
+
+- Auto recipe name: `auto_injected_long_section_chunk_pair_wrong_article`.
+- It may be appended per source during normal ingest/cache sync.
+- It is eligible when a source has at least one section longer than `chunking.max_window_tokens`.
+- Recipe selectors: anchor=`Context`, positive=`Context`, negative=`Context` with `WrongArticle` negatives.
+- It augments the source's recipe pool; it does not change `select_chunk` globally.
+- Anchor and positive are two independent chunk draws (not concatenated text, not derived from each other).
+
+### Using a source for sampling
 
 Create a sampler, register your source, then ask for a batch:
 
@@ -101,14 +174,35 @@ let _batch = sampler.next_triplet_batch(SplitLabel::Train)?;
 
 > _`DataRecord` is the core sampling primitive, but this in-memory example is only for illustration and not a scalable or memory-efficient pattern. For real datasets, prefer the built-in integrated sources or an `IndexableSource` implementation._
 
-## Integrated sources
+### Integrated sources
 
 `triplets` ships with two built-in sources; if you use either, deterministic paging is always enabled (`FileSource`, `HuggingFaceRowSource`).
 
 - **File source (`FileSource`)**: local files and folders.
 - **Hugging Face source (`HuggingFaceRowSource`)** *(feature: `huggingface`)*: HF dataset rows.
 
-### Hugging Face source lists (recommended)
+Built-in source defaults use a mixed-negative recipe pool when `SamplerConfig.recipes` is empty:
+
+- `*_anchor_context_wrong_article` / `title_summary_wrong_article` (context negatives): weight `0.75`
+- `*_anchor_anchor_wrong_article` / `title_anchor_wrong_article` (anchor negatives): weight `0.25`
+
+File source note:
+
+- Date-aware defaults are **gated** by `FileSourceConfig::with_date_aware_default_recipe(true)`.
+- When enabled, file-source date-aware recipes are:
+  - `title_summary_wrong_date` (context negatives): weight `0.30`
+  - `title_anchor_wrong_date` (anchor negatives): weight `0.10`
+  - `title_summary_wrong_article` (context negatives): weight `0.35`
+  - `title_anchor_wrong_article` (anchor negatives): weight `0.25`
+- Default `FileSourceConfig::new(...)` leaves date-aware defaults disabled.
+- Here, "date-aware" means publication date metadata (for example `META_FIELD_DATE` from taxonomy/record metadata), **not** filesystem modification/creation/access timestamps.
+
+Hugging Face source defaults use:
+
+- `*_anchor_context_wrong_article` (context negatives): weight `0.75`
+- `*_anchor_anchor_wrong_article` (anchor negatives): weight `0.25`
+
+#### Hugging Face source lists (recommended)
 
 Define HF sources in a text file and pass it to the demo or your own loader. The `hf://` prefix is a `triplets`-specific shorthand used only in these lists:
 
@@ -141,7 +235,7 @@ Row formats supported by the HF backend:
 - `.jsonl` / `.ndjson` (one JSON object per line)
 - plain text lines (each non-empty line becomes `{ "text": "..." }`)
 
-## Adding new sources
+### Adding new sources
 
 Use one of these two paths:
 

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::config::{SamplerConfig, TripletRecipe};
+use crate::config::{NegativeStrategy, SamplerConfig, Selector, TripletRecipe};
 use crate::data::{DataRecord, QualityScore, RecordSection, SectionRole};
 use crate::errors::SamplerError;
 use crate::source::indexing::file_corpus::FileCorpusIndex;
@@ -37,6 +37,8 @@ pub struct FileSourceConfig {
     pub group_by_directory: bool,
     /// Whether title extraction should replace underscores with spaces.
     pub title_replace_underscores: bool,
+    /// Whether default recipe set includes the date-aware negative lane.
+    pub include_date_aware_default_recipe: bool,
     /// Optional default recipes returned by this source.
     pub default_triplet_recipes: Vec<TripletRecipe>,
     /// Taxonomy builder invoked per file.
@@ -57,7 +59,8 @@ impl FileSourceConfig {
             text_files_only: false,
             group_by_directory: true,
             title_replace_underscores: true,
-            default_triplet_recipes: Vec::new(),
+            include_date_aware_default_recipe: false,
+            default_triplet_recipes: default_title_summary_triplet_recipes(false),
             taxonomy_builder: Arc::new(taxonomy_from_path),
             section_builder: Arc::new(anchor_context_sections),
         }
@@ -100,6 +103,16 @@ impl FileSourceConfig {
         self
     }
 
+    /// Enable/disable the date-aware default recipe lane (`WrongPublicationDate`).
+    ///
+    /// "Date-aware" here uses publication-date metadata on records (for example
+    /// taxonomy/meta date fields), not filesystem timestamps from source files.
+    pub fn with_date_aware_default_recipe(mut self, include: bool) -> Self {
+        self.include_date_aware_default_recipe = include;
+        self.default_triplet_recipes = default_title_summary_triplet_recipes(include);
+        self
+    }
+
     /// Set source-provided default triplet recipes.
     pub fn with_default_triplet_recipes(mut self, recipes: Vec<TripletRecipe>) -> Self {
         self.default_triplet_recipes = recipes;
@@ -117,6 +130,62 @@ impl FileSourceConfig {
         self.section_builder = section_builder;
         self
     }
+}
+
+/// Default mixed-negative recipes used by `FileSource` title/body corpora.
+///
+/// When `include_date_aware` is enabled, the date-aware lane compares metadata
+/// publication dates, not filesystem mtime/ctime/atime values.
+pub fn default_title_summary_triplet_recipes(include_date_aware: bool) -> Vec<TripletRecipe> {
+    let mut recipes = Vec::new();
+    if include_date_aware {
+        // Make date-aware summary negatives nearly as common as summary wrong-article
+        // negatives so temporal contrast is meaningfully represented.
+        recipes.push(TripletRecipe {
+            name: "title_summary_wrong_date".into(),
+            anchor: Selector::Role(SectionRole::Anchor),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongPublicationDate,
+            weight: 0.30,
+            instruction: None,
+        });
+        // Keep a smaller anchor-negative date-aware lane for harder examples
+        // without overwhelming the primary summary-driven objectives.
+        // Date-aware means publication-date metadata comparison, not file mtime.
+        recipes.push(TripletRecipe {
+            name: "title_anchor_wrong_date".into(),
+            anchor: Selector::Role(SectionRole::Anchor),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Anchor),
+            negative_strategy: NegativeStrategy::WrongPublicationDate,
+            weight: 0.10,
+            instruction: None,
+        });
+    }
+    // Rebalance summary wrong-article depending on whether date-aware lanes are
+    // enabled so the full pool stays intentionally weighted in both modes.
+    recipes.push(TripletRecipe {
+        name: "title_summary_wrong_article".into(),
+        anchor: Selector::Role(SectionRole::Anchor),
+        positive_selector: Selector::Role(SectionRole::Context),
+        negative_selector: Selector::Role(SectionRole::Context),
+        negative_strategy: NegativeStrategy::WrongArticle,
+        weight: if include_date_aware { 0.35 } else { 0.75 },
+        instruction: None,
+    });
+    // Medium-hard lane adds anchor-as-negative pressure to improve
+    // discrimination among title-like anchor fields.
+    recipes.push(TripletRecipe {
+        name: "title_anchor_wrong_article".into(),
+        anchor: Selector::Role(SectionRole::Anchor),
+        positive_selector: Selector::Role(SectionRole::Context),
+        negative_selector: Selector::Role(SectionRole::Anchor),
+        negative_strategy: NegativeStrategy::WrongArticle,
+        weight: 0.25,
+        instruction: None,
+    });
+    recipes
 }
 
 /// Generic filesystem-backed source with configurable taxonomy and section mapping.
@@ -344,6 +413,85 @@ mod tests {
         assert_eq!(snapshot.records.len(), 1);
         assert_eq!(snapshot.records[0].sections.len(), 2);
         assert_eq!(source.default_triplet_recipes().len(), recipes.len());
+    }
+
+    #[test]
+    fn file_source_config_new_has_explicit_default_triplet_recipes() {
+        let temp = tempdir().unwrap();
+        let source = FileSource::new(FileSourceConfig::new("qa_defaults", temp.path()));
+        let defaults = source.default_triplet_recipes();
+        assert!(!defaults.is_empty());
+        let names: Vec<&str> = defaults.iter().map(|recipe| recipe.name.as_ref()).collect();
+        assert!(!names.contains(&"title_summary_wrong_date"));
+        assert!(!names.contains(&"title_anchor_wrong_date"));
+        assert!(names.contains(&"title_summary_wrong_article"));
+        assert!(names.contains(&"title_anchor_wrong_article"));
+        let summary_wrong_article = defaults
+            .iter()
+            .find(|recipe| recipe.name == "title_summary_wrong_article")
+            .unwrap();
+        let anchor_wrong_article = defaults
+            .iter()
+            .find(|recipe| recipe.name == "title_anchor_wrong_article")
+            .unwrap();
+        assert_eq!(summary_wrong_article.weight, 0.75);
+        assert_eq!(anchor_wrong_article.weight, 0.25);
+    }
+
+    #[test]
+    fn file_source_config_can_enable_date_aware_default_recipe() {
+        let temp = tempdir().unwrap();
+        let source = FileSource::new(
+            FileSourceConfig::new("qa_defaults_with_date", temp.path())
+                .with_date_aware_default_recipe(true),
+        );
+        let defaults = source.default_triplet_recipes();
+        let names: Vec<&str> = defaults.iter().map(|recipe| recipe.name.as_ref()).collect();
+        assert!(names.contains(&"title_summary_wrong_date"));
+        assert!(names.contains(&"title_anchor_wrong_date"));
+        assert!(names.contains(&"title_summary_wrong_article"));
+        assert!(names.contains(&"title_anchor_wrong_article"));
+        let summary_wrong_date = defaults
+            .iter()
+            .find(|recipe| recipe.name == "title_summary_wrong_date")
+            .unwrap();
+        let anchor_wrong_date = defaults
+            .iter()
+            .find(|recipe| recipe.name == "title_anchor_wrong_date")
+            .unwrap();
+        let summary_wrong_article = defaults
+            .iter()
+            .find(|recipe| recipe.name == "title_summary_wrong_article")
+            .unwrap();
+        let anchor_wrong_article = defaults
+            .iter()
+            .find(|recipe| recipe.name == "title_anchor_wrong_article")
+            .unwrap();
+        assert_eq!(summary_wrong_date.weight, 0.30);
+        assert_eq!(anchor_wrong_date.weight, 0.10);
+        assert_eq!(summary_wrong_article.weight, 0.35);
+        assert_eq!(anchor_wrong_article.weight, 0.25);
+    }
+
+    #[test]
+    fn file_source_config_override_replaces_default_triplet_recipes() {
+        let temp = tempdir().unwrap();
+        let custom = vec![TripletRecipe {
+            name: "custom_only".into(),
+            anchor: Selector::Role(SectionRole::Context),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 1.0,
+            instruction: None,
+        }];
+        let source = FileSource::new(
+            FileSourceConfig::new("qa_defaults_override", temp.path())
+                .with_default_triplet_recipes(custom.clone()),
+        );
+        let recipes = source.default_triplet_recipes();
+        assert_eq!(recipes.len(), 1);
+        assert_eq!(recipes[0].name.as_ref(), "custom_only");
     }
 
     #[test]
