@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::config::{SamplerConfig, TripletRecipe};
+use crate::config::{NegativeStrategy, SamplerConfig, Selector, TripletRecipe};
 use crate::data::{DataRecord, QualityScore, RecordSection, SectionRole};
 use crate::errors::SamplerError;
 use crate::source::indexing::file_corpus::FileCorpusIndex;
@@ -57,7 +57,7 @@ impl FileSourceConfig {
             text_files_only: false,
             group_by_directory: true,
             title_replace_underscores: true,
-            default_triplet_recipes: FileCorpusIndex::default_title_summary_triplet_recipes(),
+            default_triplet_recipes: default_title_summary_triplet_recipes(),
             taxonomy_builder: Arc::new(taxonomy_from_path),
             section_builder: Arc::new(anchor_context_sections),
         }
@@ -117,6 +117,45 @@ impl FileSourceConfig {
         self.section_builder = section_builder;
         self
     }
+}
+
+/// Default mixed-negative recipes used by `FileSource` title/body corpora.
+pub fn default_title_summary_triplet_recipes() -> Vec<TripletRecipe> {
+    vec![
+        // Keep a small, date-aware anchor-negative lane to reduce false negatives
+        // while still introducing temporal contrast for harder examples.
+        TripletRecipe {
+            name: "title_summary_wrong_date".into(),
+            anchor: Selector::Role(SectionRole::Anchor),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Anchor),
+            negative_strategy: NegativeStrategy::WrongPublicationDate,
+            weight: 0.10,
+            instruction: None,
+        },
+        // Majority lane remains context negatives for broad coverage and stable
+        // optimization on heterogeneous corpora.
+        TripletRecipe {
+            name: "title_summary_wrong_article".into(),
+            anchor: Selector::Role(SectionRole::Anchor),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 0.65,
+            instruction: None,
+        },
+        // Medium-hard lane adds anchor-as-negative pressure to improve
+        // discrimination among title-like anchor fields.
+        TripletRecipe {
+            name: "title_anchor_wrong_article".into(),
+            anchor: Selector::Role(SectionRole::Anchor),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Anchor),
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 0.25,
+            instruction: None,
+        },
+    ]
 }
 
 /// Generic filesystem-backed source with configurable taxonomy and section mapping.
@@ -355,6 +394,7 @@ mod tests {
         let names: Vec<&str> = defaults.iter().map(|recipe| recipe.name.as_ref()).collect();
         assert!(names.contains(&"title_summary_wrong_date"));
         assert!(names.contains(&"title_summary_wrong_article"));
+        assert!(names.contains(&"title_anchor_wrong_article"));
     }
 
     #[test]

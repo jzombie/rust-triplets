@@ -7,7 +7,7 @@ use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use triplets::config::TripletRecipe;
 use triplets::data::{DataRecord, QualityScore, SectionRole};
 use triplets::metadata::META_FIELD_DATE;
-use triplets::source::indexing::file_corpus::FileCorpusIndex;
+use triplets::source::backends::file_source::default_title_summary_triplet_recipes;
 use triplets::source::{DataSource, InMemorySource, SourceCursor, SourceSnapshot};
 use triplets::types::SourceId;
 use triplets::utils::{make_section, normalize_inline_whitespace};
@@ -115,7 +115,7 @@ impl ExampleFileSource {
         let records = load_records(id, root);
         let reported_records = records.len() as u128;
         let inner = InMemorySource::new(id, records);
-        let triplet_recipes = FileCorpusIndex::default_title_summary_triplet_recipes();
+        let triplet_recipes = default_title_summary_triplet_recipes();
         Self {
             id: id.into(),
             inner,
