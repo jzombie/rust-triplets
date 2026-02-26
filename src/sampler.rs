@@ -7453,6 +7453,102 @@ mod tests {
     }
 
     #[test]
+    fn auto_injected_recipe_keeps_all_components_in_requested_split() {
+        let split = SplitRatios {
+            train: 0.34,
+            validation: 0.33,
+            test: 0.33,
+        };
+
+        let mut config = base_config();
+        config.seed = 812;
+        config.batch_size = 1;
+        config.allowed_splits = vec![SplitLabel::Train, SplitLabel::Validation, SplitLabel::Test];
+        
+        // No custom recipes to ensure the auto-injected recipe is the only recipe available.
+        config.recipes = Vec::new();
+        
+        config.text_recipes = Vec::new();
+        config.chunking = ChunkingStrategy {
+            max_window_tokens: 2,
+            overlap_tokens: vec![0],
+            summary_fallback_weight: 0.0,
+            summary_fallback_tokens: 0,
+            chunk_weight_floor: 0.0,
+        };
+
+        let store = Arc::new(DeterministicSplitStore::new(split, 1441).unwrap());
+
+        let find_id = |label: SplitLabel, prefix: &str| -> String {
+            for i in 0..20000 {
+                let id = format!("{prefix}_{i}");
+                if store.ensure(id.clone()).unwrap() == label {
+                    return id;
+                }
+            }
+            panic!("unable to find id for {:?}", label);
+        };
+
+        let now = Utc::now();
+        let mut records = Vec::new();
+        for split_label in [SplitLabel::Train, SplitLabel::Validation, SplitLabel::Test] {
+            for idx in 0..2 {
+                let id = find_id(split_label, &format!("auto_split_{split_label:?}_{idx}"));
+                records.push(DataRecord {
+                    id,
+                    source: "ignored_by_ingestion".into(),
+                    created_at: now,
+                    updated_at: now,
+                    quality: QualityScore::default(),
+                    taxonomy: vec![],
+                    sections: vec![RecordSection {
+                        role: SectionRole::Context,
+                        heading: None,
+                        text: format!("ctx {split_label:?} {idx} one two three four"),
+                        sentences: vec![format!("ctx {split_label:?} {idx} one two three four")],
+                    }],
+                    meta_prefix: None,
+                });
+            }
+        }
+
+        let sampler = TripletSampler::new(config, Arc::clone(&store));
+        sampler.register_source(Box::new(RecipeSource::new(records, Vec::new())));
+        sampler
+            .inner
+            .lock()
+            .unwrap()
+            .ingest_internal(SplitLabel::Train)
+            .unwrap();
+
+        for requested_split in [SplitLabel::Train, SplitLabel::Validation, SplitLabel::Test] {
+            for _ in 0..8 {
+                let batch = sampler
+                    .next_triplet_batch_for_split(requested_split)
+                    .unwrap();
+                assert_eq!(batch.triplets.len(), 1);
+                let triplet = &batch.triplets[0];
+                assert_eq!(
+                    triplet.recipe,
+                    AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME
+                );
+
+                let anchor_split = store.label_for(&triplet.anchor.record_id).unwrap();
+                let positive_split = store.label_for(&triplet.positive.record_id).unwrap();
+                let negative_split = store.label_for(&triplet.negative.record_id).unwrap();
+
+                assert_eq!(anchor_split, requested_split);
+                assert_eq!(positive_split, requested_split);
+                assert_eq!(negative_split, requested_split);
+
+                assert_eq!(triplet.anchor.record_id, triplet.positive.record_id);
+                assert_ne!(triplet.anchor.record_id, triplet.negative.record_id);
+                assert_ne!(chunk_key(&triplet.anchor), chunk_key(&triplet.positive));
+            }
+        }
+    }
+
+    #[test]
     fn same_selector_triplet_returns_none_when_only_one_chunk_exists() {
         let split = SplitRatios {
             train: 1.0,
