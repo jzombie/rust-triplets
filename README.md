@@ -42,6 +42,7 @@ It is designed for multi-source training pipelines where each batch can mix reco
 - **Sampler-seed-driven source determinism** for built-in deterministic source ordering (file + Hugging Face).
 - **Runtime batch sampling** via `next_triplet_batch`, `next_pair_batch`, and `next_text_batch`.
 - **Recipe-driven sample construction** for triplet/pair/text generation (anchor/positive/negative selectors).
+- **Automatic long-section recipe injection**: for sources with sections longer than `chunking.max_window_tokens`, automatically adds `auto_injected_long_section_chunk_pair_wrong_article`, which builds anchor/positive from two different context windows of the same record and uses a context section from a different record as the negative.
 - **Deterministic long-section chunking**: short text stays as one chunk; long text becomes multiple chunk candidates (sliding windows) sampled over time. Chunks are not emitted as one grouped bundle; each sampled triplet/pair/text item uses one selected chunk at a time. Defaults are `max_window_tokens=1024`, `overlap_tokens=[64]`, and `summary_fallback_tokens=512` (all configurable via `SamplerConfig.chunking`).
 - **Weight-aware sampling controls** across source weights, recipe weights, and chunk trust/quality weighting.
 - **Anti-shortcut metadata-prefix variation** via `KvpPrefixSampler` (variant choice, per-field presence probabilities, field-order shuffle, and prefix dropout) to reduce rigid header-pattern dependence.
