@@ -23,6 +23,8 @@ pub mod metadata {
 pub mod sampler {
     /// Maximum number of forced refresh retries after an exhausted sampling pass.
     pub const EXHAUSTION_RETRY_LIMIT: usize = 2;
+    /// Retry cap when trying to produce a valid anchor/positive pair from the same selector.
+    pub const SAME_SELECTOR_PAIR_RETRY_LIMIT: usize = 8;
     /// Offset mixed into epoch RNG seed derivation for deterministic variation.
     pub const EPOCH_SEED_OFFSET: u64 = 0xB4C3_5EED;
     /// Label used for triplet recipe weight maps.

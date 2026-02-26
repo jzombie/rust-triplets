@@ -15,7 +15,7 @@ use crate::config::{
 use crate::constants::sampler::{
     EPOCH_SEED_OFFSET, EXHAUSTION_RETRY_LIMIT, NEG_REASON_WRONG_ARTICLE, NEG_REASON_WRONG_DATE,
     NEG_REASON_WRONG_QA, PREFETCHER_SOURCE_ID, PREFETCHER_STOPPED_REASON, RECIPE_LABEL_TEXT,
-    RECIPE_LABEL_TRIPLETS, ROLE_LABEL_ANCHOR, ROLE_LABEL_CONTEXT,
+    RECIPE_LABEL_TRIPLETS, ROLE_LABEL_ANCHOR, ROLE_LABEL_CONTEXT, SAME_SELECTOR_PAIR_RETRY_LIMIT,
 };
 use crate::data::{
     ChunkView, DataRecord, PairLabel, RecordChunk, RecordSection, SampleBatch, SamplePair,
@@ -39,6 +39,18 @@ use crate::types::{RecipeKey, RecordId, SourceId};
 /// if custom recipes are configured or not.
 const AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME: &str =
     "auto_injected_long_section_chunk_pair_wrong_article";
+
+// AUTO-RECIPE HANDLING OVERVIEW (end-to-end):
+// Stage A: Source-level injection eligibility ("should this source even get the recipe?")
+//   - `sync_records_from_cache` -> `record_has_long_anchor_or_context_section` marks
+//     `sources_with_long_sections`.
+//   - `resolve_source_triplet_plan` -> `should_auto_inject_chunk_pair_recipe` appends
+//     `source_chunk_pair_recipe` for eligible sources.
+// Stage B: Record-level execution eligibility ("can this specific record run it now?")
+//   - `make_auto_chunk_pair_triplet_with_anchor` checks
+//     `record_has_at_least_two_window_chunks_for_selector` before sampling.
+// Stage C: Actual chunk window layout ("how are windows formed?")
+//   - `materialize_chunks` is the source of truth for token window construction.
 
 #[derive(Debug, Clone)]
 /// Small deterministic RNG used for reproducible sampler behavior.
@@ -600,11 +612,32 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             .unwrap_or(&[])
     }
 
+    /// Returns true when `recipes` already contains the long-section auto recipe.
+    fn contains_auto_chunk_pair_recipe(recipes: &[TripletRecipe]) -> bool {
+        recipes
+            .iter()
+            .any(|recipe| recipe.name.as_ref() == AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME)
+    }
+
     fn source_supports_chunk_pair_recipe(&self, source: &str) -> bool {
         if self.config.chunking.max_window_tokens == 0 {
             return false;
         }
         self.sources_with_long_sections.contains(source)
+    }
+
+    /// Stage A (source-level): decide whether to append auto recipe for `source`.
+    ///
+    /// Decision criteria:
+    /// - source must be eligible (`source_supports_chunk_pair_recipe`), and
+    /// - configured pool must not already include the auto recipe name.
+    fn should_auto_inject_chunk_pair_recipe(
+        &self,
+        source: &str,
+        recipes: &[TripletRecipe],
+    ) -> bool {
+        self.source_supports_chunk_pair_recipe(source)
+            && !Self::contains_auto_chunk_pair_recipe(recipes)
     }
 
     /// Build the auto-injected long-section recipe.
@@ -629,34 +662,35 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         }
     }
 
-    fn triplet_recipes_for_source(&self, source: &str) -> Vec<TripletRecipe> {
+    /// Resolve the source triplet plan.
+    ///
+    /// This is Stage A (source-level injection), not record-level execution.
+    ///
+    /// Algorithm for the auto-triplet injection path:
+    /// 1) Start from the configured source recipe pool (`configured_triplet_recipes_for_source`).
+    /// 2) Check auto-injection eligibility (`should_auto_inject_chunk_pair_recipe`), which is true only when:
+    ///    - the source has long sections discovered during ingest sync, and
+    ///    - the pool does not already include the auto recipe name.
+    /// 3) If eligible, append `source_chunk_pair_recipe`.
+    /// 4) Return both the effective recipe pool and whether step (3) happened.
+    fn resolve_source_triplet_plan(&self, source: &str) -> (Vec<TripletRecipe>, bool) {
         let mut recipes = self.configured_triplet_recipes_for_source(source).to_vec();
-        // Auto-injection augments the source recipe pool; it does not mutate
-        // `select_chunk` behavior. Recipe scheduling may choose this recipe or
-        // any other recipe in the pool according to normal ordering logic.
-        if self.source_supports_chunk_pair_recipe(source)
-            && !recipes.iter().any(|recipe| {
-                recipe.name.as_ref() == AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME
-            })
-        {
+        let mut auto_injected = false;
+        if self.should_auto_inject_chunk_pair_recipe(source, &recipes) {
             recipes.push(Self::source_chunk_pair_recipe());
+            auto_injected = true;
         }
-        recipes
+        (recipes, auto_injected)
+    }
+
+    #[cfg(test)]
+    fn triplet_recipes_for_source(&self, source: &str) -> Vec<TripletRecipe> {
+        self.resolve_source_triplet_plan(source).0
     }
 
     fn triplet_recipe_count_for_source(&self, source: &str) -> usize {
-        let base = self.configured_triplet_recipes_for_source(source).len();
-        if self.source_supports_chunk_pair_recipe(source)
-            && !self
-                .configured_triplet_recipes_for_source(source)
-                .iter()
-                .any(|recipe| {
-                    recipe.name.as_ref() == AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME
-                })
-        {
-            return base.saturating_add(1);
-        }
-        base
+        let (recipes, _auto_injected) = self.resolve_source_triplet_plan(source);
+        recipes.len()
     }
 
     fn text_recipes_for_source<'a>(&'a self, source: &str) -> &'a [TextRecipe] {
@@ -921,8 +955,6 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                         .cloned()
                         .map(|record| (record, false));
                 }
-                // Fallback to any other record in the same split so split boundaries
-                // remain strictly isolated.
                 self.records
                     .values()
                     .filter(|candidate| {
@@ -1010,41 +1042,167 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         }
     }
 
-    fn make_triplet_with_anchor(
+    /// True when the recipe is the special auto-injected long-section chunk-pair recipe.
+    fn is_auto_chunk_pair_recipe(recipe: &TripletRecipe) -> bool {
+        recipe.name.as_ref() == AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME
+    }
+
+    /// Select anchor/positive chunk pair from selectors for a single record.
+    ///
+    /// When selectors are the same, retries until a valid pair is found or retry limit is hit.
+    fn select_anchor_positive_pair(
         &mut self,
-        recipe: &TripletRecipe,
         record: &DataRecord,
-    ) -> Option<SampleTriplet> {
-        // Anchor and positive are selected independently from selectors on the
-        // same input record. This is a second independent draw, not a transform
-        // of anchor text.
-        let mut anchor_chunk = self.select_chunk(record, &recipe.anchor)?;
-        self.decorate_chunk(record, &mut anchor_chunk);
-        let mut positive_chunk = self.select_chunk(record, &recipe.positive_selector)?;
-        if recipe.anchor == recipe.positive_selector {
-            let enforce_window_pair =
-                recipe.name.as_ref() == AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME;
+        anchor_selector: &Selector,
+        positive_selector: &Selector,
+        enforce_window_pair: bool,
+    ) -> Option<(RecordChunk, RecordChunk)> {
+        let mut anchor_chunk = self.select_chunk(record, anchor_selector)?;
+        let mut positive_chunk = self.select_chunk(record, positive_selector)?;
+        if anchor_selector == positive_selector {
             let mut retries = 0usize;
             while !same_selector_pair_is_valid(&anchor_chunk, &positive_chunk, enforce_window_pair)
-                && retries < 8
+                && retries < SAME_SELECTOR_PAIR_RETRY_LIMIT
             {
-                let Some(redraw_anchor) = self.select_chunk(record, &recipe.anchor) else {
+                let Some(redraw_anchor) = self.select_chunk(record, anchor_selector) else {
                     break;
                 };
-                let Some(redraw_positive) = self.select_chunk(record, &recipe.positive_selector)
-                else {
+                let Some(redraw_positive) = self.select_chunk(record, positive_selector) else {
                     break;
                 };
                 anchor_chunk = redraw_anchor;
                 positive_chunk = redraw_positive;
                 retries += 1;
             }
-            // If we cannot find a valid pair, skip this sample.
             if !same_selector_pair_is_valid(&anchor_chunk, &positive_chunk, enforce_window_pair) {
                 return None;
             }
         }
+        Some((anchor_chunk, positive_chunk))
+    }
+
+    /// Select two distinct *window* chunks for the auto-injected recipe using recipe selectors.
+    ///
+    /// This method intentionally uses the recipe's selectors (no hardcoded selector values).
+    /// For the current auto recipe those selectors are both `Role(Context)`, but the behavior
+    /// remains tied to recipe configuration, not this helper body.
+    ///
+    /// NOTE: this does *not* decide whether the auto recipe is enabled for a source.
+    /// Source-level enablement happens in `resolve_source_triplet_plan` via
+    /// `should_auto_inject_chunk_pair_recipe`.
+    fn select_distinct_window_pair_for_auto_recipe(
+        &mut self,
+        recipe: &TripletRecipe,
+        record: &DataRecord,
+    ) -> Option<(RecordChunk, RecordChunk)> {
+        if recipe.anchor != recipe.positive_selector {
+            return None;
+        }
+        self.select_anchor_positive_pair(record, &recipe.anchor, &recipe.positive_selector, true)
+    }
+
+    /// Stage B (record-level): guard for the auto-injected recipe.
+    ///
+    /// Requires at least two `ChunkView::Window` candidates across sections addressed by
+    /// `selector`. This makes the auto recipe eligibility check explicit at execution time.
+    fn record_has_at_least_two_window_chunks_for_selector(
+        &self,
+        record: &DataRecord,
+        selector: &Selector,
+    ) -> bool {
+        let section_indices: Vec<usize> = match selector {
+            Selector::Role(role) => record
+                .sections
+                .iter()
+                .enumerate()
+                .filter(|(_, section)| roles_match(role, &section.role))
+                .map(|(idx, _)| idx)
+                .collect(),
+            Selector::Paragraph(idx) => {
+                if *idx < record.sections.len() {
+                    vec![*idx]
+                } else {
+                    Vec::new()
+                }
+            }
+            Selector::Random => (0..record.sections.len()).collect(),
+            Selector::TemporalOffset(_) => return false,
+        };
+
+        let mut window_count = 0usize;
+        for section_idx in section_indices {
+            let Some(section) = record.sections.get(section_idx) else {
+                continue;
+            };
+            let chunks = self.materialize_chunks(record, section_idx, section);
+            window_count += chunks
+                .iter()
+                .filter(|chunk| matches!(chunk.view, ChunkView::Window { .. }))
+                .count();
+            if window_count >= 2 {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Shared selector-pair stage for both standard and auto-injected triplet recipes.
+    fn build_triplet_with_selector_pair_policy(
+        &mut self,
+        recipe: &TripletRecipe,
+        record: &DataRecord,
+        enforce_window_pair: bool,
+    ) -> Option<SampleTriplet> {
+        let (mut anchor_chunk, mut positive_chunk) = self.select_anchor_positive_pair(
+            record,
+            &recipe.anchor,
+            &recipe.positive_selector,
+            enforce_window_pair,
+        )?;
+        self.decorate_chunk(record, &mut anchor_chunk);
         self.decorate_chunk(record, &mut positive_chunk);
+        self.finalize_triplet_with_negative(recipe, record, anchor_chunk, positive_chunk)
+    }
+
+    /// Execute the special auto-injected long-section chunk-pair recipe.
+    ///
+    /// Algorithm:
+    /// 0) Stage B check: current record must expose at least two window chunks for selector.
+    /// 1) Draw anchor and positive from the same record using recipe selectors.
+    /// 2) Require the two chunks to be distinct.
+    /// 3) Additionally require both chunks to be `ChunkView::Window` variants.
+    /// 4) Apply metadata decoration to both chunks.
+    /// 5) Draw the negative according to recipe negative strategy.
+    fn make_auto_chunk_pair_triplet_with_anchor(
+        &mut self,
+        recipe: &TripletRecipe,
+        record: &DataRecord,
+    ) -> Option<SampleTriplet> {
+        if !self.record_has_at_least_two_window_chunks_for_selector(record, &recipe.anchor) {
+            return None;
+        }
+        let (mut anchor_chunk, mut positive_chunk) =
+            self.select_distinct_window_pair_for_auto_recipe(recipe, record)?;
+        self.decorate_chunk(record, &mut anchor_chunk);
+        self.decorate_chunk(record, &mut positive_chunk);
+        self.finalize_triplet_with_negative(recipe, record, anchor_chunk, positive_chunk)
+    }
+
+    fn make_standard_triplet_with_anchor(
+        &mut self,
+        recipe: &TripletRecipe,
+        record: &DataRecord,
+    ) -> Option<SampleTriplet> {
+        self.build_triplet_with_selector_pair_policy(recipe, record, false)
+    }
+
+    fn finalize_triplet_with_negative(
+        &mut self,
+        recipe: &TripletRecipe,
+        record: &DataRecord,
+        anchor_chunk: RecordChunk,
+        positive_chunk: RecordChunk,
+    ) -> Option<SampleTriplet> {
         let (negative_record, fallback_used) =
             self.select_negative_record(record, &recipe.negative_strategy)?;
         let mut negative_chunk = self.select_chunk(&negative_record, &recipe.negative_selector)?;
@@ -1064,6 +1222,20 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             weight,
             instruction: recipe.instruction.as_ref().map(|s| s.to_string()),
         })
+    }
+
+    fn make_triplet_with_anchor(
+        &mut self,
+        recipe: &TripletRecipe,
+        record: &DataRecord,
+    ) -> Option<SampleTriplet> {
+        // Stage B branch point:
+        // auto recipe path enforces record-level window eligibility,
+        // standard path skips that specialized gate.
+        if Self::is_auto_chunk_pair_recipe(recipe) {
+            return self.make_auto_chunk_pair_triplet_with_anchor(recipe, record);
+        }
+        self.make_standard_triplet_with_anchor(recipe, record)
     }
 
     fn make_text_sample_for_split(
@@ -1166,6 +1338,18 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         None
     }
 
+    /// Materialize chunk windows for one section according to `ChunkingStrategy`.
+    ///
+    /// Window layout algorithm:
+    /// 1) Tokenize section text with `split_whitespace`.
+    /// 2) Set `span = min(max_window_tokens, total_tokens)`.
+    /// 3) If `span == total_tokens`, emit one full-section `ChunkView::Window`.
+    /// 4) Otherwise, for each configured overlap:
+    ///    - `stride = max(1, span - overlap)`
+    ///    - emit windows `[start, min(start + span, total_tokens))` while advancing by `stride`.
+    /// 5) Optionally append one `SummaryFallback` chunk when section is longer than `max_window_tokens`.
+    ///
+    /// This is the source of truth for how chunk windows are "laid" in a record.
     fn materialize_chunks(
         &self,
         record: &DataRecord,
@@ -1278,22 +1462,30 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         derived
     }
 
+    /// Stage A helper: true when record contains an Anchor/Context section whose token
+    /// count exceeds `chunking.max_window_tokens`.
+    fn record_has_long_anchor_or_context_section(&self, record: &DataRecord) -> bool {
+        let window = self.config.chunking.max_window_tokens;
+        if window == 0 {
+            return false;
+        }
+        record.sections.iter().any(|section| {
+            matches!(section.role, SectionRole::Anchor | SectionRole::Context)
+                && section.text.split_whitespace().count() > window
+        })
+    }
+
     fn sync_records_from_cache(&mut self) -> Result<(), SamplerError> {
         let mut snapshot = self.ingestion.cache().snapshot();
         snapshot.sort_by(|a, b| a.id.cmp(&b.id));
         self.records.clear();
         self.sources_with_long_sections.clear();
-        let window = self.config.chunking.max_window_tokens;
         for record in snapshot {
             if self.split_store.label_for(&record.id).is_none() {
                 self.split_store.ensure(record.id.clone())?;
             }
-            if window > 0
-                && record.sections.iter().any(|section| {
-                    matches!(section.role, SectionRole::Anchor | SectionRole::Context)
-                        && section.text.split_whitespace().count() > window
-                })
-            {
+            if self.record_has_long_anchor_or_context_section(&record) {
+                // Mark source-level eligibility for auto-injected chunk-pair recipe.
                 self.sources_with_long_sections
                     .insert(record.source.clone());
             }
@@ -1396,6 +1588,57 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             .reconcile(target_split, &records_by_split);
         self.ensure_source_state()?;
         Ok(())
+    }
+
+    /// Select one triplet candidate for a specific source and split.
+    ///
+    /// This helper is the source-level recipe execution path used by both pair and
+    /// triplet batch builders. It always starts from `triplet_recipes_for_source`,
+    /// which already includes any auto-injected long-section recipe when eligible.
+    ///
+    /// Returns:
+    /// - candidate triplet (with recipe) if one was sampled,
+    /// - number of recipe attempts consumed (for round-robin bookkeeping).
+    fn sample_source_triplet_candidate(
+        &mut self,
+        source: &str,
+        target_split: SplitLabel,
+        recipe_orders: &mut HashMap<RecipeKey, Vec<usize>>,
+        recipe_positions: &mut HashMap<RecipeKey, usize>,
+    ) -> (Option<(TripletRecipe, SampleTriplet)>, usize) {
+        // Stage A (source-level injection): resolve effective recipe pool,
+        // including auto-injected long-section recipe when source is eligible.
+        let (recipes, _auto_injected) = self.resolve_source_triplet_plan(source);
+        if recipes.is_empty() {
+            return (None, 0);
+        }
+        if !recipe_orders.contains_key(source) {
+            let order = self.recipe_order_cycled(recipes.len(), self.triplet_recipe_rr_idx);
+            recipe_orders.insert(source.to_string(), order);
+        }
+        let order = recipe_orders
+            .get(source)
+            .expect("recipe order missing for source");
+        let pos = recipe_positions.entry(source.to_string()).or_insert(0);
+        let Some(anchor) = self.choose_anchor_record(Some(source), target_split) else {
+            return (None, 0);
+        };
+
+        let mut attempts = 0usize;
+        for offset in 0..order.len() {
+            let idx = order[(*pos + offset) % order.len()];
+            attempts = attempts.saturating_add(1);
+            let recipe = recipes[idx].clone();
+            // Stage B/C happen inside `make_triplet_with_anchor`:
+            // - Stage B: record-level auto-recipe eligibility gate,
+            // - Stage C: chunk window materialization/selection.
+            if let Some(sample) = self.make_triplet_with_anchor(&recipe, &anchor) {
+                *pos = (*pos + offset + 1) % order.len();
+                return (Some((recipe, sample)), attempts);
+            }
+        }
+
+        (None, attempts)
     }
 
     fn next_pair_batch_inner_with_weights(
@@ -1521,46 +1764,13 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 break;
             }
             let source = cycle_sources[source_idx].as_str();
-            let recipes = self.triplet_recipes_for_source(source);
-            if recipes.is_empty() {
-                source_idx += 1;
-                source_steps += 1;
-                if source_idx >= cycle_sources.len() {
-                    source_idx = 0;
-                    cycle = cycle.saturating_add(1);
-                    cycle_sources = self.shuffled_source_cycle(cycle);
-                }
-                continue;
-            }
-            if !recipe_orders.contains_key(source) {
-                let order = self.recipe_order_cycled(recipes.len(), self.triplet_recipe_rr_idx);
-                recipe_orders.insert(source.to_string(), order);
-            }
-            let order = recipe_orders
-                .get(source)
-                .expect("recipe order missing for source");
-            let pos = recipe_positions.entry(source.to_string()).or_insert(0);
-            let Some(anchor) = self.choose_anchor_record(Some(source), target_split) else {
-                source_idx += 1;
-                source_steps += 1;
-                if source_idx >= cycle_sources.len() {
-                    source_idx = 0;
-                    cycle = cycle.saturating_add(1);
-                    cycle_sources = self.shuffled_source_cycle(cycle);
-                }
-                continue;
-            };
-            let mut triplet = None;
-            for offset in 0..order.len() {
-                let idx = order[(*pos + offset) % order.len()];
-                recipe_steps = recipe_steps.saturating_add(1);
-                let recipe = recipes[idx].clone();
-                if let Some(sample) = self.make_triplet_with_anchor(&recipe, &anchor) {
-                    *pos = (*pos + offset + 1) % order.len();
-                    triplet = Some((recipe, sample));
-                    break;
-                }
-            }
+            let (triplet, attempts_used) = self.sample_source_triplet_candidate(
+                source,
+                target_split,
+                &mut recipe_orders,
+                &mut recipe_positions,
+            );
+            recipe_steps = recipe_steps.saturating_add(attempts_used);
             if let Some((recipe, triplet)) = triplet {
                 let key = (
                     triplet.anchor.record_id.clone(),
@@ -1852,46 +2062,13 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 break;
             }
             let source = cycle_sources[source_idx].as_str();
-            let recipes = self.triplet_recipes_for_source(source);
-            if recipes.is_empty() {
-                source_idx += 1;
-                source_steps += 1;
-                if source_idx >= cycle_sources.len() {
-                    source_idx = 0;
-                    cycle = cycle.saturating_add(1);
-                    cycle_sources = self.shuffled_source_cycle(cycle);
-                }
-                continue;
-            }
-            if !recipe_orders.contains_key(source) {
-                let order = self.recipe_order_cycled(recipes.len(), self.triplet_recipe_rr_idx);
-                recipe_orders.insert(source.to_string(), order);
-            }
-            let order = recipe_orders
-                .get(source)
-                .expect("recipe order missing for source");
-            let pos = recipe_positions.entry(source.to_string()).or_insert(0);
-            let Some(anchor) = self.choose_anchor_record(Some(source), target_split) else {
-                source_idx += 1;
-                source_steps += 1;
-                if source_idx >= cycle_sources.len() {
-                    source_idx = 0;
-                    cycle = cycle.saturating_add(1);
-                    cycle_sources = self.shuffled_source_cycle(cycle);
-                }
-                continue;
-            };
-            let mut triplet: Option<(TripletRecipe, SampleTriplet)> = None;
-            for offset in 0..order.len() {
-                let idx = order[(*pos + offset) % order.len()];
-                let recipe = recipes[idx].clone();
-                recipe_steps = recipe_steps.saturating_add(1);
-                if let Some(sample) = self.make_triplet_with_anchor(&recipe, &anchor) {
-                    *pos = (*pos + offset + 1) % order.len();
-                    triplet = Some((recipe, sample));
-                    break;
-                }
-            }
+            let (triplet, attempts_used) = self.sample_source_triplet_candidate(
+                source,
+                target_split,
+                &mut recipe_orders,
+                &mut recipe_positions,
+            );
+            recipe_steps = recipe_steps.saturating_add(attempts_used);
             if let Some((_recipe, triplet)) = triplet {
                 let key = (
                     triplet.anchor.record_id.clone(),
