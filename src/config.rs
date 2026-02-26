@@ -49,7 +49,7 @@ pub struct TripletRecipe {
 }
 
 /// Selector for choosing a section or neighboring record.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Selector {
     /// Select a section by role.
     Role(SectionRole),
