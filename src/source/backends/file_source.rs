@@ -57,7 +57,7 @@ impl FileSourceConfig {
             text_files_only: false,
             group_by_directory: true,
             title_replace_underscores: true,
-            default_triplet_recipes: Vec::new(),
+            default_triplet_recipes: FileCorpusIndex::default_title_summary_triplet_recipes(),
             taxonomy_builder: Arc::new(taxonomy_from_path),
             section_builder: Arc::new(anchor_context_sections),
         }
@@ -344,6 +344,38 @@ mod tests {
         assert_eq!(snapshot.records.len(), 1);
         assert_eq!(snapshot.records[0].sections.len(), 2);
         assert_eq!(source.default_triplet_recipes().len(), recipes.len());
+    }
+
+    #[test]
+    fn file_source_config_new_has_explicit_default_triplet_recipes() {
+        let temp = tempdir().unwrap();
+        let source = FileSource::new(FileSourceConfig::new("qa_defaults", temp.path()));
+        let defaults = source.default_triplet_recipes();
+        assert!(!defaults.is_empty());
+        let names: Vec<&str> = defaults.iter().map(|recipe| recipe.name.as_ref()).collect();
+        assert!(names.contains(&"title_summary_wrong_date"));
+        assert!(names.contains(&"title_summary_wrong_article"));
+    }
+
+    #[test]
+    fn file_source_config_override_replaces_default_triplet_recipes() {
+        let temp = tempdir().unwrap();
+        let custom = vec![TripletRecipe {
+            name: "custom_only".into(),
+            anchor: Selector::Role(SectionRole::Context),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 1.0,
+            instruction: None,
+        }];
+        let source = FileSource::new(
+            FileSourceConfig::new("qa_defaults_override", temp.path())
+                .with_default_triplet_recipes(custom.clone()),
+        );
+        let recipes = source.default_triplet_recipes();
+        assert_eq!(recipes.len(), 1);
+        assert_eq!(recipes[0].name.as_ref(), "custom_only");
     }
 
     #[test]
