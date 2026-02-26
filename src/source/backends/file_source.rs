@@ -37,6 +37,8 @@ pub struct FileSourceConfig {
     pub group_by_directory: bool,
     /// Whether title extraction should replace underscores with spaces.
     pub title_replace_underscores: bool,
+    /// Whether default recipe set includes the date-aware negative lane.
+    pub include_date_aware_default_recipe: bool,
     /// Optional default recipes returned by this source.
     pub default_triplet_recipes: Vec<TripletRecipe>,
     /// Taxonomy builder invoked per file.
@@ -57,7 +59,8 @@ impl FileSourceConfig {
             text_files_only: false,
             group_by_directory: true,
             title_replace_underscores: true,
-            default_triplet_recipes: default_title_summary_triplet_recipes(),
+            include_date_aware_default_recipe: false,
+            default_triplet_recipes: default_title_summary_triplet_recipes(false),
             taxonomy_builder: Arc::new(taxonomy_from_path),
             section_builder: Arc::new(anchor_context_sections),
         }
@@ -100,6 +103,13 @@ impl FileSourceConfig {
         self
     }
 
+    /// Enable/disable the date-aware default recipe lane (`WrongPublicationDate`).
+    pub fn with_date_aware_default_recipe(mut self, include: bool) -> Self {
+        self.include_date_aware_default_recipe = include;
+        self.default_triplet_recipes = default_title_summary_triplet_recipes(include);
+        self
+    }
+
     /// Set source-provided default triplet recipes.
     pub fn with_default_triplet_recipes(mut self, recipes: Vec<TripletRecipe>) -> Self {
         self.default_triplet_recipes = recipes;
@@ -120,11 +130,12 @@ impl FileSourceConfig {
 }
 
 /// Default mixed-negative recipes used by `FileSource` title/body corpora.
-pub fn default_title_summary_triplet_recipes() -> Vec<TripletRecipe> {
-    vec![
+pub fn default_title_summary_triplet_recipes(include_date_aware: bool) -> Vec<TripletRecipe> {
+    let mut recipes = Vec::new();
+    if include_date_aware {
         // Keep a small, date-aware anchor-negative lane to reduce false negatives
         // while still introducing temporal contrast for harder examples.
-        TripletRecipe {
+        recipes.push(TripletRecipe {
             name: "title_summary_wrong_date".into(),
             anchor: Selector::Role(SectionRole::Anchor),
             positive_selector: Selector::Role(SectionRole::Context),
@@ -132,30 +143,31 @@ pub fn default_title_summary_triplet_recipes() -> Vec<TripletRecipe> {
             negative_strategy: NegativeStrategy::WrongPublicationDate,
             weight: 0.10,
             instruction: None,
-        },
-        // Majority lane remains context negatives for broad coverage and stable
-        // optimization on heterogeneous corpora.
-        TripletRecipe {
-            name: "title_summary_wrong_article".into(),
-            anchor: Selector::Role(SectionRole::Anchor),
-            positive_selector: Selector::Role(SectionRole::Context),
-            negative_selector: Selector::Role(SectionRole::Context),
-            negative_strategy: NegativeStrategy::WrongArticle,
-            weight: 0.65,
-            instruction: None,
-        },
-        // Medium-hard lane adds anchor-as-negative pressure to improve
-        // discrimination among title-like anchor fields.
-        TripletRecipe {
-            name: "title_anchor_wrong_article".into(),
-            anchor: Selector::Role(SectionRole::Anchor),
-            positive_selector: Selector::Role(SectionRole::Context),
-            negative_selector: Selector::Role(SectionRole::Anchor),
-            negative_strategy: NegativeStrategy::WrongArticle,
-            weight: 0.25,
-            instruction: None,
-        },
-    ]
+        });
+    }
+    // Majority lane remains context negatives for broad coverage and stable
+    // optimization on heterogeneous corpora.
+    recipes.push(TripletRecipe {
+        name: "title_summary_wrong_article".into(),
+        anchor: Selector::Role(SectionRole::Anchor),
+        positive_selector: Selector::Role(SectionRole::Context),
+        negative_selector: Selector::Role(SectionRole::Context),
+        negative_strategy: NegativeStrategy::WrongArticle,
+        weight: 0.65,
+        instruction: None,
+    });
+    // Medium-hard lane adds anchor-as-negative pressure to improve
+    // discrimination among title-like anchor fields.
+    recipes.push(TripletRecipe {
+        name: "title_anchor_wrong_article".into(),
+        anchor: Selector::Role(SectionRole::Anchor),
+        positive_selector: Selector::Role(SectionRole::Context),
+        negative_selector: Selector::Role(SectionRole::Anchor),
+        negative_strategy: NegativeStrategy::WrongArticle,
+        weight: 0.25,
+        instruction: None,
+    });
+    recipes
 }
 
 /// Generic filesystem-backed source with configurable taxonomy and section mapping.
@@ -391,6 +403,20 @@ mod tests {
         let source = FileSource::new(FileSourceConfig::new("qa_defaults", temp.path()));
         let defaults = source.default_triplet_recipes();
         assert!(!defaults.is_empty());
+        let names: Vec<&str> = defaults.iter().map(|recipe| recipe.name.as_ref()).collect();
+        assert!(!names.contains(&"title_summary_wrong_date"));
+        assert!(names.contains(&"title_summary_wrong_article"));
+        assert!(names.contains(&"title_anchor_wrong_article"));
+    }
+
+    #[test]
+    fn file_source_config_can_enable_date_aware_default_recipe() {
+        let temp = tempdir().unwrap();
+        let source = FileSource::new(
+            FileSourceConfig::new("qa_defaults_with_date", temp.path())
+                .with_date_aware_default_recipe(true),
+        );
+        let defaults = source.default_triplet_recipes();
         let names: Vec<&str> = defaults.iter().map(|recipe| recipe.name.as_ref()).collect();
         assert!(names.contains(&"title_summary_wrong_date"));
         assert!(names.contains(&"title_summary_wrong_article"));

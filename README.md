@@ -146,7 +146,15 @@ Built-in source defaults use a mixed-negative recipe pool when `SamplerConfig.re
 
 - `*_anchor_context_wrong_article` / `title_summary_wrong_article` (context negatives): weight `0.65`
 - `*_anchor_anchor_wrong_article` / `title_anchor_wrong_article` (anchor negatives): weight `0.25`
-- `*_anchor_anchor_wrong_date` / `title_summary_wrong_date` (anchor negatives, different publication date): weight `0.10`
+
+File source note:
+
+- `title_summary_wrong_date` is date-aware and is **gated** by `FileSourceConfig::with_date_aware_default_recipe(true)`.
+- Default `FileSourceConfig::new(...)` leaves date-aware defaults disabled.
+
+Hugging Face source defaults additionally include:
+
+- `*_anchor_anchor_wrong_date` (anchor negatives, different publication date): weight `0.10`
 
 ### Hugging Face source lists (recommended)
 
