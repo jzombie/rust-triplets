@@ -35,8 +35,8 @@ use crate::types::{RecipeKey, RecordId, SourceId};
 /// Auto-injected recipe name used when a source has at least one section whose
 /// token count exceeds `chunking.max_window_tokens` during normal ingest sync.
 ///
-/// Injection only applies when source-default triplet recipes are active
-/// (i.e., not when config-level `SamplerConfig.recipes` overrides are used).
+/// This recipe is appended for any eligible source during normal ingest sync, regardless
+/// if custom recipes are configured or not.
 const AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME: &str =
     "auto_injected_long_section_chunk_pair_wrong_article";
 
@@ -6907,6 +6907,110 @@ mod tests {
                     recipe.name.as_ref()
                         != AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME
                 })
+        );
+    }
+
+    #[test]
+    fn adds_dynamic_chunk_pair_recipe_even_with_global_config_recipes() {
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let mut config = base_config();
+        config.batch_size = 1;
+        config.chunking = ChunkingStrategy {
+            max_window_tokens: 2,
+            overlap_tokens: vec![0],
+            summary_fallback_weight: 0.0,
+            summary_fallback_tokens: 0,
+            chunk_weight_floor: 0.0,
+        };
+        config.recipes = vec![TripletRecipe {
+            name: "global_anchor_context".into(),
+            anchor: Selector::Role(SectionRole::Anchor),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 1.0,
+            instruction: None,
+        }];
+
+        let now = Utc::now();
+        let records = vec![
+            DataRecord {
+                id: "cfg1".into(),
+                source: "ignored_by_ingestion".into(),
+                created_at: now,
+                updated_at: now,
+                quality: QualityScore::default(),
+                taxonomy: vec![],
+                sections: vec![
+                    RecordSection {
+                        role: SectionRole::Anchor,
+                        heading: None,
+                        text: "Headline one".into(),
+                        sentences: vec!["Headline one".into()],
+                    },
+                    RecordSection {
+                        role: SectionRole::Context,
+                        heading: None,
+                        text: "one two three four".into(),
+                        sentences: vec!["one two three four".into()],
+                    },
+                ],
+                meta_prefix: None,
+            },
+            DataRecord {
+                id: "cfg2".into(),
+                source: "ignored_by_ingestion".into(),
+                created_at: now,
+                updated_at: now,
+                quality: QualityScore::default(),
+                taxonomy: vec![],
+                sections: vec![
+                    RecordSection {
+                        role: SectionRole::Anchor,
+                        heading: None,
+                        text: "Headline two".into(),
+                        sentences: vec!["Headline two".into()],
+                    },
+                    RecordSection {
+                        role: SectionRole::Context,
+                        heading: None,
+                        text: "alpha beta gamma delta".into(),
+                        sentences: vec!["alpha beta gamma delta".into()],
+                    },
+                ],
+                meta_prefix: None,
+            },
+        ];
+
+        let store = Arc::new(DeterministicSplitStore::new(split, 121).unwrap());
+        let sampler = TripletSampler::new(config, store);
+        sampler.register_source(Box::new(RecipeSource::new(records, Vec::new())));
+        sampler
+            .inner
+            .lock()
+            .unwrap()
+            .ingest_internal(SplitLabel::Train)
+            .unwrap();
+
+        let effective = sampler
+            .inner
+            .lock()
+            .unwrap()
+            .triplet_recipes_for_source("recipe_source");
+
+        assert!(
+            effective
+                .iter()
+                .any(|recipe| recipe.name.as_ref() == "global_anchor_context")
+        );
+        assert!(
+            effective.iter().any(|recipe| {
+                recipe.name.as_ref() == AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME
+            })
         );
     }
 

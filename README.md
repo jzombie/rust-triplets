@@ -59,26 +59,12 @@ This crate does **not** perform semantic mining/retrieval scoring by itself; ins
 
 ### Auto-injected long-section recipe
 
-When using source-provided default triplet recipes (that is, when `SamplerConfig.recipes` is empty), the sampler can auto-inject one additional recipe per source:
-
-- `auto_injected_long_section_chunk_pair_wrong_article`
-
-Injection condition:
-
-- During normal ingest/cache sync, if a source has at least one section whose token count exceeds `chunking.max_window_tokens`.
-
-Recipe behavior:
-
-- Anchor selector: `Context`
-- Positive selector: `Context`
-- Negative selector: `Context`
-- Negative strategy: `WrongArticle`
-
-Important semantics:
-
-- The auto recipe augments the source recipe pool; it does not change chunk selection behavior globally.
-- Anchor and positive are two independent chunk draws from the same context chunk candidate pool for the selected record.
-- Chunk text is not concatenated; each sampled anchor/positive is a single chunk window.
+- Auto recipe name: `auto_injected_long_section_chunk_pair_wrong_article`.
+- It may be appended per source during normal ingest/cache sync.
+- It is eligible when a source has at least one section longer than `chunking.max_window_tokens`.
+- Recipe selectors: anchor=`Context`, positive=`Context`, negative=`Context` with `WrongArticle` negatives.
+- It augments the source's recipe pool; it does not change `select_chunk` globally.
+- Anchor and positive are two independent chunk draws (not concatenated text, not derived from each other).
 
 ## Using a source for sampling
 
