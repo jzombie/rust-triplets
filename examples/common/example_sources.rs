@@ -115,7 +115,7 @@ impl ExampleFileSource {
         let reported_records = records.len() as u128;
         let inner = InMemorySource::new(id, records);
         let triplet_recipes =
-            triplets::source::backends::file_source::default_title_summary_triplet_recipes(true);
+            triplets::source::backends::file_source::default_title_context_triplet_recipes(true);
         Self {
             id: id.into(),
             inner,

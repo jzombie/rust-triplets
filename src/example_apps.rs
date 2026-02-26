@@ -719,7 +719,7 @@ fn print_triplet_batch(
             .iter()
             .map(|triplet| triplet.anchor.record_id.as_str()),
     );
-    print_recipe_summary_by_source(
+    print_recipe_context_by_source(
         "triplet recipes by source",
         batch
             .triplets
@@ -746,7 +746,7 @@ fn print_text_batch(strategy: &ChunkingStrategy, batch: &TextBatch, split_store:
             .iter()
             .map(|sample| sample.chunk.record_id.as_str()),
     );
-    print_recipe_summary_by_source(
+    print_recipe_context_by_source(
         "text recipes by source",
         batch
             .samples
@@ -778,7 +778,7 @@ fn print_pair_batch(
             .iter()
             .map(|pair| pair.anchor.record_id.as_str()),
     );
-    print_recipe_summary_by_source(
+    print_recipe_context_by_source(
         "pair recipes by source",
         batch
             .pairs
@@ -882,7 +882,7 @@ where
     }
 }
 
-fn print_recipe_summary_by_source<'a, I>(label: &str, entries: I)
+fn print_recipe_context_by_source<'a, I>(label: &str, entries: I)
 where
     I: Iterator<Item = (&'a str, &'a str)>,
 {

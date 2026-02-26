@@ -4085,7 +4085,7 @@ mod tests {
             batch_size: 4,
             chunking: ChunkingStrategy::default(),
             recipes: vec![TripletRecipe {
-                name: "title_summary_triplet".into(),
+                name: "title_context_triplet".into(),
                 anchor: Selector::Role(SectionRole::Anchor),
                 positive_selector: Selector::Role(SectionRole::Context),
                 negative_selector: Selector::Role(SectionRole::Context),
@@ -5261,7 +5261,7 @@ mod tests {
         };
         let store = Arc::new(DeterministicSplitStore::new(split, 29).unwrap());
         let recipes = vec![TripletRecipe {
-            name: "inline_title_summary".into(),
+            name: "inline_title_context".into(),
             anchor: Selector::Role(SectionRole::Anchor),
             positive_selector: Selector::Role(SectionRole::Context),
             negative_selector: Selector::Role(SectionRole::Context),
@@ -5293,7 +5293,7 @@ mod tests {
             .unwrap();
         let batch = sampler.next_text_batch(SplitLabel::Train).unwrap();
         assert_eq!(batch.samples.len(), 1);
-        assert!(batch.samples[0].recipe.starts_with("inline_title_summary_"));
+        assert!(batch.samples[0].recipe.starts_with("inline_title_context_"));
     }
 
     #[test]
