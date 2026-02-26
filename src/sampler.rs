@@ -1289,13 +1289,10 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 self.split_store.ensure(record.id.clone())?;
             }
             if window > 0
-                && record
-                    .sections
-                    .iter()
-                    .any(|section| {
-                        matches!(section.role, SectionRole::Anchor | SectionRole::Context)
-                            && section.text.split_whitespace().count() > window
-                    })
+                && record.sections.iter().any(|section| {
+                    matches!(section.role, SectionRole::Anchor | SectionRole::Context)
+                        && section.text.split_whitespace().count() > window
+                })
             {
                 self.sources_with_long_sections
                     .insert(record.source.clone());
@@ -7253,7 +7250,9 @@ mod tests {
                     role: SectionRole::Context,
                     heading: None,
                     text: "alpha beta gamma delta epsilon zeta eta theta iota kappa".into(),
-                    sentences: vec!["alpha beta gamma delta epsilon zeta eta theta iota kappa".into()],
+                    sentences: vec![
+                        "alpha beta gamma delta epsilon zeta eta theta iota kappa".into(),
+                    ],
                 }],
                 meta_prefix: None,
             },
