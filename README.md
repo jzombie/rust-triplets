@@ -58,7 +58,28 @@ It is designed for multi-source training pipelines where each batch can mix reco
 
 This crate does **not** perform semantic mining/retrieval scoring by itself; instead, it gives you deterministic, metadata-driven sampling primitives you can feed into your downstream mining/retrieval stack.
 
-## Recipes
+## Sources
+
+`triplets` is source-first: sampling begins with one or more registered `DataSource`s, then recipe selection controls how samples are assembled from each source's records/sections.
+
+A **source** is any backend that yields `DataRecord`s (for example filesystem corpora, Hugging Face rows, or your own adapter). The sampler can mix multiple sources in the same run/batch.
+
+Why this matters:
+
+- You define rules (selectors, strategies, weights) once, and the sampler constructs triplets from those rules at runtime.
+- You do **not** have to precompute or hand-author every `(anchor, positive, negative)` combination.
+- Each source advances with its own cursor/progress, so sparse or slow sources do not block others.
+- Sources can be over/under-sampled independently via source weights (including per-batch reweighting).
+- When a source has limited fresh records, replay/oversampling can happen for that source without coupling all other sources to the same behavior.
+
+Key weighting concepts:
+
+- **Source weights** control how often each source contributes in a batch (`next_*_batch_with_weights`).
+- **Trust weights** (`DataRecord.quality.trust`, optional taxonomy overrides) scale sample influence by source/record quality.
+- **Recipe weights** (`TripletRecipe.weight`) control how often each recipe path is selected.
+- **Chunk weights** apply after section chunking to modulate long/short-window contribution.
+
+### Recipes
 
 ### What is a recipe?
 
@@ -70,6 +91,24 @@ A recipe defines how one training sample is assembled from eligible sections:
 Recipes are metadata-driven selection rules; they define *what can be sampled*, while runtime sampling/weights decide *how often* each eligible path is drawn.
 
 Recipe origin can be user-defined, system-defined, or mixed in the same run.
+
+Basic recipe example:
+
+```rust,no_run
+use std::borrow::Cow;
+use triplets::{NegativeStrategy, SectionRole, Selector, TripletRecipe};
+
+let recipe = TripletRecipe {
+  name: Cow::Borrowed("title_context_wrong_article"),
+  anchor: Selector::Role(SectionRole::Anchor),
+  positive_selector: Selector::Role(SectionRole::Context),
+  negative_selector: Selector::Role(SectionRole::Context),
+  negative_strategy: NegativeStrategy::WrongArticle,
+  weight: 1.0,
+  instruction: None,
+};
+# let _ = recipe;
+```
 
 ### How recipe selection works
 
@@ -91,7 +130,7 @@ Recipe origin can be user-defined, system-defined, or mixed in the same run.
 - It augments the source's recipe pool; it does not change `select_chunk` globally.
 - Anchor and positive are two independent chunk draws (not concatenated text, not derived from each other).
 
-## Using a source for sampling
+### Using a source for sampling
 
 Create a sampler, register your source, then ask for a batch:
 
@@ -135,7 +174,7 @@ let _batch = sampler.next_triplet_batch(SplitLabel::Train)?;
 
 > _`DataRecord` is the core sampling primitive, but this in-memory example is only for illustration and not a scalable or memory-efficient pattern. For real datasets, prefer the built-in integrated sources or an `IndexableSource` implementation._
 
-## Integrated sources
+### Integrated sources
 
 `triplets` ships with two built-in sources; if you use either, deterministic paging is always enabled (`FileSource`, `HuggingFaceRowSource`).
 
@@ -158,7 +197,7 @@ Hugging Face source defaults use:
 - `*_anchor_context_wrong_article` (context negatives): weight `0.75`
 - `*_anchor_anchor_wrong_article` (anchor negatives): weight `0.25`
 
-### Hugging Face source lists (recommended)
+#### Hugging Face source lists (recommended)
 
 Define HF sources in a text file and pass it to the demo or your own loader. The `hf://` prefix is a `triplets`-specific shorthand used only in these lists:
 
@@ -191,7 +230,7 @@ Row formats supported by the HF backend:
 - `.jsonl` / `.ndjson` (one JSON object per line)
 - plain text lines (each non-empty line becomes `{ "text": "..." }`)
 
-## Adding new sources
+### Adding new sources
 
 Use one of these two paths:
 
