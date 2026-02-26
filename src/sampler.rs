@@ -7464,10 +7464,10 @@ mod tests {
         config.seed = 812;
         config.batch_size = 1;
         config.allowed_splits = vec![SplitLabel::Train, SplitLabel::Validation, SplitLabel::Test];
-        
+
         // No custom recipes to ensure the auto-injected recipe is the only recipe available.
         config.recipes = Vec::new();
-        
+
         config.text_recipes = Vec::new();
         config.chunking = ChunkingStrategy {
             max_window_tokens: 2,
@@ -7479,6 +7479,8 @@ mod tests {
 
         let store = Arc::new(DeterministicSplitStore::new(split, 1441).unwrap());
 
+        // Not a manual split assignment: this only searches for record ids whose
+        // deterministic split-store derivation already maps to `label`.
         let find_id = |label: SplitLabel, prefix: &str| -> String {
             for i in 0..20000 {
                 let id = format!("{prefix}_{i}");
@@ -7494,6 +7496,7 @@ mod tests {
         for split_label in [SplitLabel::Train, SplitLabel::Validation, SplitLabel::Test] {
             for idx in 0..2 {
                 let id = find_id(split_label, &format!("auto_split_{split_label:?}_{idx}"));
+                assert_eq!(store.label_for(&id).unwrap(), split_label);
                 records.push(DataRecord {
                     id,
                     source: "ignored_by_ingestion".into(),
