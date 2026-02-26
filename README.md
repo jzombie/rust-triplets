@@ -183,12 +183,17 @@ let _batch = sampler.next_triplet_batch(SplitLabel::Train)?;
 
 Built-in source defaults use a mixed-negative recipe pool when `SamplerConfig.recipes` is empty:
 
-- `*_anchor_context_wrong_article` / `title_summary_wrong_article` (context negatives): weight `0.65`
+- `*_anchor_context_wrong_article` / `title_summary_wrong_article` (context negatives): weight `0.75`
 - `*_anchor_anchor_wrong_article` / `title_anchor_wrong_article` (anchor negatives): weight `0.25`
 
 File source note:
 
-- `title_summary_wrong_date` is date-aware and is **gated** by `FileSourceConfig::with_date_aware_default_recipe(true)`.
+- Date-aware defaults are **gated** by `FileSourceConfig::with_date_aware_default_recipe(true)`.
+- When enabled, file-source date-aware recipes are:
+  - `title_summary_wrong_date` (context negatives): weight `0.30`
+  - `title_anchor_wrong_date` (anchor negatives): weight `0.10`
+  - `title_summary_wrong_article` (context negatives): weight `0.35`
+  - `title_anchor_wrong_article` (anchor negatives): weight `0.25`
 - Default `FileSourceConfig::new(...)` leaves date-aware defaults disabled.
 - Here, "date-aware" means publication date metadata (for example `META_FIELD_DATE` from taxonomy/record metadata), **not** filesystem modification/creation/access timestamps.
 
