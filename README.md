@@ -2,7 +2,7 @@
 
 [![made-with-rust][rust-logo]][rust-src-page] [![crates.io][crates-badge]][crates-page] [![MIT licensed][mit-license-badge]][mit-license-page] [![Apache 2.0 licensed][apache-2.0-license-badge]][apache-2.0-license-page] [![Coverage][coveralls-badge]][coveralls-page]
 
-_Build reproducible, multi-source training batches without hand-curating every sample: define your sampling rules once, then let `triplets` generate balanced triplets as your data evolves._
+_Automate multi-source training data consumption and dynamically build reproducible, balanced learning batches from configurable rules as your data evolves._
 
 **WORK IN PROGRESS. THIS API IS BEING PROTOTYPED AND MAY CHANGE WITHOUT NOTICE.**
 
