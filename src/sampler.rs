@@ -6674,6 +6674,8 @@ mod tests {
         };
         let mut config = base_config();
         config.batch_size = 1;
+        // Force chunking so a 4-token context section becomes multiple windows.
+        // This is the eligibility condition for adding the dynamic chunk-pair recipe.
         config.chunking = ChunkingStrategy {
             max_window_tokens: 2,
             overlap_tokens: vec![0],
@@ -6693,6 +6695,8 @@ mod tests {
         }];
 
         let now = Utc::now();
+        // Two records are provided so `WrongArticle` negatives can be formed.
+        // Context sections are intentionally longer than `max_window_tokens`.
         let records = vec![
             DataRecord {
                 id: "r1".into(),
@@ -6744,6 +6748,8 @@ mod tests {
 
         let store = Arc::new(DeterministicSplitStore::new(split, 117).unwrap());
         let sampler = TripletSampler::new(config, store);
+        // Source provides only a base recipe; dynamic augmentation should happen
+        // automatically during ingest based on observed section lengths.
         sampler.register_source(Box::new(RecipeSource::new(records, recipes)));
         sampler
             .inner
@@ -6757,6 +6763,7 @@ mod tests {
             .lock()
             .unwrap()
             .triplet_recipes_for_source("recipe_source");
+        // Verify the dynamic same-record chunk-pair recipe was injected.
         assert!(
             effective
                 .iter()
@@ -6773,6 +6780,8 @@ mod tests {
         };
         let mut config = base_config();
         config.batch_size = 1;
+        // Large window means all sections fit in a single chunk.
+        // This should disable dynamic chunk-pair recipe injection.
         config.chunking = ChunkingStrategy {
             max_window_tokens: 8,
             overlap_tokens: vec![0],
@@ -6792,6 +6801,8 @@ mod tests {
         }];
 
         let now = Utc::now();
+        // All context sections are short and should not be classified as
+        // chunk-window eligible for dynamic augmentation.
         let records = vec![
             DataRecord {
                 id: "short1".into(),
@@ -6856,6 +6867,7 @@ mod tests {
             .lock()
             .unwrap()
             .triplet_recipes_for_source("recipe_source");
+        // Verify the dynamic recipe is absent when no oversized sections exist.
         assert!(
             effective
                 .iter()
