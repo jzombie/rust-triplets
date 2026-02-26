@@ -635,11 +635,9 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         // `select_chunk` behavior. Recipe scheduling may choose this recipe or
         // any other recipe in the pool according to normal ordering logic.
         if self.source_supports_chunk_pair_recipe(source)
-            && !recipes
-                .iter()
-                .any(|recipe| {
-                    recipe.name.as_ref() == AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME
-                })
+            && !recipes.iter().any(|recipe| {
+                recipe.name.as_ref() == AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME
+            })
         {
             recipes.push(Self::source_chunk_pair_recipe());
         }
@@ -1284,11 +1282,13 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 self.split_store.ensure(record.id.clone())?;
             }
             if window > 0
-                && record.sections.iter().any(|section| {
-                    section.text.split_whitespace().count() > window
-                })
+                && record
+                    .sections
+                    .iter()
+                    .any(|section| section.text.split_whitespace().count() > window)
             {
-                self.sources_with_long_sections.insert(record.source.clone());
+                self.sources_with_long_sections
+                    .insert(record.source.clone());
             }
             self.records.insert(record.id.clone(), record);
         }
@@ -6793,14 +6793,9 @@ mod tests {
             .unwrap()
             .triplet_recipes_for_source("recipe_source");
         // Verify the dynamic same-record chunk-pair recipe was injected.
-        assert!(
-            effective
-                .iter()
-                .any(|recipe| {
-                    recipe.name.as_ref()
-                        == AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME
-                })
-        );
+        assert!(effective.iter().any(|recipe| {
+            recipe.name.as_ref() == AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME
+        }));
     }
 
     #[test]
@@ -6900,14 +6895,9 @@ mod tests {
             .unwrap()
             .triplet_recipes_for_source("recipe_source");
         // Verify the dynamic recipe is absent when no oversized sections exist.
-        assert!(
-            effective
-                .iter()
-                .all(|recipe| {
-                    recipe.name.as_ref()
-                        != AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME
-                })
-        );
+        assert!(effective.iter().all(|recipe| {
+            recipe.name.as_ref() != AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME
+        }));
     }
 
     #[test]
@@ -7007,11 +6997,9 @@ mod tests {
                 .iter()
                 .any(|recipe| recipe.name.as_ref() == "global_anchor_context")
         );
-        assert!(
-            effective.iter().any(|recipe| {
-                recipe.name.as_ref() == AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME
-            })
-        );
+        assert!(effective.iter().any(|recipe| {
+            recipe.name.as_ref() == AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME
+        }));
     }
 
     #[test]
