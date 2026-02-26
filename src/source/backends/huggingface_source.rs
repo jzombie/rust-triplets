@@ -2825,7 +2825,7 @@ impl DataSource for HuggingFaceRowSource {
                 positive_selector: Selector::Role(SectionRole::Context),
                 negative_selector: Selector::Role(SectionRole::Context),
                 negative_strategy: NegativeStrategy::WrongArticle,
-                weight: 0.65,
+                weight: 0.75,
                 instruction: None,
             },
             // Medium-hard lane adds anchor-as-negative pressure to improve
@@ -2837,17 +2837,6 @@ impl DataSource for HuggingFaceRowSource {
                 negative_selector: Selector::Role(SectionRole::Anchor),
                 negative_strategy: NegativeStrategy::WrongArticle,
                 weight: 0.25,
-                instruction: None,
-            },
-            // Small date-aware anchor-negative lane reduces false-negative risk
-            // while keeping temporal contrast in the sample stream.
-            TripletRecipe {
-                name: "huggingface_anchor_anchor_wrong_date".into(),
-                anchor: Selector::Role(SectionRole::Anchor),
-                positive_selector: Selector::Role(SectionRole::Context),
-                negative_selector: Selector::Role(SectionRole::Anchor),
-                negative_strategy: NegativeStrategy::WrongPublicationDate,
-                weight: 0.10,
                 instruction: None,
             },
         ]
@@ -4005,10 +3994,11 @@ mod tests {
         let config = test_config(dir.path().to_path_buf());
         let source = test_source(config);
         let recipes = source.default_triplet_recipes();
-        assert_eq!(recipes.len(), 3);
+        assert_eq!(recipes.len(), 2);
         assert_eq!(recipes[0].name, "huggingface_anchor_context_wrong_article");
         assert_eq!(recipes[1].name, "huggingface_anchor_anchor_wrong_article");
-        assert_eq!(recipes[2].name, "huggingface_anchor_anchor_wrong_date");
+        assert_eq!(recipes[0].weight, 0.75);
+        assert_eq!(recipes[1].weight, 0.25);
     }
 
     #[test]

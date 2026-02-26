@@ -153,9 +153,10 @@ File source note:
 - Default `FileSourceConfig::new(...)` leaves date-aware defaults disabled.
 - Here, "date-aware" means publication date metadata (for example `META_FIELD_DATE` from taxonomy/record metadata), **not** filesystem modification/creation/access timestamps.
 
-Hugging Face source defaults additionally include:
+Hugging Face source defaults use:
 
-- `*_anchor_anchor_wrong_date` (anchor negatives, different publication date): weight `0.10`
+- `*_anchor_context_wrong_article` (context negatives): weight `0.75`
+- `*_anchor_anchor_wrong_article` (anchor negatives): weight `0.25`
 
 ### Hugging Face source lists (recommended)
 
