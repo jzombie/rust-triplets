@@ -32,9 +32,9 @@ Training on many `(anchor, positive, negative)` groups helps a model learn usefu
 
 In this crate, those triplets are built automatically from one or more data sources using metadata-driven, user-defined recipes/selectors for anchor/positive/negative section choice.
 
-Note on "hard triplet" mining: mining hard triplets can be performed purely via metadata and recipe-driven selectors (no special semantic scorer is required in principle). Because negatives are selected dynamically per anchor/positive and recipes can vary which fields or records are eligible, a training run will naturally observe a mixture of easy and hard negatives as sampling, recipe configuration, and per-batch weighting evolve.
-
 It is designed for multi-source training pipelines where each batch can mix records from several sources, while source contribution is controlled independently (for example, over/under-sampling frequency and trust/quality weighting per source) to rebalance representation and reduce source-driven bias. Because source weights can be set per batch call, they can be wired to training-time loss/metric signals and adjusted dynamically during training.
+
+> Note on "hard triplet" mining: mining hard triplets can be performed purely via metadata and recipe-driven selectors (no semantic scorer required). Negatives are chosen dynamically per anchor/positive — across record fields, chunk windows, and recipe selectors — so triplets are typically unique even without changing weights or recipes. As a result, a training run naturally sees a mixture of easy and hard negatives as sampling and configuration play out.
 
 ## High-level features
 
