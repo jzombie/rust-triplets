@@ -60,7 +60,7 @@ impl FileSourceConfig {
             group_by_directory: true,
             title_replace_underscores: true,
             include_date_aware_default_recipe: false,
-            default_triplet_recipes: default_title_summary_triplet_recipes(false),
+            default_triplet_recipes: default_title_context_triplet_recipes(false),
             taxonomy_builder: Arc::new(taxonomy_from_path),
             section_builder: Arc::new(anchor_context_sections),
         }
@@ -109,7 +109,7 @@ impl FileSourceConfig {
     /// taxonomy/meta date fields), not filesystem timestamps from source files.
     pub fn with_date_aware_default_recipe(mut self, include: bool) -> Self {
         self.include_date_aware_default_recipe = include;
-        self.default_triplet_recipes = default_title_summary_triplet_recipes(include);
+        self.default_triplet_recipes = default_title_context_triplet_recipes(include);
         self
     }
 
@@ -136,13 +136,13 @@ impl FileSourceConfig {
 ///
 /// When `include_date_aware` is enabled, the date-aware lane compares metadata
 /// publication dates, not filesystem mtime/ctime/atime values.
-pub fn default_title_summary_triplet_recipes(include_date_aware: bool) -> Vec<TripletRecipe> {
+pub fn default_title_context_triplet_recipes(include_date_aware: bool) -> Vec<TripletRecipe> {
     let mut recipes = Vec::new();
     if include_date_aware {
         // Make date-aware summary negatives nearly as common as summary wrong-article
         // negatives so temporal contrast is meaningfully represented.
         recipes.push(TripletRecipe {
-            name: "title_summary_wrong_date".into(),
+            name: "title_context_wrong_date".into(),
             anchor: Selector::Role(SectionRole::Anchor),
             positive_selector: Selector::Role(SectionRole::Context),
             negative_selector: Selector::Role(SectionRole::Context),
@@ -166,7 +166,7 @@ pub fn default_title_summary_triplet_recipes(include_date_aware: bool) -> Vec<Tr
     // Rebalance summary wrong-article depending on whether date-aware lanes are
     // enabled so the full pool stays intentionally weighted in both modes.
     recipes.push(TripletRecipe {
-        name: "title_summary_wrong_article".into(),
+        name: "title_context_wrong_article".into(),
         anchor: Selector::Role(SectionRole::Anchor),
         positive_selector: Selector::Role(SectionRole::Context),
         negative_selector: Selector::Role(SectionRole::Context),
@@ -422,13 +422,13 @@ mod tests {
         let defaults = source.default_triplet_recipes();
         assert!(!defaults.is_empty());
         let names: Vec<&str> = defaults.iter().map(|recipe| recipe.name.as_ref()).collect();
-        assert!(!names.contains(&"title_summary_wrong_date"));
+        assert!(!names.contains(&"title_context_wrong_date"));
         assert!(!names.contains(&"title_anchor_wrong_date"));
-        assert!(names.contains(&"title_summary_wrong_article"));
+        assert!(names.contains(&"title_context_wrong_article"));
         assert!(names.contains(&"title_anchor_wrong_article"));
         let summary_wrong_article = defaults
             .iter()
-            .find(|recipe| recipe.name == "title_summary_wrong_article")
+            .find(|recipe| recipe.name == "title_context_wrong_article")
             .unwrap();
         let anchor_wrong_article = defaults
             .iter()
@@ -447,13 +447,13 @@ mod tests {
         );
         let defaults = source.default_triplet_recipes();
         let names: Vec<&str> = defaults.iter().map(|recipe| recipe.name.as_ref()).collect();
-        assert!(names.contains(&"title_summary_wrong_date"));
+        assert!(names.contains(&"title_context_wrong_date"));
         assert!(names.contains(&"title_anchor_wrong_date"));
-        assert!(names.contains(&"title_summary_wrong_article"));
+        assert!(names.contains(&"title_context_wrong_article"));
         assert!(names.contains(&"title_anchor_wrong_article"));
         let summary_wrong_date = defaults
             .iter()
-            .find(|recipe| recipe.name == "title_summary_wrong_date")
+            .find(|recipe| recipe.name == "title_context_wrong_date")
             .unwrap();
         let anchor_wrong_date = defaults
             .iter()
@@ -461,7 +461,7 @@ mod tests {
             .unwrap();
         let summary_wrong_article = defaults
             .iter()
-            .find(|recipe| recipe.name == "title_summary_wrong_article")
+            .find(|recipe| recipe.name == "title_context_wrong_article")
             .unwrap();
         let anchor_wrong_article = defaults
             .iter()
