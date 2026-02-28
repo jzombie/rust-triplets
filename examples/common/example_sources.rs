@@ -157,6 +157,7 @@ fn maybe_huggingface_source() -> Option<Box<dyn DataSource + 'static>> {
     let dataset = "HuggingFaceFW/fineweb".to_string();
     let config_name = "default".to_string();
     let split_name = "train".to_string();
+    // TODO: Replace w/ cache manager
     let snapshot_dir = PathBuf::from(".hf-snapshots")
         .join(dataset.replace('/', "__"))
         .join(&config_name)
