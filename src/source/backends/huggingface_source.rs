@@ -237,6 +237,7 @@ pub fn build_hf_sources(roots: &HfListRoots) -> Vec<Box<dyn DataSource + 'static
             };
 
             let source_id = format!("hf_list_{idx}");
+            // TODO: Replace w/ cache manager
             let snapshot_dir = PathBuf::from(".hf-snapshots")
                 .join("source-list")
                 .join(dataset.replace('/', "__"))
