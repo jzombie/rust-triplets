@@ -13,7 +13,7 @@ use triplets::utils::{make_section, normalize_inline_whitespace};
 use walkdir::WalkDir;
 
 #[cfg(feature = "huggingface")]
-use triplets::{HuggingFaceRowSource, HuggingFaceRowsConfig};
+use triplets::{HuggingFaceRowSource, HuggingFaceRowsConfig, managed_hf_snapshot_dir};
 
 #[derive(Debug, Clone)]
 pub struct SourceRoots {
@@ -157,10 +157,14 @@ fn maybe_huggingface_source() -> Option<Box<dyn DataSource + 'static>> {
     let dataset = "HuggingFaceFW/fineweb".to_string();
     let config_name = "default".to_string();
     let split_name = "train".to_string();
-    let snapshot_dir = PathBuf::from(".hf-snapshots")
-        .join(dataset.replace('/', "__"))
-        .join(&config_name)
-        .join(&split_name);
+    let skip_msg_prefix = "Skipping Hugging Face source initialization for multi_source_demo: ";
+    let snapshot_dir = match managed_hf_snapshot_dir(&dataset, &config_name, &split_name) {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("{}{}", skip_msg_prefix, err);
+            return None;
+        }
+    };
 
     let mut hf =
         HuggingFaceRowsConfig::new(source_id, dataset, config_name, split_name, snapshot_dir);
@@ -171,10 +175,7 @@ fn maybe_huggingface_source() -> Option<Box<dyn DataSource + 'static>> {
     match HuggingFaceRowSource::new(hf) {
         Ok(source) => Some(Box::new(source)),
         Err(err) => {
-            eprintln!(
-                "Skipping Hugging Face source initialization for multi_source_demo: {}",
-                err
-            );
+            eprintln!("{}{}", skip_msg_prefix, err);
             None
         }
     }

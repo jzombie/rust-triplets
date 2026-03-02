@@ -293,6 +293,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
+name = "cache-manager"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ec91ececd7ae6d7a43bb7cfa66353010cb81f0b2f59bc10e3b470a5262ba03a"
+
+[[package]]
 name = "cc"
 version = "1.2.54"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2165,9 +2171,10 @@ dependencies = [
 
 [[package]]
 name = "triplets"
-version = "0.3.0-alpha"
+version = "0.4.0-alpha"
 dependencies = [
  "bitcode",
+ "cache-manager",
  "chrono",
  "clap",
  "hf-hub",

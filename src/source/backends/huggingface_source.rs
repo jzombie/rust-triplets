@@ -1,3 +1,4 @@
+use cache_manager::{CacheRoot, EvictPolicy};
 use hf_hub::Repo;
 use hf_hub::RepoType;
 use hf_hub::api::sync::ApiBuilder;
@@ -48,6 +49,48 @@ const REMOTE_BOOTSTRAP_SHARDS: usize = 4;
 const HUGGINGFACE_REFRESH_BATCH_MULTIPLIER: usize = 32;
 const SHARD_SEQUENCE_STATE_VERSION: u32 = 1;
 const SHARD_SEQUENCE_STATE_FILE: &str = "_sequence_state.json";
+const HUGGINGFACE_CACHE_GROUP_ROOT: &str = ".cache/triplets/huggingface";
+
+fn ensure_cache_group(relative_group: PathBuf) -> Result<PathBuf, String> {
+    let cache_root = CacheRoot::discover_or_cwd();
+    cache_root.ensure_group(&relative_group).map_err(|err| {
+        format!(
+            "failed creating managed cache group '{}': {err}",
+            relative_group.display()
+        )
+    })
+}
+
+/// Resolve a managed snapshot directory for a list-based Hugging Face source.
+pub fn managed_hf_list_snapshot_dir(
+    dataset: &str,
+    config: &str,
+    split: &str,
+    replica_idx: usize,
+) -> Result<PathBuf, String> {
+    ensure_cache_group(
+        PathBuf::from(HUGGINGFACE_CACHE_GROUP_ROOT)
+            .join("source-list")
+            .join(dataset.replace('/', "__"))
+            .join(config)
+            .join(split)
+            .join(format!("replica_{replica_idx}")),
+    )
+}
+
+/// Resolve a managed snapshot directory for a single Hugging Face source.
+pub fn managed_hf_snapshot_dir(
+    dataset: &str,
+    config: &str,
+    split: &str,
+) -> Result<PathBuf, String> {
+    ensure_cache_group(
+        PathBuf::from(HUGGINGFACE_CACHE_GROUP_ROOT)
+            .join(dataset.replace('/', "__"))
+            .join(config)
+            .join(split),
+    )
+}
 
 #[derive(Clone, Debug)]
 struct RowTextField {
@@ -237,12 +280,17 @@ pub fn build_hf_sources(roots: &HfListRoots) -> Vec<Box<dyn DataSource + 'static
             };
 
             let source_id = format!("hf_list_{idx}");
-            let snapshot_dir = PathBuf::from(".hf-snapshots")
-                .join("source-list")
-                .join(dataset.replace('/', "__"))
-                .join(&config)
-                .join(&split)
-                .join(format!("replica_{idx}"));
+            let snapshot_dir = match managed_hf_list_snapshot_dir(&dataset, &config, &split, idx)
+            {
+                Ok(path) => path,
+                Err(err) => {
+                    eprintln!(
+                        "Skipping Hugging Face source initialization for '{}': {}",
+                        source.uri, err
+                    );
+                    return None;
+                }
+            };
 
             let mut hf = HuggingFaceRowsConfig::new(
                 source_id,
@@ -318,10 +366,8 @@ pub struct HuggingFaceRowsConfig {
     pub max_rows: Option<usize>,
     /// Hard cap for local manifest-shard cache bytes.
     ///
-    /// When exceeded, oldest cached manifest shards are evicted.
+    /// Enforced by `cache-manager` policy application on manifest cache roots.
     pub local_disk_cap_bytes: Option<u64>,
-    /// Minimum number of manifest shards to keep resident during eviction.
-    pub min_resident_shards: usize,
     /// Optional row id column name. Falls back to synthetic id when missing.
     pub id_column: Option<String>,
     /// Text columns to extract. Empty means auto-detect textual scalar columns.
@@ -368,7 +414,6 @@ impl HuggingFaceRowsConfig {
             remote_expansion_headroom_multiplier: REMOTE_EXPANSION_HEADROOM_MULTIPLIER,
             max_rows: None,
             local_disk_cap_bytes: Some(32 * 1024 * 1024 * 1024),
-            min_resident_shards: REMOTE_BOOTSTRAP_SHARDS,
             id_column: Some("id".to_string()),
             text_columns: Vec::new(),
             anchor_column: None,
@@ -1109,91 +1154,50 @@ impl HuggingFaceRowSource {
         state.materialized_rows = running;
     }
 
-    /// Enforce local disk cap by evicting oldest manifest shards when possible.
+    /// Sync in-memory shard state from current on-disk snapshot tree.
+    fn sync_shard_state_from_disk_locked(&self, state: &mut SourceState) {
+        state.shards.retain(|shard| shard.path.exists());
+        Self::recompute_shard_offsets(state);
+    }
+
+    /// Apply cache-manager eviction policy and sync in-memory shard state.
     fn enforce_disk_cap_locked(
         &self,
         state: &mut SourceState,
-        protected_path: &Path,
+        _protected_path: &Path,
     ) -> Result<bool, SamplerError> {
         let Some(cap_bytes) = self.config.local_disk_cap_bytes else {
             return Ok(false);
         };
 
-        let manifest_root = self.manifest_cache_root();
-        let mut usage_bytes = state
+        let before = state
             .shards
             .iter()
-            .filter(|shard| shard.path.starts_with(&manifest_root))
-            .map(|shard| Self::shard_size_bytes(&shard.path))
-            .sum::<u64>();
+            .map(|shard| shard.path.clone())
+            .collect::<Vec<_>>();
+        let policy = EvictPolicy {
+            max_bytes: Some(cap_bytes),
+            ..EvictPolicy::default()
+        };
 
-        if usage_bytes <= cap_bytes {
-            return Ok(false);
-        }
-
-        let mut evicted_any = false;
-        loop {
-            if usage_bytes <= cap_bytes {
-                break;
-            }
-
-            let resident_manifest_count = state
-                .shards
-                .iter()
-                .filter(|shard| shard.path.starts_with(&manifest_root))
-                .count();
-            if resident_manifest_count <= self.config.min_resident_shards {
-                break;
-            }
-
-            let evict_pos = state.shards.iter().position(|shard| {
-                shard.path.starts_with(&manifest_root) && shard.path != protected_path
-            });
-            let Some(pos) = evict_pos else {
-                break;
-            };
-
-            let shard = state.shards.remove(pos);
-            let shard_size = Self::shard_size_bytes(&shard.path);
-            if let Err(err) = fs::remove_file(&shard.path)
-                && err.kind() != std::io::ErrorKind::NotFound
-            {
-                return Err(SamplerError::SourceUnavailable {
-                    source_id: self.config.source_id.clone(),
-                    reason: format!(
-                        "failed evicting shard {} under disk cap: {err}",
-                        shard.path.display()
-                    ),
-                });
-            }
-
-            usage_bytes = usage_bytes.saturating_sub(shard_size);
-            evicted_any = true;
-            warn!(
-                "[triplets:hf] evicted shard for disk cap: {} (usage={:.2} GiB cap={:.2} GiB)",
-                shard.path.display(),
-                usage_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
-                cap_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
-            );
-        }
-
-        if usage_bytes > cap_bytes {
-            if protected_path.exists() {
-                let _ = fs::remove_file(protected_path);
-            }
-            return Err(SamplerError::SourceUnavailable {
+        let cache_root = CacheRoot::from_root(&self.config.snapshot_dir);
+        cache_root
+            .ensure_group_with_policy("_parquet_manifest", Some(&policy))
+            .map_err(|err| SamplerError::SourceUnavailable {
                 source_id: self.config.source_id.clone(),
                 reason: format!(
-                    "local disk cap exceeded and cannot evict further (usage={} bytes cap={} bytes)",
-                    usage_bytes, cap_bytes
+                    "failed applying manifest cache eviction policy under {}: {err}",
+                    self.config.snapshot_dir.display()
                 ),
-            });
-        }
+            })?;
 
-        if evicted_any {
-            Self::recompute_shard_offsets(state);
-        }
-        Ok(evicted_any)
+        self.sync_shard_state_from_disk_locked(state);
+        let after = state
+            .shards
+            .iter()
+            .map(|shard| shard.path.clone())
+            .collect::<Vec<_>>();
+        Ok(before != after)
     }
 
     /// Return total on-disk bytes used by manifest-backed shards.
@@ -1711,7 +1715,7 @@ impl HuggingFaceRowSource {
                     let known_rows = state.materialized_rows;
                     let shard_count = state.shards.len();
                     info!(
-                        "[triplets:hf] state: candidates={} known_rows={} active_shards={} disk_cap={} min_resident_shards={}",
+                        "[triplets:hf] state: candidates={} known_rows={} active_shards={} disk_cap={}",
                         candidate_count,
                         known_rows,
                         shard_count,
@@ -1722,7 +1726,6 @@ impl HuggingFaceRowSource {
                                 bytes as f64 / (1024.0 * 1024.0 * 1024.0)
                             ))
                             .unwrap_or_else(|| "disabled".to_string()),
-                        self.config.min_resident_shards,
                     );
                     drop(state);
 
@@ -2907,6 +2910,43 @@ mod tests {
         (format!("http://{addr}"), handle)
     }
 
+    fn spawn_manifest_and_shard_http(shard_payload: Vec<u8>) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base_url = format!("http://{addr}");
+        let manifest_body = serde_json::json!({
+            "parquet_files": [
+                {
+                    "url": format!("{base_url}/resolve/main/train/bootstrap.ndjson"),
+                    "size": shard_payload.len()
+                }
+            ]
+        })
+        .to_string();
+        let handle = thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request_buf = [0u8; 4096];
+                let read = stream.read(&mut request_buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&request_buf[..read]);
+                let first_line = request.lines().next().unwrap_or_default();
+                let body = if first_line.contains("/parquet") {
+                    manifest_body.as_bytes().to_vec()
+                } else {
+                    shard_payload.clone()
+                };
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(headers.as_bytes()).unwrap();
+                stream.write_all(&body).unwrap();
+                let _ = stream.flush();
+            }
+        });
+        (base_url, handle)
+    }
+
     fn with_env_var<R>(key: &str, value: &str, run: impl FnOnce() -> R) -> R {
         static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         let guard = ENV_LOCK
@@ -2921,6 +2961,20 @@ mod tests {
         } else {
             unsafe { env::remove_var(key) };
         }
+        drop(guard);
+        result
+    }
+
+    fn with_current_dir<R>(dir: &Path, run: impl FnOnce() -> R) -> R {
+        static CWD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let guard = CWD_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("cwd lock poisoned");
+        let previous = env::current_dir().expect("get cwd");
+        env::set_current_dir(dir).expect("set cwd");
+        let result = run();
+        env::set_current_dir(previous).expect("restore cwd");
         drop(guard);
         result
     }
@@ -2967,6 +3021,147 @@ mod tests {
         assert!(row_group.next_column().unwrap().is_none());
         row_group.close().unwrap();
         writer.close().unwrap();
+    }
+
+    #[test]
+    fn managed_snapshot_helpers_create_cache_dirs_under_discovered_root() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname='tmp'\nversion='0.0.0'\n",
+        )
+        .unwrap();
+
+        with_current_dir(dir.path(), || {
+            let single = managed_hf_snapshot_dir("org/dataset", "default", "train").unwrap();
+            let listed =
+                managed_hf_list_snapshot_dir("org/dataset", "default", "train", 7).unwrap();
+
+            assert!(single.exists());
+            assert!(listed.exists());
+            assert!(single.ends_with(".cache/triplets/huggingface/org__dataset/default/train"));
+            assert!(listed.ends_with(
+                ".cache/triplets/huggingface/source-list/org__dataset/default/train/replica_7"
+            ));
+            assert!(listed.ends_with("replica_7"));
+        });
+    }
+
+    #[test]
+    fn load_and_resolve_hf_source_list_reports_invalid_and_empty_inputs() {
+        let dir = tempdir().unwrap();
+
+        let invalid_list = dir.path().join("invalid_sources.txt");
+        fs::write(&invalid_list, "hf://org/dataset/default/train badtoken\n").unwrap();
+        let invalid = load_hf_sources_from_list(invalid_list.to_str().unwrap()).unwrap_err();
+        assert!(invalid.contains("invalid source-list entry"));
+
+        let empty_list = dir.path().join("empty_sources.txt");
+        fs::write(&empty_list, "# comment only\n\n").unwrap();
+        let resolved =
+            resolve_hf_list_roots(empty_list.to_string_lossy().to_string(), Some(9)).unwrap_err();
+        assert!(resolved.contains("no hf:// entries found"));
+
+        let good_list = dir.path().join("good_sources.txt");
+        fs::write(
+            &good_list,
+            "hf://org/dataset/default/train anchor=title positive=body\n",
+        )
+        .unwrap();
+        let roots =
+            resolve_hf_list_roots(good_list.to_string_lossy().to_string(), Some(11)).unwrap();
+        assert_eq!(roots.sources.len(), 1);
+        assert_eq!(roots.max_rows_per_source, Some(11));
+    }
+
+    #[test]
+    fn new_errors_when_snapshot_dir_path_is_a_file() {
+        let dir = tempdir().unwrap();
+        let snapshot_file = dir.path().join("snapshot-file");
+        fs::write(&snapshot_file, b"x").unwrap();
+
+        let config = HuggingFaceRowsConfig::new(
+            "hf_bad_snapshot",
+            "org/dataset",
+            "default",
+            "train",
+            snapshot_file,
+        );
+        let result = HuggingFaceRowSource::new(config);
+        assert!(matches!(
+            result,
+            Err(SamplerError::SourceUnavailable { .. })
+        ));
+    }
+
+    #[test]
+    fn persist_shard_sequence_errors_when_manifest_dir_is_blocked_by_file() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        fs::write(config.snapshot_dir.join("_parquet_manifest"), b"blocked").unwrap();
+        let source = test_source(config);
+        let state = SourceState {
+            materialized_rows: 0,
+            total_rows: None,
+            shards: Vec::new(),
+            remote_candidates: Some(vec!["train/a.ndjson".to_string()]),
+            remote_candidate_sizes: HashMap::new(),
+            next_remote_idx: 0,
+        };
+
+        let err = source.persist_shard_sequence_locked(&state);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn list_remote_candidates_falls_back_when_manifest_query_fails() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.dataset = "invalid///dataset".to_string();
+
+        let result = with_env_var(
+            "TRIPLETS_HF_PARQUET_ENDPOINT",
+            "http://127.0.0.1:1/parquet",
+            || HuggingFaceRowSource::list_remote_candidates(&config),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn build_hf_sources_skips_invalid_uri_and_handles_cache_dir_failure() {
+        let roots = HfListRoots {
+            source_list: "inline".to_string(),
+            sources: vec![
+                HfSourceEntry {
+                    uri: "hf://onlyorg".to_string(),
+                    anchor_column: Some("title".to_string()),
+                    positive_column: None,
+                    context_columns: Vec::new(),
+                    text_columns: Vec::new(),
+                },
+                HfSourceEntry {
+                    uri: "hf://org/dataset/default/train".to_string(),
+                    anchor_column: Some("title".to_string()),
+                    positive_column: Some("body".to_string()),
+                    context_columns: Vec::new(),
+                    text_columns: Vec::new(),
+                },
+            ],
+            max_rows_per_source: Some(5),
+        };
+
+        let temp_root = tempdir().unwrap();
+        fs::write(
+            temp_root.path().join("Cargo.toml"),
+            "[package]\nname='tmp'\nversion='0.0.0'\n",
+        )
+        .unwrap();
+        fs::write(temp_root.path().join(".cache"), b"blocking-file").unwrap();
+
+        with_current_dir(temp_root.path(), || {
+            let built = build_hf_sources(&roots);
+            assert!(built.is_empty());
+        });
     }
 
     #[test]
@@ -3570,7 +3765,6 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path().to_path_buf());
         config.local_disk_cap_bytes = Some(20);
-        config.min_resident_shards = 0;
         let source = test_source(config);
         let manifest_root = source.manifest_cache_root();
         fs::create_dir_all(&manifest_root).unwrap();
@@ -3616,11 +3810,10 @@ mod tests {
     }
 
     #[test]
-    fn enforce_disk_cap_errors_when_usage_still_exceeds_cap() {
+    fn enforce_disk_cap_evicts_when_single_file_exceeds_cap() {
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path().to_path_buf());
         config.local_disk_cap_bytes = Some(1);
-        config.min_resident_shards = 1;
         let source = test_source(config);
         let manifest_root = source.manifest_cache_root();
         fs::create_dir_all(&manifest_root).unwrap();
@@ -3644,14 +3837,13 @@ mod tests {
             next_remote_idx: 0,
         };
 
-        let err = source
+        let evicted = source
             .enforce_disk_cap_locked(&mut state, &protected)
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            SamplerError::SourceUnavailable { ref reason, .. } if reason.contains("cannot evict further")
-        ));
+            .unwrap();
+        assert!(evicted);
         assert!(!protected.exists());
+        assert_eq!(state.shards.len(), 0);
+        assert_eq!(state.materialized_rows, 0);
     }
 
     #[test]
@@ -3906,7 +4098,6 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path().to_path_buf());
         config.local_disk_cap_bytes = Some(20);
-        config.min_resident_shards = 0;
         let source = test_source(config.clone());
 
         let manifest_root = source.manifest_cache_root();
@@ -5330,7 +5521,6 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path().to_path_buf());
         config.local_disk_cap_bytes = Some(10);
-        config.min_resident_shards = 0;
         let source = test_source(config);
 
         let manifest_root = source.manifest_cache_root();
@@ -5376,11 +5566,10 @@ mod tests {
     }
 
     #[test]
-    fn enforce_disk_cap_errors_when_min_resident_prevents_eviction() {
+    fn enforce_disk_cap_ignores_min_resident_and_applies_policy() {
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path().to_path_buf());
         config.local_disk_cap_bytes = Some(4);
-        config.min_resident_shards = 1;
         let source = test_source(config);
 
         let manifest_root = source.manifest_cache_root();
@@ -5404,9 +5593,12 @@ mod tests {
             next_remote_idx: 0,
         };
 
-        let err = source.enforce_disk_cap_locked(&mut state, &protected);
-        assert!(err.is_err());
+        let evicted = source
+            .enforce_disk_cap_locked(&mut state, &protected)
+            .unwrap();
+        assert!(evicted);
         assert!(!protected.exists());
+        assert_eq!(state.shards.len(), 0);
     }
 
     #[test]
@@ -5510,6 +5702,36 @@ mod tests {
     }
 
     #[test]
+    fn parse_row_returns_none_when_positive_or_text_columns_are_missing() {
+        let dir = tempdir().unwrap();
+        let mut role_config = test_config(dir.path().to_path_buf());
+        role_config.anchor_column = Some("anchor".into());
+        role_config.positive_column = Some("positive".into());
+        let role_source = test_source(role_config);
+
+        let role_missing = role_source.parse_row(0, &json!({"anchor":"a"})).unwrap();
+        assert!(role_missing.is_none());
+
+        let mut text_config = test_config(dir.path().to_path_buf());
+        text_config.text_columns = vec!["title".into(), "body".into()];
+        let text_source = test_source(text_config);
+        let text_missing = text_source.parse_row(1, &json!({"title":"t"})).unwrap();
+        assert!(text_missing.is_none());
+    }
+
+    #[test]
+    fn parse_row_returns_none_when_auto_detect_has_no_text_fields() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.id_column = Some("id".into());
+        config.text_columns.clear();
+        let source = test_source(config);
+
+        let parsed = source.parse_row(7, &json!({"id":"only-id"})).unwrap();
+        assert!(parsed.is_none());
+    }
+
+    #[test]
     fn row_to_record_returns_none_for_empty_fields() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
@@ -5538,6 +5760,24 @@ mod tests {
         assert!(source.ensure_row_available(0).unwrap());
         assert!(!source.ensure_row_available(3).unwrap());
         assert!(!source.ensure_row_available(1).unwrap());
+    }
+
+    #[test]
+    fn ensure_row_available_bootstraps_from_manifest_candidates() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config);
+        let (base_url, server) = spawn_manifest_and_shard_http(b"{\"text\":\"hello\"}\n".to_vec());
+
+        with_env_var(
+            "TRIPLETS_HF_PARQUET_ENDPOINT",
+            &format!("{base_url}/parquet"),
+            || {
+                assert!(source.ensure_row_available(0).unwrap());
+            },
+        );
+
+        server.join().unwrap();
     }
 
     #[test]
