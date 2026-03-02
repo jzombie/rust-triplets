@@ -922,8 +922,9 @@ fn extract_source(record_id: &str) -> SourceId {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DataRecord;
     use crate::DeterministicSplitStore;
-    use crate::data::SectionRole;
+    use crate::data::{QualityScore, RecordSection, SectionRole};
     use crate::source::{SourceCursor, SourceSnapshot};
     use chrono::Utc;
     use tempfile::tempdir;
@@ -1127,6 +1128,105 @@ mod tests {
         );
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn config_required_source_refresh_and_seed_mismatch_are_exercised() {
+        let source = ConfigRequiredSource {
+            id: "cfg-source".to_string(),
+            expected_seed: 42,
+        };
+
+        let refreshed = source
+            .refresh(&SamplerConfig::default(), None, None)
+            .unwrap();
+        assert!(refreshed.records.is_empty());
+
+        let mismatched = source.reported_record_count(&SamplerConfig {
+            seed: 7,
+            ..SamplerConfig::default()
+        });
+        assert!(matches!(
+            mismatched,
+            Err(SamplerError::SourceInconsistent { .. })
+        ));
+
+        assert!(source.default_triplet_recipes().is_empty());
+    }
+
+    #[test]
+    fn run_multi_source_demo_exhausted_paths_return_ok() {
+        struct OneRecordSource;
+
+        impl DataSource for OneRecordSource {
+            fn id(&self) -> &str {
+                "one_record"
+            }
+
+            fn refresh(
+                &self,
+                _config: &SamplerConfig,
+                _cursor: Option<&SourceCursor>,
+                _limit: Option<usize>,
+            ) -> Result<SourceSnapshot, SamplerError> {
+                let now = Utc::now();
+                Ok(SourceSnapshot {
+                    records: vec![DataRecord {
+                        id: "one_record::r1".to_string(),
+                        source: "one_record".to_string(),
+                        created_at: now,
+                        updated_at: now,
+                        quality: QualityScore { trust: 1.0 },
+                        taxonomy: Vec::new(),
+                        sections: vec![
+                            RecordSection {
+                                role: SectionRole::Anchor,
+                                heading: Some("title".to_string()),
+                                text: "anchor".to_string(),
+                                sentences: vec!["anchor".to_string()],
+                            },
+                            RecordSection {
+                                role: SectionRole::Context,
+                                heading: Some("body".to_string()),
+                                text: "context".to_string(),
+                                sentences: vec!["context".to_string()],
+                            },
+                        ],
+                        meta_prefix: None,
+                    }],
+                    cursor: SourceCursor {
+                        last_seen: now,
+                        revision: 0,
+                    },
+                })
+            }
+
+            fn reported_record_count(&self, _config: &SamplerConfig) -> Result<u128, SamplerError> {
+                Ok(1)
+            }
+
+            fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {
+                vec![default_recipe("single_record_recipe")]
+            }
+        }
+
+        for mode in ["--pair-batch", "--text-recipes", ""] {
+            let dir = tempdir().unwrap();
+            let mut args = vec![
+                "--split-store-dir".to_string(),
+                dir.path().to_string_lossy().to_string(),
+            ];
+            if !mode.is_empty() {
+                args.push(mode.to_string());
+            }
+
+            let result = run_multi_source_demo(
+                args.into_iter(),
+                |_| Ok(()),
+                |_| vec![Box::new(OneRecordSource) as DynSource],
+            );
+            assert!(result.is_ok());
+        }
     }
 
     #[test]

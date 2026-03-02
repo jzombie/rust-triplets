@@ -2910,6 +2910,43 @@ mod tests {
         (format!("http://{addr}"), handle)
     }
 
+    fn spawn_manifest_and_shard_http(shard_payload: Vec<u8>) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base_url = format!("http://{addr}");
+        let manifest_body = serde_json::json!({
+            "parquet_files": [
+                {
+                    "url": format!("{base_url}/resolve/main/train/bootstrap.ndjson"),
+                    "size": shard_payload.len()
+                }
+            ]
+        })
+        .to_string();
+        let handle = thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request_buf = [0u8; 4096];
+                let read = stream.read(&mut request_buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&request_buf[..read]);
+                let first_line = request.lines().next().unwrap_or_default();
+                let body = if first_line.contains("/parquet") {
+                    manifest_body.as_bytes().to_vec()
+                } else {
+                    shard_payload.clone()
+                };
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(headers.as_bytes()).unwrap();
+                stream.write_all(&body).unwrap();
+                let _ = stream.flush();
+            }
+        });
+        (base_url, handle)
+    }
+
     fn with_env_var<R>(key: &str, value: &str, run: impl FnOnce() -> R) -> R {
         static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         let guard = ENV_LOCK
@@ -2924,6 +2961,20 @@ mod tests {
         } else {
             unsafe { env::remove_var(key) };
         }
+        drop(guard);
+        result
+    }
+
+    fn with_current_dir<R>(dir: &Path, run: impl FnOnce() -> R) -> R {
+        static CWD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let guard = CWD_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("cwd lock poisoned");
+        let previous = env::current_dir().expect("get cwd");
+        env::set_current_dir(dir).expect("set cwd");
+        let result = run();
+        env::set_current_dir(previous).expect("restore cwd");
         drop(guard);
         result
     }
@@ -2970,6 +3021,147 @@ mod tests {
         assert!(row_group.next_column().unwrap().is_none());
         row_group.close().unwrap();
         writer.close().unwrap();
+    }
+
+    #[test]
+    fn managed_snapshot_helpers_create_cache_dirs_under_discovered_root() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname='tmp'\nversion='0.0.0'\n",
+        )
+        .unwrap();
+
+        with_current_dir(dir.path(), || {
+            let single = managed_hf_snapshot_dir("org/dataset", "default", "train").unwrap();
+            let listed =
+                managed_hf_list_snapshot_dir("org/dataset", "default", "train", 7).unwrap();
+
+            assert!(single.exists());
+            assert!(listed.exists());
+            assert!(single.ends_with(".cache/triplets/huggingface/org__dataset/default/train"));
+            assert!(listed.ends_with(
+                ".cache/triplets/huggingface/source-list/org__dataset/default/train/replica_7"
+            ));
+            assert!(listed.ends_with("replica_7"));
+        });
+    }
+
+    #[test]
+    fn load_and_resolve_hf_source_list_reports_invalid_and_empty_inputs() {
+        let dir = tempdir().unwrap();
+
+        let invalid_list = dir.path().join("invalid_sources.txt");
+        fs::write(&invalid_list, "hf://org/dataset/default/train badtoken\n").unwrap();
+        let invalid = load_hf_sources_from_list(invalid_list.to_str().unwrap()).unwrap_err();
+        assert!(invalid.contains("invalid source-list entry"));
+
+        let empty_list = dir.path().join("empty_sources.txt");
+        fs::write(&empty_list, "# comment only\n\n").unwrap();
+        let resolved =
+            resolve_hf_list_roots(empty_list.to_string_lossy().to_string(), Some(9)).unwrap_err();
+        assert!(resolved.contains("no hf:// entries found"));
+
+        let good_list = dir.path().join("good_sources.txt");
+        fs::write(
+            &good_list,
+            "hf://org/dataset/default/train anchor=title positive=body\n",
+        )
+        .unwrap();
+        let roots =
+            resolve_hf_list_roots(good_list.to_string_lossy().to_string(), Some(11)).unwrap();
+        assert_eq!(roots.sources.len(), 1);
+        assert_eq!(roots.max_rows_per_source, Some(11));
+    }
+
+    #[test]
+    fn new_errors_when_snapshot_dir_path_is_a_file() {
+        let dir = tempdir().unwrap();
+        let snapshot_file = dir.path().join("snapshot-file");
+        fs::write(&snapshot_file, b"x").unwrap();
+
+        let config = HuggingFaceRowsConfig::new(
+            "hf_bad_snapshot",
+            "org/dataset",
+            "default",
+            "train",
+            snapshot_file,
+        );
+        let result = HuggingFaceRowSource::new(config);
+        assert!(matches!(
+            result,
+            Err(SamplerError::SourceUnavailable { .. })
+        ));
+    }
+
+    #[test]
+    fn persist_shard_sequence_errors_when_manifest_dir_is_blocked_by_file() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        fs::write(config.snapshot_dir.join("_parquet_manifest"), b"blocked").unwrap();
+        let source = test_source(config);
+        let state = SourceState {
+            materialized_rows: 0,
+            total_rows: None,
+            shards: Vec::new(),
+            remote_candidates: Some(vec!["train/a.ndjson".to_string()]),
+            remote_candidate_sizes: HashMap::new(),
+            next_remote_idx: 0,
+        };
+
+        let err = source.persist_shard_sequence_locked(&state);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn list_remote_candidates_falls_back_when_manifest_query_fails() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.dataset = "invalid///dataset".to_string();
+
+        let result = with_env_var(
+            "TRIPLETS_HF_PARQUET_ENDPOINT",
+            "http://127.0.0.1:1/parquet",
+            || HuggingFaceRowSource::list_remote_candidates(&config),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn build_hf_sources_skips_invalid_uri_and_handles_cache_dir_failure() {
+        let roots = HfListRoots {
+            source_list: "inline".to_string(),
+            sources: vec![
+                HfSourceEntry {
+                    uri: "hf://onlyorg".to_string(),
+                    anchor_column: Some("title".to_string()),
+                    positive_column: None,
+                    context_columns: Vec::new(),
+                    text_columns: Vec::new(),
+                },
+                HfSourceEntry {
+                    uri: "hf://org/dataset/default/train".to_string(),
+                    anchor_column: Some("title".to_string()),
+                    positive_column: Some("body".to_string()),
+                    context_columns: Vec::new(),
+                    text_columns: Vec::new(),
+                },
+            ],
+            max_rows_per_source: Some(5),
+        };
+
+        let temp_root = tempdir().unwrap();
+        fs::write(
+            temp_root.path().join("Cargo.toml"),
+            "[package]\nname='tmp'\nversion='0.0.0'\n",
+        )
+        .unwrap();
+        fs::write(temp_root.path().join(".cache"), b"blocking-file").unwrap();
+
+        with_current_dir(temp_root.path(), || {
+            let built = build_hf_sources(&roots);
+            assert!(built.is_empty());
+        });
     }
 
     #[test]
@@ -5510,6 +5702,36 @@ mod tests {
     }
 
     #[test]
+    fn parse_row_returns_none_when_positive_or_text_columns_are_missing() {
+        let dir = tempdir().unwrap();
+        let mut role_config = test_config(dir.path().to_path_buf());
+        role_config.anchor_column = Some("anchor".into());
+        role_config.positive_column = Some("positive".into());
+        let role_source = test_source(role_config);
+
+        let role_missing = role_source.parse_row(0, &json!({"anchor":"a"})).unwrap();
+        assert!(role_missing.is_none());
+
+        let mut text_config = test_config(dir.path().to_path_buf());
+        text_config.text_columns = vec!["title".into(), "body".into()];
+        let text_source = test_source(text_config);
+        let text_missing = text_source.parse_row(1, &json!({"title":"t"})).unwrap();
+        assert!(text_missing.is_none());
+    }
+
+    #[test]
+    fn parse_row_returns_none_when_auto_detect_has_no_text_fields() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.id_column = Some("id".into());
+        config.text_columns.clear();
+        let source = test_source(config);
+
+        let parsed = source.parse_row(7, &json!({"id":"only-id"})).unwrap();
+        assert!(parsed.is_none());
+    }
+
+    #[test]
     fn row_to_record_returns_none_for_empty_fields() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
@@ -5538,6 +5760,24 @@ mod tests {
         assert!(source.ensure_row_available(0).unwrap());
         assert!(!source.ensure_row_available(3).unwrap());
         assert!(!source.ensure_row_available(1).unwrap());
+    }
+
+    #[test]
+    fn ensure_row_available_bootstraps_from_manifest_candidates() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config);
+        let (base_url, server) = spawn_manifest_and_shard_http(b"{\"text\":\"hello\"}\n".to_vec());
+
+        with_env_var(
+            "TRIPLETS_HF_PARQUET_ENDPOINT",
+            &format!("{base_url}/parquet"),
+            || {
+                assert!(source.ensure_row_available(0).unwrap());
+            },
+        );
+
+        server.join().unwrap();
     }
 
     #[test]

@@ -415,6 +415,8 @@ mod tests {
     use crate::data::{QualityScore, RecordSection, SectionRole};
     use crate::types::RecordId;
     use chrono::Duration;
+    use std::thread;
+    use std::time::Duration as StdDuration;
 
     /// Minimal `IndexableSource` test fixture.
     struct IndexableStub {
@@ -654,6 +656,45 @@ mod tests {
 
         assert_eq!(snapshot.records.len(), 4);
         assert!(snapshot.cursor.revision < 10_000);
+    }
+
+    #[test]
+    fn indexable_pager_reporting_branch_emits_progress_when_refresh_is_slow() {
+        let pager = IndexablePager::new("slow_reporting");
+        let mut slept = false;
+        let snapshot = pager
+            .refresh_with(2_000, None, Some(1_024), |_idx| {
+                if !slept {
+                    thread::sleep(StdDuration::from_millis(800));
+                    slept = true;
+                }
+                Ok(None)
+            })
+            .unwrap();
+
+        assert!(snapshot.records.is_empty());
+        assert!(snapshot.cursor.revision < 2_000);
+    }
+
+    #[test]
+    fn source_ids_and_reported_counts_are_exposed() {
+        let adapter = IndexableAdapter::new(IndexableStub::new("stub_id", 3));
+        assert_eq!(adapter.id(), "stub_id");
+        assert_eq!(
+            adapter
+                .reported_record_count(&SamplerConfig::default())
+                .unwrap(),
+            3
+        );
+
+        let memory = InMemorySource::new("mem_id", Vec::new());
+        assert_eq!(memory.id(), "mem_id");
+        assert_eq!(
+            memory
+                .reported_record_count(&SamplerConfig::default())
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
