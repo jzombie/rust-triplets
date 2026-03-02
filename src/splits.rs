@@ -139,12 +139,12 @@ pub trait EpochStateStore: Send + Sync {
         label: SplitLabel,
     ) -> Result<Option<PersistedSplitHashes>, SamplerError>;
     /// Persist split→epoch metadata map.
-    fn store_epoch_meta(
+    fn save_epoch_meta(
         &self,
         meta: &HashMap<SplitLabel, PersistedSplitMeta>,
     ) -> Result<(), SamplerError>;
     /// Persist epoch hash list for one split.
-    fn store_epoch_hashes(
+    fn save_epoch_hashes(
         &self,
         label: SplitLabel,
         hashes: &PersistedSplitHashes,
@@ -155,8 +155,12 @@ pub trait EpochStateStore: Send + Sync {
 pub trait SamplerStateStore: Send + Sync {
     /// Load persisted sampler runtime state, if present.
     fn load_sampler_state(&self) -> Result<Option<PersistedSamplerState>, SamplerError>;
-    /// Persist sampler runtime state.
-    fn store_sampler_state(&self, state: &PersistedSamplerState) -> Result<(), SamplerError>;
+    /// Save sampler runtime state, optionally mirroring to `save_path`.
+    fn save_sampler_state(
+        &self,
+        state: &PersistedSamplerState,
+        save_path: Option<&Path>,
+    ) -> Result<(), SamplerError>;
 }
 
 /// In-memory split store with deterministic assignment derivation.
@@ -234,7 +238,7 @@ impl EpochStateStore for DeterministicSplitStore {
             .cloned())
     }
 
-    fn store_epoch_meta(
+    fn save_epoch_meta(
         &self,
         meta: &HashMap<SplitLabel, PersistedSplitMeta>,
     ) -> Result<(), SamplerError> {
@@ -246,7 +250,7 @@ impl EpochStateStore for DeterministicSplitStore {
         Ok(())
     }
 
-    fn store_epoch_hashes(
+    fn save_epoch_hashes(
         &self,
         label: SplitLabel,
         hashes: &PersistedSplitHashes,
@@ -267,7 +271,11 @@ impl SamplerStateStore for DeterministicSplitStore {
             .map(|guard| guard.clone())
     }
 
-    fn store_sampler_state(&self, state: &PersistedSamplerState) -> Result<(), SamplerError> {
+    fn save_sampler_state(
+        &self,
+        state: &PersistedSamplerState,
+        _save_path: Option<&Path>,
+    ) -> Result<(), SamplerError> {
         *self
             .sampler_state
             .write()
@@ -491,7 +499,7 @@ impl EpochStateStore for FileSplitStore {
         self.read_epoch_hashes_entry(label)
     }
 
-    fn store_epoch_meta(
+    fn save_epoch_meta(
         &self,
         meta: &HashMap<SplitLabel, PersistedSplitMeta>,
     ) -> Result<(), SamplerError> {
@@ -501,7 +509,7 @@ impl EpochStateStore for FileSplitStore {
         Ok(())
     }
 
-    fn store_epoch_hashes(
+    fn save_epoch_hashes(
         &self,
         label: SplitLabel,
         hashes: &PersistedSplitHashes,
@@ -518,9 +526,29 @@ impl SamplerStateStore for FileSplitStore {
         }
     }
 
-    fn store_sampler_state(&self, state: &PersistedSamplerState) -> Result<(), SamplerError> {
+    fn save_sampler_state(
+        &self,
+        state: &PersistedSamplerState,
+        save_path: Option<&Path>,
+    ) -> Result<(), SamplerError> {
         let payload = encode_sampler_state(state);
-        write_bytes(&self.store, SAMPLER_STATE_KEY, &payload)
+        write_bytes(&self.store, SAMPLER_STATE_KEY, &payload)?;
+
+        if let Some(save_path) = save_path {
+            let target = FileSplitStore::open(save_path.to_path_buf(), self.ratios, self.seed)?;
+            let epoch_meta = self.load_epoch_meta()?;
+            target.save_epoch_meta(&epoch_meta)?;
+
+            for label in ALL_SPLITS {
+                if let Some(hashes) = self.load_epoch_hashes(label)? {
+                    target.save_epoch_hashes(label, &hashes)?;
+                }
+            }
+
+            target.save_sampler_state(state, None)?;
+        }
+
+        Ok(())
     }
 }
 
@@ -828,7 +856,7 @@ mod tests {
                 hashes_checksum: 42,
             },
         );
-        store.store_epoch_meta(&epoch_meta).unwrap();
+        store.save_epoch_meta(&epoch_meta).unwrap();
 
         let loaded_meta = store.load_epoch_meta().unwrap();
         let loaded_train = loaded_meta.get(&SplitLabel::Train).unwrap();
@@ -841,7 +869,7 @@ mod tests {
             hashes: vec![10, 20, 30],
         };
         store
-            .store_epoch_hashes(SplitLabel::Validation, &hashes)
+            .save_epoch_hashes(SplitLabel::Validation, &hashes)
             .unwrap();
         let loaded_hashes = store
             .load_epoch_hashes(SplitLabel::Validation)
@@ -859,7 +887,7 @@ mod tests {
             text_recipe_rr_idx: 5,
             source_stream_cursors: vec![("source_a".to_string(), 9)],
         };
-        store.store_sampler_state(&state).unwrap();
+        store.save_sampler_state(&state, None).unwrap();
         let loaded_state = store.load_sampler_state().unwrap().unwrap();
         assert_eq!(loaded_state.source_cycle_idx, 11);
         assert_eq!(loaded_state.source_epoch, 8);
@@ -1035,7 +1063,7 @@ mod tests {
                 hashes_checksum: 3,
             },
         );
-        store.store_epoch_meta(&meta).unwrap();
+        store.save_epoch_meta(&meta).unwrap();
         let loaded_meta = store.load_epoch_meta().unwrap();
         assert_eq!(loaded_meta.get(&SplitLabel::Test).unwrap().offset, 2);
 
@@ -1046,7 +1074,7 @@ mod tests {
                 .is_none()
         );
         store
-            .store_epoch_hashes(
+            .save_epoch_hashes(
                 SplitLabel::Train,
                 &PersistedSplitHashes {
                     checksum: 11,
@@ -1073,7 +1101,7 @@ mod tests {
             text_recipe_rr_idx: 6,
             source_stream_cursors: vec![("s1".to_string(), 7)],
         };
-        store.store_sampler_state(&sampler_state).unwrap();
+        store.save_sampler_state(&sampler_state, None).unwrap();
         assert_eq!(
             store.load_sampler_state().unwrap().unwrap().source_epoch,
             sampler_state.source_epoch
@@ -1098,7 +1126,7 @@ mod tests {
                 hashes_checksum: 999,
             },
         );
-        store_a.store_epoch_meta(&meta).unwrap();
+        store_a.save_epoch_meta(&meta).unwrap();
 
         let sampler_state = PersistedSamplerState {
             source_cycle_idx: 1,
@@ -1109,7 +1137,7 @@ mod tests {
             text_recipe_rr_idx: 6,
             source_stream_cursors: vec![("s1".to_string(), 8)],
         };
-        store_a.store_sampler_state(&sampler_state).unwrap();
+        store_a.save_sampler_state(&sampler_state, None).unwrap();
         drop(store_a);
 
         let store_b =

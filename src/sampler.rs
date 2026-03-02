@@ -4,6 +4,7 @@ use rand::prelude::*;
 use rand::seq::IndexedRandom;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -556,7 +557,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         Ok(())
     }
 
-    fn persist_source_state(&mut self) -> Result<(), SamplerError> {
+    fn persist_source_state(&mut self, save_to: Option<&Path>) -> Result<(), SamplerError> {
         if !self.source_state_loaded {
             return Ok(());
         }
@@ -573,7 +574,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             text_recipe_rr_idx: self.text_recipe_rr_idx as u64,
             source_stream_cursors: self.ingestion.snapshot_cursors(),
         };
-        self.split_store.store_sampler_state(&state)?;
+        self.split_store.save_sampler_state(&state, save_to)?;
         self.source_state_dirty = false;
         Ok(())
     }
@@ -848,11 +849,11 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         None
     }
 
-    fn persist_state(&mut self) -> Result<(), SamplerError> {
+    fn save_sampler_state(&mut self, save_to: Option<&Path>) -> Result<(), SamplerError> {
         if self.epoch_tracker.is_enabled() {
             self.epoch_tracker.persist()?;
         }
-        self.persist_source_state()?;
+        self.persist_source_state(save_to)?;
         Ok(())
     }
 
@@ -2290,9 +2291,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     }
 
     /// Persist sampler and split runtime state for restart-resume.
-    pub fn persist_state(&self) -> Result<(), SamplerError> {
+    ///
+    /// When `save_to` is `Some(path)`, current persisted runtime state is also
+    /// mirrored to `path` when supported by the split-store backend.
+    pub fn save_sampler_state(&self, save_to: Option<&Path>) -> Result<(), SamplerError> {
         let mut inner = self.inner.lock().unwrap();
-        inner.persist_state()
+        inner.save_sampler_state(save_to)
     }
 }
 
@@ -6533,7 +6537,7 @@ mod tests {
                 .anchor
                 .record_id
                 .clone();
-            sampler.persist_state().unwrap();
+            sampler.save_sampler_state(None).unwrap();
             anchor
         };
 
@@ -6551,7 +6555,7 @@ mod tests {
             let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
             anchors.extend(batch.triplets.iter().map(|t| t.anchor.record_id.clone()));
         }
-        sampler.persist_state().unwrap();
+        sampler.save_sampler_state(None).unwrap();
         assert!(
             anchors.contains(&first_anchor),
             "previously consumed records may reappear with streaming paging"
@@ -6614,7 +6618,7 @@ mod tests {
                 .unwrap();
             let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
             let anchor = batch.triplets[0].anchor.record_id.clone();
-            sampler.persist_state().unwrap();
+            sampler.save_sampler_state(None).unwrap();
             anchor
         };
 

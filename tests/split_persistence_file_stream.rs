@@ -222,7 +222,7 @@ fn split_store_growth_stays_bounded_per_epoch() {
     let mut sizes = Vec::new();
     for _ in 0..5 {
         let _ = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
-        sampler.persist_state().unwrap();
+        sampler.save_sampler_state(None).unwrap();
         let size = fs::metadata(&store_path).unwrap().len();
         sizes.push(size);
     }

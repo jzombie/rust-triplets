@@ -3,6 +3,7 @@ use std::sync::Arc;
 use chrono::{TimeZone, Utc};
 
 use triplets::source::InMemorySource;
+use triplets::splits::{EpochStateStore, SamplerStateStore};
 use triplets::utils::make_section;
 use triplets::{
     DataRecord, FileSplitStore, NegativeStrategy, QualityScore, RecordId, Sampler, SamplerConfig,
@@ -81,7 +82,7 @@ fn first_record_ids(store_path: &std::path::Path, batch_size: usize) -> Vec<Reco
     sampler.register_source(Box::new(InMemorySource::new("source_b", source_b)));
 
     let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
-    sampler.persist_state().unwrap();
+    sampler.save_sampler_state(None).unwrap();
     batch
         .triplets
         .iter()
@@ -148,7 +149,7 @@ fn negatives_persist_across_restart() {
         sampler.register_source(Box::new(InMemorySource::new("source_b", source_b.clone())));
 
         let first = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
-        sampler.persist_state().unwrap();
+        sampler.save_sampler_state(None).unwrap();
         first
             .triplets
             .iter()
@@ -163,7 +164,7 @@ fn negatives_persist_across_restart() {
         sampler.register_source(Box::new(InMemorySource::new("source_b", source_b)));
 
         let first_after_restart = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
-        sampler.persist_state().unwrap();
+        sampler.save_sampler_state(None).unwrap();
         first_after_restart
             .triplets
             .iter()
@@ -172,4 +173,122 @@ fn negatives_persist_across_restart() {
     };
 
     assert_ne!(first_run_negatives, restart_negatives);
+}
+
+#[test]
+fn save_sampler_state_none_writes_to_loaded_store_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let store_path = temp.path().join("loaded_store.bin");
+    let other_path = temp.path().join("other_store.bin");
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+
+    let _other_store = FileSplitStore::open(&other_path, split, 73).unwrap();
+
+    let store = Arc::new(FileSplitStore::open(&store_path, split, 73).unwrap());
+    let sampler = TripletSampler::new(build_config(4, split), store);
+    sampler.register_source(Box::new(InMemorySource::new(
+        "source_a",
+        vec![
+            build_record("source_a", "a1", 1),
+            build_record("source_a", "a2", 2),
+            build_record("source_a", "a3", 3),
+            build_record("source_a", "a4", 4),
+        ],
+    )));
+    sampler.register_source(Box::new(InMemorySource::new(
+        "source_b",
+        vec![
+            build_record("source_b", "b1", 1),
+            build_record("source_b", "b2", 2),
+            build_record("source_b", "b3", 3),
+            build_record("source_b", "b4", 4),
+        ],
+    )));
+
+    sampler.next_triplet_batch(SplitLabel::Train).unwrap();
+    sampler.save_sampler_state(None).unwrap();
+
+    let loaded_store = FileSplitStore::open(&store_path, split, 73).unwrap();
+    let other_store = FileSplitStore::open(&other_path, split, 73).unwrap();
+
+    assert!(loaded_store.load_sampler_state().unwrap().is_some());
+    assert!(other_store.load_sampler_state().unwrap().is_none());
+}
+
+#[test]
+fn save_sampler_state_some_mirrors_to_new_store_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let source_store_path = temp.path().join("source_store.bin");
+    let mirror_store_path = temp.path().join("mirror_store.bin");
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+
+    let store = Arc::new(FileSplitStore::open(&source_store_path, split, 73).unwrap());
+    let sampler = TripletSampler::new(build_config(4, split), store);
+    sampler.register_source(Box::new(InMemorySource::new(
+        "source_a",
+        vec![
+            build_record("source_a", "a1", 1),
+            build_record("source_a", "a2", 2),
+            build_record("source_a", "a3", 3),
+            build_record("source_a", "a4", 4),
+        ],
+    )));
+    sampler.register_source(Box::new(InMemorySource::new(
+        "source_b",
+        vec![
+            build_record("source_b", "b1", 1),
+            build_record("source_b", "b2", 2),
+            build_record("source_b", "b3", 3),
+            build_record("source_b", "b4", 4),
+        ],
+    )));
+
+    sampler.next_triplet_batch(SplitLabel::Train).unwrap();
+    sampler
+        .save_sampler_state(Some(mirror_store_path.as_path()))
+        .unwrap();
+
+    let source_store = FileSplitStore::open(&source_store_path, split, 73).unwrap();
+    let mirror_store = FileSplitStore::open(&mirror_store_path, split, 73).unwrap();
+
+    let source_state = source_store.load_sampler_state().unwrap().unwrap();
+    let mirror_state = mirror_store.load_sampler_state().unwrap().unwrap();
+
+    assert_eq!(mirror_state.source_cycle_idx, source_state.source_cycle_idx);
+    assert_eq!(
+        mirror_state.source_record_cursors,
+        source_state.source_record_cursors
+    );
+    assert_eq!(mirror_state.source_epoch, source_state.source_epoch);
+    assert_eq!(mirror_state.rng_state, source_state.rng_state);
+    assert_eq!(
+        mirror_state.triplet_recipe_rr_idx,
+        source_state.triplet_recipe_rr_idx
+    );
+    assert_eq!(
+        mirror_state.text_recipe_rr_idx,
+        source_state.text_recipe_rr_idx
+    );
+    assert_eq!(
+        mirror_state.source_stream_cursors,
+        source_state.source_stream_cursors
+    );
+
+    let source_meta = source_store.load_epoch_meta().unwrap();
+    let mirror_meta = mirror_store.load_epoch_meta().unwrap();
+    assert_eq!(mirror_meta.len(), source_meta.len());
+    for (label, expected) in source_meta {
+        let actual = mirror_meta.get(&label).unwrap();
+        assert_eq!(actual.epoch, expected.epoch);
+        assert_eq!(actual.offset, expected.offset);
+        assert_eq!(actual.hashes_checksum, expected.hashes_checksum);
+    }
 }

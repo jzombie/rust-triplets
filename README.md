@@ -49,7 +49,7 @@ It is designed for multi-source training pipelines where each batch can mix reco
 - **Per-source batch mixing controls** so multiple sources can contribute to the same batch, with independent source frequency controls (including over/under-sampling).
 - **Per-source trust controls** to weight quality/trust independently by source/taxonomy and help mitigate bias from uneven source quality.
 - **Per-batch dynamic source reweighting** so source weights can be changed across batches (for example from loss/metric feedback) while training.
-- **Resume support** via `persist_state()` and split-store persistence.
+- **Resume support** via `save_sampler_state(save_to)` and split-store persistence.
 - **Source-agnostic backends** (`DataSource` or `IndexableSource` + `IndexableAdapter`).
 - **Supply-chain style orchestration (core layer):** multi-source intake (`refresh`) with per-call parallel ingest, optional per-source weighting, staged buffering, deterministic split routing, and batch assembly into train-ready outputs.
 - **Bounded ingestion** windows instead of loading full corpora into memory.
@@ -329,15 +329,19 @@ to `save_to`. Passing `None` for `load_from` starts from an empty/new store.
 Short version:
 
 - Call **`sampler.next_triplet_batch(split)`**, **`sampler.next_pair_batch(split)`**, or **`sampler.next_text_batch(split)`** to sample batches (ingestion happens automatically).
-- Call **`sampler.persist_state()`** when you want restart-resume behavior.
+- Call **`sampler.save_sampler_state(None)`** when you want restart-resume behavior.
+- Call **`sampler.save_sampler_state(Some(path.as_path()))`** when you also want to persist current state to another file.
 - Optionally call **`sampler.set_epoch(n)`** for explicit epoch control.
 
 Step-by-step:
 
 1. Build config + open the split store.
+   - Use `FileSplitStore::open(path, ratios, seed)` for a single file, or
+     `FileSplitStore::open_with_load_path(Some(load_from), save_to, ratios, seed)` for explicit load/save split.
 2. Register sources.
 3. Call one of **`sampler.next_triplet_batch(split)`**, **`sampler.next_pair_batch(split)`**, or **`sampler.next_text_batch(split)`**.
-4. Call **`sampler.persist_state()`** when you want to write persisted sampler/split state (typically at the end of an epoch or at explicit checkpoint boundaries). **Do not call this every step.** Very frequent writes can create high I/O overhead and, at very large write counts (for example, tens of millions), can also adversely affect split-store initialization time.
+4. Call **`sampler.save_sampler_state(None)`** when you want to write persisted sampler/split state (typically at the end of an epoch or at explicit checkpoint boundaries). **Do not call this every step.** Very frequent writes can create high I/O overhead and, at very large write counts (for example, tens of millions), can also adversely affect split-store initialization time.
+  - Use `sampler.save_sampler_state(Some(path.as_path()))` to additionally write to another file on demand.
 5. Optionally call **`sampler.set_epoch(n)`** for explicit epoch replay/order.
 
 Operational notes:
@@ -350,7 +354,7 @@ Operational notes:
 - Refresh concurrency is per call: source refreshes run in parallel for that call, then the sampler joins all refresh threads before merging buffers (not an always-on per-source background ingest loop).
 - Prefetchers smooth latency by filling bounded queues from the existing batch APIs (`next_triplet_batch`, `next_pair_batch`, `next_text_batch`).
 - New data from streaming sources is pulled in on the next batch call.
-- `sampler.persist_state()` is manual; skipping it means no resume state after restart.
+- `sampler.save_sampler_state(None)` is manual; skipping it means no resume state after restart.
 - `sampler.set_epoch(n)` is an advanced override and is not required for normal resume behavior.
 - `IngestionManager::source_refresh_stats()` exposes per-source refresh duration/records/throughput/errors.
 - `metrics::source_skew` summarizes per-source sample imbalance for a batch.

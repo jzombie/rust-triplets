@@ -157,7 +157,7 @@ impl EpochStateStore for CountingSplitStore {
             .cloned())
     }
 
-    fn store_epoch_meta(
+    fn save_epoch_meta(
         &self,
         meta: &HashMap<SplitLabel, PersistedSplitMeta>,
     ) -> Result<(), triplets::SamplerError> {
@@ -169,7 +169,7 @@ impl EpochStateStore for CountingSplitStore {
         Ok(())
     }
 
-    fn store_epoch_hashes(
+    fn save_epoch_hashes(
         &self,
         label: SplitLabel,
         hashes: &PersistedSplitHashes,
@@ -190,9 +190,10 @@ impl SamplerStateStore for CountingSplitStore {
             .map(|guard| guard.clone())
     }
 
-    fn store_sampler_state(
+    fn save_sampler_state(
         &self,
         state: &PersistedSamplerState,
+        _save_path: Option<&std::path::Path>,
     ) -> Result<(), triplets::SamplerError> {
         *self.sampler_state.write().map_err(|_| {
             triplets::SamplerError::SplitStore("sampler state lock poisoned".into())
@@ -273,7 +274,7 @@ fn restart_with_persisted_state_continues_sequence() {
 
     let first_batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
     let first = first_batch.triplets[0].anchor.record_id.clone();
-    sampler.persist_state().unwrap();
+    sampler.save_sampler_state(None).unwrap();
     // Restart from persisted state: should continue from the stored sequence.
     let resumed = TripletSampler::new(build_config(11, 4, split), Arc::clone(&store));
     resumed.register_source(Box::new(InMemorySource::new("a", source_a.clone())));
@@ -322,7 +323,7 @@ fn negatives_change_after_restart_when_state_is_persisted() {
         .iter()
         .map(|t| t.negative.record_id.clone())
         .collect();
-    sampler.persist_state().unwrap();
+    sampler.save_sampler_state(None).unwrap();
 
     let resumed = TripletSampler::new(build_config(13, 4, split), store);
     resumed.register_source(Box::new(InMemorySource::new("a", source_a)));

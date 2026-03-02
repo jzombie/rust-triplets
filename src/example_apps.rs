@@ -556,7 +556,7 @@ where
                 } else {
                     print_pair_batch(&chunking, &pair_batch, split_store.as_ref());
                 }
-                sampler.persist_state()?;
+                sampler.save_sampler_state(None)?;
             }
             Err(SamplerError::Exhausted(name)) => {
                 eprintln!(
@@ -576,7 +576,7 @@ where
                 } else {
                     print_text_batch(&chunking, &text_batch, split_store.as_ref());
                 }
-                sampler.persist_state()?;
+                sampler.save_sampler_state(None)?;
             }
             Err(SamplerError::Exhausted(name)) => {
                 eprintln!(
@@ -605,7 +605,7 @@ where
                 } else {
                     print_triplet_batch(&chunking, &triplet_batch, split_store.as_ref());
                 }
-                sampler.persist_state()?;
+                sampler.save_sampler_state(None)?;
             }
             Err(SamplerError::Exhausted(name)) => {
                 eprintln!(

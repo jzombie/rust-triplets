@@ -283,7 +283,7 @@ impl EpochTracker {
                 },
             );
         }
-        store.store_epoch_meta(&meta)?;
+        store.save_epoch_meta(&meta)?;
         self.dirty = false;
         Ok(())
     }
