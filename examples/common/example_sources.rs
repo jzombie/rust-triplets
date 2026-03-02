@@ -157,11 +157,11 @@ fn maybe_huggingface_source() -> Option<Box<dyn DataSource + 'static>> {
     let dataset = "HuggingFaceFW/fineweb".to_string();
     let config_name = "default".to_string();
     let split_name = "train".to_string();
-    let skip_msg = "Skipping Hugging Face source initialization for multi_source_demo: {}";
+    let skip_msg_prefix = "Skipping Hugging Face source initialization for multi_source_demo: ";
     let snapshot_dir = match managed_hf_snapshot_dir(&dataset, &config_name, &split_name) {
         Ok(path) => path,
         Err(err) => {
-            eprintln!(skip_msg, err);
+            eprintln!("{}{}", skip_msg_prefix, err);
             return None;
         }
     };
@@ -175,7 +175,7 @@ fn maybe_huggingface_source() -> Option<Box<dyn DataSource + 'static>> {
     match HuggingFaceRowSource::new(hf) {
         Ok(source) => Some(Box::new(source)),
         Err(err) => {
-            eprintln!(skip_msg, err);
+            eprintln!("{}{}", skip_msg_prefix, err);
             None
         }
     }
