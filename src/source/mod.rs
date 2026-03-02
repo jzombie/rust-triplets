@@ -26,7 +26,10 @@ pub use backends::file_source::{
     taxonomy_from_path,
 };
 #[cfg(feature = "huggingface")]
-pub use backends::huggingface_source::{HuggingFaceRowSource, HuggingFaceRowsConfig};
+pub use backends::huggingface_source::{
+    HuggingFaceRowSource, HuggingFaceRowsConfig, managed_hf_list_snapshot_dir,
+    managed_hf_snapshot_dir,
+};
 
 /// Source-owned incremental refresh position.
 ///

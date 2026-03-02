@@ -49,8 +49,9 @@ pub use kvp::{KvpField, KvpPrefixSampler};
 pub use sampler::{BatchPrefetcher, Sampler, TripletSampler};
 #[cfg(feature = "huggingface")]
 pub use source::backends::huggingface_source::{
-    HfListRoots, HfSourceEntry, build_hf_sources, load_hf_sources_from_list, parse_csv_fields,
-    parse_hf_source_line, parse_hf_uri, resolve_hf_list_roots,
+    HfListRoots, HfSourceEntry, build_hf_sources, load_hf_sources_from_list,
+    managed_hf_list_snapshot_dir, managed_hf_snapshot_dir, parse_csv_fields, parse_hf_source_line,
+    parse_hf_uri, resolve_hf_list_roots,
 };
 pub use source::{DataSource, SourceCursor};
 #[cfg(feature = "huggingface")]

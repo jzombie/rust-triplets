@@ -1,3 +1,4 @@
+use cache_manager::{CacheRoot, EvictPolicy};
 use hf_hub::Repo;
 use hf_hub::RepoType;
 use hf_hub::api::sync::ApiBuilder;
@@ -48,6 +49,48 @@ const REMOTE_BOOTSTRAP_SHARDS: usize = 4;
 const HUGGINGFACE_REFRESH_BATCH_MULTIPLIER: usize = 32;
 const SHARD_SEQUENCE_STATE_VERSION: u32 = 1;
 const SHARD_SEQUENCE_STATE_FILE: &str = "_sequence_state.json";
+const HUGGINGFACE_CACHE_GROUP_ROOT: &str = ".cache/triplets/huggingface";
+
+fn ensure_cache_group(relative_group: PathBuf) -> Result<PathBuf, String> {
+    let cache_root = CacheRoot::discover_or_cwd();
+    cache_root.ensure_group(&relative_group).map_err(|err| {
+        format!(
+            "failed creating managed cache group '{}': {err}",
+            relative_group.display()
+        )
+    })
+}
+
+/// Resolve a managed snapshot directory for a list-based Hugging Face source.
+pub fn managed_hf_list_snapshot_dir(
+    dataset: &str,
+    config: &str,
+    split: &str,
+    replica_idx: usize,
+) -> Result<PathBuf, String> {
+    ensure_cache_group(
+        PathBuf::from(HUGGINGFACE_CACHE_GROUP_ROOT)
+            .join("source-list")
+            .join(dataset.replace('/', "__"))
+            .join(config)
+            .join(split)
+            .join(format!("replica_{replica_idx}")),
+    )
+}
+
+/// Resolve a managed snapshot directory for a single Hugging Face source.
+pub fn managed_hf_snapshot_dir(
+    dataset: &str,
+    config: &str,
+    split: &str,
+) -> Result<PathBuf, String> {
+    ensure_cache_group(
+        PathBuf::from(HUGGINGFACE_CACHE_GROUP_ROOT)
+            .join(dataset.replace('/', "__"))
+            .join(config)
+            .join(split),
+    )
+}
 
 #[derive(Clone, Debug)]
 struct RowTextField {
@@ -237,13 +280,17 @@ pub fn build_hf_sources(roots: &HfListRoots) -> Vec<Box<dyn DataSource + 'static
             };
 
             let source_id = format!("hf_list_{idx}");
-            // TODO: Replace w/ cache manager
-            let snapshot_dir = PathBuf::from(".hf-snapshots")
-                .join("source-list")
-                .join(dataset.replace('/', "__"))
-                .join(&config)
-                .join(&split)
-                .join(format!("replica_{idx}"));
+            let snapshot_dir = match managed_hf_list_snapshot_dir(&dataset, &config, &split, idx)
+            {
+                Ok(path) => path,
+                Err(err) => {
+                    eprintln!(
+                        "Skipping Hugging Face source initialization for '{}': {}",
+                        source.uri, err
+                    );
+                    return None;
+                }
+            };
 
             let mut hf = HuggingFaceRowsConfig::new(
                 source_id,
@@ -319,10 +366,8 @@ pub struct HuggingFaceRowsConfig {
     pub max_rows: Option<usize>,
     /// Hard cap for local manifest-shard cache bytes.
     ///
-    /// When exceeded, oldest cached manifest shards are evicted.
+    /// Enforced by `cache-manager` policy application on manifest cache roots.
     pub local_disk_cap_bytes: Option<u64>,
-    /// Minimum number of manifest shards to keep resident during eviction.
-    pub min_resident_shards: usize,
     /// Optional row id column name. Falls back to synthetic id when missing.
     pub id_column: Option<String>,
     /// Text columns to extract. Empty means auto-detect textual scalar columns.
@@ -369,7 +414,6 @@ impl HuggingFaceRowsConfig {
             remote_expansion_headroom_multiplier: REMOTE_EXPANSION_HEADROOM_MULTIPLIER,
             max_rows: None,
             local_disk_cap_bytes: Some(32 * 1024 * 1024 * 1024),
-            min_resident_shards: REMOTE_BOOTSTRAP_SHARDS,
             id_column: Some("id".to_string()),
             text_columns: Vec::new(),
             anchor_column: None,
@@ -1110,91 +1154,50 @@ impl HuggingFaceRowSource {
         state.materialized_rows = running;
     }
 
-    /// Enforce local disk cap by evicting oldest manifest shards when possible.
+    /// Sync in-memory shard state from current on-disk snapshot tree.
+    fn sync_shard_state_from_disk_locked(&self, state: &mut SourceState) {
+        state.shards.retain(|shard| shard.path.exists());
+        Self::recompute_shard_offsets(state);
+    }
+
+    /// Apply cache-manager eviction policy and sync in-memory shard state.
     fn enforce_disk_cap_locked(
         &self,
         state: &mut SourceState,
-        protected_path: &Path,
+        _protected_path: &Path,
     ) -> Result<bool, SamplerError> {
         let Some(cap_bytes) = self.config.local_disk_cap_bytes else {
             return Ok(false);
         };
 
-        let manifest_root = self.manifest_cache_root();
-        let mut usage_bytes = state
+        let before = state
             .shards
             .iter()
-            .filter(|shard| shard.path.starts_with(&manifest_root))
-            .map(|shard| Self::shard_size_bytes(&shard.path))
-            .sum::<u64>();
+            .map(|shard| shard.path.clone())
+            .collect::<Vec<_>>();
+        let policy = EvictPolicy {
+            max_bytes: Some(cap_bytes),
+            ..EvictPolicy::default()
+        };
 
-        if usage_bytes <= cap_bytes {
-            return Ok(false);
-        }
-
-        let mut evicted_any = false;
-        loop {
-            if usage_bytes <= cap_bytes {
-                break;
-            }
-
-            let resident_manifest_count = state
-                .shards
-                .iter()
-                .filter(|shard| shard.path.starts_with(&manifest_root))
-                .count();
-            if resident_manifest_count <= self.config.min_resident_shards {
-                break;
-            }
-
-            let evict_pos = state.shards.iter().position(|shard| {
-                shard.path.starts_with(&manifest_root) && shard.path != protected_path
-            });
-            let Some(pos) = evict_pos else {
-                break;
-            };
-
-            let shard = state.shards.remove(pos);
-            let shard_size = Self::shard_size_bytes(&shard.path);
-            if let Err(err) = fs::remove_file(&shard.path)
-                && err.kind() != std::io::ErrorKind::NotFound
-            {
-                return Err(SamplerError::SourceUnavailable {
-                    source_id: self.config.source_id.clone(),
-                    reason: format!(
-                        "failed evicting shard {} under disk cap: {err}",
-                        shard.path.display()
-                    ),
-                });
-            }
-
-            usage_bytes = usage_bytes.saturating_sub(shard_size);
-            evicted_any = true;
-            warn!(
-                "[triplets:hf] evicted shard for disk cap: {} (usage={:.2} GiB cap={:.2} GiB)",
-                shard.path.display(),
-                usage_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
-                cap_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
-            );
-        }
-
-        if usage_bytes > cap_bytes {
-            if protected_path.exists() {
-                let _ = fs::remove_file(protected_path);
-            }
-            return Err(SamplerError::SourceUnavailable {
+        let cache_root = CacheRoot::from_root(&self.config.snapshot_dir);
+        cache_root
+            .ensure_group_with_policy("_parquet_manifest", Some(&policy))
+            .map_err(|err| SamplerError::SourceUnavailable {
                 source_id: self.config.source_id.clone(),
                 reason: format!(
-                    "local disk cap exceeded and cannot evict further (usage={} bytes cap={} bytes)",
-                    usage_bytes, cap_bytes
+                    "failed applying manifest cache eviction policy under {}: {err}",
+                    self.config.snapshot_dir.display()
                 ),
-            });
-        }
+            })?;
 
-        if evicted_any {
-            Self::recompute_shard_offsets(state);
-        }
-        Ok(evicted_any)
+        self.sync_shard_state_from_disk_locked(state);
+        let after = state
+            .shards
+            .iter()
+            .map(|shard| shard.path.clone())
+            .collect::<Vec<_>>();
+        Ok(before != after)
     }
 
     /// Return total on-disk bytes used by manifest-backed shards.
@@ -1712,7 +1715,7 @@ impl HuggingFaceRowSource {
                     let known_rows = state.materialized_rows;
                     let shard_count = state.shards.len();
                     info!(
-                        "[triplets:hf] state: candidates={} known_rows={} active_shards={} disk_cap={} min_resident_shards={}",
+                        "[triplets:hf] state: candidates={} known_rows={} active_shards={} disk_cap={}",
                         candidate_count,
                         known_rows,
                         shard_count,
@@ -1723,7 +1726,6 @@ impl HuggingFaceRowSource {
                                 bytes as f64 / (1024.0 * 1024.0 * 1024.0)
                             ))
                             .unwrap_or_else(|| "disabled".to_string()),
-                        self.config.min_resident_shards,
                     );
                     drop(state);
 
@@ -3571,7 +3573,6 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path().to_path_buf());
         config.local_disk_cap_bytes = Some(20);
-        config.min_resident_shards = 0;
         let source = test_source(config);
         let manifest_root = source.manifest_cache_root();
         fs::create_dir_all(&manifest_root).unwrap();
@@ -3617,11 +3618,10 @@ mod tests {
     }
 
     #[test]
-    fn enforce_disk_cap_errors_when_usage_still_exceeds_cap() {
+    fn enforce_disk_cap_evicts_when_single_file_exceeds_cap() {
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path().to_path_buf());
         config.local_disk_cap_bytes = Some(1);
-        config.min_resident_shards = 1;
         let source = test_source(config);
         let manifest_root = source.manifest_cache_root();
         fs::create_dir_all(&manifest_root).unwrap();
@@ -3645,14 +3645,13 @@ mod tests {
             next_remote_idx: 0,
         };
 
-        let err = source
+        let evicted = source
             .enforce_disk_cap_locked(&mut state, &protected)
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            SamplerError::SourceUnavailable { ref reason, .. } if reason.contains("cannot evict further")
-        ));
+            .unwrap();
+        assert!(evicted);
         assert!(!protected.exists());
+        assert_eq!(state.shards.len(), 0);
+        assert_eq!(state.materialized_rows, 0);
     }
 
     #[test]
@@ -3907,7 +3906,6 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path().to_path_buf());
         config.local_disk_cap_bytes = Some(20);
-        config.min_resident_shards = 0;
         let source = test_source(config.clone());
 
         let manifest_root = source.manifest_cache_root();
@@ -5331,7 +5329,6 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path().to_path_buf());
         config.local_disk_cap_bytes = Some(10);
-        config.min_resident_shards = 0;
         let source = test_source(config);
 
         let manifest_root = source.manifest_cache_root();
@@ -5377,11 +5374,10 @@ mod tests {
     }
 
     #[test]
-    fn enforce_disk_cap_errors_when_min_resident_prevents_eviction() {
+    fn enforce_disk_cap_ignores_min_resident_and_applies_policy() {
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path().to_path_buf());
         config.local_disk_cap_bytes = Some(4);
-        config.min_resident_shards = 1;
         let source = test_source(config);
 
         let manifest_root = source.manifest_cache_root();
@@ -5405,9 +5401,12 @@ mod tests {
             next_remote_idx: 0,
         };
 
-        let err = source.enforce_disk_cap_locked(&mut state, &protected);
-        assert!(err.is_err());
+        let evicted = source
+            .enforce_disk_cap_locked(&mut state, &protected)
+            .unwrap();
+        assert!(evicted);
         assert!(!protected.exists());
+        assert_eq!(state.shards.len(), 0);
     }
 
     #[test]
