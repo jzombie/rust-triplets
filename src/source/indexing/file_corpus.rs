@@ -3,6 +3,7 @@ use std::hash::Hash;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use crate::constants::cache::FILE_CORPUS_GROUP;
 use crate::constants::file_corpus::{
     FILE_INDEX_META_KEY, FILE_INDEX_PATH_KEY_PREFIX, FILE_INDEX_READ_BATCH, FILE_INDEX_STORE_DIR,
     SKIP_UNREADABLE_MSG,
@@ -13,12 +14,30 @@ use crate::source::{SourceCursor, SourceSnapshot};
 use crate::transport::fs::{FileStream, is_text_file};
 use crate::types::{GroupKey, PathString, SourceId};
 use crate::utils::normalize_inline_whitespace;
+use cache_manager::CacheRoot;
 use simd_r_drive::storage_engine::DataStore;
 use simd_r_drive::storage_engine::traits::{DataStoreReader, DataStoreWriter};
 use std::fs;
+#[cfg(test)]
 use tempfile::TempDir;
 use tracing::{debug, warn};
 use walkdir::WalkDir;
+
+fn managed_cache_root() -> Result<CacheRoot, String> {
+    #[cfg(test)]
+    {
+        static TEST_CACHE_ROOT: OnceLock<TempDir> = OnceLock::new();
+        let root = TEST_CACHE_ROOT
+            .get_or_init(|| TempDir::new().expect("failed to create test file-corpus cache root"));
+        return Ok(CacheRoot::from_root(root.path()));
+    }
+
+    #[cfg(not(test))]
+    {
+        CacheRoot::from_discovery()
+            .map_err(|err| format!("failed discovering managed cache root: {err}"))
+    }
+}
 
 #[derive(bitcode::Encode, bitcode::Decode)]
 /// Persisted metadata for the temporary file index store.
@@ -654,13 +673,23 @@ impl FileCorpusIndex {
         )
     }
 }
-/// Resolve the per-process temp directory used for file index stores.
+/// Resolve the managed cache directory used for file-corpus index stores.
 fn file_index_root_dir() -> PathBuf {
-    static FILE_INDEX_ROOT: OnceLock<TempDir> = OnceLock::new();
+    static FILE_INDEX_ROOT: OnceLock<PathBuf> = OnceLock::new();
     FILE_INDEX_ROOT
-        .get_or_init(|| TempDir::new().expect("failed to create temp file index dir"))
-        .path()
-        .join(FILE_INDEX_STORE_DIR)
+        .get_or_init(|| {
+            let cache_root = managed_cache_root().unwrap_or_else(|err| panic!("{err}"));
+            let relative_group = PathBuf::from(FILE_CORPUS_GROUP).join(FILE_INDEX_STORE_DIR);
+            cache_root
+                .ensure_group(&relative_group)
+                .unwrap_or_else(|err| {
+                    panic!(
+                        "failed creating managed file-corpus cache group '{}': {err}",
+                        relative_group.display()
+                    )
+                })
+        })
+        .clone()
 }
 
 fn stable_group_seed(source_id: &SourceId, total: usize, sampler_seed: u64) -> u64 {
@@ -823,6 +852,20 @@ mod tests {
         let path_a = FileCorpusIndex::file_index_store_path(root, &source_a);
         let path_b = FileCorpusIndex::file_index_store_path(root, &source_b);
         assert_ne!(path_a, path_b);
+    }
+
+    #[test]
+    fn file_index_root_dir_ignores_snapshot_store_filename() {
+        let dir_a = file_index_root_dir();
+        let dir_b = file_index_root_dir();
+
+        assert_eq!(dir_a, dir_b);
+        assert!(
+            dir_a
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name == FILE_INDEX_STORE_DIR)
+        );
     }
 
     #[test]

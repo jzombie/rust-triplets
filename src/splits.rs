@@ -10,9 +10,9 @@ use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
 use crate::constants::splits::{
-    ALL_SPLITS, BITCODE_PREFIX, DEFAULT_STORE_FILENAME, EPOCH_HASH_RECORD_VERSION,
-    EPOCH_HASHES_PREFIX, EPOCH_META_PREFIX, EPOCH_META_RECORD_VERSION, EPOCH_RECORD_TOMBSTONE,
-    META_KEY, SAMPLER_STATE_KEY, SAMPLER_STATE_RECORD_VERSION, SPLIT_PREFIX, STORE_VERSION,
+    ALL_SPLITS, BITCODE_PREFIX, EPOCH_HASH_RECORD_VERSION, EPOCH_HASHES_PREFIX, EPOCH_META_PREFIX,
+    EPOCH_META_RECORD_VERSION, EPOCH_RECORD_TOMBSTONE, META_KEY, SAMPLER_STATE_KEY,
+    SAMPLER_STATE_RECORD_VERSION, SPLIT_PREFIX, STORE_VERSION,
 };
 use crate::data::RecordId;
 use crate::errors::SamplerError;
@@ -74,7 +74,7 @@ impl SplitRatios {
     }
 }
 
-pub use crate::constants::splits::{DEFAULT_STORE_DIR, EPOCH_STATE_VERSION};
+pub use crate::constants::splits::EPOCH_STATE_VERSION;
 
 /// Persisted epoch cursor metadata for one split.
 #[derive(Clone, Debug, bitcode::Encode, bitcode::Decode)]
@@ -321,9 +321,37 @@ impl FileSplitStore {
         ratios: SplitRatios,
         seed: u64,
     ) -> Result<Self, SamplerError> {
+        Self::open_with_load_path(None::<PathBuf>, path, ratios, seed)
+    }
+
+    /// Open (or create) a file-backed split store at `save_path`, optionally
+    /// bootstrapping from `load_path` when the target does not yet exist.
+    ///
+    /// This makes snapshot movement explicit: callers control exactly where
+    /// state is loaded from and where it is saved.
+    pub fn open_with_load_path<LP: Into<PathBuf>, SP: Into<PathBuf>>(
+        load_path: Option<LP>,
+        save_path: SP,
+        ratios: SplitRatios,
+        seed: u64,
+    ) -> Result<Self, SamplerError> {
         let ratios = ratios.normalized()?;
-        let path = coerce_store_path(path.into());
+        let path = coerce_store_path(save_path.into());
         ensure_parent_dir(&path)?;
+        if !path.exists()
+            && let Some(load_path) = load_path
+        {
+            let source = coerce_store_path(load_path.into());
+            if source != path && source.exists() {
+                fs::copy(&source, &path).map_err(|err| {
+                    SamplerError::SplitStore(format!(
+                        "failed to bootstrap split store from '{}' to '{}': {err}",
+                        source.display(),
+                        path.display()
+                    ))
+                })?;
+            }
+        }
         let store = DataStore::open(path.as_path()).map_err(map_store_err)?;
         let store = Self {
             store,
@@ -332,16 +360,6 @@ impl FileSplitStore {
         };
         store.verify_metadata()?;
         Ok(store)
-    }
-
-    /// Default split-store file path under the crate's default store directory.
-    pub fn default_path() -> PathBuf {
-        Self::default_path_in_dir(DEFAULT_STORE_DIR)
-    }
-
-    /// Default split-store file path inside a custom directory.
-    pub fn default_path_in_dir<P: AsRef<Path>>(dir: P) -> PathBuf {
-        dir.as_ref().join(DEFAULT_STORE_FILENAME)
     }
 
     fn verify_metadata(&self) -> Result<(), SamplerError> {
@@ -671,9 +689,6 @@ fn decode_bitcode_payload(bytes: &[u8]) -> Result<Vec<u8>, SamplerError> {
 }
 
 fn coerce_store_path(path: PathBuf) -> PathBuf {
-    if path.is_dir() {
-        return path.join(DEFAULT_STORE_FILENAME);
-    }
     path
 }
 
@@ -784,10 +799,8 @@ mod tests {
     fn file_store_accepts_directory_path() {
         let dir = tempdir().unwrap();
         let ratios = SplitRatios::default();
-        let store = FileSplitStore::open(dir.path(), ratios, 777).unwrap();
-        store.ensure("abc".to_string()).unwrap();
-        let expected_file = dir.path().join(DEFAULT_STORE_FILENAME);
-        assert!(expected_file.is_file());
+        let err = FileSplitStore::open(dir.path(), ratios, 777).unwrap_err();
+        assert!(matches!(err, SamplerError::SplitStore(_)));
     }
 
     #[test]
@@ -942,7 +955,7 @@ mod tests {
         assert!(file_path.parent().unwrap().exists());
 
         let existing_dir_path = coerce_store_path(dir.path().to_path_buf());
-        assert_eq!(existing_dir_path, dir.path().join(DEFAULT_STORE_FILENAME));
+        assert_eq!(existing_dir_path, dir.path().to_path_buf());
 
         let ratios = SplitRatios::default();
         let store = FileSplitStore::open(&file_path, ratios, 444).unwrap();
@@ -998,7 +1011,7 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_store_trait_methods_and_default_paths_work() {
+    fn deterministic_store_trait_methods_work() {
         let ratios = SplitRatios::default();
         let store = DeterministicSplitStore::new(ratios, 999).unwrap();
 
@@ -1065,16 +1078,73 @@ mod tests {
             store.load_sampler_state().unwrap().unwrap().source_epoch,
             sampler_state.source_epoch
         );
+    }
 
-        let in_dir = FileSplitStore::default_path_in_dir("tmp-test-store");
-        assert_eq!(
-            in_dir.file_name().and_then(|name| name.to_str()),
-            Some(DEFAULT_STORE_FILENAME)
+    #[test]
+    fn open_with_load_path_bootstraps_state_explicitly() {
+        let dir = tempdir().unwrap();
+        let path_a = dir.path().join("snapshot_a.bin");
+        let path_b = dir.path().join("snapshot_b.bin");
+        let ratios = SplitRatios::default();
+
+        let store_a = FileSplitStore::open(&path_a, ratios, 42).unwrap();
+
+        let mut meta = HashMap::new();
+        meta.insert(
+            SplitLabel::Train,
+            PersistedSplitMeta {
+                epoch: 5,
+                offset: 3,
+                hashes_checksum: 999,
+            },
         );
-        let default_path = FileSplitStore::default_path();
+        store_a.store_epoch_meta(&meta).unwrap();
+
+        let sampler_state = PersistedSamplerState {
+            source_cycle_idx: 1,
+            source_record_cursors: vec![("s1".to_string(), 2)],
+            source_epoch: 7,
+            rng_state: 123,
+            triplet_recipe_rr_idx: 4,
+            text_recipe_rr_idx: 6,
+            source_stream_cursors: vec![("s1".to_string(), 8)],
+        };
+        store_a.store_sampler_state(&sampler_state).unwrap();
+        drop(store_a);
+
+        let store_b =
+            FileSplitStore::open_with_load_path(Some(path_a.clone()), &path_b, ratios, 42).unwrap();
         assert_eq!(
-            default_path.file_name().and_then(|name| name.to_str()),
-            Some(DEFAULT_STORE_FILENAME)
+            store_b
+                .load_epoch_meta()
+                .unwrap()
+                .get(&SplitLabel::Train)
+                .unwrap()
+                .epoch,
+            5
+        );
+        assert_eq!(
+            store_b.load_sampler_state().unwrap().unwrap().source_epoch,
+            7
+        );
+
+        let store_a_again = FileSplitStore::open(&path_a, ratios, 42).unwrap();
+        assert_eq!(
+            store_a_again
+                .load_epoch_meta()
+                .unwrap()
+                .get(&SplitLabel::Train)
+                .unwrap()
+                .epoch,
+            5
+        );
+        assert_eq!(
+            store_a_again
+                .load_sampler_state()
+                .unwrap()
+                .unwrap()
+                .source_epoch,
+            7
         );
     }
 

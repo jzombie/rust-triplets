@@ -308,14 +308,21 @@ cargo run --example multi_source_demo -- \
 
 ### Split-store path configuration
 
-The `multi_source_demo` example persists sampler/split state by default to:
+The `multi_source_demo` example persists sampler/split state by default to a
+managed cache-group path under:
 
-- `.sampler_store/split_store.bin`
+- `.cache/triplets/multi-source-demo/split_store.bin`
 
-You can override persistence location with either:
+You can still set an explicit persistence file path:
 
-- `--split-store-path <FILE>` for an explicit file path
-- `--split-store-dir <DIR>` to keep filename `split_store.bin` in a custom directory
+- `--split-store-path <FILE>`
+
+If you need explicit load/save control, use:
+
+- `FileSplitStore::open_with_load_path(Some(load_from), save_to, ratios, seed)`
+
+This loads from `load_from` only when `save_to` does not exist yet, then writes
+to `save_to`. Passing `None` for `load_from` starts from an empty/new store.
 
 ## Usage flow
 

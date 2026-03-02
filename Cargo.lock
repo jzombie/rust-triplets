@@ -294,9 +294,9 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
 name = "cache-manager"
-version = "0.1.4"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ec91ececd7ae6d7a43bb7cfa66353010cb81f0b2f59bc10e3b470a5262ba03a"
+checksum = "24a87dc24c3e63b9f47a691ef2560791dbfdcf28c645f2e657f21e7b3afa6f25"
 
 [[package]]
 name = "cc"

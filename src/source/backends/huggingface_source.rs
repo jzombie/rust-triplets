@@ -16,15 +16,18 @@ use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
+#[cfg(test)]
+use tempfile::TempDir;
 use tracing::{info, warn};
 use walkdir::WalkDir;
 
 use crate::SamplerError;
 use crate::config::{NegativeStrategy, SamplerConfig, Selector, TripletRecipe};
+use crate::constants::cache::HUGGINGFACE_GROUP;
 use crate::data::{DataRecord, QualityScore, SectionRole};
 use crate::utils::make_section;
 use chrono::{DateTime, Utc};
@@ -49,10 +52,24 @@ const REMOTE_BOOTSTRAP_SHARDS: usize = 4;
 const HUGGINGFACE_REFRESH_BATCH_MULTIPLIER: usize = 32;
 const SHARD_SEQUENCE_STATE_VERSION: u32 = 1;
 const SHARD_SEQUENCE_STATE_FILE: &str = "_sequence_state.json";
-const HUGGINGFACE_CACHE_GROUP_ROOT: &str = ".cache/triplets/huggingface";
+fn managed_cache_root() -> Result<CacheRoot, String> {
+    #[cfg(test)]
+    {
+        static TEST_CACHE_ROOT: OnceLock<TempDir> = OnceLock::new();
+        let root = TEST_CACHE_ROOT
+            .get_or_init(|| TempDir::new().expect("failed to create test HF cache root"));
+        return Ok(CacheRoot::from_root(root.path()));
+    }
+
+    #[cfg(not(test))]
+    {
+        CacheRoot::from_discovery()
+            .map_err(|err| format!("failed discovering managed cache root: {err}"))
+    }
+}
 
 fn ensure_cache_group(relative_group: PathBuf) -> Result<PathBuf, String> {
-    let cache_root = CacheRoot::discover_or_cwd();
+    let cache_root = managed_cache_root()?;
     cache_root.ensure_group(&relative_group).map_err(|err| {
         format!(
             "failed creating managed cache group '{}': {err}",
@@ -69,7 +86,7 @@ pub fn managed_hf_list_snapshot_dir(
     replica_idx: usize,
 ) -> Result<PathBuf, String> {
     ensure_cache_group(
-        PathBuf::from(HUGGINGFACE_CACHE_GROUP_ROOT)
+        PathBuf::from(HUGGINGFACE_GROUP)
             .join("source-list")
             .join(dataset.replace('/', "__"))
             .join(config)
@@ -85,7 +102,7 @@ pub fn managed_hf_snapshot_dir(
     split: &str,
 ) -> Result<PathBuf, String> {
     ensure_cache_group(
-        PathBuf::from(HUGGINGFACE_CACHE_GROUP_ROOT)
+        PathBuf::from(HUGGINGFACE_GROUP)
             .join(dataset.replace('/', "__"))
             .join(config)
             .join(split),
@@ -3039,10 +3056,14 @@ mod tests {
 
             assert!(single.exists());
             assert!(listed.exists());
-            assert!(single.ends_with(".cache/triplets/huggingface/org__dataset/default/train"));
-            assert!(listed.ends_with(
-                ".cache/triplets/huggingface/source-list/org__dataset/default/train/replica_7"
-            ));
+            assert!(single.ends_with(PathBuf::from(format!(
+                "{}/org__dataset/default/train",
+                HUGGINGFACE_GROUP
+            ))));
+            assert!(listed.ends_with(PathBuf::from(format!(
+                "{}/source-list/org__dataset/default/train/replica_7",
+                HUGGINGFACE_GROUP
+            ))));
             assert!(listed.ends_with("replica_7"));
         });
     }

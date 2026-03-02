@@ -108,11 +108,6 @@ pub mod splits {
     /// Canonical split iteration order used when storing/loading all splits.
     pub const ALL_SPLITS: [SplitLabel; 3] =
         [SplitLabel::Train, SplitLabel::Validation, SplitLabel::Test];
-
-    /// Default directory for persisted split-store files.
-    pub const DEFAULT_STORE_DIR: &str = ".sampler_store";
-    /// Default filename for persisted split-store files.
-    pub const DEFAULT_STORE_FILENAME: &str = "split_store.bin";
 }
 
 /// Constants used by file-corpus indexing and persisted index layout.
@@ -131,4 +126,16 @@ pub mod file_corpus {
     pub const FILE_INDEX_READ_BATCH: usize = 256;
     /// Log message used when unreadable records are skipped.
     pub const SKIP_UNREADABLE_MSG: &str = "skipping unreadable file record";
+}
+
+/// Constants used for managed cache-root groups.
+pub mod cache {
+    /// Managed cache group for Hugging Face snapshot-backed sources.
+    pub const HUGGINGFACE_GROUP: &str = "triplets/huggingface";
+    /// Managed cache group for file-corpus index stores.
+    pub const FILE_CORPUS_GROUP: &str = "triplets/file-corpus";
+    /// Managed cache group for multi-source demo split-store persistence.
+    pub const MULTI_SOURCE_DEMO_GROUP: &str = "triplets/multi-source-demo";
+    /// Filename used by the demo app split-store persistence.
+    pub const MULTI_SOURCE_DEMO_STORE_FILENAME: &str = "split_store.bin";
 }
