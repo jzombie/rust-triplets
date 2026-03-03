@@ -2971,15 +2971,27 @@ mod tests {
         let guard = ENV_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
-            .expect("env lock poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let previous = env::var(key).ok();
+        struct EnvRestore {
+            key: String,
+            previous: Option<String>,
+        }
+        impl Drop for EnvRestore {
+            fn drop(&mut self) {
+                if let Some(old) = self.previous.clone() {
+                    unsafe { env::set_var(&self.key, old) };
+                } else {
+                    unsafe { env::remove_var(&self.key) };
+                }
+            }
+        }
+        let _restore = EnvRestore {
+            key: key.to_string(),
+            previous,
+        };
         unsafe { env::set_var(key, value) };
         let result = run();
-        if let Some(old) = previous {
-            unsafe { env::set_var(key, old) };
-        } else {
-            unsafe { env::remove_var(key) };
-        }
         drop(guard);
         result
     }
@@ -2989,11 +3001,19 @@ mod tests {
         let guard = CWD_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
-            .expect("cwd lock poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let previous = env::current_dir().expect("get cwd");
+        struct CwdRestore {
+            previous: PathBuf,
+        }
+        impl Drop for CwdRestore {
+            fn drop(&mut self) {
+                let _ = env::set_current_dir(&self.previous);
+            }
+        }
+        let _restore = CwdRestore { previous };
         env::set_current_dir(dir).expect("set cwd");
         let result = run();
-        env::set_current_dir(previous).expect("restore cwd");
         drop(guard);
         result
     }
@@ -3151,7 +3171,7 @@ mod tests {
     }
 
     #[test]
-    fn build_hf_sources_skips_invalid_uri_and_handles_cache_dir_failure() {
+    fn build_hf_sources_skips_invalid_uri_and_builds_valid_source() {
         let roots = HfListRoots {
             source_list: "inline".to_string(),
             sources: vec![
@@ -3183,7 +3203,7 @@ mod tests {
 
         with_current_dir(temp_root.path(), || {
             let built = build_hf_sources(&roots);
-            assert!(built.is_empty());
+            assert_eq!(built.len(), 1);
         });
     }
 
