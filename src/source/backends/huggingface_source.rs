@@ -3512,6 +3512,76 @@ impl HuggingFaceRowSource {
     }
 }
 
+impl HuggingFaceRowSource {
+    /// Spawn the background shard-expansion thread if expansion is needed and
+    /// no download is already in progress.  This is separate from `refresh()`
+    /// so the ingestion manager can call it on every scheduling cycle even
+    /// when the per-source buffer has not yet drained to empty, preventing
+    /// expansion from stalling for long epochs.
+    fn trigger_expansion_if_needed(&self) {
+        let needs_expansion = self
+            .state
+            .lock()
+            .map(|state| {
+                let known_empty = state.total_rows == Some(0);
+                let all_consumed = state
+                    .remote_candidates
+                    .as_ref()
+                    .is_some_and(|c| state.next_remote_idx >= c.len());
+                !known_empty && !all_consumed
+            })
+            .unwrap_or(false);
+
+        if !needs_expansion {
+            return;
+        }
+
+        let already_running = self
+            .expansion_thread
+            .lock()
+            .map(|t| t.as_ref().is_some_and(|h| !h.is_finished()))
+            .unwrap_or(false);
+
+        if already_running {
+            return;
+        }
+
+        let source = self.clone();
+        let handle = thread::spawn(move || {
+            // If candidates not yet fetched, discover them first.
+            let needs_candidates = source
+                .state
+                .lock()
+                .map(|s| s.remote_candidates.is_none())
+                .unwrap_or(false);
+            if needs_candidates {
+                let target = source
+                    .state
+                    .lock()
+                    .map(|s| s.materialized_rows)
+                    .unwrap_or(0);
+                if let Err(err) = source.ensure_row_available(target) {
+                    warn!(
+                        "[triplets:hf] background expansion (candidate fetch) error \
+                         (source '{}'): {}",
+                        source.config.source_id, err
+                    );
+                }
+                return;
+            }
+            if let Err(err) = source.download_next_remote_shard() {
+                warn!(
+                    "[triplets:hf] background expansion error (source '{}'): {}",
+                    source.config.source_id, err
+                );
+            }
+        });
+        if let Ok(mut slot) = self.expansion_thread.lock() {
+            *slot = Some(handle);
+        }
+    }
+}
+
 impl DataSource for HuggingFaceRowSource {
     /// Return stable source id.
     fn id(&self) -> &str {
@@ -3662,78 +3732,11 @@ impl DataSource for HuggingFaceRowSource {
             .max()
             .unwrap_or_else(Utc::now);
 
-        // Fire-and-forget background shard expansion — one shard per refresh()
-        // cycle.  We hold the JoinHandle in a Mutex<Option<JoinHandle>>.
-        // is_finished() returns true once the thread exits for *any* reason
-        // including a panic, so the guard can never get permanently stuck the
-        // way an AtomicBool can when the thread panics before clearing it.
-        //
-        // Two conditions allow spawning:
-        //   (a) candidates already fetched and there are unconsumed entries, or
-        //   (b) candidates not yet fetched — happens when the source starts with
-        //       local shards from a prior session (remote_candidates stays None
-        //       because the materialized_rows>0 bootstrap path is skipped).
-        {
-            let needs_expansion = {
-                let state = self
-                    .state
-                    .lock()
-                    .map_err(|_| SamplerError::SourceUnavailable {
-                        source_id: self.config.source_id.clone(),
-                        reason: "huggingface source state lock poisoned".to_string(),
-                    })?;
-                let known_empty = state.total_rows == Some(0);
-                let all_consumed = state
-                    .remote_candidates
-                    .as_ref()
-                    .is_some_and(|c| state.next_remote_idx >= c.len());
-                !known_empty && !all_consumed
-            };
-
-            if needs_expansion {
-                let already_running = self
-                    .expansion_thread
-                    .lock()
-                    .map(|t| t.as_ref().is_some_and(|h| !h.is_finished()))
-                    .unwrap_or(false);
-
-                if !already_running {
-                    let source = self.clone();
-                    let handle = thread::spawn(move || {
-                        // If candidates not yet fetched, discover them first.
-                        let needs_candidates = source
-                            .state
-                            .lock()
-                            .map(|s| s.remote_candidates.is_none())
-                            .unwrap_or(false);
-                        if needs_candidates {
-                            let target = source
-                                .state
-                                .lock()
-                                .map(|s| s.materialized_rows)
-                                .unwrap_or(0);
-                            if let Err(err) = source.ensure_row_available(target) {
-                                warn!(
-                                    "[triplets:hf] background expansion (candidate fetch) error \
-                                     (source '{}'): {}",
-                                    source.config.source_id, err
-                                );
-                            }
-                            return;
-                        }
-                        if let Err(err) = source.download_next_remote_shard() {
-                            warn!(
-                                "[triplets:hf] background expansion error (source '{}'): {}",
-                                source.config.source_id, err
-                            );
-                        }
-                    });
-                    if let Ok(mut slot) = self.expansion_thread.lock() {
-                        *slot = Some(handle);
-                    }
-                }
-            }
-        }
+        // Fire background shard expansion via the shared helper.  The helper
+        // is also called by the ingestion manager on every scheduling cycle
+        // (even when this source's buffer is non-empty and refresh() itself
+        // is skipped), so expansion continues across long epochs.
+        self.trigger_expansion_if_needed();
 
         Ok(SourceSnapshot {
             records,
@@ -3753,6 +3756,11 @@ impl DataSource for HuggingFaceRowSource {
                 source_id: self.config.source_id.clone(),
                 details: "huggingface source did not provide len_hint".to_string(),
             })
+    }
+
+    /// Forward expansion hint to background shard downloader.
+    fn try_expand(&self, _config: &SamplerConfig) {
+        self.trigger_expansion_if_needed();
     }
 
     /// Return mixed default triplet recipes used by Hugging Face row sources.

@@ -88,6 +88,16 @@ pub trait DataSource: Send + Sync {
     fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {
         Vec::new()
     }
+
+    /// Non-blocking hint to proactively expand the source's data pool.
+    ///
+    /// Called by the ingestion manager on every refresh cycle, including
+    /// cycles where a source's per-source buffer is non-empty and a full
+    /// `refresh()` call is therefore skipped.  This ensures that sources
+    /// that support background shard expansion (e.g. `HuggingFaceRowSource`)
+    /// continue to download new shards even when the buffer never drains to
+    /// empty within an epoch.  The default implementation is a no-op.
+    fn try_expand(&self, _config: &SamplerConfig) {}
 }
 
 /// Index-addressable source interface used by deterministic pagers.
