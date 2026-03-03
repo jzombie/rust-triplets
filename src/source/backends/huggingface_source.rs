@@ -568,7 +568,10 @@ struct ShardIndex {
     path: PathBuf,
     global_start: usize,
     row_count: usize,
-    is_parquet: bool,
+    /// When `true`, rows are read via random-access indexed reads (parquet row-group
+    /// reader or `.simdr` row-store).  When `false`, the shard is read sequentially
+    /// as newline-delimited text (NDJSON, etc.).
+    random_access: bool,
     parquet_row_groups: Vec<(usize, usize)>,
     checkpoints: Vec<u64>,
     /// Remote candidate string this shard was downloaded from, used to
@@ -887,7 +890,7 @@ impl HuggingFaceRowSource {
         &self,
         shard: &ShardIndex,
     ) -> Result<Option<ShardIndex>, SamplerError> {
-        if !shard.is_parquet {
+        if !shard.random_access {
             return Ok(Some(shard.clone()));
         }
 
@@ -911,7 +914,7 @@ impl HuggingFaceRowSource {
                     path: store_path,
                     global_start: shard.global_start,
                     row_count: existing_rows,
-                    is_parquet: true,
+                    random_access: true,
                     parquet_row_groups: vec![(0, existing_rows)],
                     checkpoints: Vec::new(),
                     remote_candidate: shard.remote_candidate.clone(),
@@ -994,7 +997,7 @@ impl HuggingFaceRowSource {
             path: store_path,
             global_start: shard.global_start,
             row_count: served_rows,
-            is_parquet: true,
+            random_access: true,
             parquet_row_groups: vec![(0, served_rows)],
             checkpoints: Vec::new(),
             remote_candidate: shard.remote_candidate.clone(),
@@ -1013,7 +1016,7 @@ impl HuggingFaceRowSource {
             shard.path.hash(&mut hasher);
             shard.global_start.hash(&mut hasher);
             shard.row_count.hash(&mut hasher);
-            shard.is_parquet.hash(&mut hasher);
+            shard.random_access.hash(&mut hasher);
             shard.parquet_row_groups.hash(&mut hasher);
         }
         hasher.finish()
@@ -1026,7 +1029,7 @@ impl HuggingFaceRowSource {
         let mut eligible = Vec::new();
 
         for shard in shards {
-            if shard.is_parquet {
+            if shard.random_access {
                 if Self::is_store_shard_path(&shard.path) {
                     for local_idx in 0..shard.row_count {
                         let absolute_idx = shard.global_start.saturating_add(local_idx);
@@ -2300,7 +2303,7 @@ impl HuggingFaceRowSource {
             path: path.to_path_buf(),
             global_start,
             row_count: rows,
-            is_parquet: is_transient_parquet || is_store,
+            random_access: is_transient_parquet || is_store,
             parquet_row_groups,
             checkpoints,
             remote_candidate: None,
@@ -2559,7 +2562,7 @@ impl HuggingFaceRowSource {
         let mut shard = shard;
         shard.global_start = state.materialized_rows;
         shard.row_count = rows_to_add;
-        if shard.is_parquet {
+        if shard.random_access {
             shard
                 .parquet_row_groups
                 .retain(|(start, _)| *start < rows_to_add);
@@ -3275,7 +3278,7 @@ impl HuggingFaceRowSource {
             let mut parquet_groups: HashMap<ParquetGroupKey, Vec<ParquetGroupRequest>> =
                 HashMap::new();
             for (idx, shard, local_idx) in resolutions {
-                if shard.is_parquet {
+                if shard.random_access {
                     let (group_pos, local_in_group) =
                         self.locate_parquet_group(&shard, local_idx)?;
                     parquet_groups
@@ -4401,7 +4404,7 @@ mod tests {
                     path: manifest_file,
                     global_start: 0,
                     row_count: 1,
-                    is_parquet: true,
+                    random_access: true,
                     parquet_row_groups: vec![(0, 1)],
                     checkpoints: Vec::new(),
                     remote_candidate: None,
@@ -4410,7 +4413,7 @@ mod tests {
                     path: local_file,
                     global_start: 1,
                     row_count: 1,
-                    is_parquet: false,
+                    random_access: false,
                     parquet_row_groups: Vec::new(),
                     checkpoints: vec![0],
                     remote_candidate: None,
@@ -4445,7 +4448,7 @@ mod tests {
             path: dir.path().join("rows.parquet"),
             global_start: 0,
             row_count: 6,
-            is_parquet: true,
+            random_access: true,
             parquet_row_groups: vec![(0, 2), (2, 2), (4, 2)],
             checkpoints: Vec::new(),
             remote_candidate: None,
@@ -4632,7 +4635,7 @@ mod tests {
             path: PathBuf::from("a.ndjson"),
             global_start: 0,
             row_count: 2,
-            is_parquet: false,
+            random_access: false,
             parquet_row_groups: Vec::new(),
             checkpoints: vec![0],
             remote_candidate: None,
@@ -4674,7 +4677,7 @@ mod tests {
                 path,
                 global_start: 0,
                 row_count: 1,
-                is_parquet: false,
+                random_access: false,
                 parquet_row_groups: Vec::new(),
                 checkpoints: vec![0],
                 remote_candidate: None,
@@ -4705,7 +4708,7 @@ mod tests {
                 path,
                 global_start: 0,
                 row_count: 3,
-                is_parquet: true,
+                random_access: true,
                 parquet_row_groups: vec![(0, 3)],
                 checkpoints: Vec::new(),
                 remote_candidate: None,
@@ -4756,7 +4759,7 @@ mod tests {
                 path: shard_path,
                 global_start: 0,
                 row_count: 1,
-                is_parquet: true,
+                random_access: true,
                 parquet_row_groups: vec![(0, 1)],
                 checkpoints: Vec::new(),
                 remote_candidate: None,
@@ -4795,7 +4798,7 @@ mod tests {
                     path: first.clone(),
                     global_start: 0,
                     row_count: 1,
-                    is_parquet: true,
+                    random_access: true,
                     parquet_row_groups: vec![(0, 1)],
                     checkpoints: Vec::new(),
                     remote_candidate: None,
@@ -4804,7 +4807,7 @@ mod tests {
                     path: second.clone(),
                     global_start: 1,
                     row_count: 1,
-                    is_parquet: true,
+                    random_access: true,
                     parquet_row_groups: vec![(0, 1)],
                     checkpoints: Vec::new(),
                     remote_candidate: None,
@@ -4844,7 +4847,7 @@ mod tests {
                 path: protected.clone(),
                 global_start: 0,
                 row_count: 1,
-                is_parquet: true,
+                random_access: true,
                 parquet_row_groups: vec![(0, 1)],
                 checkpoints: Vec::new(),
                 remote_candidate: None,
@@ -5072,7 +5075,7 @@ mod tests {
             .unwrap();
         assert_eq!(shard.global_start, 5);
         assert_eq!(shard.row_count, 3);
-        assert!(!shard.is_parquet);
+        assert!(!shard.random_access);
         assert!(shard.checkpoints.len() >= 2);
         assert_eq!(shard.checkpoints[0], 0);
     }
@@ -5113,7 +5116,7 @@ mod tests {
                 path: old_path.clone(),
                 global_start: 0,
                 row_count: 1,
-                is_parquet: true,
+                random_access: true,
                 parquet_row_groups: vec![(0, 1)],
                 checkpoints: Vec::new(),
                 remote_candidate: None,
@@ -5260,7 +5263,7 @@ mod tests {
                 path: dir.path().join("missing.parquet"),
                 global_start: 0,
                 row_count: 1,
-                is_parquet: true,
+                random_access: true,
                 parquet_row_groups: vec![(0, 1)],
                 checkpoints: Vec::new(),
                 remote_candidate: None,
@@ -5546,7 +5549,7 @@ mod tests {
         let shard = HuggingFaceRowSource::index_single_shard(&config, &path, 0)
             .unwrap()
             .unwrap();
-        assert!(shard.is_parquet);
+        assert!(shard.random_access);
         assert_eq!(shard.row_count, 3);
         assert!(shard.checkpoints.is_empty());
     }
@@ -5992,7 +5995,7 @@ mod tests {
 
     // When transcode_parquet_shard_to_row_store takes the early-return path
     // (simdr store already fully populated), it must still delete the input
-    // parquet file and return a ShardIndex with is_parquet = false.
+    // parquet file and return a ShardIndex with random_access = true.
     #[test]
     fn transcode_parquet_shard_to_row_store_early_return_cleans_up_parquet() {
         let dir = tempdir().unwrap();
@@ -6017,7 +6020,7 @@ mod tests {
             path: parquet_path.clone(),
             global_start: 0,
             row_count: 2,
-            is_parquet: true,
+            random_access: true,
             parquet_row_groups: vec![(0, 2)],
             checkpoints: Vec::new(),
             remote_candidate: None,
@@ -6036,12 +6039,12 @@ mod tests {
         // Simdr store must still be present.
         assert!(store_path.exists(), "simdr store must survive early return");
 
-        // Returned shard must point to the store and carry is_parquet = false.
+        // Returned shard must point to the store and carry random_access = true.
         let returned = result.expect("early return must yield Some(ShardIndex)");
         assert_eq!(returned.path, store_path);
         assert!(
-            returned.is_parquet,
-            "is_parquet must be true for .simdr store (random-access read path)"
+            returned.random_access,
+            "random_access must be true for .simdr store (random-access read path)"
         );
         assert_eq!(returned.row_count, 2);
     }
@@ -6417,7 +6420,7 @@ mod tests {
                 path: PathBuf::from("a"),
                 global_start: 10,
                 row_count: 3,
-                is_parquet: false,
+                random_access: false,
                 parquet_row_groups: Vec::new(),
                 checkpoints: vec![0],
                 remote_candidate: None,
@@ -6426,7 +6429,7 @@ mod tests {
                 path: PathBuf::from("b"),
                 global_start: 20,
                 row_count: 2,
-                is_parquet: false,
+                random_access: false,
                 parquet_row_groups: Vec::new(),
                 checkpoints: vec![0],
                 remote_candidate: None,
@@ -6516,7 +6519,7 @@ mod tests {
             path: dir.path().join("missing-baseline.ndjson"),
             global_start: 0,
             row_count: 1,
-            is_parquet: false,
+            random_access: false,
             parquet_row_groups: Vec::new(),
             checkpoints: vec![0],
             remote_candidate: None,
@@ -6644,7 +6647,7 @@ mod tests {
                     path: evict_path.clone(),
                     global_start: 0,
                     row_count: 8,
-                    is_parquet: true,
+                    random_access: true,
                     parquet_row_groups: vec![(0, 8)],
                     checkpoints: Vec::new(),
                     remote_candidate: None,
@@ -6653,7 +6656,7 @@ mod tests {
                     path: keep_path.clone(),
                     global_start: 8,
                     row_count: 8,
-                    is_parquet: true,
+                    random_access: true,
                     parquet_row_groups: vec![(0, 8)],
                     checkpoints: Vec::new(),
                     remote_candidate: None,
@@ -6693,7 +6696,7 @@ mod tests {
                 path: protected.clone(),
                 global_start: 0,
                 row_count: 8,
-                is_parquet: true,
+                random_access: true,
                 parquet_row_groups: vec![(0, 8)],
                 checkpoints: Vec::new(),
                 remote_candidate: None,
