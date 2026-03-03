@@ -215,6 +215,7 @@ Rules:
 - Lines are whitespace-delimited; comments start with `#`.
 - `anchor=`, `positive=`, `context=`, and `text=` are the only accepted keys.
 - At least one mapping key is required per line.
+- HF row extraction is strict: no auto-detect fallback is used when mappings are absent.
 - `context=` and `text=` accept comma-delimited column lists.
 - Rows with missing/blank required fields are skipped.
 
@@ -229,11 +230,12 @@ hf://wikimedia/wikipedia/20231101.en/train anchor=title positive=text
 hf://pfox/71k-English-uncleaned-wordlist/default/train text=text
 ```
 
-Row formats supported by the HF backend:
+HF backend persistence and lookup model:
 
-- `.parquet`
-- `.jsonl` / `.ndjson` (one JSON object per line)
-- plain text lines (each non-empty line becomes `{ "text": "..." }`)
+- Persisted shard format is per-shard `.simdr` row stores.
+- `.parquet` is treated as transient decode input only and is removed after transcode.
+- Store keys use a single canonical key type: positional local row offset (`rowv1|<u64-le>`).
+- Reads use batch key lookups (`batch_read`) over these positional keys.
 
 ### Adding new sources
 

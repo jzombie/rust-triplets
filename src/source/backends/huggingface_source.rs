@@ -7,9 +7,11 @@ use parquet::record::reader::RowIter;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use simd_r_drive::storage_engine::DataStore;
+use simd_r_drive::storage_engine::traits::{DataStoreReader, DataStoreWriter};
 use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
@@ -61,6 +63,9 @@ const LARGE_REFRESH_MIN_RECORDS: usize = 1024;
 const HUGGINGFACE_REFRESH_BATCH_MULTIPLIER: usize = 8;
 const SHARD_SEQUENCE_STATE_VERSION: u32 = 1;
 const SHARD_SEQUENCE_STATE_FILE: &str = "_sequence_state.json";
+const HF_SHARD_STORE_EXTENSION: &str = "simdr";
+const HF_SHARD_STORE_ROW_PREFIX: &[u8] = b"rowv1|";
+const HF_SHARD_STORE_META_ROWS_KEY: &[u8] = b"meta|rows";
 fn managed_cache_root() -> Result<CacheRoot, String> {
     #[cfg(test)]
     {
@@ -118,13 +123,13 @@ pub fn managed_hf_snapshot_dir(
     )
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct RowTextField {
     name: String,
     text: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct RowView {
     row_id: Option<String>,
     timestamp: Option<DateTime<Utc>>,
@@ -396,12 +401,12 @@ pub struct HuggingFaceRowsConfig {
     pub local_disk_cap_bytes: Option<u64>,
     /// Optional row id column name. Falls back to synthetic id when missing.
     pub id_column: Option<String>,
-    /// Text columns to extract. Empty means auto-detect textual scalar columns.
+    /// Text columns to extract explicitly.
     pub text_columns: Vec<String>,
     /// Optional column used for anchor text.
     ///
     /// When set (or when `positive_column`/`context_columns` are set), role-based
-    /// extraction is used instead of `text_columns`/auto-detect mode.
+    /// extraction is used instead of `text_columns` mode.
     pub anchor_column: Option<String>,
     /// Optional column used for positive text.
     ///
@@ -430,6 +435,7 @@ impl HuggingFaceRowsConfig {
             snapshot_dir: snapshot_dir.into(),
             shard_extensions: vec![
                 "parquet".to_string(),
+                HF_SHARD_STORE_EXTENSION.to_string(),
                 "jsonl".to_string(),
                 "ndjson".to_string(),
             ],
@@ -441,11 +447,18 @@ impl HuggingFaceRowsConfig {
             max_rows: None,
             local_disk_cap_bytes: Some(32 * 1024 * 1024 * 1024),
             id_column: Some("id".to_string()),
-            text_columns: Vec::new(),
+            text_columns: vec!["text".to_string()],
             anchor_column: None,
             positive_column: None,
             context_columns: Vec::new(),
         }
+    }
+
+    fn has_explicit_mapping(&self) -> bool {
+        self.anchor_column.is_some()
+            || self.positive_column.is_some()
+            || !self.context_columns.is_empty()
+            || !self.text_columns.is_empty()
     }
 }
 
@@ -615,6 +628,7 @@ pub struct HuggingFaceRowSource {
     state: Mutex<SourceState>,
     cache: Mutex<RowCache>,
     parquet_cache: Mutex<ParquetCache>,
+    store_cache: Mutex<HashMap<PathBuf, Arc<DataStore>>>,
     eligible_index: Mutex<EligibleIndexCache>,
 }
 
@@ -651,6 +665,12 @@ impl HuggingFaceRowSource {
         if config.checkpoint_stride == 0 {
             return Err(SamplerError::Configuration(
                 "huggingface source checkpoint_stride must be > 0".to_string(),
+            ));
+        }
+        if !config.has_explicit_mapping() {
+            return Err(SamplerError::Configuration(
+                "huggingface source requires explicit field mapping (anchor/positive/context/text_columns)"
+                    .to_string(),
             ));
         }
 
@@ -718,8 +738,234 @@ impl HuggingFaceRowSource {
             }),
             cache: Mutex::new(RowCache::default()),
             parquet_cache: Mutex::new(ParquetCache::default()),
+            store_cache: Mutex::new(HashMap::new()),
             eligible_index: Mutex::new(EligibleIndexCache::default()),
         })
+    }
+
+    fn is_store_shard_path(path: &Path) -> bool {
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case(HF_SHARD_STORE_EXTENSION))
+    }
+
+    fn shard_store_path_for(path: &Path) -> PathBuf {
+        if Self::is_store_shard_path(path) {
+            return path.to_path_buf();
+        }
+        path.with_extension(HF_SHARD_STORE_EXTENSION)
+    }
+
+    fn open_shard_store(
+        config: &HuggingFaceRowsConfig,
+        shard_store_path: &Path,
+    ) -> Result<DataStore, SamplerError> {
+        if let Some(parent) = shard_store_path.parent() {
+            fs::create_dir_all(parent).map_err(|err| SamplerError::SourceUnavailable {
+                source_id: config.source_id.clone(),
+                reason: format!("failed creating row-store directory {}: {err}", parent.display()),
+            })?;
+        }
+        DataStore::open(shard_store_path).map_err(|err| SamplerError::SourceUnavailable {
+            source_id: config.source_id.clone(),
+            reason: format!("failed opening row store {}: {err}", shard_store_path.display()),
+        })
+    }
+
+    fn get_or_open_shard_store(&self, shard_store_path: &Path) -> Result<Arc<DataStore>, SamplerError> {
+        if let Some(store) = self
+            .store_cache
+            .lock()
+            .map_err(|_| SamplerError::SourceUnavailable {
+                source_id: self.config.source_id.clone(),
+                reason: "huggingface row-store cache lock poisoned".to_string(),
+            })?
+            .get(shard_store_path)
+            .cloned()
+        {
+            return Ok(store);
+        }
+
+        let store = Arc::new(Self::open_shard_store(&self.config, shard_store_path)?);
+        let mut cache =
+            self.store_cache
+                .lock()
+                .map_err(|_| SamplerError::SourceUnavailable {
+                    source_id: self.config.source_id.clone(),
+                    reason: "huggingface row-store cache lock poisoned".to_string(),
+                })?;
+        let entry = cache
+            .entry(shard_store_path.to_path_buf())
+            .or_insert_with(|| store.clone());
+        Ok(entry.clone())
+    }
+
+    fn prune_store_cache_to_shards(&self, shards: &[ShardIndex]) {
+        let keep = shards
+            .iter()
+            .map(|shard| shard.path.clone())
+            .collect::<HashSet<_>>();
+        if let Ok(mut cache) = self.store_cache.lock() {
+            cache.retain(|path, _| keep.contains(path));
+        }
+    }
+
+    fn row_store_row_key(local_idx: usize) -> Vec<u8> {
+        let mut key = Vec::with_capacity(HF_SHARD_STORE_ROW_PREFIX.len() + std::mem::size_of::<u64>());
+        key.extend_from_slice(HF_SHARD_STORE_ROW_PREFIX);
+        key.extend_from_slice(&(local_idx as u64).to_le_bytes());
+        key
+    }
+
+    fn encode_row_view(&self, row: &RowView) -> Result<Vec<u8>, SamplerError> {
+        serde_json::to_vec(row).map_err(|err| SamplerError::SourceUnavailable {
+            source_id: self.config.source_id.clone(),
+            reason: format!("failed encoding row-view payload: {err}"),
+        })
+    }
+
+    fn decode_row_view(&self, bytes: &[u8]) -> Result<RowView, SamplerError> {
+        serde_json::from_slice(bytes).map_err(|err| SamplerError::SourceUnavailable {
+            source_id: self.config.source_id.clone(),
+            reason: format!("failed decoding row-view payload: {err}"),
+        })
+    }
+
+    fn read_store_row_count(&self, store: &DataStore) -> Result<usize, SamplerError> {
+        let Some(entry) = store
+            .read(HF_SHARD_STORE_META_ROWS_KEY)
+            .map_err(|err| SamplerError::SourceUnavailable {
+                source_id: self.config.source_id.clone(),
+                reason: format!("row-store meta read failed: {err}"),
+            })?
+        else {
+            return Ok(0);
+        };
+
+        let bytes = entry.as_ref();
+        if bytes.len() != std::mem::size_of::<u64>() {
+            return Err(SamplerError::SourceUnavailable {
+                source_id: self.config.source_id.clone(),
+                reason: "row-store meta payload size mismatch".to_string(),
+            });
+        }
+        let mut raw = [0u8; 8];
+        raw.copy_from_slice(bytes);
+        Ok(u64::from_le_bytes(raw) as usize)
+    }
+
+    fn write_store_row_count(&self, store: &DataStore, rows: usize) -> Result<(), SamplerError> {
+        let payload = (rows as u64).to_le_bytes();
+        store
+            .write(HF_SHARD_STORE_META_ROWS_KEY, payload.as_slice())
+            .map_err(|err| SamplerError::SourceUnavailable {
+                source_id: self.config.source_id.clone(),
+                reason: format!("row-store meta write failed: {err}"),
+            })?;
+        Ok(())
+    }
+
+    fn transcode_parquet_shard_to_row_store(
+        &self,
+        shard: &ShardIndex,
+    ) -> Result<Option<ShardIndex>, SamplerError> {
+        if !shard.is_parquet {
+            return Ok(Some(shard.clone()));
+        }
+
+        let store_path = Self::shard_store_path_for(&shard.path);
+        let store = self.get_or_open_shard_store(&store_path)?;
+        if store_path.exists() {
+            let existing_rows = self.read_store_row_count(&store)?;
+            if existing_rows > 0 {
+                return Ok(Some(ShardIndex {
+                    path: store_path,
+                    global_start: shard.global_start,
+                    row_count: existing_rows,
+                    is_parquet: true,
+                    parquet_row_groups: vec![(0, existing_rows)],
+                    checkpoints: Vec::new(),
+                }));
+            }
+        }
+
+        let mut served_rows = 0usize;
+
+        for (group_pos, (group_start, group_count)) in shard.parquet_row_groups.iter().copied().enumerate() {
+            let rows = self
+                .parquet_cache
+                .lock()
+                .map_err(|_| SamplerError::SourceUnavailable {
+                    source_id: self.config.source_id.clone(),
+                    reason: "huggingface parquet cache lock poisoned".to_string(),
+                })?
+                .row_group_rows_for(
+                    &self.config.source_id,
+                    &shard.path,
+                    group_pos,
+                    self.config.parquet_row_group_cache_capacity,
+                )?;
+
+            let mut batch: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+            batch.reserve(group_count);
+
+            for local_in_group in 0..group_count {
+                let local_idx = group_start.saturating_add(local_in_group);
+                if local_idx >= shard.row_count {
+                    break;
+                }
+                let Some(row_value) = rows.get(local_in_group) else {
+                    break;
+                };
+                let absolute_idx = shard.global_start.saturating_add(local_idx);
+                let Some(row) = self.parse_row(absolute_idx, row_value)? else {
+                    continue;
+                };
+
+                let key = Self::row_store_row_key(served_rows);
+                let payload = self.encode_row_view(&row)?;
+                batch.push((key, payload));
+                served_rows = served_rows.saturating_add(1);
+            }
+
+            if !batch.is_empty() {
+                let refs: Vec<(&[u8], &[u8])> = batch
+                    .iter()
+                    .map(|(key, payload)| (key.as_slice(), payload.as_slice()))
+                    .collect();
+                store
+                    .batch_write(&refs)
+                    .map_err(|err| SamplerError::SourceUnavailable {
+                        source_id: self.config.source_id.clone(),
+                        reason: format!("row-store batch write failed: {err}"),
+                    })?;
+            }
+        }
+
+        self.write_store_row_count(&store, served_rows)?;
+
+        if shard.path != store_path {
+            fs::remove_file(&shard.path).map_err(|err| SamplerError::SourceUnavailable {
+                source_id: self.config.source_id.clone(),
+                reason: format!(
+                    "failed removing parquet shard after store transcode {}: {err}",
+                    shard.path.display()
+                ),
+            })?;
+        }
+
+        if served_rows == 0 {
+            return Ok(None);
+        }
+
+        Ok(Some(ShardIndex {
+            path: store_path,
+            global_start: shard.global_start,
+            row_count: served_rows,
+            is_parquet: true,
+            parquet_row_groups: vec![(0, served_rows)],
+            checkpoints: Vec::new(),
+        }))
     }
 
     fn invalidate_eligible_index(&self) {
@@ -748,6 +994,14 @@ impl HuggingFaceRowSource {
 
         for shard in shards {
             if shard.is_parquet {
+                if Self::is_store_shard_path(&shard.path) {
+                    for local_idx in 0..shard.row_count {
+                        let absolute_idx = shard.global_start.saturating_add(local_idx);
+                        eligible.push(absolute_idx);
+                    }
+                    continue;
+                }
+
                 for (group_pos, (group_start, group_count)) in
                     shard.parquet_row_groups.iter().copied().enumerate()
                 {
@@ -995,7 +1249,8 @@ impl HuggingFaceRowSource {
                 .is_some_and(|ext| accepted.iter().any(|allowed| allowed == ext))
             {
                 let target = Self::candidate_target_path(config, remote_path);
-                if target.exists() {
+                let store_target = Self::shard_store_path_for(&target);
+                if target.exists() || store_target.exists() {
                     continue;
                 }
                 candidates.push(remote_path.clone());
@@ -1079,6 +1334,10 @@ impl HuggingFaceRowSource {
                 let candidate = format!("{REMOTE_URL_PREFIX}{url}");
                 let expected_size = entry.get("size").and_then(Value::as_u64);
                 let target = Self::candidate_target_path(config, &candidate);
+                let store_target = Self::shard_store_path_for(&target);
+                if store_target.exists() {
+                    continue;
+                }
                 if target.exists() {
                     if Self::target_matches_expected_size(&target, expected_size) {
                         continue;
@@ -1606,6 +1865,10 @@ impl HuggingFaceRowSource {
     ) -> Result<PathBuf, SamplerError> {
         if let Some(remote_url) = remote_path.strip_prefix(REMOTE_URL_PREFIX) {
             let target = Self::candidate_target_path(config, remote_path);
+            let store_target = Self::shard_store_path_for(&target);
+            if store_target.exists() {
+                return Ok(store_target);
+            }
             if target.exists() {
                 if Self::target_matches_expected_size(&target, expected_bytes) {
                     return Ok(target);
@@ -1801,6 +2064,10 @@ impl HuggingFaceRowSource {
         }
 
         let target = Self::candidate_target_path(config, remote_path);
+        let store_target = Self::shard_store_path_for(&target);
+        if store_target.exists() {
+            return Ok(store_target);
+        }
         Self::materialize_local_file(config, &local_cached, &target)?;
         Ok(target)
     }
@@ -1811,12 +2078,38 @@ impl HuggingFaceRowSource {
         path: &Path,
         global_start: usize,
     ) -> Result<Option<ShardIndex>, SamplerError> {
-        let is_parquet = path
+        let is_store = Self::is_store_shard_path(path);
+        // Parquet is treated as a transient decode artifact only.
+        // Persisted shard artifacts should be per-shard .simdr stores.
+        let is_transient_parquet = path
             .extension()
             .and_then(|v| v.to_str())
             .is_some_and(|ext| ext.eq_ignore_ascii_case("parquet"));
 
-        let (rows, parquet_row_groups, checkpoints) = if is_parquet {
+        let (rows, parquet_row_groups, checkpoints) = if is_store {
+            let store = Self::open_shard_store(config, path)?;
+            let rows = if let Some(entry) = store.read(HF_SHARD_STORE_META_ROWS_KEY).map_err(
+                |err| SamplerError::SourceUnavailable {
+                    source_id: config.source_id.clone(),
+                    reason: format!("row-store meta read failed {}: {err}", path.display()),
+                },
+            )? {
+                let payload = entry.as_ref();
+                if payload.len() != std::mem::size_of::<u64>() {
+                    return Err(SamplerError::SourceUnavailable {
+                        source_id: config.source_id.clone(),
+                        reason: format!("invalid row-store meta payload {}", path.display()),
+                    });
+                }
+                let mut raw = [0u8; 8];
+                raw.copy_from_slice(payload);
+                u64::from_le_bytes(raw) as usize
+            } else {
+                0
+            };
+            let groups = if rows > 0 { vec![(0, rows)] } else { Vec::new() };
+            (rows, groups, Vec::new())
+        } else if is_transient_parquet {
             let (rows, parquet_row_groups) = Self::parquet_row_group_map(config, path)?;
             (rows, parquet_row_groups, Vec::new())
         } else {
@@ -1860,7 +2153,7 @@ impl HuggingFaceRowSource {
             path: path.to_path_buf(),
             global_start,
             row_count: rows,
-            is_parquet,
+            is_parquet: is_transient_parquet || is_store,
             parquet_row_groups,
             checkpoints,
         }))
@@ -2076,7 +2369,7 @@ impl HuggingFaceRowSource {
             return Ok(true);
         };
 
-        let mut state = self
+        let state = self
             .state
             .lock()
             .map_err(|_| SamplerError::SourceUnavailable {
@@ -2112,6 +2405,19 @@ impl HuggingFaceRowSource {
                 *count = (*count).min(allowed);
             }
         }
+
+        drop(state);
+        let Some(shard) = self.transcode_parquet_shard_to_row_store(&shard)? else {
+            return Ok(true);
+        };
+
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| SamplerError::SourceUnavailable {
+                source_id: self.config.source_id.clone(),
+                reason: "huggingface source state lock poisoned".to_string(),
+            })?;
         state.materialized_rows += rows_to_add;
         state.shards.push(shard);
         drop(state);
@@ -2129,6 +2435,7 @@ impl HuggingFaceRowSource {
         self.persist_shard_sequence_locked(&state)?;
         let materialized_rows = state.materialized_rows;
         let shard_count = state.shards.len();
+        let active_shards = state.shards.clone();
         let remaining_candidates = state
             .remote_candidates
             .as_ref()
@@ -2142,6 +2449,7 @@ impl HuggingFaceRowSource {
             .map(|bytes| format!("{:.2} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0)))
             .unwrap_or_else(|| "disabled".to_string());
         drop(state);
+        self.prune_store_cache_to_shards(&active_shards);
 
         if evicted_any {
             if let Ok(mut cache) = self.cache.lock() {
@@ -2253,6 +2561,14 @@ impl HuggingFaceRowSource {
             };
             if ext.eq_ignore_ascii_case("parquet") {
                 saw_parquet = true;
+                if let Err(err) = fs::remove_file(entry.path()) {
+                    warn!(
+                        "[triplets:hf] found persisted parquet shard (expected transient only) and failed to remove {}: {}",
+                        entry.path().display(),
+                        err
+                    );
+                }
+                continue;
             }
             if accepted
                 .iter()
@@ -2264,14 +2580,11 @@ impl HuggingFaceRowSource {
 
         shard_paths.sort();
         if shard_paths.is_empty() {
-            if saw_parquet && !accepted.iter().any(|value| value == "parquet") {
-                return Err(SamplerError::SourceUnavailable {
-                    source_id: config.source_id.clone(),
-                    reason: format!(
-                        "found parquet files under {}, but shard_extensions does not include parquet.",
-                        config.snapshot_dir.display()
-                    ),
-                });
+            if saw_parquet {
+                warn!(
+                    "[triplets:hf] found persisted parquet under {} (transient-only policy); parquet files were pruned and source will repopulate from remote candidates",
+                    config.snapshot_dir.display()
+                );
             }
             return Err(SamplerError::SourceUnavailable {
                 source_id: config.source_id.clone(),
@@ -2283,19 +2596,16 @@ impl HuggingFaceRowSource {
             });
         }
 
-        let mut indexed_shards = shard_paths
-            .into_par_iter()
-            .enumerate()
-            .map(|(ordinal, path)| {
-                info!(
-                    "[triplets:hf] indexing shard {}: {}",
-                    ordinal + 1,
-                    path.display()
-                );
-                let shard = Self::index_single_shard(config, &path, 0)?;
-                Ok::<_, SamplerError>((ordinal, shard))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut indexed_shards = Vec::with_capacity(shard_paths.len());
+        for (ordinal, path) in shard_paths.into_iter().enumerate() {
+            info!(
+                "[triplets:hf] indexing shard {}: {}",
+                ordinal + 1,
+                path.display()
+            );
+            let shard = Self::index_single_shard(config, &path, 0)?;
+            indexed_shards.push((ordinal, shard));
+        }
 
         indexed_shards.sort_by_key(|(ordinal, _)| *ordinal);
 
@@ -2481,6 +2791,15 @@ impl HuggingFaceRowSource {
         absolute_idx: usize,
         row_value: &Value,
     ) -> Result<Option<RowView>, SamplerError> {
+        if !self.config.has_explicit_mapping() {
+            return Err(SamplerError::SourceInconsistent {
+                source_id: self.config.source_id.clone(),
+                details:
+                    "huggingface row parsing requires explicit field mapping; no columns configured"
+                        .to_string(),
+            });
+        }
+
         let row_payload = row_value.get("row").unwrap_or(row_value);
         let row_obj = row_payload
             .as_object()
@@ -2545,18 +2864,6 @@ impl HuggingFaceRowSource {
                     name: name.clone(),
                     text,
                 });
-            }
-        } else if self.config.text_columns.is_empty() {
-            for (name, value) in row_obj {
-                if self.config.id_column.as_ref().is_some_and(|id| id == name) {
-                    continue;
-                }
-                if let Some(text) = Self::value_to_text(value) {
-                    text_fields.push(RowTextField {
-                        name: name.clone(),
-                        text,
-                    });
-                }
             }
         } else {
             for name in &self.config.text_columns {
@@ -2809,6 +3116,80 @@ impl HuggingFaceRowSource {
                 for (idx, local_in_group, _) in requested {
                     targets.entry(local_in_group).or_default().push(idx);
                 }
+
+                let (group_start, _) = shard.parquet_row_groups[group_pos];
+                let mut unresolved_targets: BTreeMap<usize, Vec<usize>> = targets.clone();
+
+                if Self::is_store_shard_path(&shard.path) {
+                    let store = self.get_or_open_shard_store(&shard.path)?;
+                    let requested_positions = targets.keys().copied().collect::<Vec<_>>();
+                    let store_keys = requested_positions
+                        .iter()
+                        .map(|position| {
+                            let local_idx = group_start.saturating_add(*position);
+                            Self::row_store_row_key(local_idx)
+                        })
+                        .collect::<Vec<_>>();
+                    let store_key_refs = store_keys
+                        .iter()
+                        .map(|key| key.as_slice())
+                        .collect::<Vec<_>>();
+                    let store_entries = store.batch_read(&store_key_refs).map_err(|err| {
+                        SamplerError::SourceUnavailable {
+                            source_id: self.config.source_id.clone(),
+                            reason: format!("row-store batch read failed: {err}"),
+                        }
+                    })?;
+
+                    unresolved_targets.clear();
+                    for (position, entry) in requested_positions.into_iter().zip(store_entries.into_iter()) {
+                        let Some(indices_for_position) = targets.get(&position).cloned() else {
+                            continue;
+                        };
+                        let Some(entry) = entry else {
+                            unresolved_targets.insert(position, indices_for_position);
+                            continue;
+                        };
+
+                        let row = self.decode_row_view(entry.as_ref())?;
+                        for idx in indices_for_position {
+                            let record = self.row_to_record(&row, idx as u64)?;
+                            if let Some(record) = record {
+                                self.cache
+                                    .lock()
+                                    .map_err(|_| SamplerError::SourceUnavailable {
+                                        source_id: self.config.source_id.clone(),
+                                        reason: "huggingface row cache lock poisoned".to_string(),
+                                    })?
+                                    .insert(idx, row.clone(), self.config.cache_capacity);
+                                fetched.insert(idx, Some(record));
+                            } else {
+                                fetched.insert(idx, None);
+                            }
+                        }
+                    }
+
+                    if unresolved_targets.is_empty() {
+                        continue;
+                    }
+
+                    let missing = unresolved_targets
+                        .keys()
+                        .copied()
+                        .map(|value| value.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    return Err(SamplerError::SourceUnavailable {
+                        source_id: self.config.source_id.clone(),
+                        reason: format!(
+                            "row-store rows missing in shard {} row_group {} at local offsets [{}]",
+                            shard.path.display(),
+                            group_pos,
+                            missing
+                        ),
+                    });
+                }
+
                 let row_group_rows = self
                     .parquet_cache
                     .lock()
@@ -2824,16 +3205,27 @@ impl HuggingFaceRowSource {
                     )?;
 
                 let mut missing_offsets = Vec::new();
-                for (position, indices_for_position) in targets {
+                for (position, indices_for_position) in unresolved_targets {
                     let Some(row_value) = row_group_rows.get(position) else {
                         missing_offsets.push(position);
                         continue;
                     };
 
-                    for idx in indices_for_position {
-                        let row = self.parse_row(idx, row_value)?;
+                    let parsed = indices_for_position
+                        .into_par_iter()
+                        .map(|idx| {
+                            let row = self.parse_row(idx, row_value)?;
+                            if let Some(row) = row {
+                                let record = self.row_to_record(&row, idx as u64)?;
+                                Ok((idx, Some(row), record))
+                            } else {
+                                Ok((idx, None, None))
+                            }
+                        })
+                        .collect::<Result<Vec<_>, SamplerError>>()?;
+
+                    for (idx, row, record) in parsed {
                         if let Some(row) = row {
-                            let record = self.row_to_record(&row, idx as u64)?;
                             self.cache
                                 .lock()
                                 .map_err(|_| SamplerError::SourceUnavailable {
@@ -3191,6 +3583,7 @@ mod tests {
             }),
             cache: Mutex::new(RowCache::default()),
             parquet_cache: Mutex::new(ParquetCache::default()),
+            store_cache: Mutex::new(HashMap::new()),
             eligible_index: Mutex::new(EligibleIndexCache::default()),
         };
         source.set_active_sampler_config(&SamplerConfig {
@@ -4196,6 +4589,7 @@ mod tests {
             }),
             cache: Mutex::new(RowCache::default()),
             parquet_cache: Mutex::new(ParquetCache::default()),
+            store_cache: Mutex::new(HashMap::new()),
             eligible_index: Mutex::new(EligibleIndexCache::default()),
         };
 
@@ -5646,10 +6040,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_row_auto_detects_text_fields_and_skips_id() {
+    fn parse_row_uses_explicit_text_columns() {
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path().to_path_buf());
         config.id_column = Some("id".into());
+        config.text_columns = vec!["title".into(), "body".into()];
         let source = test_source(config);
 
         let row = source
@@ -5666,9 +6061,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(row.row_id.as_deref(), Some("row-5"));
-        assert!(row.text_fields.iter().any(|f| f.name == "title"));
-        assert!(row.text_fields.iter().any(|f| f.name == "body"));
-        assert!(row.text_fields.iter().all(|f| f.name != "id"));
+        assert_eq!(row.text_fields.len(), 2);
+        assert_eq!(row.text_fields[0].name, "title");
+        assert_eq!(row.text_fields[1].name, "body");
+        assert!(row.text_fields.iter().all(|field| field.name != "id"));
     }
 
     #[test]
@@ -6145,15 +6541,18 @@ mod tests {
     }
 
     #[test]
-    fn parse_row_returns_none_when_auto_detect_has_no_text_fields() {
+    fn parse_row_errors_when_no_mapping_is_configured() {
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path().to_path_buf());
         config.id_column = Some("id".into());
         config.text_columns.clear();
         let source = test_source(config);
 
-        let parsed = source.parse_row(7, &json!({"id":"only-id"})).unwrap();
-        assert!(parsed.is_none());
+        let parsed = source.parse_row(7, &json!({"id":"only-id"}));
+        assert!(matches!(
+            parsed,
+            Err(SamplerError::SourceInconsistent { .. })
+        ));
     }
 
     #[test]
