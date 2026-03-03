@@ -28,24 +28,24 @@ const DEFAULT_SOURCE_LIST: &str = r#"# triplets Hugging Face source-list format:
 # - accepted keys: anchor= positive= context= text=
 # - context/text accept comma-delimited columns
 
-# hf://allenai/c4/default/train text=text
+# hf://allenai/c4/default text=text
 
 # Single words (probably *never* use because BGE was never optimized for this)
-# hf://pfox/71k-English-uncleaned-wordlist/default/train text=text
+# hf://pfox/71k-English-uncleaned-wordlist/default text=text
 
 # TODO: Add different types of transcriptions
 
 # Anchor basic relationships
-# hf://roneneldan/TinyStories/default/train text=text
+# hf://roneneldan/TinyStories/default text=text
 
 # Conversational tech
-hf://labofsahil/hackernews-vector-search-dataset/default/train anchor=title positive=text
+hf://labofsahil/hackernews-vector-search-dataset/default anchor=title positive=text
 
 # Skeleton of most embedding spaces
-hf://wikimedia/wikipedia/20231101.en/train anchor=title positive=text
+hf://wikimedia/wikipedia/20231101.en anchor=title positive=text
 
 # The "All-in-One" cleaned giant
-# hf://cerebras/SlimPajama-627B/default/train text=text
+# hf://cerebras/SlimPajama-627B/default text=text
 "#;
 
 #[cfg(feature = "huggingface")]
