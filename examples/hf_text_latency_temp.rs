@@ -84,14 +84,14 @@ struct HfTextLatencyCli {
     batch_size: usize,
     #[arg(
         long,
-        default_value_t = 1024,
+        default_value_t = 2048,
         value_name = "N",
         help = "Sampler ingestion_max_records"
     )]
     ingestion_max_records: usize,
     #[arg(
         long,
-        default_value_t = 20,
+        default_value_t = 1000,
         value_name = "N",
         help = "Number of timed next_text_batch calls"
     )]
@@ -116,16 +116,6 @@ struct HfTextLatencyCli {
 #[cfg(not(feature = "huggingface"))]
 fn main() {
     eprintln!("hf_text_latency_temp requires --features huggingface");
-}
-
-#[cfg(feature = "huggingface")]
-fn percentile(sorted_ms: &[f64], p: f64) -> f64 {
-    if sorted_ms.is_empty() {
-        return 0.0;
-    }
-    let p = p.clamp(0.0, 100.0);
-    let idx = ((p / 100.0) * ((sorted_ms.len() - 1) as f64)).round() as usize;
-    sorted_ms[idx]
 }
 
 #[cfg(feature = "huggingface")]
@@ -183,47 +173,35 @@ fn main() -> Result<(), Box<dyn Error>> {
         sampler.register_source(source);
     }
 
-    println!("warming up first next_text_batch...");
-    let warmup_started = Instant::now();
-    let warmup = sampler.next_text_batch(split)?;
-    let warmup_ms = warmup_started.elapsed().as_secs_f64() * 1000.0;
-    println!(
-        "warmup_ms={:.2} samples={}",
-        warmup_ms,
-        warmup.samples.len()
-    );
+    println!("running {} iterations of next_text_batch (batch_size={})...", cli.iterations, cli.batch_size);
+    println!("watch .cache/triplets/ for new .simdr shard files appearing");
+    println!();
 
-    let mut latencies_ms = Vec::with_capacity(cli.iterations);
+    let run_start = Instant::now();
+    let mut total_samples = 0usize;
+
     for iter in 0..cli.iterations {
         let started = Instant::now();
         let batch = sampler.next_text_batch(split)?;
         let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
-        latencies_ms.push(elapsed_ms);
+        total_samples += batch.samples.len();
+
         println!(
-            "iter={:03} latency_ms={:.2} samples={}",
+            "[{:>7.1}s] iter={:04} latency_ms={:>7.2} samples={} total_samples={}",
+            run_start.elapsed().as_secs_f64(),
             iter + 1,
             elapsed_ms,
-            batch.samples.len()
+            batch.samples.len(),
+            total_samples,
         );
     }
 
-    if !latencies_ms.is_empty() {
-        let mut sorted = latencies_ms.clone();
-        sorted.sort_by(|a, b| a.total_cmp(b));
-        let sum: f64 = latencies_ms.iter().sum();
-        let mean = sum / (latencies_ms.len() as f64);
-        let min = *sorted.first().unwrap_or(&0.0);
-        let max = *sorted.last().unwrap_or(&0.0);
-
-        println!("--- latency summary (ms) ---");
-        println!("count={}", latencies_ms.len());
-        println!("min={:.2}", min);
-        println!("mean={:.2}", mean);
-        println!("p50={:.2}", percentile(&sorted, 50.0));
-        println!("p95={:.2}", percentile(&sorted, 95.0));
-        println!("p99={:.2}", percentile(&sorted, 99.0));
-        println!("max={:.2}", max);
-    }
+    println!();
+    println!("done: {} iterations, {} total samples in {:.1}s",
+        cli.iterations,
+        total_samples,
+        run_start.elapsed().as_secs_f64(),
+    );
 
     sampler.save_sampler_state(None)?;
     Ok(())

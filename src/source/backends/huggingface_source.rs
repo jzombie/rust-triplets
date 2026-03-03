@@ -20,7 +20,6 @@ use std::path::Path;
 use std::path::PathBuf;
 #[cfg(test)]
 use std::sync::OnceLock;
-use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -617,11 +616,11 @@ pub struct HuggingFaceRowSource {
     parquet_cache: Arc<Mutex<ParquetCache>>,
     store_cache: Arc<Mutex<HashMap<PathBuf, Arc<DataStore>>>>,
     eligible_index: Arc<Mutex<EligibleIndexCache>>,
-    /// True while a background shard-expansion thread is running.  Prevents
-    /// launching a second download before the first finishes.  The thread
-    /// updates shared `state` directly and clears this flag on completion;
-    /// `refresh()` never blocks waiting for it.
-    expansion_in_progress: Arc<AtomicBool>,
+    /// Handle to the running background shard-expansion thread, if any.
+    /// `is_finished()` returns true once the thread exits for any reason
+    /// including panic, so this can never get permanently stuck the way
+    /// an `AtomicBool` flag can when the thread panics before clearing it.
+    expansion_thread: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
 }
 
 impl Clone for HuggingFaceRowSource {
@@ -634,7 +633,7 @@ impl Clone for HuggingFaceRowSource {
             parquet_cache: Arc::clone(&self.parquet_cache),
             store_cache: Arc::clone(&self.store_cache),
             eligible_index: Arc::clone(&self.eligible_index),
-            expansion_in_progress: Arc::clone(&self.expansion_in_progress),
+            expansion_thread: Arc::clone(&self.expansion_thread),
         }
     }
 }
@@ -748,7 +747,7 @@ impl HuggingFaceRowSource {
             parquet_cache: Arc::new(Mutex::new(ParquetCache::default())),
             store_cache: Arc::new(Mutex::new(HashMap::new())),
             eligible_index: Arc::new(Mutex::new(EligibleIndexCache::default())),
-            expansion_in_progress: Arc::new(AtomicBool::new(false)),
+            expansion_thread: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -3663,13 +3662,19 @@ impl DataSource for HuggingFaceRowSource {
             .max()
             .unwrap_or_else(Utc::now);
 
-        // Fire-and-forget background shard expansion.  The thread updates
-        // shared Arc state directly; refresh() never blocks waiting for it.
-        // AtomicBool prevents launching a second download before the first
-        // completes.  Successive calls walk through every remote candidate
-        // in order until the full dataset is consumed.
+        // Fire-and-forget background shard expansion — one shard per refresh()
+        // cycle.  We hold the JoinHandle in a Mutex<Option<JoinHandle>>.
+        // is_finished() returns true once the thread exits for *any* reason
+        // including a panic, so the guard can never get permanently stuck the
+        // way an AtomicBool can when the thread panics before clearing it.
+        //
+        // Two conditions allow spawning:
+        //   (a) candidates already fetched and there are unconsumed entries, or
+        //   (b) candidates not yet fetched — happens when the source starts with
+        //       local shards from a prior session (remote_candidates stays None
+        //       because the materialized_rows>0 bootstrap path is skipped).
         {
-            let has_remaining = {
+            let needs_expansion = {
                 let state = self
                     .state
                     .lock()
@@ -3677,31 +3682,56 @@ impl DataSource for HuggingFaceRowSource {
                         source_id: self.config.source_id.clone(),
                         reason: "huggingface source state lock poisoned".to_string(),
                     })?;
-                state
+                let known_empty = state.total_rows == Some(0);
+                let all_consumed = state
                     .remote_candidates
                     .as_ref()
-                    .is_some_and(|c| state.next_remote_idx < c.len())
+                    .is_some_and(|c| state.next_remote_idx >= c.len());
+                !known_empty && !all_consumed
             };
-            if has_remaining
-                && !self
-                    .expansion_in_progress
-                    .load(std::sync::atomic::Ordering::Acquire)
-            {
-                self.expansion_in_progress
-                    .store(true, std::sync::atomic::Ordering::Release);
-                let source = self.clone();
-                thread::spawn(move || {
-                    match source.download_next_remote_shard() {
-                        Ok(_) => {}
-                        Err(err) => warn!(
-                            "[triplets:hf] background expansion error (source '{}'): {}",
-                            source.config.source_id, err
-                        ),
+
+            if needs_expansion {
+                let already_running = self
+                    .expansion_thread
+                    .lock()
+                    .map(|t| t.as_ref().is_some_and(|h| !h.is_finished()))
+                    .unwrap_or(false);
+
+                if !already_running {
+                    let source = self.clone();
+                    let handle = thread::spawn(move || {
+                        // If candidates not yet fetched, discover them first.
+                        let needs_candidates = source
+                            .state
+                            .lock()
+                            .map(|s| s.remote_candidates.is_none())
+                            .unwrap_or(false);
+                        if needs_candidates {
+                            let target = source
+                                .state
+                                .lock()
+                                .map(|s| s.materialized_rows)
+                                .unwrap_or(0);
+                            if let Err(err) = source.ensure_row_available(target) {
+                                warn!(
+                                    "[triplets:hf] background expansion (candidate fetch) error \
+                                     (source '{}'): {}",
+                                    source.config.source_id, err
+                                );
+                            }
+                            return;
+                        }
+                        if let Err(err) = source.download_next_remote_shard() {
+                            warn!(
+                                "[triplets:hf] background expansion error (source '{}'): {}",
+                                source.config.source_id, err
+                            );
+                        }
+                    });
+                    if let Ok(mut slot) = self.expansion_thread.lock() {
+                        *slot = Some(handle);
                     }
-                    source
-                        .expansion_in_progress
-                        .store(false, std::sync::atomic::Ordering::Release);
-                });
+                }
             }
         }
 
@@ -3794,7 +3824,7 @@ mod tests {
             parquet_cache: Arc::new(Mutex::new(ParquetCache::default())),
             store_cache: Arc::new(Mutex::new(HashMap::new())),
             eligible_index: Arc::new(Mutex::new(EligibleIndexCache::default())),
-            expansion_in_progress: Arc::new(AtomicBool::new(false)),
+            expansion_thread: Arc::new(Mutex::new(None)),
         };
         source.set_active_sampler_config(&SamplerConfig {
             seed: 1,
@@ -4840,7 +4870,7 @@ mod tests {
             parquet_cache: Arc::new(Mutex::new(ParquetCache::default())),
             store_cache: Arc::new(Mutex::new(HashMap::new())),
             eligible_index: Arc::new(Mutex::new(EligibleIndexCache::default())),
-            expansion_in_progress: Arc::new(AtomicBool::new(false)),
+            expansion_thread: Arc::new(Mutex::new(None)),
         };
 
         assert!(source.configured_sampler_seed().is_err());
