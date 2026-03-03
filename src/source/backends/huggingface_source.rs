@@ -896,6 +896,17 @@ impl HuggingFaceRowSource {
         if store_path.exists() {
             let existing_rows = self.read_store_row_count(&store)?;
             if existing_rows > 0 {
+                // Simdr store is already fully populated.  Clean up the
+                // transient parquet source file if it is still present.
+                if shard.path != store_path && shard.path.exists() {
+                    if let Err(err) = fs::remove_file(&shard.path) {
+                        warn!(
+                            "[triplets:hf] failed removing stale parquet after store hit {}: {}",
+                            shard.path.display(),
+                            err
+                        );
+                    }
+                }
                 return Ok(Some(ShardIndex {
                     path: store_path,
                     global_start: shard.global_start,
@@ -5977,6 +5988,62 @@ mod tests {
         assert_eq!(state.shards.len(), 1);
         assert_eq!(state.shards[0].path, store_target);
         assert_eq!(state.materialized_rows, 2);
+    }
+
+    // When transcode_parquet_shard_to_row_store takes the early-return path
+    // (simdr store already fully populated), it must still delete the input
+    // parquet file and return a ShardIndex with is_parquet = false.
+    #[test]
+    fn transcode_parquet_shard_to_row_store_early_return_cleans_up_parquet() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config.clone());
+
+        // Write a parquet fixture (simulates a stale/unconsumed parquet from a
+        // previous run that crashed before the delete step fired).
+        let parquet_path = dir.path().join("stale.parquet");
+        write_parquet_fixture(&parquet_path, &[("r1", "hello"), ("r2", "world")]);
+        assert!(
+            parquet_path.exists(),
+            "parquet fixture must exist before test"
+        );
+
+        // Pre-populate the corresponding simdr store so the function short-circuits.
+        let store_path = HuggingFaceRowSource::shard_store_path_for(&parquet_path);
+        write_simdr_fixture(&store_path, &[("r1", "hello"), ("r2", "world")]);
+        assert!(store_path.exists(), "simdr store must exist before test");
+
+        let shard = ShardIndex {
+            path: parquet_path.clone(),
+            global_start: 0,
+            row_count: 2,
+            is_parquet: true,
+            parquet_row_groups: vec![(0, 2)],
+            checkpoints: Vec::new(),
+            remote_candidate: None,
+        };
+
+        let result = source
+            .transcode_parquet_shard_to_row_store(&shard)
+            .expect("transcode must succeed");
+
+        // Stale parquet must be gone.
+        assert!(
+            !parquet_path.exists(),
+            "stale parquet must be removed on early return"
+        );
+
+        // Simdr store must still be present.
+        assert!(store_path.exists(), "simdr store must survive early return");
+
+        // Returned shard must point to the store and carry is_parquet = false.
+        let returned = result.expect("early return must yield Some(ShardIndex)");
+        assert_eq!(returned.path, store_path);
+        assert!(
+            returned.is_parquet,
+            "is_parquet must be true for .simdr store (random-access read path)"
+        );
+        assert_eq!(returned.row_count, 2);
     }
 
     #[test]
