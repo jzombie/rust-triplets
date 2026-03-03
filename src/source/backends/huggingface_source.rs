@@ -16,7 +16,9 @@ use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
+#[cfg(test)]
+use std::sync::OnceLock;
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
@@ -58,7 +60,7 @@ fn managed_cache_root() -> Result<CacheRoot, String> {
         static TEST_CACHE_ROOT: OnceLock<TempDir> = OnceLock::new();
         let root = TEST_CACHE_ROOT
             .get_or_init(|| TempDir::new().expect("failed to create test HF cache root"));
-        return Ok(CacheRoot::from_root(root.path()));
+        Ok(CacheRoot::from_root(root.path()))
     }
 
     #[cfg(not(test))]

@@ -29,7 +29,7 @@ fn managed_cache_root() -> Result<CacheRoot, String> {
         static TEST_CACHE_ROOT: OnceLock<TempDir> = OnceLock::new();
         let root = TEST_CACHE_ROOT
             .get_or_init(|| TempDir::new().expect("failed to create test file-corpus cache root"));
-        return Ok(CacheRoot::from_root(root.path()));
+        Ok(CacheRoot::from_root(root.path()))
     }
 
     #[cfg(not(test))]
