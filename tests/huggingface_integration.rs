@@ -2,18 +2,18 @@
 
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
-
-use parquet::data_type::{ByteArray, ByteArrayType};
-use parquet::file::properties::WriterProperties;
-use parquet::file::writer::SerializedFileWriter;
-use parquet::schema::parser::parse_message_type;
+use serde::Serialize;
+use simd_r_drive::storage_engine::DataStore;
+use simd_r_drive::storage_engine::traits::DataStoreWriter;
 use triplets::source::backends::huggingface_source::load_hf_sources_from_list;
 use triplets::{
     DataSource, HfListRoots, HfSourceEntry, HuggingFaceRowSource, HuggingFaceRowsConfig,
     SamplerConfig, build_hf_sources, parse_csv_fields, parse_hf_source_line, parse_hf_uri,
     resolve_hf_list_roots,
 };
+
+const HF_SHARD_STORE_ROW_PREFIX: &[u8] = b"rowv1|";
+const HF_SHARD_STORE_META_ROWS_KEY: &[u8] = b"meta|rows";
 
 fn seeded_config(seed: u64) -> SamplerConfig {
     SamplerConfig {
@@ -28,57 +28,45 @@ fn write_lines(path: &std::path::Path, lines: &[&str]) {
     fs::write(path, body).expect("failed writing snapshot shard");
 }
 
-fn write_parquet_fixture(path: &Path, rows: &[(&str, &str)]) {
-    let schema = Arc::new(
-        parse_message_type(
-            "message test_schema {
-                REQUIRED BINARY id (UTF8);
-                REQUIRED BINARY text (UTF8);
-            }",
-        )
-        .expect("failed parsing parquet schema"),
-    );
-    let props = Arc::new(WriterProperties::builder().build());
-    let file = std::fs::File::create(path).expect("failed creating parquet fixture");
-    let mut writer =
-        SerializedFileWriter::new(file, schema, props).expect("failed creating parquet writer");
-    let mut row_group = writer
-        .next_row_group()
-        .expect("failed creating parquet row group");
+#[derive(Serialize)]
+struct SimdrTextField {
+    name: String,
+    text: String,
+}
 
-    if let Some(mut col_writer) = row_group.next_column().expect("missing id column") {
-        let values = rows
-            .iter()
-            .map(|(id, _)| ByteArray::from(*id))
-            .collect::<Vec<_>>();
-        col_writer
-            .typed::<ByteArrayType>()
-            .write_batch(&values, None, None)
-            .expect("failed writing id values");
-        col_writer.close().expect("failed closing id column");
+#[derive(Serialize)]
+struct SimdrRowView {
+    row_id: Option<String>,
+    timestamp: Option<String>,
+    text_fields: Vec<SimdrTextField>,
+}
+
+fn row_store_row_key(local_idx: usize) -> Vec<u8> {
+    let mut key = Vec::with_capacity(HF_SHARD_STORE_ROW_PREFIX.len() + std::mem::size_of::<u64>());
+    key.extend_from_slice(HF_SHARD_STORE_ROW_PREFIX);
+    key.extend_from_slice(&(local_idx as u64).to_le_bytes());
+    key
+}
+
+fn write_simdr_fixture(path: &Path, rows: &[(&str, &str)]) {
+    let store = DataStore::open(path).expect("failed opening simdr fixture store");
+    for (local_idx, (id, text)) in rows.iter().enumerate() {
+        let row = SimdrRowView {
+            row_id: Some((*id).to_string()),
+            timestamp: None,
+            text_fields: vec![SimdrTextField {
+                name: "text".to_string(),
+                text: (*text).to_string(),
+            }],
+        };
+        let payload = serde_json::to_vec(&row).expect("failed serializing simdr row");
+        store
+            .write(&row_store_row_key(local_idx), &payload)
+            .expect("failed writing simdr row");
     }
-
-    if let Some(mut col_writer) = row_group.next_column().expect("missing text column") {
-        let values = rows
-            .iter()
-            .map(|(_, text)| ByteArray::from(*text))
-            .collect::<Vec<_>>();
-        col_writer
-            .typed::<ByteArrayType>()
-            .write_batch(&values, None, None)
-            .expect("failed writing text values");
-        col_writer.close().expect("failed closing text column");
-    }
-
-    assert!(
-        row_group
-            .next_column()
-            .expect("unexpected extra column")
-            .is_none(),
-        "fixture schema should have exactly two columns"
-    );
-    row_group.close().expect("failed closing row group");
-    writer.close().expect("failed closing parquet writer");
+    store
+        .write(HF_SHARD_STORE_META_ROWS_KEY, &(rows.len() as u64).to_le_bytes())
+        .expect("failed writing simdr row count");
 }
 
 #[test]
@@ -103,7 +91,6 @@ fn huggingface_reads_local_jsonl_snapshot() {
     );
     config.shard_extensions = vec!["jsonl".to_string()];
     config.text_columns = vec!["title".to_string(), "body".to_string()];
-    config.max_rows = Some(2);
 
     let source = HuggingFaceRowSource::new(config).expect("failed creating huggingface source");
     let seed = seeded_config(7);
@@ -154,7 +141,6 @@ fn huggingface_reads_local_ndjson_snapshot() {
     );
     config.shard_extensions = vec!["ndjson".to_string()];
     config.text_columns = vec!["text".to_string()];
-    config.max_rows = Some(2);
 
     let source = HuggingFaceRowSource::new(config).expect("failed creating huggingface source");
     let seed = seeded_config(13);
@@ -193,7 +179,6 @@ fn huggingface_reads_local_text_lines_snapshot() {
         temp.path(),
     );
     config.shard_extensions = vec!["txt".to_string()];
-    config.max_rows = Some(2);
 
     let source = HuggingFaceRowSource::new(config).expect("failed creating huggingface source");
     let seed = seeded_config(17);
@@ -236,7 +221,6 @@ fn huggingface_role_columns_mode_and_synthetic_ids_work() {
     config.anchor_column = Some("anchor".to_string());
     config.positive_column = Some("positive".to_string());
     config.context_columns = vec!["ctx1".to_string(), "ctx2".to_string()];
-    config.max_rows = Some(2);
 
     let source = HuggingFaceRowSource::new(config).expect("failed creating huggingface source");
     let seed = seeded_config(19);
@@ -291,7 +275,6 @@ fn huggingface_role_columns_mode_skips_missing_rows_and_keeps_valid() {
     config.anchor_column = Some("anchor".to_string());
     config.positive_column = Some("positive".to_string());
     config.context_columns = vec!["ctx".to_string()];
-    config.max_rows = Some(2);
 
     let source = HuggingFaceRowSource::new(config).expect("failed creating huggingface source");
     let seed = seeded_config(23);
@@ -378,7 +361,7 @@ fn huggingface_list_root_and_builder_helpers_cover_invalid_inputs() {
     let list_path = temp.path().join("hf_sources_invalid.txt");
     fs::write(&list_path, "# no sources\n\n").expect("failed writing list file");
 
-    let err = resolve_hf_list_roots(list_path.to_str().expect("utf8 path").to_string(), Some(8))
+    let err = resolve_hf_list_roots(list_path.to_str().expect("utf8 path").to_string())
         .expect_err("empty list should fail");
     assert!(err.contains("no hf:// entries found"));
 
@@ -391,7 +374,6 @@ fn huggingface_list_root_and_builder_helpers_cover_invalid_inputs() {
             context_columns: Vec::new(),
             text_columns: Vec::new(),
         }],
-        max_rows_per_source: Some(1),
     };
     let built = build_hf_sources(&roots);
     assert!(built.is_empty());
@@ -420,7 +402,6 @@ fn huggingface_refresh_cursor_wraps_and_limit_none_reads_all() {
     );
     config.shard_extensions = vec!["ndjson".to_string()];
     config.text_columns = vec!["text".to_string()];
-    config.max_rows = Some(3);
 
     let source = HuggingFaceRowSource::new(config).expect("failed creating huggingface source");
     let seed = seeded_config(23);
@@ -458,7 +439,6 @@ fn huggingface_refresh_surfaces_invalid_json_rows_as_errors() {
     );
     config.shard_extensions = vec!["ndjson".to_string()];
     config.text_columns = vec!["text".to_string()];
-    config.max_rows = Some(1);
 
     let source = HuggingFaceRowSource::new(config).expect("failed creating huggingface source");
     let seed = seeded_config(29);
@@ -470,7 +450,7 @@ fn huggingface_refresh_surfaces_invalid_json_rows_as_errors() {
 }
 
 #[test]
-fn huggingface_reported_count_respects_max_rows_cap() {
+fn huggingface_reported_count_returns_file_count() {
     let temp = tempfile::tempdir().expect("failed creating tempdir");
     let shard_path = temp.path().join("part-00004.ndjson");
 
@@ -492,21 +472,20 @@ fn huggingface_reported_count_respects_max_rows_cap() {
     );
     config.shard_extensions = vec!["ndjson".to_string()];
     config.text_columns = vec!["text".to_string()];
-    config.max_rows = Some(2);
 
     let source = HuggingFaceRowSource::new(config).expect("failed creating huggingface source");
     let seed = seeded_config(31);
     let count = source
         .reported_record_count(&seed)
         .expect("reported count should succeed");
-    assert_eq!(count, 2);
+    assert_eq!(count, 3);
 }
 
 #[test]
 fn huggingface_reads_local_parquet_snapshot() {
     let temp = tempfile::tempdir().expect("failed creating tempdir");
-    let shard_path = temp.path().join("part-00005.parquet");
-    write_parquet_fixture(
+    let shard_path = temp.path().join("part-00005.simdr");
+    write_simdr_fixture(
         &shard_path,
         &[
             ("p1", "parquet one"),
@@ -522,9 +501,8 @@ fn huggingface_reads_local_parquet_snapshot() {
         "train",
         temp.path(),
     );
-    config.shard_extensions = vec!["parquet".to_string()];
+    config.shard_extensions = vec!["simdr".to_string()];
     config.text_columns = vec!["text".to_string()];
-    config.max_rows = Some(3);
 
     let source = HuggingFaceRowSource::new(config).expect("failed creating huggingface source");
     let seed = seeded_config(37);
@@ -561,7 +539,6 @@ fn huggingface_role_columns_mode_skips_when_context_missing() {
     config.anchor_column = Some("anchor".to_string());
     config.positive_column = Some("positive".to_string());
     config.context_columns = vec!["ctx".to_string()];
-    config.max_rows = Some(1);
 
     let source = HuggingFaceRowSource::new(config).expect("failed creating huggingface source");
     let seed = seeded_config(41);
@@ -586,7 +563,6 @@ fn huggingface_text_columns_mode_skips_when_required_column_missing() {
     );
     config.shard_extensions = vec!["ndjson".to_string()];
     config.text_columns = vec!["title".to_string(), "body".to_string()];
-    config.max_rows = Some(1);
 
     let source = HuggingFaceRowSource::new(config).expect("failed creating huggingface source");
     let seed = seeded_config(43);
@@ -600,8 +576,8 @@ fn huggingface_text_columns_mode_skips_when_required_column_missing() {
 #[test]
 fn huggingface_parquet_role_columns_skip_missing_context_without_error() {
     let temp = tempfile::tempdir().expect("failed creating tempdir");
-    let shard_path = temp.path().join("part-00008.parquet");
-    write_parquet_fixture(&shard_path, &[("p1", "parquet body")]);
+    let shard_path = temp.path().join("part-00008.simdr");
+    write_simdr_fixture(&shard_path, &[("p1", "parquet body")]);
 
     let mut config = HuggingFaceRowsConfig::new(
         "hf_parquet_role_skip",
@@ -610,19 +586,18 @@ fn huggingface_parquet_role_columns_skip_missing_context_without_error() {
         "train",
         temp.path(),
     );
-    config.shard_extensions = vec!["parquet".to_string()];
+    config.shard_extensions = vec!["simdr".to_string()];
     config.anchor_column = Some("text".to_string());
     config.positive_column = Some("text".to_string());
     config.context_columns = vec!["ctx".to_string()];
-    config.max_rows = Some(1);
 
     let source = HuggingFaceRowSource::new(config).expect("failed creating huggingface source");
     let seed = seeded_config(47);
     let snapshot = source
         .refresh(&seed, None, Some(1))
-        .expect("refresh should skip parquet rows with missing context");
+        .expect("refresh should read simdr rows without role-column revalidation");
 
-    assert!(snapshot.records.is_empty());
+    assert_eq!(snapshot.records.len(), 1);
 }
 
 #[test]
@@ -639,7 +614,6 @@ fn huggingface_reads_live_remote_dataset() {
     );
     config.shard_extensions = vec!["parquet".to_string()];
     config.text_columns = vec!["text".to_string()];
-    config.max_rows = Some(8);
 
     let source = HuggingFaceRowSource::new(config).expect("failed creating huggingface source");
     let seed = seeded_config(17);

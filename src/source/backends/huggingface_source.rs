@@ -50,13 +50,6 @@ const REMOTE_EXPANSION_HEADROOM_MULTIPLIER: usize = 4;
 /// Number of initial remote shards to materialize when bootstrapping an empty
 /// local snapshot before regular lazy expansion.
 const REMOTE_BOOTSTRAP_SHARDS: usize = 1;
-/// Minimum number of remote shards to materialize before large refresh passes.
-///
-/// This prevents long single-file regimes where large refresh windows repeatedly
-/// sample from only the first downloaded shard.
-const REMOTE_MIN_SHARDS_FOR_LARGE_REFRESH: usize = 2;
-/// Refresh-size threshold that enables proactive multi-shard warmup.
-const LARGE_REFRESH_MIN_RECORDS: usize = 1024;
 /// Multiplies the source `refresh` limit passed by `IngestionManager`
 /// (`step.unwrap_or(max_records)`) to set this source's internal row-read
 /// batch target for each refresh pass.
@@ -151,15 +144,13 @@ pub struct HfSourceEntry {
     pub text_columns: Vec<String>,
 }
 
-/// Parsed Hugging Face source list with explicit mappings and caps.
+/// Parsed Hugging Face source list with explicit mappings.
 #[derive(Debug, Clone)]
 pub struct HfListRoots {
     /// The source list file path used for loading.
     pub source_list: String,
     /// Parsed sources with explicit field mappings.
     pub sources: Vec<HfSourceEntry>,
-    /// Optional maximum rows per source.
-    pub max_rows_per_source: Option<usize>,
 }
 
 /// Split a comma-delimited field list into trimmed column names.
@@ -279,10 +270,9 @@ pub fn load_hf_sources_from_list(path: &str) -> Result<Vec<HfSourceEntry>, Strin
     Ok(out)
 }
 
-/// Resolve parsed Hugging Face source list entries and caps into a structured root.
+/// Resolve parsed Hugging Face source list entries into a structured root.
 pub fn resolve_hf_list_roots(
     source_list: String,
-    max_rows_per_source: Option<usize>,
 ) -> Result<HfListRoots, String> {
     let sources = load_hf_sources_from_list(&source_list)?;
     if sources.is_empty() {
@@ -291,7 +281,6 @@ pub fn resolve_hf_list_roots(
     Ok(HfListRoots {
         source_list,
         sources,
-        max_rows_per_source,
     })
 }
 
@@ -344,7 +333,6 @@ pub fn build_hf_sources(roots: &HfListRoots) -> Vec<Box<dyn DataSource + 'static
                 hf.context_columns,
                 hf.text_columns
             );
-            hf.max_rows = roots.max_rows_per_source;
 
             match HuggingFaceRowSource::new(hf) {
                 Ok(source) => Some(Box::new(source) as Box<dyn DataSource + 'static>),
@@ -393,8 +381,6 @@ pub struct HuggingFaceRowsConfig {
     ///
     /// Effective headroom is `cache_capacity * remote_expansion_headroom_multiplier`.
     pub remote_expansion_headroom_multiplier: usize,
-    /// Optional maximum row cap exposed by the source.
-    pub max_rows: Option<usize>,
     /// Hard cap for local manifest-shard cache bytes.
     ///
     /// Enforced by `cache-manager` policy application on manifest cache roots.
@@ -444,7 +430,6 @@ impl HuggingFaceRowsConfig {
             parquet_row_group_cache_capacity: 8,
             refresh_batch_multiplier: HUGGINGFACE_REFRESH_BATCH_MULTIPLIER,
             remote_expansion_headroom_multiplier: REMOTE_EXPANSION_HEADROOM_MULTIPLIER,
-            max_rows: None,
             local_disk_cap_bytes: Some(32 * 1024 * 1024 * 1024),
             id_column: Some("id".to_string()),
             text_columns: vec!["text".to_string()],
@@ -696,10 +681,7 @@ impl HuggingFaceRowSource {
             );
         }
 
-        let materialized_rows = config
-            .max_rows
-            .map(|cap| cap.min(discovered))
-            .unwrap_or(discovered);
+        let materialized_rows = discovered;
         let total_rows = match Self::fetch_global_row_count(&config) {
             Ok(value) => value,
             Err(err) => {
@@ -1788,10 +1770,171 @@ impl HuggingFaceRowSource {
 
         let mut count =
             Self::extract_split_row_count_from_size_response(&json, &config.config, &config.split);
-        if let (Some(max_rows), Some(rows)) = (config.max_rows, count) {
-            count = Some(rows.min(max_rows));
-        }
         Ok(count)
+    }
+
+    fn is_parquet_path(path: &Path) -> bool {
+        path.extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("parquet"))
+    }
+
+    fn allocate_temp_download_path(
+        config: &HuggingFaceRowsConfig,
+        remote_path: &str,
+        extension: &str,
+    ) -> Result<PathBuf, SamplerError> {
+        let mut hasher = DefaultHasher::new();
+        config.source_id.hash(&mut hasher);
+        remote_path.hash(&mut hasher);
+        let fingerprint = hasher.finish();
+        let prefix = format!("triplets_hf_{fingerprint:016x}_");
+        let suffix = format!(".{}", extension.trim_start_matches('.'));
+        let temp_file = tempfile::Builder::new()
+            .prefix(&prefix)
+            .suffix(&suffix)
+            .tempfile()
+            .map_err(|err| SamplerError::SourceUnavailable {
+                source_id: config.source_id.clone(),
+                reason: format!("failed creating temporary download file: {err}"),
+            })?;
+        let (_, path) = temp_file
+            .keep()
+            .map_err(|err| SamplerError::SourceUnavailable {
+                source_id: config.source_id.clone(),
+                reason: format!(
+                    "failed persisting temporary download path for '{}': {}",
+                    remote_path,
+                    err.error
+                ),
+            })?;
+        Ok(path)
+    }
+
+    fn download_remote_url_to_target(
+        config: &HuggingFaceRowsConfig,
+        remote_url: &str,
+        target: &Path,
+        expected_bytes: Option<u64>,
+    ) -> Result<(), SamplerError> {
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|err| SamplerError::SourceUnavailable {
+                source_id: config.source_id.clone(),
+                reason: format!("failed creating shard output dir {}: {err}", parent.display()),
+            })?;
+        }
+
+        let temp_target = target.with_extension("part");
+        if temp_target.exists() {
+            let _ = fs::remove_file(&temp_target);
+        }
+
+        let response = ureq::get(remote_url)
+            .call()
+            .map_err(|err| SamplerError::SourceUnavailable {
+                source_id: config.source_id.clone(),
+                reason: format!("failed downloading shard URL '{}': {err}", remote_url),
+            })?;
+        let mut reader = response.into_body().into_reader();
+        let mut file = File::create(&temp_target).map_err(|err| SamplerError::SourceUnavailable {
+            source_id: config.source_id.clone(),
+            reason: format!(
+                "failed creating target shard {}: {err}",
+                temp_target.display()
+            ),
+        })?;
+        info!(
+            "[triplets:hf] downloading shard payload -> {}",
+            target.display()
+        );
+        let started = Instant::now();
+        let mut total_bytes = 0u64;
+        let mut buffer = vec![0u8; 8 * 1024 * 1024];
+        let mut last_report = Instant::now();
+        loop {
+            let read = reader
+                .read(&mut buffer)
+                .map_err(|err| SamplerError::SourceUnavailable {
+                    source_id: config.source_id.clone(),
+                    reason: format!("failed reading shard stream '{}': {err}", remote_url),
+                })?;
+            if read == 0 {
+                break;
+            }
+            file.write_all(&buffer[..read])
+                .map_err(|err| SamplerError::SourceUnavailable {
+                    source_id: config.source_id.clone(),
+                    reason: format!("failed writing target shard {}: {err}", temp_target.display()),
+                })?;
+            total_bytes = total_bytes.saturating_add(read as u64);
+            if last_report.elapsed() >= Duration::from_secs(2) {
+                let elapsed = started.elapsed().as_secs_f64();
+                if let Some(expected) = expected_bytes
+                    && expected > 0
+                {
+                    let pct = ((total_bytes as f64 / expected as f64) * 100.0).clamp(0.0, 100.0);
+                    let rate = if elapsed > 0.0 {
+                        total_bytes as f64 / elapsed
+                    } else {
+                        0.0
+                    };
+                    let eta_secs = if rate > 0.0 && total_bytes < expected {
+                        (expected.saturating_sub(total_bytes) as f64) / rate
+                    } else {
+                        0.0
+                    };
+                    info!(
+                        "[triplets:hf] download progress {}: {:.1}/{:.1} MiB ({:.1}%, {:.1}s elapsed, ETA {:.1}s)",
+                        target.display(),
+                        total_bytes as f64 / (1024.0 * 1024.0),
+                        expected as f64 / (1024.0 * 1024.0),
+                        pct,
+                        elapsed,
+                        eta_secs.max(0.0)
+                    );
+                } else {
+                    info!(
+                        "[triplets:hf] download progress {}: {:.1} MiB ({:.1}s)",
+                        target.display(),
+                        total_bytes as f64 / (1024.0 * 1024.0),
+                        elapsed
+                    );
+                }
+                last_report = Instant::now();
+            }
+        }
+        let elapsed = started.elapsed().as_secs_f64();
+        if let Some(expected) = expected_bytes
+            && expected > 0
+        {
+            let pct = ((total_bytes as f64 / expected as f64) * 100.0).clamp(0.0, 100.0);
+            info!(
+                "[triplets:hf] download complete {}: {:.1}/{:.1} MiB ({:.1}%) in {:.1}s",
+                target.display(),
+                total_bytes as f64 / (1024.0 * 1024.0),
+                expected as f64 / (1024.0 * 1024.0),
+                pct,
+                elapsed
+            );
+        } else {
+            info!(
+                "[triplets:hf] download complete {}: {:.1} MiB in {:.1}s",
+                target.display(),
+                total_bytes as f64 / (1024.0 * 1024.0),
+                elapsed
+            );
+        }
+
+        fs::rename(&temp_target, target).map_err(|err| SamplerError::SourceUnavailable {
+            source_id: config.source_id.clone(),
+            reason: format!(
+                "failed moving downloaded shard {} -> {}: {err}",
+                temp_target.display(),
+                target.display()
+            ),
+        })?;
+
+        Ok(())
     }
 
     /// Extract split row count from datasets-server size payload variants.
@@ -1881,6 +2024,15 @@ impl HuggingFaceRowSource {
             if store_target.exists() {
                 return Ok(store_target);
             }
+            let parquet_candidate = Self::is_parquet_path(&target);
+            if parquet_candidate {
+                if target.exists() {
+                    let _ = fs::remove_file(&target);
+                }
+                let temp_target = Self::allocate_temp_download_path(config, remote_path, "parquet")?;
+                Self::download_remote_url_to_target(config, remote_url, &temp_target, expected_bytes)?;
+                return Ok(temp_target);
+            }
             if target.exists() {
                 if Self::target_matches_expected_size(&target, expected_bytes) {
                     return Ok(target);
@@ -1898,133 +2050,28 @@ impl HuggingFaceRowSource {
                 })?;
             }
 
-            if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent).map_err(|err| SamplerError::SourceUnavailable {
-                    source_id: config.source_id.clone(),
-                    reason: format!(
-                        "failed creating snapshot subdir {}: {err}",
-                        parent.display()
-                    ),
-                })?;
-            }
-
-            let temp_target = target.with_extension("part");
-            if temp_target.exists() {
-                let _ = fs::remove_file(&temp_target);
-            }
-
-            let response =
-                ureq::get(remote_url)
-                    .call()
-                    .map_err(|err| SamplerError::SourceUnavailable {
-                        source_id: config.source_id.clone(),
-                        reason: format!("failed downloading shard URL '{}': {err}", remote_url),
-                    })?;
-            let mut reader = response.into_body().into_reader();
-            let mut file =
-                File::create(&temp_target).map_err(|err| SamplerError::SourceUnavailable {
-                    source_id: config.source_id.clone(),
-                    reason: format!(
-                        "failed creating target shard {}: {err}",
-                        temp_target.display()
-                    ),
-                })?;
-            info!(
-                "[triplets:hf] downloading shard payload -> {}",
-                target.display()
-            );
-            let started = Instant::now();
-            let mut total_bytes = 0u64;
-            let mut buffer = vec![0u8; 8 * 1024 * 1024];
-            let mut last_report = Instant::now();
-            loop {
-                let read =
-                    reader
-                        .read(&mut buffer)
-                        .map_err(|err| SamplerError::SourceUnavailable {
-                            source_id: config.source_id.clone(),
-                            reason: format!("failed reading shard stream '{}': {err}", remote_url),
-                        })?;
-                if read == 0 {
-                    break;
-                }
-                file.write_all(&buffer[..read])
-                    .map_err(|err| SamplerError::SourceUnavailable {
-                        source_id: config.source_id.clone(),
-                        reason: format!(
-                            "failed writing target shard {}: {err}",
-                            temp_target.display()
-                        ),
-                    })?;
-                total_bytes = total_bytes.saturating_add(read as u64);
-                if last_report.elapsed() >= Duration::from_secs(2) {
-                    let elapsed = started.elapsed().as_secs_f64();
-                    if let Some(expected) = expected_bytes
-                        && expected > 0
-                    {
-                        let pct =
-                            ((total_bytes as f64 / expected as f64) * 100.0).clamp(0.0, 100.0);
-                        let rate = if elapsed > 0.0 {
-                            total_bytes as f64 / elapsed
-                        } else {
-                            0.0
-                        };
-                        let eta_secs = if rate > 0.0 && total_bytes < expected {
-                            (expected.saturating_sub(total_bytes) as f64) / rate
-                        } else {
-                            0.0
-                        };
-                        info!(
-                            "[triplets:hf] download progress {}: {:.1}/{:.1} MiB ({:.1}%, {:.1}s elapsed, ETA {:.1}s)",
-                            target.display(),
-                            total_bytes as f64 / (1024.0 * 1024.0),
-                            expected as f64 / (1024.0 * 1024.0),
-                            pct,
-                            elapsed,
-                            eta_secs.max(0.0)
-                        );
-                    } else {
-                        info!(
-                            "[triplets:hf] download progress {}: {:.1} MiB ({:.1}s)",
-                            target.display(),
-                            total_bytes as f64 / (1024.0 * 1024.0),
-                            elapsed
-                        );
-                    }
-                    last_report = Instant::now();
-                }
-            }
-            let elapsed = started.elapsed().as_secs_f64();
-            if let Some(expected) = expected_bytes
-                && expected > 0
-            {
-                let pct = ((total_bytes as f64 / expected as f64) * 100.0).clamp(0.0, 100.0);
-                info!(
-                    "[triplets:hf] download complete {}: {:.1}/{:.1} MiB ({:.1}%) in {:.1}s",
-                    target.display(),
-                    total_bytes as f64 / (1024.0 * 1024.0),
-                    expected as f64 / (1024.0 * 1024.0),
-                    pct,
-                    elapsed
-                );
-            } else {
-                info!(
-                    "[triplets:hf] download complete {}: {:.1} MiB in {:.1}s",
-                    target.display(),
-                    total_bytes as f64 / (1024.0 * 1024.0),
-                    elapsed
-                );
-            }
-
-            fs::rename(&temp_target, &target).map_err(|err| SamplerError::SourceUnavailable {
-                source_id: config.source_id.clone(),
-                reason: format!(
-                    "failed moving downloaded shard {} -> {}: {err}",
-                    temp_target.display(),
-                    target.display()
-                ),
-            })?;
+            Self::download_remote_url_to_target(config, remote_url, &target, expected_bytes)?;
             return Ok(target);
+        }
+
+        if Path::new(remote_path)
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("parquet"))
+        {
+            let target = Self::candidate_target_path(config, remote_path);
+            let store_target = Self::shard_store_path_for(&target);
+            if store_target.exists() {
+                return Ok(store_target);
+            }
+            let remote_url = format!(
+                "https://huggingface.co/datasets/{}/resolve/main/{}",
+                config.dataset,
+                remote_path.trim_start_matches('/')
+            );
+            let temp_target = Self::allocate_temp_download_path(config, remote_path, "parquet")?;
+            Self::download_remote_url_to_target(config, &remote_url, &temp_target, expected_bytes)?;
+            return Ok(temp_target);
         }
 
         let api = ApiBuilder::new()
@@ -2238,10 +2285,6 @@ impl HuggingFaceRowSource {
                     return Ok(true);
                 }
 
-                if self.config.max_rows.is_some_and(|max_rows| idx >= max_rows) {
-                    return Ok(false);
-                }
-
                 if let Some(candidates) = &state.remote_candidates
                     && state.next_remote_idx >= candidates.len()
                 {
@@ -2394,18 +2437,12 @@ impl HuggingFaceRowSource {
                 reason: "huggingface source state lock poisoned".to_string(),
             })?;
 
-        if self
-            .config
-            .max_rows
-            .is_some_and(|max_rows| state.materialized_rows >= max_rows)
-        {
-            return Ok(true);
-        }
-
         let mut rows_to_add = shard.row_count;
-        if let Some(max_rows) = self.config.max_rows {
-            rows_to_add = rows_to_add.min(max_rows.saturating_sub(state.materialized_rows));
-        }
+        // All rows from this shard are now available.  A per-shard cap was
+        // previously applied here but has been removed: reads are now gated on
+        // materialized_rows and expansion happens one shard per refresh(), so a
+        // large Wikipedia shard can no longer stall the read loop regardless of
+        // how many rows it contributes.
         if rows_to_add == 0 {
             return Ok(true);
         }
@@ -2424,9 +2461,69 @@ impl HuggingFaceRowSource {
         }
 
         drop(state);
-        let Some(shard) = self.transcode_parquet_shard_to_row_store(&shard)? else {
-            return Ok(true);
+        let mut shard = match self.transcode_parquet_shard_to_row_store(&shard)? {
+            Some(shard) => shard,
+            None => return Ok(true),
         };
+
+        if local_path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("parquet"))
+            && Self::is_store_shard_path(&shard.path)
+        {
+            let canonical_store = Self::shard_store_path_for(&Self::candidate_target_path(
+                &self.config,
+                &remote_path,
+            ));
+            if shard.path != canonical_store {
+                if let Some(parent) = canonical_store.parent() {
+                    fs::create_dir_all(parent).map_err(|err| SamplerError::SourceUnavailable {
+                        source_id: self.config.source_id.clone(),
+                        reason: format!(
+                            "failed creating canonical store parent {}: {err}",
+                            parent.display()
+                        ),
+                    })?;
+                }
+
+                if canonical_store.exists() {
+                    fs::remove_file(&canonical_store).map_err(|err| {
+                        SamplerError::SourceUnavailable {
+                            source_id: self.config.source_id.clone(),
+                            reason: format!(
+                                "failed replacing canonical store {}: {err}",
+                                canonical_store.display()
+                            ),
+                        }
+                    })?;
+                }
+
+                if let Err(rename_err) = fs::rename(&shard.path, &canonical_store) {
+                    fs::copy(&shard.path, &canonical_store).map_err(|copy_err| {
+                        SamplerError::SourceUnavailable {
+                            source_id: self.config.source_id.clone(),
+                            reason: format!(
+                                "failed moving temporary store {} -> {}: rename={rename_err}; copy={copy_err}",
+                                shard.path.display(),
+                                canonical_store.display()
+                            ),
+                        }
+                    })?;
+                    fs::remove_file(&shard.path).map_err(|cleanup_err| {
+                        SamplerError::SourceUnavailable {
+                            source_id: self.config.source_id.clone(),
+                            reason: format!(
+                                "failed cleaning temporary store {} after copy move: {cleanup_err}",
+                                shard.path.display()
+                            ),
+                        }
+                    })?;
+                }
+
+                shard.path = canonical_store;
+            }
+        }
 
         let mut state = self
             .state
@@ -2632,25 +2729,6 @@ impl HuggingFaceRowSource {
             let Some(mut shard) = maybe_shard else {
                 continue;
             };
-
-            if let Some(max_rows) = config.max_rows {
-                if running_total >= max_rows {
-                    break;
-                }
-                let allowed = max_rows.saturating_sub(running_total);
-                if shard.row_count > allowed {
-                    shard.row_count = allowed;
-                    if shard.is_parquet {
-                        shard
-                            .parquet_row_groups
-                            .retain(|(start, _)| *start < shard.row_count);
-                        if let Some((start, count)) = shard.parquet_row_groups.last_mut() {
-                            let group_allowed = shard.row_count.saturating_sub(*start);
-                            *count = (*count).min(group_allowed);
-                        }
-                    }
-                }
-            }
 
             if shard.row_count == 0 {
                 continue;
@@ -3316,9 +3394,6 @@ impl HuggingFaceRowSource {
                     upper = upper.min(total_rows);
                 }
             }
-            if let Some(max_rows) = self.config.max_rows {
-                upper = upper.min(max_rows);
-            }
             return Some(upper.max(known));
         }
 
@@ -3331,10 +3406,6 @@ impl HuggingFaceRowSource {
             .as_ref()
             .is_some_and(|candidates| candidates.is_empty())
         {
-            return Some(0);
-        }
-
-        if self.config.max_rows.is_some_and(|max_rows| max_rows == 0) {
             return Some(0);
         }
 
@@ -3356,68 +3427,40 @@ impl DataSource for HuggingFaceRowSource {
         limit: Option<usize>,
     ) -> Result<SourceSnapshot, SamplerError> {
         self.set_active_sampler_config(config);
-        let mut eligible_rows = self.eligible_rows()?;
+        let hinted_total = self.len_hint().unwrap_or(0);
+        let max = limit.unwrap_or(hinted_total);
 
-        // When no eligible rows are currently indexed, attempt to bootstrap
-        // materialization before declaring the source empty.
-        if eligible_rows.is_empty() {
-            let hinted_total = self.len_hint().unwrap_or(0);
-            if hinted_total > 0 {
-                for _ in 0..32 {
-                    let probe_idx = {
-                        let state =
-                            self.state
-                                .lock()
-                                .map_err(|_| SamplerError::SourceUnavailable {
-                                    source_id: self.config.source_id.clone(),
-                                    reason: "huggingface source state lock poisoned".to_string(),
-                                })?;
-                        state.materialized_rows
-                    };
-
-                    if !self.ensure_row_available(probe_idx)? {
-                        break;
-                    }
-
-                    eligible_rows = self.eligible_rows()?;
-                    if !eligible_rows.is_empty() {
-                        break;
-                    }
-                }
+        // Page only over rows that are already on disk.  len_hint() includes
+        // expansion headroom beyond materialized_rows; generating indices into
+        // that range forces ensure_row_available() to download a shard
+        // synchronously mid-read-loop, which blocks for minutes on large
+        // datasets.  Instead, reads are always instant (materialized only),
+        // and a single shard expansion is triggered AFTER the reads complete
+        // so the next refresh call automatically has more rows available.
+        // This way every remote shard is eventually consumed without ever
+        // blocking on the hot read path.
+        let total = {
+            let (materialized, known_empty) = {
+                let state = self.state.lock().map_err(|_| SamplerError::SourceUnavailable {
+                    source_id: self.config.source_id.clone(),
+                    reason: "huggingface source state lock poisoned".to_string(),
+                })?;
+                let known_empty = state.total_rows == Some(0);
+                (state.materialized_rows, known_empty)
+            };
+            if materialized == 0 && !known_empty {
+                // Bootstrap: discover candidates and download the first shard so
+                // the read loop below has rows to work with.  ensure_row_available
+                // handles candidate discovery and the initial shard download.
+                self.ensure_row_available(0)?;
+                self.state.lock().map_err(|_| SamplerError::SourceUnavailable {
+                    source_id: self.config.source_id.clone(),
+                    reason: "huggingface source state lock poisoned".to_string(),
+                })?.materialized_rows
+            } else {
+                materialized
             }
-        }
-
-        let max = limit.unwrap_or(eligible_rows.len());
-        if max >= LARGE_REFRESH_MIN_RECORDS {
-            for _ in 0..32 {
-                let (materialized_rows, shard_count, has_remaining_candidates) = {
-                    let state = self
-                        .state
-                        .lock()
-                        .map_err(|_| SamplerError::SourceUnavailable {
-                            source_id: self.config.source_id.clone(),
-                            reason: "huggingface source state lock poisoned".to_string(),
-                        })?;
-                    let remaining = state
-                        .remote_candidates
-                        .as_ref()
-                        .is_some_and(|candidates| state.next_remote_idx < candidates.len());
-                    (state.materialized_rows, state.shards.len(), remaining)
-                };
-
-                if shard_count >= REMOTE_MIN_SHARDS_FOR_LARGE_REFRESH || !has_remaining_candidates {
-                    break;
-                }
-
-                if !self.ensure_row_available(materialized_rows)? {
-                    break;
-                }
-
-                eligible_rows = self.eligible_rows()?;
-            }
-        }
-
-        let total = eligible_rows.len();
+        };
 
         if total == 0 {
             return Ok(SourceSnapshot {
@@ -3462,10 +3505,7 @@ impl DataSource for HuggingFaceRowSource {
                 if records.len() + pending_indices.len() >= max {
                     break;
                 }
-                let eligible_idx = permutation.next();
-                if let Some(physical_idx) = eligible_rows.get(eligible_idx) {
-                    pending_indices.push(*physical_idx);
-                }
+                pending_indices.push(permutation.next());
                 attempts += 1;
             }
 
@@ -3516,6 +3556,26 @@ impl DataSource for HuggingFaceRowSource {
             .map(|record| record.updated_at)
             .max()
             .unwrap_or_else(Utc::now);
+
+        // Expand by one shard after reads complete so the next refresh call
+        // has more rows available.  Because refresh() runs on a background
+        // thread in the ingestion manager, this blocks that thread only while
+        // the previous buffer still serves the sampler — reads are never
+        // delayed mid-loop.  Repeating this on every call walks through every
+        // remote candidate until the full dataset is consumed.
+        let has_remaining = {
+            let state = self.state.lock().map_err(|_| SamplerError::SourceUnavailable {
+                source_id: self.config.source_id.clone(),
+                reason: "huggingface source state lock poisoned".to_string(),
+            })?;
+            state
+                .remote_candidates
+                .as_ref()
+                .is_some_and(|c| state.next_remote_idx < c.len())
+        };
+        if has_remaining {
+            self.download_next_remote_shard()?;
+        }
 
         Ok(SourceSnapshot {
             records,
@@ -3844,7 +3904,7 @@ mod tests {
         let empty_list = dir.path().join("empty_sources.txt");
         fs::write(&empty_list, "# comment only\n\n").unwrap();
         let resolved =
-            resolve_hf_list_roots(empty_list.to_string_lossy().to_string(), Some(9)).unwrap_err();
+            resolve_hf_list_roots(empty_list.to_string_lossy().to_string()).unwrap_err();
         assert!(resolved.contains("no hf:// entries found"));
 
         let good_list = dir.path().join("good_sources.txt");
@@ -3854,9 +3914,8 @@ mod tests {
         )
         .unwrap();
         let roots =
-            resolve_hf_list_roots(good_list.to_string_lossy().to_string(), Some(11)).unwrap();
+            resolve_hf_list_roots(good_list.to_string_lossy().to_string()).unwrap();
         assert_eq!(roots.sources.len(), 1);
-        assert_eq!(roots.max_rows_per_source, Some(11));
     }
 
     #[test]
@@ -3932,7 +3991,6 @@ mod tests {
                     text_columns: Vec::new(),
                 },
             ],
-            max_rows_per_source: Some(5),
         };
 
         let temp_root = tempdir().unwrap();
@@ -4482,20 +4540,6 @@ mod tests {
     }
 
     #[test]
-    fn len_hint_applies_max_rows_cap() {
-        let dir = tempdir().unwrap();
-        let mut config = test_config(dir.path().to_path_buf());
-        config.max_rows = Some(3);
-        let source = test_source(config);
-        {
-            let mut state = source.state.lock().unwrap();
-            state.materialized_rows = 2;
-            state.total_rows = Some(100);
-        }
-        assert_eq!(source.len_hint(), Some(3));
-    }
-
-    #[test]
     fn enforce_disk_cap_returns_false_when_disabled_or_under_limit() {
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path().to_path_buf());
@@ -4754,17 +4798,6 @@ mod tests {
         }
         assert!(source.ensure_row_available(1).unwrap());
 
-        let mut cfg_max = test_config(dir.path().to_path_buf());
-        cfg_max.max_rows = Some(2);
-        let source_max = test_source(cfg_max);
-        {
-            let mut state = source_max.state.lock().unwrap();
-            state.materialized_rows = 0;
-            state.remote_candidates = Some(vec!["x".to_string()]);
-            state.next_remote_idx = 0;
-        }
-        assert!(!source_max.ensure_row_available(2).unwrap());
-
         let source_done = test_source(test_config(dir.path().to_path_buf()));
         {
             let mut state = source_done.state.lock().unwrap();
@@ -4786,24 +4819,6 @@ mod tests {
             err,
             SamplerError::SourceUnavailable { ref reason, .. } if reason.contains("no shard files found")
         ));
-    }
-
-    #[test]
-    fn build_shard_index_applies_max_rows_to_parquet_shard() {
-        let dir = tempdir().unwrap();
-        let store_path = dir.path().join("rows.simdr");
-        write_simdr_fixture(
-            &store_path,
-            &[("id-1", "text-1"), ("id-2", "text-2"), ("id-3", "text-3")],
-        );
-        let mut config = test_config(dir.path().to_path_buf());
-        config.max_rows = Some(2);
-
-        let (shards, discovered) = HuggingFaceRowSource::build_shard_index(&config).unwrap();
-        assert_eq!(discovered, 2);
-        assert_eq!(shards.len(), 1);
-        assert!(shards[0].is_parquet);
-        assert_eq!(shards[0].row_count, 2);
     }
 
     #[test]
@@ -5012,31 +5027,6 @@ mod tests {
 
         assert_eq!(out, target);
         assert_eq!(fs::read(&target).unwrap(), payload);
-    }
-
-    #[test]
-    fn download_next_remote_shard_skips_when_max_rows_already_reached() {
-        let dir = tempdir().unwrap();
-        let mut config = test_config(dir.path().to_path_buf());
-        config.max_rows = Some(0);
-        let source = test_source(config);
-        let payload = b"{\"text\":\"x\"}\n".to_vec();
-        let (base_url, server) = spawn_one_shot_http(payload);
-        let candidate =
-            format!("url::{base_url}/datasets/org/ds/resolve/main/train/part-200.ndjson");
-
-        {
-            let mut state = source.state.lock().unwrap();
-            state.remote_candidates = Some(vec![candidate]);
-            state.next_remote_idx = 0;
-            state.materialized_rows = 0;
-        }
-
-        assert!(source.download_next_remote_shard().unwrap());
-        server.join().unwrap();
-        let state = source.state.lock().unwrap();
-        assert_eq!(state.materialized_rows, 0);
-        assert!(state.shards.is_empty());
     }
 
     #[test]
@@ -5260,15 +5250,6 @@ mod tests {
             .unwrap();
         assert_eq!(row.text_fields.len(), 1);
         assert_eq!(row.text_fields[0].text, "123");
-    }
-
-    #[test]
-    fn len_hint_returns_zero_when_max_rows_is_zero() {
-        let dir = tempdir().unwrap();
-        let mut config = test_config(dir.path().to_path_buf());
-        config.max_rows = Some(0);
-        let source = test_source(config);
-        assert_eq!(source.len_hint(), Some(0));
     }
 
     #[test]
@@ -5498,32 +5479,6 @@ mod tests {
     }
 
     #[test]
-    fn download_next_remote_shard_trims_rows_to_max_rows_limit() {
-        let dir = tempdir().unwrap();
-        let mut config = test_config(dir.path().to_path_buf());
-        config.max_rows = Some(1);
-        let source = test_source(config);
-        let payload = b"{\"text\":\"a\"}\n{\"text\":\"b\"}\n".to_vec();
-        let (base_url, server) = spawn_one_shot_http(payload);
-        let candidate = format!("url::{base_url}/datasets/org/ds/resolve/main/train/trim.ndjson");
-
-        {
-            let mut state = source.state.lock().unwrap();
-            state.remote_candidates = Some(vec![candidate]);
-            state.next_remote_idx = 0;
-            state.materialized_rows = 0;
-        }
-
-        assert!(source.download_next_remote_shard().unwrap());
-        server.join().unwrap();
-
-        let state = source.state.lock().unwrap();
-        assert_eq!(state.materialized_rows, 1);
-        assert_eq!(state.shards.len(), 1);
-        assert_eq!(state.shards[0].row_count, 1);
-    }
-
-    #[test]
     fn build_shard_index_skips_empty_files_and_keeps_non_empty() {
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("a.ndjson"), b"").unwrap();
@@ -5583,26 +5538,6 @@ mod tests {
         .unwrap();
         assert!(candidates.is_empty());
         assert!(sizes.is_empty());
-    }
-
-    #[test]
-    fn parse_global_row_count_response_applies_max_rows() {
-        let dir = tempdir().unwrap();
-        let mut config = test_config(dir.path().to_path_buf());
-        config.max_rows = Some(3);
-        let body = serde_json::to_string(&json!({
-            "size": {
-                "splits": [
-                    {"config": "default", "split": "train", "num_rows": 10}
-                ]
-            }
-        }))
-        .unwrap();
-
-        let rows = HuggingFaceRowSource::parse_global_row_count_response(&config, &body)
-            .unwrap()
-            .unwrap();
-        assert_eq!(rows, 3);
     }
 
     #[test]
@@ -5822,6 +5757,40 @@ mod tests {
         server.join().unwrap();
         assert_eq!(refreshed, target);
         assert_eq!(fs::read(&target).unwrap(), payload);
+    }
+
+    #[test]
+    fn download_next_remote_shard_parquet_stages_temp_and_persists_store_only() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config.clone());
+
+        let fixture_path = dir.path().join("fixture.parquet");
+        write_parquet_fixture(&fixture_path, &[("r1", "alpha"), ("r2", "beta")]);
+        let payload = fs::read(&fixture_path).unwrap();
+        let (base_url, server) = spawn_one_shot_http(payload);
+        let candidate =
+            format!("url::{base_url}/datasets/org/ds/resolve/main/train/part-222.parquet");
+
+        {
+            let mut state = source.state.lock().unwrap();
+            state.remote_candidates = Some(vec![candidate.clone()]);
+            state.next_remote_idx = 0;
+        }
+
+        assert!(source.download_next_remote_shard().unwrap());
+        server.join().unwrap();
+
+        let parquet_target = HuggingFaceRowSource::candidate_target_path(&config, &candidate);
+        let store_target = HuggingFaceRowSource::shard_store_path_for(&parquet_target);
+
+        assert!(store_target.exists());
+        assert!(!parquet_target.exists());
+
+        let state = source.state.lock().unwrap();
+        assert_eq!(state.shards.len(), 1);
+        assert_eq!(state.shards[0].path, store_target);
+        assert_eq!(state.materialized_rows, 2);
     }
 
     #[test]
@@ -6227,8 +6196,7 @@ mod tests {
     #[test]
     fn len_hint_covers_known_and_empty_paths() {
         let dir = tempdir().unwrap();
-        let mut config = test_config(dir.path().to_path_buf());
-        config.max_rows = Some(9);
+        let config = test_config(dir.path().to_path_buf());
         let source = test_source(config);
 
         {
@@ -6236,7 +6204,9 @@ mod tests {
             state.materialized_rows = 5;
             state.total_rows = Some(100);
         }
-        assert_eq!(source.len_hint(), Some(9));
+        // headroom = ingestion_max_records * multiplier = 10 * 3 = 30; since known (5)
+        // < headroom, expansion = 30; upper = min(5+30, 100) = 35
+        assert_eq!(source.len_hint(), Some(35));
 
         {
             let mut state = source.state.lock().unwrap();
@@ -6628,8 +6598,7 @@ mod tests {
     #[test]
     fn ensure_row_available_handles_materialized_max_and_exhausted_candidates() {
         let dir = tempdir().unwrap();
-        let mut config = test_config(dir.path().to_path_buf());
-        config.max_rows = Some(2);
+        let config = test_config(dir.path().to_path_buf());
         let source = test_source(config);
         {
             let mut state = source.state.lock().unwrap();
@@ -6731,21 +6700,6 @@ mod tests {
         let config = test_config(dir.path().to_path_buf());
         let result = HuggingFaceRowSource::build_shard_index(&config);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn build_shard_index_honors_max_rows() {
-        let dir = tempdir().unwrap();
-        fs::write(
-            dir.path().join("rows.jsonl"),
-            b"{\"text\":\"1\"}\n{\"text\":\"2\"}\n{\"text\":\"3\"}\n",
-        )
-        .unwrap();
-        let mut config = test_config(dir.path().to_path_buf());
-        config.max_rows = Some(2);
-
-        let (_, discovered) = HuggingFaceRowSource::build_shard_index(&config).unwrap();
-        assert_eq!(discovered, 2);
     }
 
     #[test]

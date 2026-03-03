@@ -106,13 +106,6 @@ struct HfTextLatencyCli {
     )]
     split: SplitArg,
     #[arg(
-        long = "max-rows-per-source",
-        default_value_t = 2048,
-        value_name = "N",
-        help = "Per-source row cap while probing"
-    )]
-    max_rows_per_source: usize,
-    #[arg(
         long = "source-list",
         value_name = "PATH",
         help = "Optional existing source-list path; if omitted, writes your requested list to .cache/triplets/tmp_hf_text_latency_sources.txt"
@@ -162,11 +155,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("ingestion_max_records: {}", cli.ingestion_max_records);
     println!("iterations: {}", cli.iterations);
     println!("split: {:?}", split);
-    println!("max_rows_per_source: {}", cli.max_rows_per_source);
 
     let roots = resolve_hf_list_roots(
         source_list_path.to_string_lossy().to_string(),
-        Some(cli.max_rows_per_source),
     )
     .map_err(|err| -> Box<dyn Error> { err.into() })?;
     println!("resolved_sources: {}", roots.sources.len());
