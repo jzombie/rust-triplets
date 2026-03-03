@@ -522,10 +522,7 @@ fn advance_on_empty_buffer_fills_to_max_records_not_step() {
             self.calls.fetch_add(1, Ordering::Relaxed);
             self.inner.refresh(config, cursor, limit)
         }
-        fn reported_record_count(
-            &self,
-            config: &SamplerConfig,
-        ) -> Result<u128, SamplerError> {
+        fn reported_record_count(&self, config: &SamplerConfig) -> Result<u128, SamplerError> {
             self.inner.reported_record_count(config)
         }
     }

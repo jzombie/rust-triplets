@@ -14,8 +14,8 @@ use std::sync::Arc;
 use std::time::Instant;
 #[cfg(feature = "huggingface")]
 use triplets::{
-    BatchPrefetcher, FileSplitStore, Sampler, SamplerConfig, SplitLabel, SplitRatios,
-    TextBatch, TripletSampler, build_hf_sources, resolve_hf_list_roots,
+    BatchPrefetcher, FileSplitStore, Sampler, SamplerConfig, SplitLabel, SplitRatios, TextBatch,
+    TripletSampler, build_hf_sources, resolve_hf_list_roots,
 };
 
 #[cfg(feature = "huggingface")]

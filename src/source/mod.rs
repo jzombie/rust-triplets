@@ -88,7 +88,6 @@ pub trait DataSource: Send + Sync {
     fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {
         Vec::new()
     }
-
 }
 
 /// Index-addressable source interface used by deterministic pagers.

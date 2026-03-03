@@ -676,9 +676,7 @@ fn huggingface_cursor_advances_between_refreshes() {
     let source = HuggingFaceRowSource::new(config).expect("failed creating source");
     let seed = seeded_config(11);
 
-    let snap1 = source
-        .refresh(&seed, None, Some(2))
-        .expect("first refresh");
+    let snap1 = source.refresh(&seed, None, Some(2)).expect("first refresh");
     assert_eq!(snap1.records.len(), 2);
 
     let snap2 = source
@@ -689,7 +687,10 @@ fn huggingface_cursor_advances_between_refreshes() {
     // The cursor must have advanced: the two batches should not be identical.
     let ids1: std::collections::HashSet<_> = snap1.records.iter().map(|r| &r.id).collect();
     let ids2: std::collections::HashSet<_> = snap2.records.iter().map(|r| &r.id).collect();
-    assert_ne!(ids1, ids2, "cursor must advance between successive refreshes");
+    assert_ne!(
+        ids1, ids2,
+        "cursor must advance between successive refreshes"
+    );
 }
 
 #[test]
