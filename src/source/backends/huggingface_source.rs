@@ -47,11 +47,11 @@ const REMOTE_URL_PREFIX: &str = "url::";
 const REMOTE_EXPANSION_HEADROOM_MULTIPLIER: usize = 4;
 /// Number of initial remote shards to materialize when bootstrapping an empty
 /// local snapshot before regular lazy expansion.
-const REMOTE_BOOTSTRAP_SHARDS: usize = 4;
+const REMOTE_BOOTSTRAP_SHARDS: usize = 1;
 /// Multiplies the source `refresh` limit passed by `IngestionManager`
 /// (`step.unwrap_or(max_records)`) to set this source's internal row-read
 /// batch target for each refresh pass.
-const HUGGINGFACE_REFRESH_BATCH_MULTIPLIER: usize = 32;
+const HUGGINGFACE_REFRESH_BATCH_MULTIPLIER: usize = 8;
 const SHARD_SEQUENCE_STATE_VERSION: u32 = 1;
 const SHARD_SEQUENCE_STATE_FILE: &str = "_sequence_state.json";
 fn managed_cache_root() -> Result<CacheRoot, String> {
@@ -495,16 +495,17 @@ impl ParquetCache {
         }
 
         let reader = self.reader_for(source_id, path)?;
-        let row_group = reader
-            .get_row_group(group_pos)
-            .map_err(|err| SamplerError::SourceUnavailable {
-                source_id: source_id.to_string(),
-                reason: format!(
-                    "failed opening parquet row group {} for {}: {err}",
-                    group_pos,
-                    path.display()
-                ),
-            })?;
+        let row_group =
+            reader
+                .get_row_group(group_pos)
+                .map_err(|err| SamplerError::SourceUnavailable {
+                    source_id: source_id.to_string(),
+                    reason: format!(
+                        "failed opening parquet row group {} for {}: {err}",
+                        group_pos,
+                        path.display()
+                    ),
+                })?;
         let iter = RowIter::from_row_group(None, row_group.as_ref()).map_err(|err| {
             SamplerError::SourceUnavailable {
                 source_id: source_id.to_string(),
@@ -817,13 +818,13 @@ impl HuggingFaceRowSource {
         }
 
         let rows = Arc::new(self.build_eligible_rows_from_shards(&shards)?);
-        let mut cache = self
-            .eligible_index
-            .lock()
-            .map_err(|_| SamplerError::SourceUnavailable {
-                source_id: self.config.source_id.clone(),
-                reason: "huggingface eligible-index cache lock poisoned".to_string(),
-            })?;
+        let mut cache =
+            self.eligible_index
+                .lock()
+                .map_err(|_| SamplerError::SourceUnavailable {
+                    source_id: self.config.source_id.clone(),
+                    reason: "huggingface eligible-index cache lock poisoned".to_string(),
+                })?;
         cache.signature = Some(signature);
         cache.rows = Some(rows.clone());
         Ok(rows)
@@ -982,6 +983,7 @@ impl HuggingFaceRowSource {
         }
 
         candidates.sort();
+        candidates.dedup();
         info!(
             "[triplets:hf] remote candidates matching {:?}: {}",
             config.shard_extensions,
@@ -1063,6 +1065,8 @@ impl HuggingFaceRowSource {
         }
 
         candidates.sort();
+        candidates.dedup();
+        candidate_sizes.retain(|candidate, _| candidates.binary_search(candidate).is_ok());
         Ok((candidates, candidate_sizes))
     }
 
@@ -2915,10 +2919,13 @@ impl DataSource for HuggingFaceRowSource {
             if hinted_total > 0 {
                 for _ in 0..32 {
                     let probe_idx = {
-                        let state = self.state.lock().map_err(|_| SamplerError::SourceUnavailable {
-                            source_id: self.config.source_id.clone(),
-                            reason: "huggingface source state lock poisoned".to_string(),
-                        })?;
+                        let state =
+                            self.state
+                                .lock()
+                                .map_err(|_| SamplerError::SourceUnavailable {
+                                    source_id: self.config.source_id.clone(),
+                                    reason: "huggingface source state lock poisoned".to_string(),
+                                })?;
                         state.materialized_rows
                     };
 
