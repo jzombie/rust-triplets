@@ -1,13 +1,15 @@
 use std::sync::Arc;
 
 use chrono::{TimeZone, Utc};
+use simd_r_drive::storage_engine::DataStore;
+use simd_r_drive::storage_engine::traits::DataStoreWriter;
 
 use triplets::source::InMemorySource;
-use triplets::splits::{EpochStateStore, SamplerStateStore};
+use triplets::splits::{EpochStateStore, PersistedSamplerState, SamplerStateStore};
 use triplets::utils::make_section;
 use triplets::{
     DataRecord, FileSplitStore, NegativeStrategy, QualityScore, RecordId, Sampler, SamplerConfig,
-    SectionRole, Selector, SplitLabel, SplitRatios, TripletRecipe, TripletSampler,
+    SectionRole, Selector, SplitLabel, SplitRatios, SplitStore, TripletRecipe, TripletSampler,
 };
 
 fn build_record(source: &str, suffix: &str, day_offset: u32) -> DataRecord {
@@ -291,4 +293,146 @@ fn save_sampler_state_some_mirrors_to_new_store_path() {
         assert_eq!(actual.offset, expected.offset);
         assert_eq!(actual.hashes_checksum, expected.hashes_checksum);
     }
+}
+
+#[test]
+fn save_sampler_state_some_preserves_split_assignments_in_mirror_store() {
+    let temp = tempfile::tempdir().unwrap();
+    let source_store_path = temp.path().join("source_with_assignments.bin");
+    let mirror_store_path = temp.path().join("mirror_with_assignments.bin");
+    let split = SplitRatios {
+        train: 0.8,
+        validation: 0.1,
+        test: 0.1,
+    };
+
+    let probe_store = FileSplitStore::open(&source_store_path, split, 73).unwrap();
+
+    let mut forced_id = None;
+    for idx in 0..10_000 {
+        let candidate = format!("forced_record_{idx}");
+        if probe_store.label_for(&candidate) != Some(SplitLabel::Validation) {
+            forced_id = Some(candidate);
+            break;
+        }
+    }
+    let forced_id = forced_id.expect("should find id whose derived label is not validation");
+
+    let mut split_key = b"split:".to_vec();
+    split_key.extend_from_slice(forced_id.as_bytes());
+    let datastore = DataStore::open(&source_store_path).unwrap();
+    datastore.write(&split_key, b"1").unwrap();
+
+    let source_store = FileSplitStore::open(&source_store_path, split, 73).unwrap();
+
+    assert_eq!(
+        source_store.label_for(&forced_id),
+        Some(SplitLabel::Validation)
+    );
+
+    let state = PersistedSamplerState {
+        source_cycle_idx: 1,
+        source_record_cursors: vec![("source_a".to_string(), 2)],
+        source_epoch: 3,
+        rng_state: 4,
+        triplet_recipe_rr_idx: 5,
+        text_recipe_rr_idx: 6,
+        source_stream_cursors: vec![("source_a".to_string(), 7)],
+    };
+
+    source_store
+        .save_sampler_state(&state, Some(mirror_store_path.as_path()))
+        .unwrap();
+
+    let mirror_store = FileSplitStore::open(&mirror_store_path, split, 73).unwrap();
+    assert_eq!(
+        mirror_store.label_for(&forced_id),
+        Some(SplitLabel::Validation)
+    );
+}
+
+#[test]
+fn save_sampler_state_some_errors_if_destination_store_exists() {
+    let temp = tempfile::tempdir().unwrap();
+    let source_store_path = temp.path().join("source_store.bin");
+    let existing_dest_path = temp.path().join("already_exists.bin");
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+
+    let source_store = FileSplitStore::open(&source_store_path, split, 73).unwrap();
+    let _existing_dest_store = FileSplitStore::open(&existing_dest_path, split, 73).unwrap();
+
+    let state = PersistedSamplerState {
+        source_cycle_idx: 1,
+        source_record_cursors: vec![("source_a".to_string(), 2)],
+        source_epoch: 3,
+        rng_state: 4,
+        triplet_recipe_rr_idx: 5,
+        text_recipe_rr_idx: 6,
+        source_stream_cursors: vec![("source_a".to_string(), 7)],
+    };
+
+    let err = source_store
+        .save_sampler_state(&state, Some(existing_dest_path.as_path()))
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        triplets::SamplerError::SplitStore(msg) if msg.contains("refusing to overwrite existing split store")
+    ));
+}
+
+#[test]
+fn save_sampler_state_some_creates_missing_parent_directories() {
+    let temp = tempfile::tempdir().unwrap();
+    let source_store_path = temp.path().join("source_store.bin");
+    let deep_mirror_path = temp
+        .path()
+        .join("deep")
+        .join("nested")
+        .join("mirror")
+        .join("state")
+        .join("mirror_store.bin");
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+
+    assert!(!deep_mirror_path.exists());
+    assert!(!deep_mirror_path.parent().unwrap().exists());
+
+    let store = Arc::new(FileSplitStore::open(&source_store_path, split, 73).unwrap());
+    let sampler = TripletSampler::new(build_config(4, split), store);
+    sampler.register_source(Box::new(InMemorySource::new(
+        "source_a",
+        vec![
+            build_record("source_a", "a1", 1),
+            build_record("source_a", "a2", 2),
+            build_record("source_a", "a3", 3),
+            build_record("source_a", "a4", 4),
+        ],
+    )));
+    sampler.register_source(Box::new(InMemorySource::new(
+        "source_b",
+        vec![
+            build_record("source_b", "b1", 1),
+            build_record("source_b", "b2", 2),
+            build_record("source_b", "b3", 3),
+            build_record("source_b", "b4", 4),
+        ],
+    )));
+
+    sampler.next_triplet_batch(SplitLabel::Train).unwrap();
+    sampler
+        .save_sampler_state(Some(deep_mirror_path.as_path()))
+        .unwrap();
+
+    assert!(deep_mirror_path.parent().unwrap().exists());
+    assert!(deep_mirror_path.exists());
+
+    let mirror_store = FileSplitStore::open(&deep_mirror_path, split, 73).unwrap();
+    assert!(mirror_store.load_sampler_state().unwrap().is_some());
 }

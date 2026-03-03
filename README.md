@@ -323,6 +323,13 @@ If you need explicit load/save control, use:
 
 This loads from `load_from` only when `save_to` does not exist yet, then writes
 to `save_to`. Passing `None` for `load_from` starts from an empty/new store.
+Parent directories for `save_to` are created recursively when missing.
+
+When using `sampler.save_sampler_state(Some(path.as_path()))`:
+
+- `path` must not already exist (the call errors rather than overwriting).
+- parent directories for `path` are created recursively when missing.
+- later `sampler.save_sampler_state(None)` calls still write to the originally opened store file.
 
 ## Usage flow
 
@@ -331,6 +338,8 @@ Short version:
 - Call **`sampler.next_triplet_batch(split)`**, **`sampler.next_pair_batch(split)`**, or **`sampler.next_text_batch(split)`** to sample batches (ingestion happens automatically).
 - Call **`sampler.save_sampler_state(None)`** when you want restart-resume behavior.
 - Call **`sampler.save_sampler_state(Some(path.as_path()))`** when you also want to persist current state to another file.
+  - `Some(path)` requires `path` to not already exist; otherwise it returns an error instead of overwriting.
+  - After `Some(path)`, subsequent `None` calls still save to the originally opened store path.
 - Optionally call **`sampler.set_epoch(n)`** for explicit epoch control.
 
 Step-by-step:
@@ -342,6 +351,8 @@ Step-by-step:
 3. Call one of **`sampler.next_triplet_batch(split)`**, **`sampler.next_pair_batch(split)`**, or **`sampler.next_text_batch(split)`**.
 4. Call **`sampler.save_sampler_state(None)`** when you want to write persisted sampler/split state (typically at the end of an epoch or at explicit checkpoint boundaries). **Do not call this every step.** Very frequent writes can create high I/O overhead and, at very large write counts (for example, tens of millions), can also adversely affect split-store initialization time.
   - Use `sampler.save_sampler_state(Some(path.as_path()))` to additionally write to another file on demand.
+  - `path` must be a new file path; if it already exists, the call fails rather than overwriting.
+  - This on-demand write does not retarget the sampler; later `sampler.save_sampler_state(None)` calls still write to the original store file.
 5. Optionally call **`sampler.set_epoch(n)`** for explicit epoch replay/order.
 
 Operational notes:

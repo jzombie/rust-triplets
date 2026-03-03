@@ -309,6 +309,7 @@ fn decode_store_meta(bytes: &[u8]) -> Result<StoreMeta, SamplerError> {
 /// Persists assignment metadata, epoch state, and sampler runtime state.
 pub struct FileSplitStore {
     store: DataStore,
+    path: PathBuf,
     ratios: SplitRatios,
     seed: u64,
 }
@@ -316,6 +317,7 @@ pub struct FileSplitStore {
 impl fmt::Debug for FileSplitStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FileSplitStore")
+            .field("path", &self.path)
             .field("ratios", &self.ratios)
             .field("seed", &self.seed)
             .finish()
@@ -363,6 +365,7 @@ impl FileSplitStore {
         let store = DataStore::open(path.as_path()).map_err(map_store_err)?;
         let store = Self {
             store,
+            path,
             ratios,
             seed,
         };
@@ -535,16 +538,25 @@ impl SamplerStateStore for FileSplitStore {
         write_bytes(&self.store, SAMPLER_STATE_KEY, &payload)?;
 
         if let Some(save_path) = save_path {
-            let target = FileSplitStore::open(save_path.to_path_buf(), self.ratios, self.seed)?;
-            let epoch_meta = self.load_epoch_meta()?;
-            target.save_epoch_meta(&epoch_meta)?;
-
-            for label in ALL_SPLITS {
-                if let Some(hashes) = self.load_epoch_hashes(label)? {
-                    target.save_epoch_hashes(label, &hashes)?;
+            let target_path = coerce_store_path(save_path.to_path_buf());
+            if target_path != self.path {
+                ensure_parent_dir(&target_path)?;
+                if target_path.exists() {
+                    return Err(SamplerError::SplitStore(format!(
+                        "refusing to overwrite existing split store '{}'; choose a new path",
+                        target_path.display()
+                    )));
                 }
+                fs::copy(&self.path, &target_path).map_err(|err| {
+                    SamplerError::SplitStore(format!(
+                        "failed to copy split store from '{}' to '{}': {err}",
+                        self.path.display(),
+                        target_path.display()
+                    ))
+                })?;
             }
 
+            let target = FileSplitStore::open(target_path, self.ratios, self.seed)?;
             target.save_sampler_state(state, None)?;
         }
 
@@ -1173,6 +1185,44 @@ mod tests {
                 .unwrap()
                 .source_epoch,
             7
+        );
+    }
+
+    #[test]
+    fn save_sampler_state_to_new_path_copies_existing_store_first() {
+        let dir = tempdir().unwrap();
+        let path_a = dir.path().join("source_store.bin");
+        let path_b = dir.path().join("mirror_store.bin");
+        let ratios = SplitRatios::default();
+
+        let store_a = FileSplitStore::open(&path_a, ratios, 42).unwrap();
+
+        let assigned_id = "record_with_assignment".to_string();
+        let assigned_key = split_key(&assigned_id);
+        store_a.store.write(&assigned_key, b"1").unwrap();
+
+        let sampler_state = PersistedSamplerState {
+            source_cycle_idx: 1,
+            source_record_cursors: vec![("s1".to_string(), 2)],
+            source_epoch: 9,
+            rng_state: 123,
+            triplet_recipe_rr_idx: 4,
+            text_recipe_rr_idx: 6,
+            source_stream_cursors: vec![("s1".to_string(), 8)],
+        };
+
+        store_a
+            .save_sampler_state(&sampler_state, Some(path_b.as_path()))
+            .unwrap();
+
+        let store_b = FileSplitStore::open(&path_b, ratios, 42).unwrap();
+        assert_eq!(
+            store_b.label_for(&assigned_id),
+            Some(SplitLabel::Validation)
+        );
+        assert_eq!(
+            store_b.load_sampler_state().unwrap().unwrap().source_epoch,
+            9
         );
     }
 
