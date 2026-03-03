@@ -604,6 +604,226 @@ fn huggingface_parquet_role_columns_skip_missing_context_without_error() {
 }
 
 #[test]
+fn huggingface_record_ids_are_stable_across_independent_source_instances() {
+    // The same row in the same shard file must produce the same record ID
+    // regardless of which source instance reads it. This is what makes split
+    // store assignments survive a parquet cache deletion and re-download.
+    let temp = tempfile::tempdir().expect("failed creating tempdir");
+    write_lines(
+        &temp.path().join("part-00000.ndjson"),
+        &[
+            r#"{"id":"stable1","text":"row one"}"#,
+            r#"{"id":"stable2","text":"row two"}"#,
+        ],
+    );
+
+    let make_source = || {
+        let mut config = HuggingFaceRowsConfig::new(
+            "hf_stable_ids",
+            "local/test-dataset",
+            "default",
+            "train",
+            temp.path(),
+        );
+        config.shard_extensions = vec!["ndjson".to_string()];
+        config.text_columns = vec!["text".to_string()];
+        HuggingFaceRowSource::new(config).expect("failed creating source")
+    };
+
+    let seed = seeded_config(7);
+    let snap1 = make_source()
+        .refresh(&seed, None, Some(2))
+        .expect("first instance refresh");
+    let snap2 = make_source()
+        .refresh(&seed, None, Some(2))
+        .expect("second instance refresh");
+
+    let ids1: std::collections::HashSet<String> =
+        snap1.records.iter().map(|r| r.id.clone()).collect();
+    let ids2: std::collections::HashSet<String> =
+        snap2.records.iter().map(|r| r.id.clone()).collect();
+    assert_eq!(
+        ids1, ids2,
+        "record IDs must be identical across independent source instances"
+    );
+}
+
+#[test]
+fn huggingface_cursor_advances_between_refreshes() {
+    // The cursor returned from refresh() must cause the next call to start
+    // from a different position, not restart from row 0 every time.
+    let temp = tempfile::tempdir().expect("failed creating tempdir");
+    write_lines(
+        &temp.path().join("part-00000.ndjson"),
+        &[
+            r#"{"id":"adv1","text":"alpha"}"#,
+            r#"{"id":"adv2","text":"beta"}"#,
+            r#"{"id":"adv3","text":"gamma"}"#,
+            r#"{"id":"adv4","text":"delta"}"#,
+        ],
+    );
+
+    let mut config = HuggingFaceRowsConfig::new(
+        "hf_cursor_advance",
+        "local/test-dataset",
+        "default",
+        "train",
+        temp.path(),
+    );
+    config.shard_extensions = vec!["ndjson".to_string()];
+    config.text_columns = vec!["text".to_string()];
+
+    let source = HuggingFaceRowSource::new(config).expect("failed creating source");
+    let seed = seeded_config(11);
+
+    let snap1 = source
+        .refresh(&seed, None, Some(2))
+        .expect("first refresh");
+    assert_eq!(snap1.records.len(), 2);
+
+    let snap2 = source
+        .refresh(&seed, Some(&snap1.cursor), Some(2))
+        .expect("second refresh");
+    assert_eq!(snap2.records.len(), 2);
+
+    // The cursor must have advanced: the two batches should not be identical.
+    let ids1: std::collections::HashSet<_> = snap1.records.iter().map(|r| &r.id).collect();
+    let ids2: std::collections::HashSet<_> = snap2.records.iter().map(|r| &r.id).collect();
+    assert_ne!(ids1, ids2, "cursor must advance between successive refreshes");
+}
+
+#[test]
+fn huggingface_refresh_limit_is_strictly_respected() {
+    // refresh(..., Some(limit)) must never return more than `limit` records.
+    let temp = tempfile::tempdir().expect("failed creating tempdir");
+    write_lines(
+        &temp.path().join("part-00000.ndjson"),
+        &[
+            r#"{"id":"lim1","text":"a"}"#,
+            r#"{"id":"lim2","text":"b"}"#,
+            r#"{"id":"lim3","text":"c"}"#,
+            r#"{"id":"lim4","text":"d"}"#,
+            r#"{"id":"lim5","text":"e"}"#,
+        ],
+    );
+
+    let mut config = HuggingFaceRowsConfig::new(
+        "hf_limit",
+        "local/test-dataset",
+        "default",
+        "train",
+        temp.path(),
+    );
+    config.shard_extensions = vec!["ndjson".to_string()];
+    config.text_columns = vec!["text".to_string()];
+
+    let source = HuggingFaceRowSource::new(config).expect("failed creating source");
+    let seed = seeded_config(13);
+
+    let snap = source
+        .refresh(&seed, None, Some(2))
+        .expect("refresh should succeed");
+    assert!(
+        snap.records.len() <= 2,
+        "refresh returned {} records but limit was 2",
+        snap.records.len()
+    );
+}
+
+#[test]
+fn huggingface_both_local_shards_are_sampled() {
+    // When two shard files exist, records from both must appear across a
+    // full refresh so that shard expansion actually increases coverage.
+    let temp = tempfile::tempdir().expect("failed creating tempdir");
+    write_lines(
+        &temp.path().join("part-00000.ndjson"),
+        &[
+            r#"{"id":"s1r1","text":"shard one row one"}"#,
+            r#"{"id":"s1r2","text":"shard one row two"}"#,
+        ],
+    );
+    write_lines(
+        &temp.path().join("part-00001.ndjson"),
+        &[
+            r#"{"id":"s2r1","text":"shard two row one"}"#,
+            r#"{"id":"s2r2","text":"shard two row two"}"#,
+        ],
+    );
+
+    let mut config = HuggingFaceRowsConfig::new(
+        "hf_two_shards",
+        "local/test-dataset",
+        "default",
+        "train",
+        temp.path(),
+    );
+    config.shard_extensions = vec!["ndjson".to_string()];
+    config.text_columns = vec!["text".to_string()];
+
+    let source = HuggingFaceRowSource::new(config).expect("failed creating source");
+    let seed = seeded_config(17);
+
+    let snap = source
+        .refresh(&seed, None, Some(100))
+        .expect("refresh should read from both shards");
+
+    let ids: std::collections::HashSet<String> =
+        snap.records.iter().map(|r| r.id.clone()).collect();
+    assert!(
+        ids.iter().any(|id| id.contains("s1r")),
+        "no records from shard 1 found in refresh output"
+    );
+    assert!(
+        ids.iter().any(|id| id.contains("s2r")),
+        "no records from shard 2 found in refresh output"
+    );
+}
+
+#[test]
+fn huggingface_refresh_wraps_correctly_after_all_rows_consumed() {
+    // After reading all materialized rows, a second refresh must wrap the
+    // cursor back to the start and return records — it must not panic or
+    // return an empty snapshot.
+    let temp = tempfile::tempdir().expect("failed creating tempdir");
+    write_lines(
+        &temp.path().join("part-00000.ndjson"),
+        &[
+            r#"{"id":"w1","text":"row one"}"#,
+            r#"{"id":"w2","text":"row two"}"#,
+        ],
+    );
+
+    let mut config = HuggingFaceRowsConfig::new(
+        "hf_wrap_after_exhaustion",
+        "local/test-dataset",
+        "default",
+        "train",
+        temp.path(),
+    );
+    config.shard_extensions = vec!["ndjson".to_string()];
+    config.text_columns = vec!["text".to_string()];
+
+    let source = HuggingFaceRowSource::new(config).expect("failed creating source");
+    let seed = seeded_config(19);
+
+    // First pass: consume all rows.
+    let snap1 = source
+        .refresh(&seed, None, Some(100))
+        .expect("first refresh");
+    assert_eq!(snap1.records.len(), 2);
+
+    // Second pass with returning cursor: must wrap and return records.
+    let snap2 = source
+        .refresh(&seed, Some(&snap1.cursor), Some(1))
+        .expect("second refresh after exhaustion must not fail");
+    assert_eq!(
+        snap2.records.len(),
+        1,
+        "refresh must still return records after cursor wraps"
+    );
+}
+
+#[test]
 #[ignore = "network integration test against live Hugging Face dataset"]
 fn huggingface_reads_live_remote_dataset() {
     let temp = tempfile::tempdir().expect("failed creating tempdir");
