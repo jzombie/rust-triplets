@@ -48,6 +48,13 @@ const REMOTE_EXPANSION_HEADROOM_MULTIPLIER: usize = 4;
 /// Number of initial remote shards to materialize when bootstrapping an empty
 /// local snapshot before regular lazy expansion.
 const REMOTE_BOOTSTRAP_SHARDS: usize = 1;
+/// Minimum number of remote shards to materialize before large refresh passes.
+///
+/// This prevents long single-file regimes where large refresh windows repeatedly
+/// sample from only the first downloaded shard.
+const REMOTE_MIN_SHARDS_FOR_LARGE_REFRESH: usize = 2;
+/// Refresh-size threshold that enables proactive multi-shard warmup.
+const LARGE_REFRESH_MIN_RECORDS: usize = 1024;
 /// Multiplies the source `refresh` limit passed by `IngestionManager`
 /// (`step.unwrap_or(max_records)`) to set this source's internal row-read
 /// batch target for each refresh pass.
@@ -453,6 +460,7 @@ struct ParquetCache {
 struct EligibleIndexCache {
     signature: Option<u64>,
     rows: Option<Arc<Vec<usize>>>,
+    shards: Vec<ShardIndex>,
 }
 
 impl ParquetCache {
@@ -559,7 +567,7 @@ impl ParquetCache {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct ShardIndex {
     path: PathBuf,
     global_start: usize,
@@ -817,6 +825,39 @@ impl HuggingFaceRowSource {
             return Ok(rows.clone());
         }
 
+        let incremental_seed = if let Ok(cache) = self.eligible_index.lock()
+            && cache.signature != Some(signature)
+            && !cache.shards.is_empty()
+            && cache.shards.len() < shards.len()
+            && shards
+                .iter()
+                .take(cache.shards.len())
+                .eq(cache.shards.iter())
+            && let Some(existing_rows) = cache.rows.as_ref()
+        {
+            Some((cache.shards.len(), existing_rows.as_ref().clone()))
+        } else {
+            None
+        };
+
+        if let Some((prefix_len, mut merged)) = incremental_seed {
+            let appended = self.build_eligible_rows_from_shards(&shards[prefix_len..])?;
+            merged.extend(appended);
+            let rows = Arc::new(merged);
+
+            let mut writable =
+                self.eligible_index
+                    .lock()
+                    .map_err(|_| SamplerError::SourceUnavailable {
+                        source_id: self.config.source_id.clone(),
+                        reason: "huggingface eligible-index cache lock poisoned".to_string(),
+                    })?;
+            writable.signature = Some(signature);
+            writable.shards = shards;
+            writable.rows = Some(rows.clone());
+            return Ok(rows);
+        }
+
         let rows = Arc::new(self.build_eligible_rows_from_shards(&shards)?);
         let mut cache =
             self.eligible_index
@@ -826,6 +867,7 @@ impl HuggingFaceRowSource {
                     reason: "huggingface eligible-index cache lock poisoned".to_string(),
                 })?;
         cache.signature = Some(signature);
+        cache.shards = shards;
         cache.rows = Some(rows.clone());
         Ok(rows)
     }
@@ -1243,12 +1285,8 @@ impl HuggingFaceRowSource {
         if candidates.len() <= 1 {
             return;
         }
-        let mut hasher = DefaultHasher::new();
-        config.source_id.hash(&mut hasher);
-        config.dataset.hash(&mut hasher);
-        config.config.hash(&mut hasher);
-        config.split.hash(&mut hasher);
-        let offset = (hasher.finish() as usize) % candidates.len();
+        let seed = Self::shard_candidate_seed(config, candidates.len(), 0);
+        let offset = (seed as usize) % candidates.len();
         candidates.rotate_left(offset);
     }
 
@@ -2003,11 +2041,7 @@ impl HuggingFaceRowSource {
             let sequence_pos = state.next_remote_idx;
             let remote_ordinal = sequence_pos + 1;
             let remote_total = candidates.len();
-            let sampler_seed = self.configured_sampler_seed()?;
-            let seed = Self::shard_candidate_seed(&self.config, remote_total, sampler_seed);
-            let mut permutation =
-                crate::source::IndexPermutation::new(remote_total, seed, sequence_pos as u64);
-            let candidate_idx = permutation.next();
+            let candidate_idx = sequence_pos;
             let remote_path = candidates[candidate_idx].clone();
             let expected_bytes = state.remote_candidate_sizes.get(&remote_path).copied();
             state.next_remote_idx += 1;
@@ -2941,6 +2975,36 @@ impl DataSource for HuggingFaceRowSource {
             }
         }
 
+        let max = limit.unwrap_or(eligible_rows.len());
+        if max >= LARGE_REFRESH_MIN_RECORDS {
+            for _ in 0..32 {
+                let (materialized_rows, shard_count, has_remaining_candidates) = {
+                    let state =
+                        self.state
+                            .lock()
+                            .map_err(|_| SamplerError::SourceUnavailable {
+                                source_id: self.config.source_id.clone(),
+                                reason: "huggingface source state lock poisoned".to_string(),
+                            })?;
+                    let remaining = state
+                        .remote_candidates
+                        .as_ref()
+                        .is_some_and(|candidates| state.next_remote_idx < candidates.len());
+                    (state.materialized_rows, state.shards.len(), remaining)
+                };
+
+                if shard_count >= REMOTE_MIN_SHARDS_FOR_LARGE_REFRESH || !has_remaining_candidates {
+                    break;
+                }
+
+                if !self.ensure_row_available(materialized_rows)? {
+                    break;
+                }
+
+                eligible_rows = self.eligible_rows()?;
+            }
+        }
+
         let total = eligible_rows.len();
 
         if total == 0 {
@@ -2953,7 +3017,6 @@ impl DataSource for HuggingFaceRowSource {
             });
         }
 
-        let max = limit.unwrap_or(total);
         let mut start = cursor.map(|state| state.revision as usize).unwrap_or(0);
         if start >= total {
             start = 0;
@@ -5361,6 +5424,39 @@ mod tests {
     }
 
     #[test]
+    fn download_next_remote_shard_consumes_distinct_candidates_in_order() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config.clone());
+
+        let payload_a = b"{\"id\":\"a\",\"text\":\"alpha\"}\n".to_vec();
+        let payload_b = b"{\"id\":\"b\",\"text\":\"beta\"}\n".to_vec();
+        let (base_a, server_a) = spawn_one_shot_http(payload_a);
+        let (base_b, server_b) = spawn_one_shot_http(payload_b);
+        let candidate_a =
+            format!("url::{base_a}/datasets/org/ds/resolve/main/train/part-a.ndjson");
+        let candidate_b =
+            format!("url::{base_b}/datasets/org/ds/resolve/main/train/part-b.ndjson");
+        {
+            let mut state = source.state.lock().unwrap();
+            state.remote_candidates = Some(vec![candidate_a.clone(), candidate_b.clone()]);
+            state.remote_candidate_sizes.insert(candidate_a.clone(), 27);
+            state.remote_candidate_sizes.insert(candidate_b.clone(), 26);
+            state.next_remote_idx = 0;
+        }
+
+        assert!(source.download_next_remote_shard().unwrap());
+        assert!(source.download_next_remote_shard().unwrap());
+        server_a.join().unwrap();
+        server_b.join().unwrap();
+
+        let state = source.state.lock().unwrap();
+        assert_eq!(state.next_remote_idx, 2);
+        assert_eq!(state.shards.len(), 2);
+        assert_ne!(state.shards[0].path, state.shards[1].path);
+    }
+
+    #[test]
     fn extract_split_row_count_reads_split_entries() {
         let payload = json!({
             "size": {
@@ -5722,6 +5818,45 @@ mod tests {
         // After warmup, expansion continues in trickle mode (12.5% of
         // headroom, minimum 1) so remote shard diversity can keep growing.
         assert_eq!(source.len_hint(), Some(9));
+    }
+
+    #[test]
+    fn eligible_rows_extends_cached_index_when_new_shard_is_appended() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config.clone());
+
+        let appended_path = dir.path().join("append.ndjson");
+        fs::write(&appended_path, b"{\"id\":\"r1\",\"text\":\"hello\"}\n").unwrap();
+        let appended = HuggingFaceRowSource::index_single_shard(&config, &appended_path, 1)
+            .unwrap()
+            .unwrap();
+
+        let baseline = ShardIndex {
+            path: dir.path().join("missing-baseline.ndjson"),
+            global_start: 0,
+            row_count: 1,
+            is_parquet: false,
+            parquet_row_groups: Vec::new(),
+            checkpoints: vec![0],
+        };
+
+        {
+            let mut state = source.state.lock().unwrap();
+            state.shards = vec![baseline.clone(), appended.clone()];
+            state.materialized_rows = 2;
+            state.total_rows = Some(2);
+        }
+
+        {
+            let mut cache = source.eligible_index.lock().unwrap();
+            cache.signature = Some(HuggingFaceRowSource::shard_signature(&[baseline.clone()]));
+            cache.rows = Some(Arc::new(vec![0]));
+            cache.shards = vec![baseline];
+        }
+
+        let rows = source.eligible_rows().unwrap();
+        assert_eq!(rows.as_ref(), &vec![0, 1]);
     }
 
     #[test]
