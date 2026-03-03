@@ -328,7 +328,7 @@ impl IngestionManager {
                 Option<(Result<SourceSnapshot, SamplerError>, std::time::Duration)>,
             > = Vec::with_capacity(self.sources.len());
             results.resize_with(self.sources.len(), || None);
-            let fetch_limit = step.unwrap_or(self.max_records);
+            let fetch_limit = self.max_records;
             let sampler_config = self.sampler_config.clone();
             thread::scope(|scope| {
                 let mut handles = Vec::with_capacity(refresh_plan.len());
