@@ -3745,6 +3745,39 @@ mod tests {
         writer.close().unwrap();
     }
 
+    fn write_simdr_fixture(path: &Path, rows: &[(&str, &str)]) {
+        // Create/open the simd-r-drive DataStore and write row-view entries
+        let store = DataStore::open(path).expect("open simdr store");
+        if rows.is_empty() {
+            store
+                .write(HF_SHARD_STORE_META_ROWS_KEY, &(0u64).to_le_bytes())
+                .expect("write meta");
+            return;
+        }
+
+        let mut batch: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        for (i, (id, text)) in rows.iter().enumerate() {
+            let row = RowView {
+                row_id: Some(id.to_string()),
+                timestamp: None,
+                text_fields: vec![RowTextField {
+                    name: "text".to_string(),
+                    text: text.to_string(),
+                }],
+            };
+            let payload = serde_json::to_vec(&row).expect("encode row");
+            let mut key = HF_SHARD_STORE_ROW_PREFIX.to_vec();
+            key.extend_from_slice(&(i as u64).to_le_bytes());
+            batch.push((key, payload));
+        }
+
+        let refs: Vec<(&[u8], &[u8])> = batch.iter().map(|(k, v)| (k.as_slice(), v.as_slice())).collect();
+        store.batch_write(&refs).expect("batch write");
+        store
+            .write(HF_SHARD_STORE_META_ROWS_KEY, &(rows.len() as u64).to_le_bytes())
+            .expect("write meta");
+    }
+
     #[test]
     fn managed_snapshot_helpers_create_cache_dirs_under_discovered_root() {
         let dir = tempdir().unwrap();
@@ -4732,9 +4765,9 @@ mod tests {
     #[test]
     fn build_shard_index_applies_max_rows_to_parquet_shard() {
         let dir = tempdir().unwrap();
-        let parquet_path = dir.path().join("rows.parquet");
-        write_parquet_fixture(
-            &parquet_path,
+        let store_path = dir.path().join("rows.simdr");
+        write_simdr_fixture(
+            &store_path,
             &[("id-1", "text-1"), ("id-2", "text-2"), ("id-3", "text-3")],
         );
         let mut config = test_config(dir.path().to_path_buf());
