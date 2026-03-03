@@ -3758,11 +3758,6 @@ impl DataSource for HuggingFaceRowSource {
             })
     }
 
-    /// Forward expansion hint to background shard downloader.
-    fn try_expand(&self, _config: &SamplerConfig) {
-        self.trigger_expansion_if_needed();
-    }
-
     /// Return mixed default triplet recipes used by Hugging Face row sources.
     fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {
         vec![

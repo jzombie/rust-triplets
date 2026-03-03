@@ -313,20 +313,6 @@ impl IngestionManager {
         step: Option<usize>,
         weights: Option<&HashMap<SourceId, f32>>,
     ) {
-        // Proactively trigger background shard expansion when a source's buffer
-        // is running low (below half of its per-source share).  This ensures
-        // a new shard starts downloading before the buffer drains to empty,
-        // without hammering downloads on every single step when the buffer is
-        // still healthy.
-        let per_source_cap = (self.max_records / self.sources.len().max(1)).max(1);
-        let expand_threshold = per_source_cap / 2;
-        let sampler_config_for_expand = self.sampler_config.clone();
-        for state in &self.sources {
-            if state.buffer.len() <= expand_threshold {
-                state.source.try_expand(&sampler_config_for_expand);
-            }
-        }
-
         let mut refresh_plan = Vec::new();
         for (idx, state) in self.sources.iter_mut().enumerate() {
             if force_refresh {
