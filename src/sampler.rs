@@ -1281,7 +1281,11 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             let total_tokens = tokens.len();
             let max_window = self.config.chunking.max_window_tokens;
             if max_window > 0 && total_tokens > max_window {
-                let truncated = tokens.into_iter().take(max_window).collect::<Vec<_>>().join(" ");
+                let truncated = tokens
+                    .into_iter()
+                    .take(max_window)
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 chunk.text = truncated;
                 chunk.tokens_estimate = max_window;
             } else {
@@ -2810,37 +2814,37 @@ mod tests {
         body.split(" | ").map(|part| part.to_string()).collect()
     }
 
-        #[test]
-        fn decorate_chunk_truncates_and_updates_tokens_estimate() {
-            let split = SplitRatios::default();
-            let store = Arc::new(DeterministicSplitStore::new(split, 42).unwrap());
-            let mut cfg = base_config();
-            // small window so truncation is obvious
-            cfg.chunking.max_window_tokens = 5;
-            let sampler = TripletSampler::new(cfg, store);
+    #[test]
+    fn decorate_chunk_truncates_and_updates_tokens_estimate() {
+        let split = SplitRatios::default();
+        let store = Arc::new(DeterministicSplitStore::new(split, 42).unwrap());
+        let mut cfg = base_config();
+        // small window so truncation is obvious
+        cfg.chunking.max_window_tokens = 5;
+        let sampler = TripletSampler::new(cfg, store);
 
-            // Build a short section that would be under the window without meta prefix
-            let mut record = sample_record();
-            record.sections[0].text = "one two three".to_string();
+        // Build a short section that would be under the window without meta prefix
+        let mut record = sample_record();
+        record.sections[0].text = "one two three".to_string();
 
-            // Add a meta prefix variant that expands the token count beyond the window
-            let mut kvp = KvpPrefixSampler::new(1.0);
-            kvp.add_variant([("long", "a b c d e f g h i")] as [(&str, &str); 1]);
-            record.meta_prefix = Some(kvp);
+        // Add a meta prefix variant that expands the token count beyond the window
+        let mut kvp = KvpPrefixSampler::new(1.0);
+        kvp.add_variant([("long", "a b c d e f g h i")] as [(&str, &str); 1]);
+        record.meta_prefix = Some(kvp);
 
-            let mut inner = sampler.inner.lock().unwrap();
-            let mut chunks = inner.materialize_chunks(&record, 0, &record.sections[0]);
-            assert!(!chunks.is_empty());
-            let mut chunk = chunks.remove(0);
-            // initial estimate should reflect original short section
-            assert_eq!(chunk.tokens_estimate, 3);
+        let mut inner = sampler.inner.lock().unwrap();
+        let mut chunks = inner.materialize_chunks(&record, 0, &record.sections[0]);
+        assert!(!chunks.is_empty());
+        let mut chunk = chunks.remove(0);
+        // initial estimate should reflect original short section
+        assert_eq!(chunk.tokens_estimate, 3);
 
-            inner.decorate_chunk(&record, &mut chunk);
+        inner.decorate_chunk(&record, &mut chunk);
 
-            let tokens_after = chunk.text.split_whitespace().count();
-            assert_eq!(tokens_after, 5);
-            assert_eq!(chunk.tokens_estimate, 5);
-        }
+        let tokens_after = chunk.text.split_whitespace().count();
+        assert_eq!(tokens_after, 5);
+        assert_eq!(chunk.tokens_estimate, 5);
+    }
 
     #[test]
     fn exhaustion_retry_limit_returns_exhausted() {

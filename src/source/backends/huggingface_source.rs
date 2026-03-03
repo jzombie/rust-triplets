@@ -763,16 +763,25 @@ impl HuggingFaceRowSource {
         if let Some(parent) = shard_store_path.parent() {
             fs::create_dir_all(parent).map_err(|err| SamplerError::SourceUnavailable {
                 source_id: config.source_id.clone(),
-                reason: format!("failed creating row-store directory {}: {err}", parent.display()),
+                reason: format!(
+                    "failed creating row-store directory {}: {err}",
+                    parent.display()
+                ),
             })?;
         }
         DataStore::open(shard_store_path).map_err(|err| SamplerError::SourceUnavailable {
             source_id: config.source_id.clone(),
-            reason: format!("failed opening row store {}: {err}", shard_store_path.display()),
+            reason: format!(
+                "failed opening row store {}: {err}",
+                shard_store_path.display()
+            ),
         })
     }
 
-    fn get_or_open_shard_store(&self, shard_store_path: &Path) -> Result<Arc<DataStore>, SamplerError> {
+    fn get_or_open_shard_store(
+        &self,
+        shard_store_path: &Path,
+    ) -> Result<Arc<DataStore>, SamplerError> {
         if let Some(store) = self
             .store_cache
             .lock()
@@ -787,13 +796,13 @@ impl HuggingFaceRowSource {
         }
 
         let store = Arc::new(Self::open_shard_store(&self.config, shard_store_path)?);
-        let mut cache =
-            self.store_cache
-                .lock()
-                .map_err(|_| SamplerError::SourceUnavailable {
-                    source_id: self.config.source_id.clone(),
-                    reason: "huggingface row-store cache lock poisoned".to_string(),
-                })?;
+        let mut cache = self
+            .store_cache
+            .lock()
+            .map_err(|_| SamplerError::SourceUnavailable {
+                source_id: self.config.source_id.clone(),
+                reason: "huggingface row-store cache lock poisoned".to_string(),
+            })?;
         let entry = cache
             .entry(shard_store_path.to_path_buf())
             .or_insert_with(|| store.clone());
@@ -811,7 +820,8 @@ impl HuggingFaceRowSource {
     }
 
     fn row_store_row_key(local_idx: usize) -> Vec<u8> {
-        let mut key = Vec::with_capacity(HF_SHARD_STORE_ROW_PREFIX.len() + std::mem::size_of::<u64>());
+        let mut key =
+            Vec::with_capacity(HF_SHARD_STORE_ROW_PREFIX.len() + std::mem::size_of::<u64>());
         key.extend_from_slice(HF_SHARD_STORE_ROW_PREFIX);
         key.extend_from_slice(&(local_idx as u64).to_le_bytes());
         key
@@ -832,12 +842,12 @@ impl HuggingFaceRowSource {
     }
 
     fn read_store_row_count(&self, store: &DataStore) -> Result<usize, SamplerError> {
-        let Some(entry) = store
-            .read(HF_SHARD_STORE_META_ROWS_KEY)
-            .map_err(|err| SamplerError::SourceUnavailable {
+        let Some(entry) = store.read(HF_SHARD_STORE_META_ROWS_KEY).map_err(|err| {
+            SamplerError::SourceUnavailable {
                 source_id: self.config.source_id.clone(),
                 reason: format!("row-store meta read failed: {err}"),
-            })?
+            }
+        })?
         else {
             return Ok(0);
         };
@@ -891,7 +901,9 @@ impl HuggingFaceRowSource {
 
         let mut served_rows = 0usize;
 
-        for (group_pos, (group_start, group_count)) in shard.parquet_row_groups.iter().copied().enumerate() {
+        for (group_pos, (group_start, group_count)) in
+            shard.parquet_row_groups.iter().copied().enumerate()
+        {
             let rows = self
                 .parquet_cache
                 .lock()
@@ -2088,12 +2100,13 @@ impl HuggingFaceRowSource {
 
         let (rows, parquet_row_groups, checkpoints) = if is_store {
             let store = Self::open_shard_store(config, path)?;
-            let rows = if let Some(entry) = store.read(HF_SHARD_STORE_META_ROWS_KEY).map_err(
-                |err| SamplerError::SourceUnavailable {
-                    source_id: config.source_id.clone(),
-                    reason: format!("row-store meta read failed {}: {err}", path.display()),
-                },
-            )? {
+            let rows = if let Some(entry) =
+                store.read(HF_SHARD_STORE_META_ROWS_KEY).map_err(|err| {
+                    SamplerError::SourceUnavailable {
+                        source_id: config.source_id.clone(),
+                        reason: format!("row-store meta read failed {}: {err}", path.display()),
+                    }
+                })? {
                 let payload = entry.as_ref();
                 if payload.len() != std::mem::size_of::<u64>() {
                     return Err(SamplerError::SourceUnavailable {
@@ -2107,7 +2120,11 @@ impl HuggingFaceRowSource {
             } else {
                 0
             };
-            let groups = if rows > 0 { vec![(0, rows)] } else { Vec::new() };
+            let groups = if rows > 0 {
+                vec![(0, rows)]
+            } else {
+                Vec::new()
+            };
             (rows, groups, Vec::new())
         } else if is_transient_parquet {
             let (rows, parquet_row_groups) = Self::parquet_row_group_map(config, path)?;
@@ -3142,7 +3159,10 @@ impl HuggingFaceRowSource {
                     })?;
 
                     unresolved_targets.clear();
-                    for (position, entry) in requested_positions.into_iter().zip(store_entries.into_iter()) {
+                    for (position, entry) in requested_positions
+                        .into_iter()
+                        .zip(store_entries.into_iter())
+                    {
                         let Some(indices_for_position) = targets.get(&position).cloned() else {
                             continue;
                         };
@@ -3371,13 +3391,13 @@ impl DataSource for HuggingFaceRowSource {
         if max >= LARGE_REFRESH_MIN_RECORDS {
             for _ in 0..32 {
                 let (materialized_rows, shard_count, has_remaining_candidates) = {
-                    let state =
-                        self.state
-                            .lock()
-                            .map_err(|_| SamplerError::SourceUnavailable {
-                                source_id: self.config.source_id.clone(),
-                                reason: "huggingface source state lock poisoned".to_string(),
-                            })?;
+                    let state = self
+                        .state
+                        .lock()
+                        .map_err(|_| SamplerError::SourceUnavailable {
+                            source_id: self.config.source_id.clone(),
+                            reason: "huggingface source state lock poisoned".to_string(),
+                        })?;
                     let remaining = state
                         .remote_candidates
                         .as_ref()
@@ -3771,10 +3791,16 @@ mod tests {
             batch.push((key, payload));
         }
 
-        let refs: Vec<(&[u8], &[u8])> = batch.iter().map(|(k, v)| (k.as_slice(), v.as_slice())).collect();
+        let refs: Vec<(&[u8], &[u8])> = batch
+            .iter()
+            .map(|(k, v)| (k.as_slice(), v.as_slice()))
+            .collect();
         store.batch_write(&refs).expect("batch write");
         store
-            .write(HF_SHARD_STORE_META_ROWS_KEY, &(rows.len() as u64).to_le_bytes())
+            .write(
+                HF_SHARD_STORE_META_ROWS_KEY,
+                &(rows.len() as u64).to_le_bytes(),
+            )
             .expect("write meta");
     }
 
@@ -5860,10 +5886,8 @@ mod tests {
         let payload_b = b"{\"id\":\"b\",\"text\":\"beta\"}\n".to_vec();
         let (base_a, server_a) = spawn_one_shot_http(payload_a);
         let (base_b, server_b) = spawn_one_shot_http(payload_b);
-        let candidate_a =
-            format!("url::{base_a}/datasets/org/ds/resolve/main/train/part-a.ndjson");
-        let candidate_b =
-            format!("url::{base_b}/datasets/org/ds/resolve/main/train/part-b.ndjson");
+        let candidate_a = format!("url::{base_a}/datasets/org/ds/resolve/main/train/part-a.ndjson");
+        let candidate_b = format!("url::{base_b}/datasets/org/ds/resolve/main/train/part-b.ndjson");
         {
             let mut state = source.state.lock().unwrap();
             state.remote_candidates = Some(vec![candidate_a.clone(), candidate_b.clone()]);
