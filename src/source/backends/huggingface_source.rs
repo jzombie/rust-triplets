@@ -272,9 +272,7 @@ pub fn load_hf_sources_from_list(path: &str) -> Result<Vec<HfSourceEntry>, Strin
 }
 
 /// Resolve parsed Hugging Face source list entries into a structured root.
-pub fn resolve_hf_list_roots(
-    source_list: String,
-) -> Result<HfListRoots, String> {
+pub fn resolve_hf_list_roots(source_list: String) -> Result<HfListRoots, String> {
     let sources = load_hf_sources_from_list(&source_list)?;
     if sources.is_empty() {
         return Err(format!("no hf:// entries found in {}", source_list));
@@ -574,6 +572,9 @@ struct ShardIndex {
     is_parquet: bool,
     parquet_row_groups: Vec<(usize, usize)>,
     checkpoints: Vec<u64>,
+    /// Remote candidate string this shard was downloaded from, used to
+    /// re-queue the download if the local file is evicted from the cache.
+    remote_candidate: Option<String>,
 }
 
 #[derive(Default)]
@@ -646,6 +647,9 @@ struct SourceState {
     remote_candidates: Option<Vec<String>>,
     remote_candidate_sizes: HashMap<String, u64>,
     next_remote_idx: usize,
+    /// Candidates whose local shard files were evicted from the cache and
+    /// must be re-downloaded before new candidates are consumed.
+    eviction_queue: VecDeque<String>,
 }
 
 type ParquetGroupKey = (PathBuf, usize);
@@ -738,6 +742,7 @@ impl HuggingFaceRowSource {
                 remote_candidates: None,
                 remote_candidate_sizes: HashMap::new(),
                 next_remote_idx: 0,
+                eviction_queue: VecDeque::new(),
             })),
             cache: Arc::new(Mutex::new(RowCache::default())),
             parquet_cache: Arc::new(Mutex::new(ParquetCache::default())),
@@ -899,6 +904,7 @@ impl HuggingFaceRowSource {
                     is_parquet: true,
                     parquet_row_groups: vec![(0, existing_rows)],
                     checkpoints: Vec::new(),
+                    remote_candidate: shard.remote_candidate.clone(),
                 }));
             }
         }
@@ -981,6 +987,7 @@ impl HuggingFaceRowSource {
             is_parquet: true,
             parquet_row_groups: vec![(0, served_rows)],
             checkpoints: Vec::new(),
+            remote_candidate: shard.remote_candidate.clone(),
         }))
     }
 
@@ -1571,7 +1578,11 @@ impl HuggingFaceRowSource {
         }
         let base_seed = Self::shard_candidate_seed(config, n, sampler_seed);
         // xorshift64 — fast, no dependency, deterministic.
-        let mut rng = if base_seed == 0 { 0xdeadbeef_cafebabe } else { base_seed };
+        let mut rng = if base_seed == 0 {
+            0xdeadbeef_cafebabe
+        } else {
+            base_seed
+        };
         for i in (1..n).rev() {
             rng ^= rng << 13;
             rng ^= rng >> 7;
@@ -1711,6 +1722,17 @@ impl HuggingFaceRowSource {
 
     /// Sync in-memory shard state from current on-disk snapshot tree.
     fn sync_shard_state_from_disk_locked(&self, state: &mut SourceState) {
+        // Collect remote candidates for shards whose files have been evicted so
+        // they can be re-downloaded before new candidates are consumed.
+        for shard in &state.shards {
+            if !shard.path.exists() {
+                if let Some(candidate) = &shard.remote_candidate {
+                    if !state.eviction_queue.contains(candidate) {
+                        state.eviction_queue.push_back(candidate.clone());
+                    }
+                }
+            }
+        }
         state.shards.retain(|shard| shard.path.exists());
         Self::recompute_shard_offsets(state);
     }
@@ -1842,8 +1864,7 @@ impl HuggingFaceRowSource {
                 source_id: config.source_id.clone(),
                 reason: format!(
                     "failed persisting temporary download path for '{}': {}",
-                    remote_path,
-                    err.error
+                    remote_path, err.error
                 ),
             })?;
         Ok(path)
@@ -1858,7 +1879,10 @@ impl HuggingFaceRowSource {
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent).map_err(|err| SamplerError::SourceUnavailable {
                 source_id: config.source_id.clone(),
-                reason: format!("failed creating shard output dir {}: {err}", parent.display()),
+                reason: format!(
+                    "failed creating shard output dir {}: {err}",
+                    parent.display()
+                ),
             })?;
         }
 
@@ -1867,20 +1891,22 @@ impl HuggingFaceRowSource {
             let _ = fs::remove_file(&temp_target);
         }
 
-        let response = ureq::get(remote_url)
-            .call()
-            .map_err(|err| SamplerError::SourceUnavailable {
-                source_id: config.source_id.clone(),
-                reason: format!("failed downloading shard URL '{}': {err}", remote_url),
-            })?;
+        let response =
+            ureq::get(remote_url)
+                .call()
+                .map_err(|err| SamplerError::SourceUnavailable {
+                    source_id: config.source_id.clone(),
+                    reason: format!("failed downloading shard URL '{}': {err}", remote_url),
+                })?;
         let mut reader = response.into_body().into_reader();
-        let mut file = File::create(&temp_target).map_err(|err| SamplerError::SourceUnavailable {
-            source_id: config.source_id.clone(),
-            reason: format!(
-                "failed creating target shard {}: {err}",
-                temp_target.display()
-            ),
-        })?;
+        let mut file =
+            File::create(&temp_target).map_err(|err| SamplerError::SourceUnavailable {
+                source_id: config.source_id.clone(),
+                reason: format!(
+                    "failed creating target shard {}: {err}",
+                    temp_target.display()
+                ),
+            })?;
         info!(
             "[triplets:hf] downloading shard payload -> {}",
             target.display()
@@ -1902,7 +1928,10 @@ impl HuggingFaceRowSource {
             file.write_all(&buffer[..read])
                 .map_err(|err| SamplerError::SourceUnavailable {
                     source_id: config.source_id.clone(),
-                    reason: format!("failed writing target shard {}: {err}", temp_target.display()),
+                    reason: format!(
+                        "failed writing target shard {}: {err}",
+                        temp_target.display()
+                    ),
                 })?;
             total_bytes = total_bytes.saturating_add(read as u64);
             if last_report.elapsed() >= Duration::from_secs(2) {
@@ -2067,8 +2096,14 @@ impl HuggingFaceRowSource {
                 if target.exists() {
                     let _ = fs::remove_file(&target);
                 }
-                let temp_target = Self::allocate_temp_download_path(config, remote_path, "parquet")?;
-                Self::download_remote_url_to_target(config, remote_url, &temp_target, expected_bytes)?;
+                let temp_target =
+                    Self::allocate_temp_download_path(config, remote_path, "parquet")?;
+                Self::download_remote_url_to_target(
+                    config,
+                    remote_url,
+                    &temp_target,
+                    expected_bytes,
+                )?;
                 return Ok(temp_target);
             }
             if target.exists() {
@@ -2258,6 +2293,7 @@ impl HuggingFaceRowSource {
             is_parquet: is_transient_parquet || is_store,
             parquet_row_groups,
             checkpoints,
+            remote_candidate: None,
         }))
     }
 
@@ -2353,7 +2389,11 @@ impl HuggingFaceRowSource {
                     let (mut candidates, candidate_sizes) =
                         Self::list_remote_candidates(&self.config)?;
                     let sampler_seed = self.configured_sampler_seed().unwrap_or(0);
-                    Self::shuffle_candidates_deterministically(&self.config, &mut candidates, sampler_seed);
+                    Self::shuffle_candidates_deterministically(
+                        &self.config,
+                        &mut candidates,
+                        sampler_seed,
+                    );
                     state.remote_candidates = Some(candidates);
                     state.remote_candidate_sizes = candidate_sizes;
                     state.next_remote_idx = 0;
@@ -2416,7 +2456,7 @@ impl HuggingFaceRowSource {
 
     /// Download and register the next remote shard candidate.
     fn download_next_remote_shard(&self) -> Result<bool, SamplerError> {
-        let (remote_ordinal, remote_total, remote_path, expected_bytes) = {
+        let (is_recovery, remote_ordinal, remote_total, remote_path, expected_bytes) = {
             let mut state = self
                 .state
                 .lock()
@@ -2424,28 +2464,48 @@ impl HuggingFaceRowSource {
                     source_id: self.config.source_id.clone(),
                     reason: "huggingface source state lock poisoned".to_string(),
                 })?;
-            let Some(candidates) = &state.remote_candidates else {
-                return Ok(false);
-            };
-            if state.next_remote_idx >= candidates.len() {
-                return Ok(false);
+            // Drain the eviction queue first so evicted shards are recovered
+            // before new candidates are consumed.
+            if let Some(candidate) = state.eviction_queue.pop_front() {
+                let expected = state.remote_candidate_sizes.get(&candidate).copied();
+                (true, 0usize, 0usize, candidate, expected)
+            } else {
+                let Some(candidates) = &state.remote_candidates else {
+                    return Ok(false);
+                };
+                if state.next_remote_idx >= candidates.len() {
+                    return Ok(false);
+                }
+                let sequence_pos = state.next_remote_idx;
+                let remote_ordinal = sequence_pos + 1;
+                let remote_total = candidates.len();
+                let candidate_idx = sequence_pos;
+                let remote_path = candidates[candidate_idx].clone();
+                let expected_bytes = state.remote_candidate_sizes.get(&remote_path).copied();
+                state.next_remote_idx += 1;
+                (
+                    false,
+                    remote_ordinal,
+                    remote_total,
+                    remote_path,
+                    expected_bytes,
+                )
             }
-            let sequence_pos = state.next_remote_idx;
-            let remote_ordinal = sequence_pos + 1;
-            let remote_total = candidates.len();
-            let candidate_idx = sequence_pos;
-            let remote_path = candidates[candidate_idx].clone();
-            let expected_bytes = state.remote_candidate_sizes.get(&remote_path).copied();
-            state.next_remote_idx += 1;
-            (remote_ordinal, remote_total, remote_path, expected_bytes)
         };
 
-        info!(
-            "[triplets:hf] lazy downloading shard {}/{}: {}",
-            remote_ordinal,
-            remote_total,
-            remote_path.as_str()
-        );
+        if is_recovery {
+            info!(
+                "[triplets:hf] re-downloading evicted shard: {}",
+                remote_path.as_str()
+            );
+        } else {
+            info!(
+                "[triplets:hf] lazy downloading shard {}/{}: {}",
+                remote_ordinal,
+                remote_total,
+                remote_path.as_str()
+            );
+        }
         let local_path =
             Self::download_and_materialize_shard(&self.config, &remote_path, expected_bytes)?;
 
@@ -2572,6 +2632,7 @@ impl HuggingFaceRowSource {
                 reason: "huggingface source state lock poisoned".to_string(),
             })?;
         state.materialized_rows += rows_to_add;
+        shard.remote_candidate = Some(remote_path.clone());
         state.shards.push(shard);
         drop(state);
         self.invalidate_eligible_index();
@@ -3480,10 +3541,13 @@ impl DataSource for HuggingFaceRowSource {
         // blocking on the hot read path.
         let total = {
             let (materialized, known_empty) = {
-                let state = self.state.lock().map_err(|_| SamplerError::SourceUnavailable {
-                    source_id: self.config.source_id.clone(),
-                    reason: "huggingface source state lock poisoned".to_string(),
-                })?;
+                let state = self
+                    .state
+                    .lock()
+                    .map_err(|_| SamplerError::SourceUnavailable {
+                        source_id: self.config.source_id.clone(),
+                        reason: "huggingface source state lock poisoned".to_string(),
+                    })?;
                 let known_empty = state.total_rows == Some(0);
                 (state.materialized_rows, known_empty)
             };
@@ -3492,10 +3556,13 @@ impl DataSource for HuggingFaceRowSource {
                 // the read loop below has rows to work with.  ensure_row_available
                 // handles candidate discovery and the initial shard download.
                 self.ensure_row_available(0)?;
-                self.state.lock().map_err(|_| SamplerError::SourceUnavailable {
-                    source_id: self.config.source_id.clone(),
-                    reason: "huggingface source state lock poisoned".to_string(),
-                })?.materialized_rows
+                self.state
+                    .lock()
+                    .map_err(|_| SamplerError::SourceUnavailable {
+                        source_id: self.config.source_id.clone(),
+                        reason: "huggingface source state lock poisoned".to_string(),
+                    })?
+                    .materialized_rows
             } else {
                 materialized
             }
@@ -3603,30 +3670,37 @@ impl DataSource for HuggingFaceRowSource {
         // in order until the full dataset is consumed.
         {
             let has_remaining = {
-                let state = self.state.lock().map_err(|_| SamplerError::SourceUnavailable {
-                    source_id: self.config.source_id.clone(),
-                    reason: "huggingface source state lock poisoned".to_string(),
-                })?;
+                let state = self
+                    .state
+                    .lock()
+                    .map_err(|_| SamplerError::SourceUnavailable {
+                        source_id: self.config.source_id.clone(),
+                        reason: "huggingface source state lock poisoned".to_string(),
+                    })?;
                 state
                     .remote_candidates
                     .as_ref()
                     .is_some_and(|c| state.next_remote_idx < c.len())
             };
             if has_remaining
-                && !self.expansion_in_progress.load(std::sync::atomic::Ordering::Acquire)
+                && !self
+                    .expansion_in_progress
+                    .load(std::sync::atomic::Ordering::Acquire)
             {
-                self.expansion_in_progress.store(true, std::sync::atomic::Ordering::Release);
+                self.expansion_in_progress
+                    .store(true, std::sync::atomic::Ordering::Release);
                 let source = self.clone();
                 thread::spawn(move || {
                     match source.download_next_remote_shard() {
                         Ok(_) => {}
                         Err(err) => warn!(
                             "[triplets:hf] background expansion error (source '{}'): {}",
-                            source.config.source_id,
-                            err
+                            source.config.source_id, err
                         ),
                     }
-                    source.expansion_in_progress.store(false, std::sync::atomic::Ordering::Release);
+                    source
+                        .expansion_in_progress
+                        .store(false, std::sync::atomic::Ordering::Release);
                 });
             }
         }
@@ -3714,6 +3788,7 @@ mod tests {
                 remote_candidates: None,
                 remote_candidate_sizes: HashMap::new(),
                 next_remote_idx: 0,
+                eviction_queue: VecDeque::new(),
             })),
             cache: Arc::new(Mutex::new(RowCache::default())),
             parquet_cache: Arc::new(Mutex::new(ParquetCache::default())),
@@ -3958,8 +4033,7 @@ mod tests {
 
         let empty_list = dir.path().join("empty_sources.txt");
         fs::write(&empty_list, "# comment only\n\n").unwrap();
-        let resolved =
-            resolve_hf_list_roots(empty_list.to_string_lossy().to_string()).unwrap_err();
+        let resolved = resolve_hf_list_roots(empty_list.to_string_lossy().to_string()).unwrap_err();
         assert!(resolved.contains("no hf:// entries found"));
 
         let good_list = dir.path().join("good_sources.txt");
@@ -3968,8 +4042,7 @@ mod tests {
             "hf://org/dataset/default/train anchor=title positive=body\n",
         )
         .unwrap();
-        let roots =
-            resolve_hf_list_roots(good_list.to_string_lossy().to_string()).unwrap();
+        let roots = resolve_hf_list_roots(good_list.to_string_lossy().to_string()).unwrap();
         assert_eq!(roots.sources.len(), 1);
     }
 
@@ -4006,6 +4079,7 @@ mod tests {
             remote_candidates: Some(vec!["train/a.ndjson".to_string()]),
             remote_candidate_sizes: HashMap::new(),
             next_remote_idx: 0,
+            eviction_queue: VecDeque::new(),
         };
 
         let err = source.persist_shard_sequence_locked(&state);
@@ -4286,6 +4360,7 @@ mod tests {
                     is_parquet: true,
                     parquet_row_groups: vec![(0, 1)],
                     checkpoints: Vec::new(),
+                    remote_candidate: None,
                 },
                 ShardIndex {
                     path: local_file,
@@ -4294,11 +4369,13 @@ mod tests {
                     is_parquet: false,
                     parquet_row_groups: Vec::new(),
                     checkpoints: vec![0],
+                    remote_candidate: None,
                 },
             ],
             remote_candidates: None,
             remote_candidate_sizes: HashMap::new(),
             next_remote_idx: 0,
+            eviction_queue: VecDeque::new(),
         };
 
         assert_eq!(source.manifest_usage_bytes_locked(&state), 7);
@@ -4327,6 +4404,7 @@ mod tests {
             is_parquet: true,
             parquet_row_groups: vec![(0, 2), (2, 2), (4, 2)],
             checkpoints: Vec::new(),
+            remote_candidate: None,
         };
 
         let mapped = source.locate_parquet_group(&shard, 3).unwrap();
@@ -4438,6 +4516,7 @@ mod tests {
             remote_candidates: None,
             remote_candidate_sizes: HashMap::new(),
             next_remote_idx: 0,
+            eviction_queue: VecDeque::new(),
         };
 
         source.persist_shard_sequence_locked(&state).unwrap();
@@ -4512,6 +4591,7 @@ mod tests {
             is_parquet: false,
             parquet_row_groups: Vec::new(),
             checkpoints: vec![0],
+            remote_candidate: None,
         }];
 
         assert!(HuggingFaceRowSource::locate_shard(&shards, 5).is_none());
@@ -4553,6 +4633,7 @@ mod tests {
                 is_parquet: false,
                 parquet_row_groups: Vec::new(),
                 checkpoints: vec![0],
+                remote_candidate: None,
             }];
         }
 
@@ -4583,6 +4664,7 @@ mod tests {
                 is_parquet: true,
                 parquet_row_groups: vec![(0, 3)],
                 checkpoints: Vec::new(),
+                remote_candidate: None,
             }];
         }
 
@@ -4607,6 +4689,7 @@ mod tests {
             remote_candidates: None,
             remote_candidate_sizes: HashMap::new(),
             next_remote_idx: 0,
+            eviction_queue: VecDeque::new(),
         };
         let protected = dir.path().join("p");
         assert!(
@@ -4632,10 +4715,12 @@ mod tests {
                 is_parquet: true,
                 parquet_row_groups: vec![(0, 1)],
                 checkpoints: Vec::new(),
+                remote_candidate: None,
             }],
             remote_candidates: None,
             remote_candidate_sizes: HashMap::new(),
             next_remote_idx: 0,
+            eviction_queue: VecDeque::new(),
         };
         assert!(
             !source2
@@ -4669,6 +4754,7 @@ mod tests {
                     is_parquet: true,
                     parquet_row_groups: vec![(0, 1)],
                     checkpoints: Vec::new(),
+                    remote_candidate: None,
                 },
                 ShardIndex {
                     path: second.clone(),
@@ -4677,11 +4763,13 @@ mod tests {
                     is_parquet: true,
                     parquet_row_groups: vec![(0, 1)],
                     checkpoints: Vec::new(),
+                    remote_candidate: None,
                 },
             ],
             remote_candidates: None,
             remote_candidate_sizes: HashMap::new(),
             next_remote_idx: 0,
+            eviction_queue: VecDeque::new(),
         };
 
         let evicted = source.enforce_disk_cap_locked(&mut state, &second).unwrap();
@@ -4715,10 +4803,12 @@ mod tests {
                 is_parquet: true,
                 parquet_row_groups: vec![(0, 1)],
                 checkpoints: Vec::new(),
+                remote_candidate: None,
             }],
             remote_candidates: None,
             remote_candidate_sizes: HashMap::new(),
             next_remote_idx: 0,
+            eviction_queue: VecDeque::new(),
         };
 
         let evicted = source
@@ -4744,6 +4834,7 @@ mod tests {
                 remote_candidates: None,
                 remote_candidate_sizes: HashMap::new(),
                 next_remote_idx: 0,
+                eviction_queue: VecDeque::new(),
             })),
             cache: Arc::new(Mutex::new(RowCache::default())),
             parquet_cache: Arc::new(Mutex::new(ParquetCache::default())),
@@ -4981,6 +5072,7 @@ mod tests {
                 is_parquet: true,
                 parquet_row_groups: vec![(0, 1)],
                 checkpoints: Vec::new(),
+                remote_candidate: None,
             }];
             state.remote_candidates = Some(vec![candidate]);
             state.next_remote_idx = 0;
@@ -5127,6 +5219,7 @@ mod tests {
                 is_parquet: true,
                 parquet_row_groups: vec![(0, 1)],
                 checkpoints: Vec::new(),
+                remote_candidate: None,
             }];
         }
 
@@ -5251,6 +5344,7 @@ mod tests {
             remote_candidates: Some(vec!["a".into(), "b".into()]),
             remote_candidate_sizes: HashMap::new(),
             next_remote_idx: 99,
+            eviction_queue: VecDeque::new(),
         };
 
         source.persist_shard_sequence_locked(&state).unwrap();
@@ -6084,6 +6178,7 @@ mod tests {
             ]),
             remote_candidate_sizes: HashMap::new(),
             next_remote_idx: 1,
+            eviction_queue: VecDeque::new(),
         };
         state.remote_candidate_sizes.insert(
             "url::https://x/resolve/main/train/000.parquet".to_string(),
@@ -6225,6 +6320,7 @@ mod tests {
                 is_parquet: false,
                 parquet_row_groups: Vec::new(),
                 checkpoints: vec![0],
+                remote_candidate: None,
             },
             ShardIndex {
                 path: PathBuf::from("b"),
@@ -6233,6 +6329,7 @@ mod tests {
                 is_parquet: false,
                 parquet_row_groups: Vec::new(),
                 checkpoints: vec![0],
+                remote_candidate: None,
             },
         ];
         let hit = HuggingFaceRowSource::locate_shard(&shards, 11).unwrap();
@@ -6245,6 +6342,7 @@ mod tests {
             remote_candidates: None,
             remote_candidate_sizes: HashMap::new(),
             next_remote_idx: 0,
+            eviction_queue: VecDeque::new(),
         };
         HuggingFaceRowSource::recompute_shard_offsets(&mut state);
         assert_eq!(state.shards[0].global_start, 0);
@@ -6321,6 +6419,7 @@ mod tests {
             is_parquet: false,
             parquet_row_groups: Vec::new(),
             checkpoints: vec![0],
+            remote_candidate: None,
         };
 
         {
@@ -6448,6 +6547,7 @@ mod tests {
                     is_parquet: true,
                     parquet_row_groups: vec![(0, 8)],
                     checkpoints: Vec::new(),
+                    remote_candidate: None,
                 },
                 ShardIndex {
                     path: keep_path.clone(),
@@ -6456,11 +6556,13 @@ mod tests {
                     is_parquet: true,
                     parquet_row_groups: vec![(0, 8)],
                     checkpoints: Vec::new(),
+                    remote_candidate: None,
                 },
             ],
             remote_candidates: None,
             remote_candidate_sizes: HashMap::new(),
             next_remote_idx: 0,
+            eviction_queue: VecDeque::new(),
         };
 
         let evicted = source
@@ -6494,10 +6596,12 @@ mod tests {
                 is_parquet: true,
                 parquet_row_groups: vec![(0, 8)],
                 checkpoints: Vec::new(),
+                remote_candidate: None,
             }],
             remote_candidates: None,
             remote_candidate_sizes: HashMap::new(),
             next_remote_idx: 0,
+            eviction_queue: VecDeque::new(),
         };
 
         let evicted = source

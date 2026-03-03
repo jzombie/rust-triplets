@@ -156,10 +156,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("iterations: {}", cli.iterations);
     println!("split: {:?}", split);
 
-    let roots = resolve_hf_list_roots(
-        source_list_path.to_string_lossy().to_string(),
-    )
-    .map_err(|err| -> Box<dyn Error> { err.into() })?;
+    let roots = resolve_hf_list_roots(source_list_path.to_string_lossy().to_string())
+        .map_err(|err| -> Box<dyn Error> { err.into() })?;
     println!("resolved_sources: {}", roots.sources.len());
 
     let sources = build_hf_sources(&roots);

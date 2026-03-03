@@ -1,10 +1,10 @@
 #![cfg(feature = "huggingface")]
 
-use std::fs;
-use std::path::Path;
 use serde::Serialize;
 use simd_r_drive::storage_engine::DataStore;
 use simd_r_drive::storage_engine::traits::DataStoreWriter;
+use std::fs;
+use std::path::Path;
 use triplets::source::backends::huggingface_source::load_hf_sources_from_list;
 use triplets::{
     DataSource, HfListRoots, HfSourceEntry, HuggingFaceRowSource, HuggingFaceRowsConfig,
@@ -65,7 +65,10 @@ fn write_simdr_fixture(path: &Path, rows: &[(&str, &str)]) {
             .expect("failed writing simdr row");
     }
     store
-        .write(HF_SHARD_STORE_META_ROWS_KEY, &(rows.len() as u64).to_le_bytes())
+        .write(
+            HF_SHARD_STORE_META_ROWS_KEY,
+            &(rows.len() as u64).to_le_bytes(),
+        )
         .expect("failed writing simdr row count");
 }
 
