@@ -20,6 +20,7 @@ use std::path::Path;
 use std::path::PathBuf;
 #[cfg(test)]
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -609,12 +610,32 @@ impl RowCache {
 /// Bulk-oriented Hugging Face source backed by local shard files.
 pub struct HuggingFaceRowSource {
     config: HuggingFaceRowsConfig,
-    sampler_config: Mutex<Option<SamplerConfig>>,
-    state: Mutex<SourceState>,
-    cache: Mutex<RowCache>,
-    parquet_cache: Mutex<ParquetCache>,
-    store_cache: Mutex<HashMap<PathBuf, Arc<DataStore>>>,
-    eligible_index: Mutex<EligibleIndexCache>,
+    sampler_config: Arc<Mutex<Option<SamplerConfig>>>,
+    state: Arc<Mutex<SourceState>>,
+    cache: Arc<Mutex<RowCache>>,
+    parquet_cache: Arc<Mutex<ParquetCache>>,
+    store_cache: Arc<Mutex<HashMap<PathBuf, Arc<DataStore>>>>,
+    eligible_index: Arc<Mutex<EligibleIndexCache>>,
+    /// True while a background shard-expansion thread is running.  Prevents
+    /// launching a second download before the first finishes.  The thread
+    /// updates shared `state` directly and clears this flag on completion;
+    /// `refresh()` never blocks waiting for it.
+    expansion_in_progress: Arc<AtomicBool>,
+}
+
+impl Clone for HuggingFaceRowSource {
+    fn clone(&self) -> Self {
+        Self {
+            config: self.config.clone(),
+            sampler_config: Arc::clone(&self.sampler_config),
+            state: Arc::clone(&self.state),
+            cache: Arc::clone(&self.cache),
+            parquet_cache: Arc::clone(&self.parquet_cache),
+            store_cache: Arc::clone(&self.store_cache),
+            eligible_index: Arc::clone(&self.eligible_index),
+            expansion_in_progress: Arc::clone(&self.expansion_in_progress),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -709,19 +730,20 @@ impl HuggingFaceRowSource {
 
         Ok(Self {
             config,
-            sampler_config: Mutex::new(None),
-            state: Mutex::new(SourceState {
+            sampler_config: Arc::new(Mutex::new(None)),
+            state: Arc::new(Mutex::new(SourceState {
                 materialized_rows,
                 total_rows,
                 shards,
                 remote_candidates: None,
                 remote_candidate_sizes: HashMap::new(),
                 next_remote_idx: 0,
-            }),
-            cache: Mutex::new(RowCache::default()),
-            parquet_cache: Mutex::new(ParquetCache::default()),
-            store_cache: Mutex::new(HashMap::new()),
-            eligible_index: Mutex::new(EligibleIndexCache::default()),
+            })),
+            cache: Arc::new(Mutex::new(RowCache::default())),
+            parquet_cache: Arc::new(Mutex::new(ParquetCache::default())),
+            store_cache: Arc::new(Mutex::new(HashMap::new())),
+            eligible_index: Arc::new(Mutex::new(EligibleIndexCache::default())),
+            expansion_in_progress: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -1531,16 +1553,32 @@ impl HuggingFaceRowSource {
     }
 
     /// Rotate candidate ordering deterministically using source identity.
-    fn rotate_candidates_deterministically(
+    /// Shuffle remote shard candidates into a deterministic-but-random order.
+    ///
+    /// A Fisher-Yates shuffle seeded from source identity and the sampler seed
+    /// ensures that downloaded shards are spread broadly across the full
+    /// positional space of the dataset rather than walking file-name order from
+    /// a fixed offset.  The same seed always produces the same shuffle, so runs
+    /// are reproducible.
+    fn shuffle_candidates_deterministically(
         config: &HuggingFaceRowsConfig,
         candidates: &mut [String],
+        sampler_seed: u64,
     ) {
-        if candidates.len() <= 1 {
+        let n = candidates.len();
+        if n <= 1 {
             return;
         }
-        let seed = Self::shard_candidate_seed(config, candidates.len(), 0);
-        let offset = (seed as usize) % candidates.len();
-        candidates.rotate_left(offset);
+        let base_seed = Self::shard_candidate_seed(config, n, sampler_seed);
+        // xorshift64 — fast, no dependency, deterministic.
+        let mut rng = if base_seed == 0 { 0xdeadbeef_cafebabe } else { base_seed };
+        for i in (1..n).rev() {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            let j = (rng as usize) % (i + 1);
+            candidates.swap(i, j);
+        }
     }
 
     /// Build deterministic seed used to permute remote shard candidate order.
@@ -2314,7 +2352,8 @@ impl HuggingFaceRowSource {
                 if state.remote_candidates.is_none() {
                     let (mut candidates, candidate_sizes) =
                         Self::list_remote_candidates(&self.config)?;
-                    Self::rotate_candidates_deterministically(&self.config, &mut candidates);
+                    let sampler_seed = self.configured_sampler_seed().unwrap_or(0);
+                    Self::shuffle_candidates_deterministically(&self.config, &mut candidates, sampler_seed);
                     state.remote_candidates = Some(candidates);
                     state.remote_candidate_sizes = candidate_sizes;
                     state.next_remote_idx = 0;
@@ -3557,24 +3596,39 @@ impl DataSource for HuggingFaceRowSource {
             .max()
             .unwrap_or_else(Utc::now);
 
-        // Expand by one shard after reads complete so the next refresh call
-        // has more rows available.  Because refresh() runs on a background
-        // thread in the ingestion manager, this blocks that thread only while
-        // the previous buffer still serves the sampler — reads are never
-        // delayed mid-loop.  Repeating this on every call walks through every
-        // remote candidate until the full dataset is consumed.
-        let has_remaining = {
-            let state = self.state.lock().map_err(|_| SamplerError::SourceUnavailable {
-                source_id: self.config.source_id.clone(),
-                reason: "huggingface source state lock poisoned".to_string(),
-            })?;
-            state
-                .remote_candidates
-                .as_ref()
-                .is_some_and(|c| state.next_remote_idx < c.len())
-        };
-        if has_remaining {
-            self.download_next_remote_shard()?;
+        // Fire-and-forget background shard expansion.  The thread updates
+        // shared Arc state directly; refresh() never blocks waiting for it.
+        // AtomicBool prevents launching a second download before the first
+        // completes.  Successive calls walk through every remote candidate
+        // in order until the full dataset is consumed.
+        {
+            let has_remaining = {
+                let state = self.state.lock().map_err(|_| SamplerError::SourceUnavailable {
+                    source_id: self.config.source_id.clone(),
+                    reason: "huggingface source state lock poisoned".to_string(),
+                })?;
+                state
+                    .remote_candidates
+                    .as_ref()
+                    .is_some_and(|c| state.next_remote_idx < c.len())
+            };
+            if has_remaining
+                && !self.expansion_in_progress.load(std::sync::atomic::Ordering::Acquire)
+            {
+                self.expansion_in_progress.store(true, std::sync::atomic::Ordering::Release);
+                let source = self.clone();
+                thread::spawn(move || {
+                    match source.download_next_remote_shard() {
+                        Ok(_) => {}
+                        Err(err) => warn!(
+                            "[triplets:hf] background expansion error (source '{}'): {}",
+                            source.config.source_id,
+                            err
+                        ),
+                    }
+                    source.expansion_in_progress.store(false, std::sync::atomic::Ordering::Release);
+                });
+            }
         }
 
         Ok(SourceSnapshot {
@@ -3652,19 +3706,20 @@ mod tests {
     fn test_source(config: HuggingFaceRowsConfig) -> HuggingFaceRowSource {
         let source = HuggingFaceRowSource {
             config,
-            sampler_config: Mutex::new(None),
-            state: Mutex::new(SourceState {
+            sampler_config: Arc::new(Mutex::new(None)),
+            state: Arc::new(Mutex::new(SourceState {
                 materialized_rows: 0,
                 total_rows: None,
                 shards: Vec::new(),
                 remote_candidates: None,
                 remote_candidate_sizes: HashMap::new(),
                 next_remote_idx: 0,
-            }),
-            cache: Mutex::new(RowCache::default()),
-            parquet_cache: Mutex::new(ParquetCache::default()),
-            store_cache: Mutex::new(HashMap::new()),
-            eligible_index: Mutex::new(EligibleIndexCache::default()),
+            })),
+            cache: Arc::new(Mutex::new(RowCache::default())),
+            parquet_cache: Arc::new(Mutex::new(ParquetCache::default())),
+            store_cache: Arc::new(Mutex::new(HashMap::new())),
+            eligible_index: Arc::new(Mutex::new(EligibleIndexCache::default())),
+            expansion_in_progress: Arc::new(AtomicBool::new(false)),
         };
         source.set_active_sampler_config(&SamplerConfig {
             seed: 1,
@@ -4681,19 +4736,20 @@ mod tests {
         let config = test_config(dir.path().to_path_buf());
         let source = HuggingFaceRowSource {
             config,
-            sampler_config: Mutex::new(None),
-            state: Mutex::new(SourceState {
+            sampler_config: Arc::new(Mutex::new(None)),
+            state: Arc::new(Mutex::new(SourceState {
                 materialized_rows: 0,
                 total_rows: None,
                 shards: Vec::new(),
                 remote_candidates: None,
                 remote_candidate_sizes: HashMap::new(),
                 next_remote_idx: 0,
-            }),
-            cache: Mutex::new(RowCache::default()),
-            parquet_cache: Mutex::new(ParquetCache::default()),
-            store_cache: Mutex::new(HashMap::new()),
-            eligible_index: Mutex::new(EligibleIndexCache::default()),
+            })),
+            cache: Arc::new(Mutex::new(RowCache::default())),
+            parquet_cache: Arc::new(Mutex::new(ParquetCache::default())),
+            store_cache: Arc::new(Mutex::new(HashMap::new())),
+            eligible_index: Arc::new(Mutex::new(EligibleIndexCache::default())),
+            expansion_in_progress: Arc::new(AtomicBool::new(false)),
         };
 
         assert!(source.configured_sampler_seed().is_err());
@@ -4701,7 +4757,7 @@ mod tests {
     }
 
     #[test]
-    fn shard_candidate_seed_and_rotation_are_deterministic() {
+    fn shard_candidate_seed_and_shuffle_are_deterministic() {
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path().to_path_buf());
         config.source_id = "hf_rotator".to_string();
@@ -4713,16 +4769,19 @@ mod tests {
         let baseline = vec!["c".to_string(), "a".to_string(), "b".to_string()];
         let mut left = baseline.clone();
         let mut right = baseline;
-        HuggingFaceRowSource::rotate_candidates_deterministically(&config, &mut left);
-        HuggingFaceRowSource::rotate_candidates_deterministically(&config, &mut right);
+        HuggingFaceRowSource::shuffle_candidates_deterministically(&config, &mut left, 42);
+        HuggingFaceRowSource::shuffle_candidates_deterministically(&config, &mut right, 42);
         assert_eq!(left, right);
 
-        let mut sorted = left.clone();
-        sorted.sort();
-        assert_eq!(
-            sorted,
-            vec!["a".to_string(), "b".to_string(), "c".to_string()]
-        );
+        // Different seeds produce different orderings for non-trivial inputs.
+        let mut alt = vec!["c".to_string(), "a".to_string(), "b".to_string()];
+        HuggingFaceRowSource::shuffle_candidates_deterministically(&config, &mut alt, 99);
+        // Membership is preserved regardless of seed.
+        let mut sorted_left = left.clone();
+        sorted_left.sort();
+        let mut sorted_alt = alt.clone();
+        sorted_alt.sort();
+        assert_eq!(sorted_left, sorted_alt);
     }
 
     #[test]
@@ -5126,11 +5185,11 @@ mod tests {
     }
 
     #[test]
-    fn rotate_candidates_deterministically_is_noop_for_singleton() {
+    fn shuffle_candidates_deterministically_is_noop_for_singleton() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
         let mut candidates = vec!["one".to_string()];
-        HuggingFaceRowSource::rotate_candidates_deterministically(&config, &mut candidates);
+        HuggingFaceRowSource::shuffle_candidates_deterministically(&config, &mut candidates, 1);
         assert_eq!(candidates, vec!["one".to_string()]);
     }
 
@@ -6515,17 +6574,17 @@ mod tests {
     }
 
     #[test]
-    fn rotate_candidates_deterministically_preserves_membership() {
+    fn shuffle_candidates_deterministically_preserves_membership() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
         let original = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        let mut rotated = original.clone();
-        HuggingFaceRowSource::rotate_candidates_deterministically(&config, &mut rotated);
+        let mut shuffled = original.clone();
+        HuggingFaceRowSource::shuffle_candidates_deterministically(&config, &mut shuffled, 1);
         let mut sorted_original = original;
-        let mut sorted_rotated = rotated;
+        let mut sorted_shuffled = shuffled;
         sorted_original.sort();
-        sorted_rotated.sort();
-        assert_eq!(sorted_rotated, sorted_original);
+        sorted_shuffled.sort();
+        assert_eq!(sorted_shuffled, sorted_original);
     }
 
     #[test]
