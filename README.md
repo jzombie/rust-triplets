@@ -79,6 +79,13 @@ Key weighting concepts:
 - **Recipe weights** (`TripletRecipe.weight`) control how often each recipe path is selected.
 - **Chunk weights** apply after section chunking to modulate long/short-window contribution.
 
+Source weight semantics:
+
+- **Proportional values:** Weights are treated as proportional scalars — only their ratios matter. They do *not* need to sum to `1.0`. For example, `{A: 2.0, B: 1.0}` and `{A: 0.75, B: 0.375}` are equivalent in relative contribution.
+- **Omitted sources default to 1.0:** If a source id is not present in a per-call weight map, it is treated as having weight `1.0` for that call.
+- **Invalid entries cause errors:** Passing a weight map that references an unknown source id or contains a negative weight will cause the weight-aware ingestion APIs to return an error (`SamplerError::InvalidWeight`). Callers should handle the `Result` returned by the weight-aware methods (for example, the ingestion helpers `advance_with_weights`, `refresh_all_with_weights`, and `force_refresh_all_with_weights`, and the sampler paths that propagate their errors).
+- **Zero weights are allowed:** A source weight of exactly `0.0` disables contribution from that source for the call (it is effectively skipped). If all provided weights are non-positive, the implementation falls back to equal weighting.
+
 ### Recipes
 
 ### What is a recipe?
