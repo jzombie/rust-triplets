@@ -282,8 +282,17 @@ impl IngestionManager {
     }
 
     /// Advance the ingestion window by ingesting `step` new records with weights.
-    pub fn advance_with_weights(&mut self, step: usize, weights: &HashMap<SourceId, f32>) {
+    ///
+    /// Returns `Err(SamplerError::InvalidWeight)` if `weights` contains an unregistered
+    /// source ID or a negative value.
+    pub fn advance_with_weights(
+        &mut self,
+        step: usize,
+        weights: &HashMap<SourceId, f32>,
+    ) -> Result<(), SamplerError> {
+        self.validate_weights(weights)?;
         self.refresh_all_internal(false, Some(step), Some(weights));
+        Ok(())
     }
 
     /// Force refresh all registered sources, discarding buffered records.
@@ -292,13 +301,49 @@ impl IngestionManager {
     }
 
     /// Refresh all registered sources once with per-call source weights.
-    pub fn refresh_all_with_weights(&mut self, weights: &HashMap<SourceId, f32>) {
+    ///
+    /// Returns `Err(SamplerError::InvalidWeight)` if `weights` contains an unregistered
+    /// source ID or a negative value.
+    pub fn refresh_all_with_weights(
+        &mut self,
+        weights: &HashMap<SourceId, f32>,
+    ) -> Result<(), SamplerError> {
+        self.validate_weights(weights)?;
         self.refresh_all_internal(false, None, Some(weights));
+        Ok(())
     }
 
     /// Force refresh all registered sources with per-call source weights.
-    pub fn force_refresh_all_with_weights(&mut self, weights: &HashMap<SourceId, f32>) {
+    ///
+    /// Returns `Err(SamplerError::InvalidWeight)` if `weights` contains an unregistered
+    /// source ID or a negative value.
+    pub fn force_refresh_all_with_weights(
+        &mut self,
+        weights: &HashMap<SourceId, f32>,
+    ) -> Result<(), SamplerError> {
+        self.validate_weights(weights)?;
         self.refresh_all_internal(true, None, Some(weights));
+        Ok(())
+    }
+
+    fn validate_weights(&self, weights: &HashMap<SourceId, f32>) -> Result<(), SamplerError> {
+        let known_ids: std::collections::HashSet<&str> =
+            self.sources.iter().map(|s| s.source.id()).collect();
+        for (id, &w) in weights {
+            if !known_ids.contains(id.as_str()) {
+                return Err(SamplerError::InvalidWeight {
+                    source_id: id.clone(),
+                    reason: "source is not registered".to_string(),
+                });
+            }
+            if w < 0.0 {
+                return Err(SamplerError::InvalidWeight {
+                    source_id: id.clone(),
+                    reason: format!("weight {w} is negative"),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Rebuild the shared cache by round-robin draining per-source buffers.
@@ -470,11 +515,6 @@ impl IngestionManager {
         let mut any_positive = false;
         for state in &self.sources {
             let weight = weights.get(state.source.id()).copied().unwrap_or(1.0);
-            let weight = if weight.is_sign_negative() {
-                0.0
-            } else {
-                weight
-            };
             if weight > 0.0 {
                 any_positive = true;
             }
@@ -815,7 +855,7 @@ mod tests {
         let mut only_b = HashMap::new();
         only_b.insert("a".to_string(), 0.0);
         only_b.insert("b".to_string(), 1.0);
-        manager.refresh_all_with_weights(&only_b);
+        manager.refresh_all_with_weights(&only_b).unwrap();
         let ids: Vec<String> = manager
             .cache()
             .snapshot()
@@ -848,10 +888,12 @@ mod tests {
             })],
         )));
 
-        let mut non_positive = HashMap::new();
-        non_positive.insert("a".to_string(), -3.0);
-        non_positive.insert("b".to_string(), 0.0);
-        manager_fallback.refresh_all_with_weights(&non_positive);
+        let mut all_zero = HashMap::new();
+        all_zero.insert("a".to_string(), 0.0);
+        all_zero.insert("b".to_string(), 0.0);
+        manager_fallback
+            .refresh_all_with_weights(&all_zero)
+            .unwrap();
         let ids: Vec<String> = manager_fallback
             .cache()
             .snapshot()
@@ -923,7 +965,67 @@ mod tests {
 
         let mut weights = HashMap::new();
         weights.insert("w".to_string(), 1.0);
-        manager.force_refresh_all_with_weights(&weights);
+        manager.force_refresh_all_with_weights(&weights).unwrap();
         assert_eq!(manager.cache().len(), 1);
+    }
+
+    #[test]
+    fn advance_with_weights_rejects_unknown_source() {
+        let mut manager = IngestionManager::new(4, SamplerConfig::default());
+        manager.register_source(Box::new(ScriptedSource::new(
+            "known",
+            Arc::new(AtomicUsize::new(0)),
+            vec![],
+        )));
+
+        let mut weights = HashMap::new();
+        weights.insert("known".to_string(), 1.0);
+        weights.insert("unknown".to_string(), 0.5);
+
+        let err = manager.advance_with_weights(1, &weights).unwrap_err();
+        assert!(
+            matches!(err, SamplerError::InvalidWeight { ref source_id, .. } if source_id == "unknown"),
+            "expected InvalidWeight for unknown source, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn refresh_all_with_weights_rejects_negative_weight() {
+        let mut manager = IngestionManager::new(4, SamplerConfig::default());
+        manager.register_source(Box::new(ScriptedSource::new(
+            "src",
+            Arc::new(AtomicUsize::new(0)),
+            vec![],
+        )));
+
+        let mut weights = HashMap::new();
+        weights.insert("src".to_string(), -1.0);
+
+        let err = manager.refresh_all_with_weights(&weights).unwrap_err();
+        assert!(
+            matches!(err, SamplerError::InvalidWeight { ref source_id, .. } if source_id == "src"),
+            "expected InvalidWeight for negative weight, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn force_refresh_all_with_weights_rejects_unknown_source() {
+        let mut manager = IngestionManager::new(4, SamplerConfig::default());
+        manager.register_source(Box::new(ScriptedSource::new(
+            "real",
+            Arc::new(AtomicUsize::new(0)),
+            vec![],
+        )));
+
+        let mut weights = HashMap::new();
+        weights.insert("ghost".to_string(), 1.0);
+
+        let err = manager
+            .force_refresh_all_with_weights(&weights)
+            .unwrap_err();
+        assert!(
+            matches!(err, SamplerError::InvalidWeight { ref source_id, .. } if source_id == "ghost"),
+            "expected InvalidWeight for unknown source, got {err:?}"
+        );
     }
 }

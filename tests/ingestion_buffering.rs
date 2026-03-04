@@ -363,7 +363,7 @@ fn test_weighted_refresh_all_prefers_weighted_sources() {
     weights.insert("A".to_string(), 2.0);
     weights.insert("B".to_string(), 1.0);
 
-    manager.refresh_all_with_weights(&weights);
+    manager.refresh_all_with_weights(&weights).unwrap();
     let batch = manager.cache().snapshot();
     let count_a = batch.iter().filter(|r| r.source == "A").count();
     let count_b = batch.iter().filter(|r| r.source == "B").count();
@@ -389,7 +389,7 @@ fn test_weighted_refresh_all_skips_zero_weight_sources() {
     weights.insert("A".to_string(), 1.0);
     weights.insert("B".to_string(), 0.0);
 
-    manager.refresh_all_with_weights(&weights);
+    manager.refresh_all_with_weights(&weights).unwrap();
     let batch = manager.cache().snapshot();
     assert_eq!(batch.len(), 6);
     let count_a = batch.iter().filter(|r| r.source == "A").count();
@@ -423,7 +423,7 @@ fn test_weighted_refresh_all_zero_weight_does_not_reduce_batch() {
     weights.insert("B".to_string(), 0.0);
     weights.insert("C".to_string(), 1.0);
 
-    manager.refresh_all_with_weights(&weights);
+    manager.refresh_all_with_weights(&weights).unwrap();
     let batch = manager.cache().snapshot();
     assert_eq!(batch.len(), 9);
     let count_b = batch.iter().filter(|r| r.source == "B").count();

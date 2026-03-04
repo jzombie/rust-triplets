@@ -1562,10 +1562,10 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             self.ingestion_cursors_loaded = true;
         }
         if self.ingestion.cache().is_empty() {
-            self.ingestion.refresh_all_with_weights(weights);
+            self.ingestion.refresh_all_with_weights(weights)?;
         } else {
             self.ingestion
-                .advance_with_weights(self.config.batch_size, weights);
+                .advance_with_weights(self.config.batch_size, weights)?;
         }
         let observed = self.ingestion.cache().ingest_count();
         if observed == self.last_observed_ingest && !self.records.is_empty() {
@@ -1595,7 +1595,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             }
             self.ingestion_cursors_loaded = true;
         }
-        self.ingestion.force_refresh_all_with_weights(weights);
+        self.ingestion.force_refresh_all_with_weights(weights)?;
         self.last_observed_ingest = self.ingestion.cache().ingest_count();
         self.sync_records_from_cache()?;
         self.epoch_tracker.ensure_loaded()?;
