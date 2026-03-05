@@ -170,12 +170,14 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let sources = build_hf_sources(&roots);
 
-    let mut config = SamplerConfig::default();
-    config.seed = cli.seed;
-    config.batch_size = cli.batch_size;
-    config.ingestion_max_records = cli.ingestion_max_records;
-    config.split = SplitRatios::default();
-    config.allowed_splits = vec![split];
+    let config = SamplerConfig {
+        seed: cli.seed,
+        batch_size: cli.batch_size,
+        ingestion_max_records: cli.ingestion_max_records,
+        split: SplitRatios::default(),
+        allowed_splits: vec![split],
+        ..Default::default()
+    };
 
     let split_store_path = PathBuf::from(".cache/triplets/tmp_hf_text_latency_split_store.bin");
     if let Some(parent) = split_store_path.parent() {

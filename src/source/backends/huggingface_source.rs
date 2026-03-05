@@ -499,6 +499,7 @@ struct ParquetCache {
 }
 
 #[derive(Default)]
+#[allow(dead_code)]
 struct EligibleIndexCache {
     signature: Option<u64>,
     rows: Option<Arc<Vec<usize>>>,
@@ -947,14 +948,15 @@ impl HuggingFaceRowSource {
             if existing_rows > 0 {
                 // Simdr store is already fully populated.  Clean up the
                 // transient parquet source file if it is still present.
-                if shard.path != store_path && shard.path.exists() {
-                    if let Err(err) = fs::remove_file(&shard.path) {
-                        warn!(
-                            "[triplets:hf] failed removing stale parquet after store hit {}: {}",
-                            shard.path.display(),
-                            err
-                        );
-                    }
+                if shard.path != store_path
+                    && shard.path.exists()
+                    && let Err(err) = fs::remove_file(&shard.path)
+                {
+                    warn!(
+                        "[triplets:hf] failed removing stale parquet after store hit {}: {}",
+                        shard.path.display(),
+                        err
+                    );
                 }
                 return Ok(Some(ShardIndex {
                     path: store_path,
@@ -987,8 +989,7 @@ impl HuggingFaceRowSource {
                     self.config.parquet_row_group_cache_capacity,
                 )?;
 
-            let mut batch: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-            batch.reserve(group_count);
+            let mut batch: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(group_count);
 
             for local_in_group in 0..group_count {
                 let local_idx = group_start.saturating_add(local_in_group);
@@ -1056,6 +1057,7 @@ impl HuggingFaceRowSource {
         }
     }
 
+    #[allow(dead_code)]
     fn shard_signature(shards: &[ShardIndex]) -> u64 {
         let mut hasher = DefaultHasher::new();
         for shard in shards {
@@ -1068,6 +1070,7 @@ impl HuggingFaceRowSource {
         hasher.finish()
     }
 
+    #[allow(dead_code)]
     fn build_eligible_rows_from_shards(
         &self,
         shards: &[ShardIndex],
@@ -1142,6 +1145,7 @@ impl HuggingFaceRowSource {
         Ok(eligible)
     }
 
+    #[allow(dead_code)]
     fn eligible_rows(&self) -> Result<Arc<Vec<usize>>, SamplerError> {
         let (signature, shards) = {
             let state = self
@@ -1784,12 +1788,11 @@ impl HuggingFaceRowSource {
         // Collect remote candidates for shards whose files have been evicted so
         // they can be re-downloaded before new candidates are consumed.
         for shard in &state.shards {
-            if !shard.path.exists() {
-                if let Some(candidate) = &shard.remote_candidate {
-                    if !state.eviction_queue.contains(candidate) {
-                        state.eviction_queue.push_back(candidate.clone());
-                    }
-                }
+            if !shard.path.exists()
+                && let Some(candidate) = &shard.remote_candidate
+                && !state.eviction_queue.contains(candidate)
+            {
+                state.eviction_queue.push_back(candidate.clone());
             }
         }
         state.shards.retain(|shard| shard.path.exists());
@@ -1887,7 +1890,7 @@ impl HuggingFaceRowSource {
                 reason: format!("failed parsing datasets-server size response: {err}"),
             })?;
 
-        let mut count =
+        let count =
             Self::extract_split_row_count_from_size_response(&json, &config.config, &config.split);
         Ok(count)
     }
@@ -2595,7 +2598,7 @@ impl HuggingFaceRowSource {
                 reason: "huggingface source state lock poisoned".to_string(),
             })?;
 
-        let mut rows_to_add = shard.row_count;
+        let rows_to_add = shard.row_count;
         // All rows from this shard are now available.  A per-shard cap was
         // previously applied here but has been removed: reads are now gated on
         // materialized_rows and expansion happens one shard per refresh(), so a
@@ -3047,13 +3050,13 @@ impl HuggingFaceRowSource {
         row_obj: &serde_json::Map<String, Value>,
     ) -> Option<RowTextField> {
         for name in candidates {
-            if let Some(value) = row_obj.get(name) {
-                if let Some(text) = Self::value_to_text(value) {
-                    return Some(RowTextField {
-                        name: name.clone(),
-                        text,
-                    });
-                }
+            if let Some(value) = row_obj.get(name)
+                && let Some(text) = Self::value_to_text(value)
+            {
+                return Some(RowTextField {
+                    name: name.clone(),
+                    text,
+                });
             }
         }
         None
@@ -6591,7 +6594,9 @@ mod tests {
 
         {
             let mut cache = source.eligible_index.lock().unwrap();
-            cache.signature = Some(HuggingFaceRowSource::shard_signature(&[baseline.clone()]));
+            cache.signature = Some(HuggingFaceRowSource::shard_signature(std::slice::from_ref(
+                &baseline,
+            )));
             cache.rows = Some(Arc::new(vec![0]));
             cache.shards = vec![baseline];
         }
