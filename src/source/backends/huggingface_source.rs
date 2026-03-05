@@ -134,13 +134,37 @@ struct RowView {
 pub struct HfSourceEntry {
     /// Full hf:// URI for dataset/config/split.
     pub uri: String,
-    /// Optional anchor column name.
-    pub anchor_column: Option<String>,
-    /// Optional positive column name.
-    pub positive_column: Option<String>,
+    /// Anchor candidate columns (ordered).
+    ///
+    /// Each candidate is tried in order; the first whose value is present and
+    /// non-empty is used as the anchor role for the row.  When the list is
+    /// non-empty and no candidate yields content, the row is skipped.
+    pub anchor_columns: Vec<String>,
+    /// Positive candidate columns (ordered).
+    ///
+    /// Each candidate is tried in order; the first whose value is present and
+    /// non-empty is used as the positive role for the row.  When the list is
+    /// non-empty and no candidate yields content, the row is skipped.
+    pub positive_columns: Vec<String>,
     /// Optional context columns (ordered).
+    ///
+    /// Used only in **role-based mode** (i.e. when `anchor_columns` and/or
+    /// `positive_columns` are set).  Every listed column is required: if any
+    /// is missing or blank the row is skipped.
+    ///
+    /// Each column becomes an additional `SectionRole::Context` section in the
+    /// emitted record, appended after the positive section.  In contrast to
+    /// `anchor_columns`/`positive_columns`, there is no coalescing — all
+    /// columns contribute independently as separate sections.
+    ///
+    /// Not used in **text-columns mode** (`text_columns` non-empty,
+    /// `anchor_columns` empty): in that mode only `text_columns` is consulted.
     pub context_columns: Vec<String>,
-    /// Optional text columns (ordered) for text-columns mode.
+    /// Text candidate columns (ordered) for text-columns mode.
+    ///
+    /// Each candidate is tried in order; the first whose value is present and
+    /// non-empty is used as the single text content for the row.  When the
+    /// list is non-empty and no candidate yields content, the row is skipped.
     pub text_columns: Vec<String>,
 }
 
@@ -176,8 +200,8 @@ pub fn parse_hf_source_line(line: &str) -> Result<HfSourceEntry, String> {
 
     let mut entry = HfSourceEntry {
         uri: uri.to_string(),
-        anchor_column: None,
-        positive_column: None,
+        anchor_columns: Vec::new(),
+        positive_columns: Vec::new(),
         context_columns: Vec::new(),
         text_columns: Vec::new(),
     };
@@ -192,10 +216,10 @@ pub fn parse_hf_source_line(line: &str) -> Result<HfSourceEntry, String> {
         let value = raw_value.trim();
         match key.as_str() {
             "anchor" => {
-                entry.anchor_column = (!value.is_empty()).then(|| value.to_string());
+                entry.anchor_columns = parse_csv_fields(value);
             }
             "positive" => {
-                entry.positive_column = (!value.is_empty()).then(|| value.to_string());
+                entry.positive_columns = parse_csv_fields(value);
             }
             "context" => {
                 entry.context_columns = parse_csv_fields(value);
@@ -209,8 +233,8 @@ pub fn parse_hf_source_line(line: &str) -> Result<HfSourceEntry, String> {
         }
     }
 
-    let has_explicit_mapping = entry.anchor_column.is_some()
-        || entry.positive_column.is_some()
+    let has_explicit_mapping = !entry.anchor_columns.is_empty()
+        || !entry.positive_columns.is_empty()
         || !entry.context_columns.is_empty()
         || !entry.text_columns.is_empty();
     if !has_explicit_mapping {
@@ -317,8 +341,8 @@ pub fn build_hf_sources(roots: &HfListRoots) -> Vec<Box<dyn DataSource + 'static
                 split,
                 snapshot_dir,
             );
-            hf.anchor_column = source.anchor_column.clone();
-            hf.positive_column = source.positive_column.clone();
+            hf.anchor_columns = source.anchor_columns.clone();
+            hf.positive_columns = source.positive_columns.clone();
             hf.context_columns = source.context_columns.clone();
             hf.text_columns = source.text_columns.clone();
             println!(
@@ -326,8 +350,8 @@ pub fn build_hf_sources(roots: &HfListRoots) -> Vec<Box<dyn DataSource + 'static
                 hf.dataset,
                 hf.config,
                 hf.split,
-                hf.anchor_column,
-                hf.positive_column,
+                hf.anchor_columns,
+                hf.positive_columns,
                 hf.context_columns,
                 hf.text_columns
             );
@@ -385,20 +409,42 @@ pub struct HuggingFaceRowsConfig {
     pub local_disk_cap_bytes: Option<u64>,
     /// Optional row id column name. Falls back to synthetic id when missing.
     pub id_column: Option<String>,
-    /// Text columns to extract explicitly.
-    pub text_columns: Vec<String>,
-    /// Optional column used for anchor text.
+    /// Text candidate columns (ordered) for text-columns mode.
     ///
-    /// When set (or when `positive_column`/`context_columns` are set), role-based
-    /// extraction is used instead of `text_columns` mode.
-    pub anchor_column: Option<String>,
-    /// Optional column used for positive text.
+    /// Each candidate is tried in order; the first whose value is present and
+    /// non-empty is used as the single text content for the row.  When the
+    /// list is non-empty and no candidate yields content, the row is skipped.
+    pub text_columns: Vec<String>,
+    /// Anchor candidate columns (ordered).
+    ///
+    /// Each candidate is tried in order; the first whose value is present and
+    /// non-empty is used as the anchor role section.  When the list is
+    /// non-empty and no candidate yields content, the row is skipped.
+    ///
+    /// When non-empty (or when `positive_columns`/`context_columns` are set),
+    /// role-based extraction is used instead of `text_columns` mode.
+    pub anchor_columns: Vec<String>,
+    /// Positive candidate columns (ordered).
+    ///
+    /// Each candidate is tried in order; the first whose value is present and
+    /// non-empty is used for the positive role section.  When the list is
+    /// non-empty and no candidate yields content, the row is skipped.
     ///
     /// Positive text is emitted as a `SectionRole::Context` section.
-    pub positive_column: Option<String>,
+    pub positive_columns: Vec<String>,
     /// Optional ordered context columns.
     ///
-    /// Used only in role-based extraction mode.
+    /// Used only in **role-based mode** (i.e. when `anchor_columns` and/or
+    /// `positive_columns` are set).  Every listed column is required: if any
+    /// is missing or blank the row is skipped.
+    ///
+    /// Each column becomes an additional `SectionRole::Context` section in the
+    /// emitted record, appended after the positive section.  Unlike
+    /// `anchor_columns`/`positive_columns`, there is no coalescing — all
+    /// columns contribute independently as separate sections.
+    ///
+    /// Ignored in **text-columns mode** (when `anchor_columns` is empty and
+    /// `text_columns` is non-empty).
     pub context_columns: Vec<String>,
 }
 
@@ -431,15 +477,15 @@ impl HuggingFaceRowsConfig {
             local_disk_cap_bytes: Some(32 * 1024 * 1024 * 1024),
             id_column: Some("id".to_string()),
             text_columns: vec!["text".to_string()],
-            anchor_column: None,
-            positive_column: None,
+            anchor_columns: Vec::new(),
+            positive_columns: Vec::new(),
             context_columns: Vec::new(),
         }
     }
 
     fn has_explicit_mapping(&self) -> bool {
-        self.anchor_column.is_some()
-            || self.positive_column.is_some()
+        !self.anchor_columns.is_empty()
+            || !self.positive_columns.is_empty()
             || !self.context_columns.is_empty()
             || !self.text_columns.is_empty()
     }
@@ -2993,6 +3039,26 @@ impl HuggingFaceRowSource {
         }
     }
 
+    /// Try each candidate column name in order and return the first one that
+    /// yields a non-empty text value.  Returns `None` when no candidate
+    /// matches, which the caller uses to decide whether to skip the row.
+    fn coalesce_field(
+        candidates: &[String],
+        row_obj: &serde_json::Map<String, Value>,
+    ) -> Option<RowTextField> {
+        for name in candidates {
+            if let Some(value) = row_obj.get(name) {
+                if let Some(text) = Self::value_to_text(value) {
+                    return Some(RowTextField {
+                        name: name.clone(),
+                        text,
+                    });
+                }
+            }
+        }
+        None
+    }
+
     /// Parse a raw row payload into normalized `RowView` fields.
     fn parse_row(
         &self,
@@ -3030,35 +3096,29 @@ impl HuggingFaceRowSource {
             });
 
         let mut text_fields = Vec::new();
-        let use_role_columns = self.config.anchor_column.is_some()
-            || self.config.positive_column.is_some()
+        let use_role_columns = !self.config.anchor_columns.is_empty()
+            || !self.config.positive_columns.is_empty()
             || !self.config.context_columns.is_empty();
 
         if use_role_columns {
-            if let Some(name) = &self.config.anchor_column {
-                let Some(value) = row_obj.get(name) else {
-                    return Ok(None);
-                };
-                let Some(text) = Self::value_to_text(value) else {
-                    return Ok(None);
-                };
-                text_fields.push(RowTextField {
-                    name: name.clone(),
-                    text,
-                });
+            // Anchor: try each candidate column in order; use the first
+            // whose value is present and non-empty.  Skip the row when the
+            // list is non-empty but no candidate yields content.
+            if !self.config.anchor_columns.is_empty() {
+                match Self::coalesce_field(&self.config.anchor_columns, row_obj) {
+                    Some(field) => text_fields.push(field),
+                    None => return Ok(None),
+                }
             }
 
-            if let Some(name) = &self.config.positive_column {
-                let Some(value) = row_obj.get(name) else {
-                    return Ok(None);
-                };
-                let Some(text) = Self::value_to_text(value) else {
-                    return Ok(None);
-                };
-                text_fields.push(RowTextField {
-                    name: name.clone(),
-                    text,
-                });
+            // Positive: try each candidate column in order; use the first
+            // whose value is present and non-empty.  Skip the row when the
+            // list is non-empty but no candidate yields content.
+            if !self.config.positive_columns.is_empty() {
+                match Self::coalesce_field(&self.config.positive_columns, row_obj) {
+                    Some(field) => text_fields.push(field),
+                    None => return Ok(None),
+                }
             }
 
             for name in &self.config.context_columns {
@@ -3074,17 +3134,12 @@ impl HuggingFaceRowSource {
                 });
             }
         } else {
-            for name in &self.config.text_columns {
-                let Some(value) = row_obj.get(name) else {
-                    return Ok(None);
-                };
-                let Some(text) = Self::value_to_text(value) else {
-                    return Ok(None);
-                };
-                text_fields.push(RowTextField {
-                    name: name.clone(),
-                    text,
-                });
+            // Text-columns mode: try each candidate column in order; use the
+            // first whose value is present and non-empty.  The row is skipped
+            // when no candidate yields content (handled by the is_empty guard
+            // below).
+            if let Some(field) = Self::coalesce_field(&self.config.text_columns, row_obj) {
+                text_fields.push(field);
             }
         }
 
@@ -4154,15 +4209,15 @@ mod tests {
             sources: vec![
                 HfSourceEntry {
                     uri: "hf://onlyorg".to_string(),
-                    anchor_column: Some("title".to_string()),
-                    positive_column: None,
+                    anchor_columns: vec!["title".to_string()],
+                    positive_columns: Vec::new(),
                     context_columns: Vec::new(),
                     text_columns: Vec::new(),
                 },
                 HfSourceEntry {
                     uri: "hf://org/dataset/default/train".to_string(),
-                    anchor_column: Some("title".to_string()),
-                    positive_column: Some("body".to_string()),
+                    anchor_columns: vec!["title".to_string()],
+                    positive_columns: vec!["body".to_string()],
                     context_columns: Vec::new(),
                     text_columns: Vec::new(),
                 },
@@ -4464,8 +4519,8 @@ mod tests {
     fn parse_row_role_columns_mode_builds_expected_fields() {
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path().to_path_buf());
-        config.anchor_column = Some("anchor".into());
-        config.positive_column = Some("positive".into());
+        config.anchor_columns = vec!["anchor".into()];
+        config.positive_columns = vec!["positive".into()];
         config.context_columns = vec!["ctx1".into(), "ctx2".into()];
         let source = test_source(config);
 
@@ -4485,7 +4540,7 @@ mod tests {
     fn parse_row_role_columns_mode_skips_missing_or_empty_values() {
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path().to_path_buf());
-        config.anchor_column = Some("anchor".into());
+        config.anchor_columns = vec!["anchor".into()];
         config.context_columns = vec!["ctx".into()];
         let source = test_source(config);
 
@@ -6343,10 +6398,12 @@ mod tests {
             .unwrap()
             .unwrap();
 
+        // Candidate coalescing: the first non-empty column (title) is selected;
+        // body is never tried because title already yielded a value.
         assert_eq!(row.row_id.as_deref(), Some("row-5"));
-        assert_eq!(row.text_fields.len(), 2);
+        assert_eq!(row.text_fields.len(), 1);
         assert_eq!(row.text_fields[0].name, "title");
-        assert_eq!(row.text_fields[1].name, "body");
+        assert_eq!(row.text_fields[0].text, "Anchor text");
         assert!(row.text_fields.iter().all(|field| field.name != "id"));
     }
 
@@ -6354,8 +6411,8 @@ mod tests {
     fn parse_row_with_required_columns_skips_when_missing() {
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path().to_path_buf());
-        config.anchor_column = Some("anchor".into());
-        config.positive_column = Some("positive".into());
+        config.anchor_columns = vec!["anchor".into()];
+        config.positive_columns = vec!["positive".into()];
         config.context_columns = vec!["context".into()];
         let source = test_source(config);
 
@@ -6810,27 +6867,133 @@ mod tests {
             .unwrap()
             .unwrap();
 
+        // Candidate coalescing: headline is non-empty so it is selected;
+        // body is not tried.
         assert_eq!(parsed.row_id.as_deref(), Some("r-1"));
-        assert_eq!(parsed.text_fields.len(), 2);
+        assert_eq!(parsed.text_fields.len(), 1);
         assert_eq!(parsed.text_fields[0].name, "headline");
     }
 
     #[test]
-    fn parse_row_returns_none_when_positive_or_text_columns_are_missing() {
+    fn parse_row_returns_none_when_all_positive_or_text_candidates_are_missing() {
         let dir = tempdir().unwrap();
+
+        // Role mode: all positive_columns candidates absent → row skipped.
         let mut role_config = test_config(dir.path().to_path_buf());
-        role_config.anchor_column = Some("anchor".into());
-        role_config.positive_column = Some("positive".into());
+        role_config.anchor_columns = vec!["anchor".into()];
+        role_config.positive_columns = vec!["positive".into()];
         let role_source = test_source(role_config);
 
         let role_missing = role_source.parse_row(0, &json!({"anchor":"a"})).unwrap();
         assert!(role_missing.is_none());
 
+        // Text-columns mode: a row that lacks all listed candidates → row skipped.
         let mut text_config = test_config(dir.path().to_path_buf());
         text_config.text_columns = vec!["title".into(), "body".into()];
         let text_source = test_source(text_config);
-        let text_missing = text_source.parse_row(1, &json!({"title":"t"})).unwrap();
+        // Row has neither "title" nor "body" → no candidate matches → skipped.
+        let text_missing = text_source
+            .parse_row(1, &json!({"other_field": "irrelevant"}))
+            .unwrap();
         assert!(text_missing.is_none());
+    }
+
+    #[test]
+    fn parse_row_text_columns_coalesces_to_first_nonempty_candidate() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.text_columns = vec!["title".into(), "body".into()];
+        let source = test_source(config);
+
+        // "title" is empty string → coalesces to "body".
+        let row = source
+            .parse_row(0, &json!({"title": "", "body": "fallback content"}))
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.text_fields.len(), 1);
+        assert_eq!(row.text_fields[0].name, "body");
+        assert_eq!(row.text_fields[0].text, "fallback content");
+
+        // "title" is present and non-empty → it is used; "body" is never tried.
+        let row2 = source
+            .parse_row(1, &json!({"title": "primary content", "body": "ignored"}))
+            .unwrap()
+            .unwrap();
+        assert_eq!(row2.text_fields.len(), 1);
+        assert_eq!(row2.text_fields[0].name, "title");
+        assert_eq!(row2.text_fields[0].text, "primary content");
+    }
+
+    #[test]
+    fn parse_row_positive_columns_coalesces_to_first_nonempty_candidate() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.anchor_columns = vec!["anchor".into()];
+        config.positive_columns = vec!["summary".into(), "body".into()];
+        let source = test_source(config);
+
+        // "summary" is absent → coalesces to "body".
+        let row = source
+            .parse_row(0, &json!({"anchor": "a", "body": "fallback positive"}))
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.text_fields.len(), 2);
+        assert_eq!(row.text_fields[0].name, "anchor");
+        assert_eq!(row.text_fields[1].name, "body");
+
+        // "summary" is present and non-empty → it is used; "body" is ignored.
+        let row2 = source
+            .parse_row(
+                1,
+                &json!({"anchor": "a", "summary": "chosen", "body": "ignored"}),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(row2.text_fields.len(), 2);
+        assert_eq!(row2.text_fields[1].name, "summary");
+        assert_eq!(row2.text_fields[1].text, "chosen");
+
+        // Both positive candidates absent → row skipped.
+        let none = source.parse_row(2, &json!({"anchor": "a"})).unwrap();
+        assert!(none.is_none());
+    }
+
+    #[test]
+    fn parse_row_anchor_columns_coalesces_to_first_nonempty_candidate() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.anchor_columns = vec!["headline".into(), "title".into()];
+        config.positive_columns = vec!["body".into()];
+        let source = test_source(config);
+
+        // "headline" is absent → coalesces to "title".
+        let row = source
+            .parse_row(
+                0,
+                &json!({"title": "fallback anchor", "body": "positive text"}),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.text_fields.len(), 2);
+        assert_eq!(row.text_fields[0].name, "title");
+        assert_eq!(row.text_fields[0].text, "fallback anchor");
+
+        // "headline" is present and non-empty → it is used; "title" is ignored.
+        let row2 = source
+            .parse_row(
+                1,
+                &json!({"headline": "chosen anchor", "title": "ignored", "body": "positive"}),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(row2.text_fields[0].name, "headline");
+        assert_eq!(row2.text_fields[0].text, "chosen anchor");
+
+        // Both anchor candidates absent → row skipped.
+        let none = source
+            .parse_row(2, &json!({"body": "positive only"}))
+            .unwrap();
+        assert!(none.is_none());
     }
 
     #[test]

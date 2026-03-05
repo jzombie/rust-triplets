@@ -223,8 +223,21 @@ Rules:
 - `anchor=`, `positive=`, `context=`, and `text=` are the only accepted keys.
 - At least one mapping key is required per line.
 - HF row extraction is strict: no auto-detect fallback is used when mappings are absent.
-- `context=` and `text=` accept comma-delimited column lists.
-- Rows with missing/blank required fields are skipped.
+
+**Two extraction modes — pick one per source line:**
+
+| Mode             | When active                               | Keys used                          |
+| ---------------- | ----------------------------------------- | ---------------------------------- |
+| **Role-based**   | `anchor=` (and/or `positive=`) is present | `anchor=`, `positive=`, `context=` |
+| **Text-columns** | `anchor=` is absent; only `text=` is set  | `text=`                            |
+
+- **Role-based mode** maps dataset columns directly onto triplet roles.  `anchor=` becomes the anchor section; `positive=` becomes the positive/context section; `context=` adds extra context sections.  Use this when your dataset already has distinct role-labelled fields (title, body, summary, etc.).
+- **Text-columns mode** is simpler: one column (or the first non-empty candidate) becomes the entire record content.  The sampler then builds anchor/positive/negative from different records or chunks of that content.  Use this for datasets that have a single text blob per row.
+
+Column-list semantics:
+
+- `context=` accepts a comma-delimited list of columns; **all** listed columns must be present and non-empty, or the row is skipped.  Each one becomes a separate context section.
+- `anchor=`, `positive=`, and `text=` accept comma-delimited **candidate** column lists.  Candidates are tried in order; the **first** non-empty value found is used.  The row is skipped only when **no** candidate yields content.  Use multiple candidates when a field is sometimes absent (for example `anchor=title,text` uses `title` when present and falls back to `text`).
 
 Example list (see [examples/common/hf_sources.txt](examples/common/hf_sources.txt)):
 

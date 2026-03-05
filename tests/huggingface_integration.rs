@@ -221,8 +221,8 @@ fn huggingface_role_columns_mode_and_synthetic_ids_work() {
     );
     config.shard_extensions = vec!["ndjson".to_string()];
     config.id_column = Some("id".to_string());
-    config.anchor_column = Some("anchor".to_string());
-    config.positive_column = Some("positive".to_string());
+    config.anchor_columns = vec!["anchor".to_string()];
+    config.positive_columns = vec!["positive".to_string()];
     config.context_columns = vec!["ctx1".to_string(), "ctx2".to_string()];
 
     let source = HuggingFaceRowSource::new(config).expect("failed creating huggingface source");
@@ -275,8 +275,8 @@ fn huggingface_role_columns_mode_skips_missing_rows_and_keeps_valid() {
         temp.path(),
     );
     config.shard_extensions = vec!["ndjson".to_string()];
-    config.anchor_column = Some("anchor".to_string());
-    config.positive_column = Some("positive".to_string());
+    config.anchor_columns = vec!["anchor".to_string()];
+    config.positive_columns = vec!["positive".to_string()];
     config.context_columns = vec!["ctx".to_string()];
 
     let source = HuggingFaceRowSource::new(config).expect("failed creating huggingface source");
@@ -313,8 +313,8 @@ fn huggingface_parses_source_list_with_explicit_mappings() {
     assert_eq!(entries.len(), 1);
     let entry = &entries[0];
     assert_eq!(entry.uri, "hf://org/dataset/default/train");
-    assert_eq!(entry.anchor_column.as_deref(), Some("title"));
-    assert_eq!(entry.positive_column.as_deref(), Some("text"));
+    assert_eq!(entry.anchor_columns, vec!["title".to_string()]);
+    assert_eq!(entry.positive_columns, vec!["text".to_string()]);
     assert_eq!(
         entry.context_columns,
         vec!["ctx1".to_string(), "ctx2".to_string()]
@@ -334,8 +334,8 @@ fn huggingface_helper_parsers_cover_success_and_error_paths() {
     )
     .expect("line should parse");
     assert_eq!(parsed.uri, "hf://org/dataset/default/train");
-    assert_eq!(parsed.anchor_column.as_deref(), Some("title"));
-    assert_eq!(parsed.positive_column.as_deref(), Some("body"));
+    assert_eq!(parsed.anchor_columns, vec!["title".to_string()]);
+    assert_eq!(parsed.positive_columns, vec!["body".to_string()]);
     assert_eq!(parsed.context_columns, vec!["c1", "c2"]);
     assert_eq!(parsed.text_columns, vec!["body"]);
 
@@ -372,8 +372,8 @@ fn huggingface_list_root_and_builder_helpers_cover_invalid_inputs() {
         source_list: "manual".to_string(),
         sources: vec![HfSourceEntry {
             uri: "hf://org".to_string(),
-            anchor_column: Some("a".to_string()),
-            positive_column: None,
+            anchor_columns: vec!["a".to_string()],
+            positive_columns: Vec::new(),
             context_columns: Vec::new(),
             text_columns: Vec::new(),
         }],
@@ -539,8 +539,8 @@ fn huggingface_role_columns_mode_skips_when_context_missing() {
         temp.path(),
     );
     config.shard_extensions = vec!["ndjson".to_string()];
-    config.anchor_column = Some("anchor".to_string());
-    config.positive_column = Some("positive".to_string());
+    config.anchor_columns = vec!["anchor".to_string()];
+    config.positive_columns = vec!["positive".to_string()];
     config.context_columns = vec!["ctx".to_string()];
 
     let source = HuggingFaceRowSource::new(config).expect("failed creating huggingface source");
@@ -552,10 +552,14 @@ fn huggingface_role_columns_mode_skips_when_context_missing() {
 }
 
 #[test]
-fn huggingface_text_columns_mode_skips_when_required_column_missing() {
+fn huggingface_text_columns_mode_skips_when_all_candidates_missing() {
     let temp = tempfile::tempdir().expect("failed creating tempdir");
     let shard_path = temp.path().join("part-00007.ndjson");
-    write_lines(&shard_path, &[r#"{"id":"t1","title":"headline only"}"#]);
+    // Row contains neither "title" nor "body" → coalescing finds no candidate.
+    write_lines(
+        &shard_path,
+        &[r#"{"id":"t1","other":"irrelevant content"}"#],
+    );
 
     let mut config = HuggingFaceRowsConfig::new(
         "hf_text_columns_skip",
@@ -571,9 +575,115 @@ fn huggingface_text_columns_mode_skips_when_required_column_missing() {
     let seed = seeded_config(43);
     let snapshot = source
         .refresh(&seed, None, Some(1))
-        .expect("refresh should skip rows missing required text columns");
+        .expect("refresh should skip rows where no text candidate matches");
 
     assert!(snapshot.records.is_empty());
+}
+
+#[test]
+fn huggingface_text_columns_coalesces_to_first_nonempty_candidate() {
+    let temp = tempfile::tempdir().expect("failed creating tempdir");
+    let shard_path = temp.path().join("part-00009.ndjson");
+    // "title" is an empty string → coalescing falls through to "text".
+    write_lines(
+        &shard_path,
+        &[
+            r#"{"id":"c1","title":"","text":"fallback content"}"#,
+            r#"{"id":"c2","title":"primary content","text":"ignored"}"#,
+        ],
+    );
+
+    let mut config = HuggingFaceRowsConfig::new(
+        "hf_text_coalesce",
+        "local/test-dataset",
+        "default",
+        "train",
+        temp.path(),
+    );
+    config.shard_extensions = vec!["ndjson".to_string()];
+    config.text_columns = vec!["title".to_string(), "text".to_string()];
+
+    let source = HuggingFaceRowSource::new(config).expect("failed creating huggingface source");
+    let seed = seeded_config(53);
+    let snapshot = source
+        .refresh(&seed, None, Some(2))
+        .expect("refresh should coalesce text column candidates");
+
+    assert_eq!(snapshot.records.len(), 2);
+
+    let c1 = snapshot
+        .records
+        .iter()
+        .find(|r| r.id.ends_with("::c1"))
+        .expect("record c1 should be present");
+    assert!(
+        c1.sections.iter().any(|s| s.text == "fallback content"),
+        "c1 should use 'text' column because 'title' is empty"
+    );
+
+    let c2 = snapshot
+        .records
+        .iter()
+        .find(|r| r.id.ends_with("::c2"))
+        .expect("record c2 should be present");
+    assert!(
+        c2.sections.iter().any(|s| s.text == "primary content"),
+        "c2 should use 'title' column because it is non-empty"
+    );
+}
+
+#[test]
+fn huggingface_positive_columns_coalesces_to_first_nonempty_candidate() {
+    let temp = tempfile::tempdir().expect("failed creating tempdir");
+    let shard_path = temp.path().join("part-00010.ndjson");
+    // Row A: "summary" absent → falls through to "body".
+    // Row B: "summary" present → "summary" is used; "body" is ignored.
+    write_lines(
+        &shard_path,
+        &[
+            r#"{"id":"p1","anchor":"anchor content","body":"fallback positive"}"#,
+            r#"{"id":"p2","anchor":"anchor content","summary":"chosen positive","body":"ignored"}"#,
+        ],
+    );
+
+    let mut config = HuggingFaceRowsConfig::new(
+        "hf_positive_coalesce",
+        "local/test-dataset",
+        "default",
+        "train",
+        temp.path(),
+    );
+    config.shard_extensions = vec!["ndjson".to_string()];
+    config.anchor_columns = vec!["anchor".to_string()];
+    config.positive_columns = vec!["summary".to_string(), "body".to_string()];
+
+    let source = HuggingFaceRowSource::new(config).expect("failed creating huggingface source");
+    let seed = seeded_config(59);
+    let snapshot = source
+        .refresh(&seed, None, Some(2))
+        .expect("refresh should coalesce positive column candidates");
+
+    assert_eq!(snapshot.records.len(), 2);
+
+    let p1 = snapshot
+        .records
+        .iter()
+        .find(|r| r.id.ends_with("::p1"))
+        .expect("record p1 should be present");
+    assert!(
+        p1.sections.iter().any(|s| s.text == "fallback positive"),
+        "p1 should use 'body' because 'summary' is absent"
+    );
+
+    let p2 = snapshot
+        .records
+        .iter()
+        .find(|r| r.id.ends_with("::p2"))
+        .expect("record p2 should be present");
+    assert!(
+        p2.sections.iter().any(|s| s.text == "chosen positive"),
+        "p2 should use 'summary' because it is present and non-empty"
+    );
 }
 
 #[test]
@@ -590,8 +700,8 @@ fn huggingface_parquet_role_columns_skip_missing_context_without_error() {
         temp.path(),
     );
     config.shard_extensions = vec!["simdr".to_string()];
-    config.anchor_column = Some("text".to_string());
-    config.positive_column = Some("text".to_string());
+    config.anchor_columns = vec!["text".to_string()];
+    config.positive_columns = vec!["text".to_string()];
     config.context_columns = vec!["ctx".to_string()];
 
     let source = HuggingFaceRowSource::new(config).expect("failed creating huggingface source");
