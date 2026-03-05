@@ -3485,6 +3485,137 @@ mod tests {
         assert!((avg - (1.0 + 0.5 + 0.0) / 3.0).abs() < f32::EPSILON);
     }
 
+    // Enforcement test: text, pair, and triplet samples must all be drawn from
+    // the same chunk windows that `materialize_chunks` would produce for the
+    // record's section.  If the chunking path is ever accidentally bypassed for
+    // one sample type, the chunk text will not appear in the precomputed pool
+    // and this test will fail.
+    #[test]
+    fn text_pair_and_triplet_chunks_all_come_from_materialize_pool() {
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let mut config = base_config();
+        config.seed = 42;
+        config.batch_size = 2;
+        config.allowed_splits = vec![SplitLabel::Train];
+        // Small window so multiple distinct windows are produced from one section,
+        // making membership assertions meaningful.
+        config.chunking = ChunkingStrategy {
+            max_window_tokens: 4,
+            overlap_tokens: vec![1],
+            summary_fallback_weight: 0.0,
+            summary_fallback_tokens: 0,
+            chunk_weight_floor: 0.0,
+        };
+        let context_text = "alpha beta gamma delta epsilon zeta eta theta";
+        config.recipes = vec![TripletRecipe {
+            name: "parity_triplet".into(),
+            anchor: Selector::Role(SectionRole::Context),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 1.0,
+            instruction: None,
+        }];
+        config.text_recipes = vec![TextRecipe {
+            name: "parity_text".into(),
+            selector: Selector::Role(SectionRole::Context),
+            weight: 1.0,
+            instruction: None,
+        }];
+
+        let make_record = |id: &str| DataRecord {
+            id: id.into(),
+            source: "unit".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            quality: QualityScore { trust: 1.0 },
+            taxonomy: vec![],
+            sections: vec![RecordSection {
+                role: SectionRole::Context,
+                heading: None,
+                text: context_text.into(),
+                sentences: vec![context_text.into()],
+            }],
+            meta_prefix: None,
+        };
+        let records = vec![make_record("parity_a"), make_record("parity_b")];
+
+        // Build the expected pool by calling materialize_chunks directly on the
+        // shared section text.  Both records have identical section text, so one
+        // pool covers all possible chunk texts.
+        let pool_store = Arc::new(DeterministicSplitStore::new(split, 1).unwrap());
+        let pool_sampler = TripletSampler::new(config.clone(), pool_store);
+        let expected_pool: HashSet<String> = pool_sampler
+            .inner
+            .lock()
+            .unwrap()
+            .materialize_chunks(&records[0], 0, &records[0].sections[0])
+            .into_iter()
+            .map(|c| c.text)
+            .collect();
+        assert!(!expected_pool.is_empty(), "pool must not be empty");
+
+        let store = Arc::new(DeterministicSplitStore::new(split, 77).unwrap());
+        let sampler = TripletSampler::new(config, store);
+        sampler.register_source(Box::new(InMemorySource::new("unit", records)));
+
+        // Text batches ─ every sampled chunk must come from the pool.
+        for _ in 0..5 {
+            let batch = sampler.next_text_batch(SplitLabel::Train).unwrap();
+            for sample in &batch.samples {
+                assert!(
+                    expected_pool.contains(sample.chunk.text.as_str()),
+                    "text sample chunk {:?} not in materialize_chunks pool {:?}",
+                    sample.chunk.text,
+                    expected_pool,
+                );
+            }
+        }
+
+        // Triplet batches ─ anchor, positive, and negative must all be in the pool.
+        for _ in 0..5 {
+            let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
+            for triplet in &batch.triplets {
+                assert!(
+                    expected_pool.contains(triplet.anchor.text.as_str()),
+                    "triplet anchor {:?} not in pool",
+                    triplet.anchor.text,
+                );
+                assert!(
+                    expected_pool.contains(triplet.positive.text.as_str()),
+                    "triplet positive {:?} not in pool",
+                    triplet.positive.text,
+                );
+                assert!(
+                    expected_pool.contains(triplet.negative.text.as_str()),
+                    "triplet negative {:?} not in pool",
+                    triplet.negative.text,
+                );
+            }
+        }
+
+        // Pair batches ─ anchor and positive must be in the pool.
+        for _ in 0..5 {
+            let batch = sampler.next_pair_batch(SplitLabel::Train).unwrap();
+            for pair in &batch.pairs {
+                assert!(
+                    expected_pool.contains(pair.anchor.text.as_str()),
+                    "pair anchor {:?} not in pool",
+                    pair.anchor.text,
+                );
+                assert!(
+                    expected_pool.contains(pair.positive.text.as_str()),
+                    "pair positive {:?} not in pool",
+                    pair.positive.text,
+                );
+            }
+        }
+    }
+
     #[test]
     fn end_to_end_text_weighting_uses_chunk_offsets() {
         let split = SplitRatios {
