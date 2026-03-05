@@ -61,6 +61,7 @@ It is designed for multi-source training pipelines where each batch can mix reco
 - **Supply-chain style orchestration (core layer):** multi-source intake (`refresh`) with per-call parallel ingest, optional per-source weighting, staged buffering, deterministic split routing, and batch assembly into train-ready outputs.
 - **Bounded ingestion** windows instead of loading full corpora into memory.
 - **Per-call source threading**: during refresh, each source is fetched on its own short-lived thread, then merged deterministically for batch assembly.
+- **Background batch prefetching** via `BatchPrefetcher`: a dedicated worker thread continuously fills a bounded queue with ready-to-consume batches, so the training loop never stalls on source I/O. Because it sits on top of the multi-source, per-call threading layer, prefetching works transparently across all registered sources — each source advances on its own thread while the prefetch queue stays warm.
 - **Streaming-friendly**: sources can be finite or unbounded.
 
 This crate does **not** perform semantic mining/retrieval scoring by itself; instead, it gives you deterministic, metadata-driven sampling primitives you can feed into your downstream mining/retrieval stack.
