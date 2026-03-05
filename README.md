@@ -230,11 +230,11 @@ Example list (see [examples/common/hf_sources.txt](examples/common/hf_sources.tx
 
 ```text
 # role columns
-hf://labofsahil/hackernews-vector-search-dataset/default/train anchor=title positive=text
+hf://labofsahil/hackernews-vector-search-dataset/default text=text
 hf://wikimedia/wikipedia/20231101.en/train anchor=title positive=text
 
 # explicit text-column mode
-hf://pfox/71k-English-uncleaned-wordlist/default/train text=text
+hf://pfox/71k-English-uncleaned-wordlist/default text=text
 ```
 
 HF backend persistence and lookup model:

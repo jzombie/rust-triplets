@@ -6,10 +6,10 @@
 # - Use text= for ordered text-columns mode
 
 # Conversational tech
-hf://labofsahil/hackernews-vector-search-dataset/default/train anchor=title positive=text
+hf://labofsahil/hackernews-vector-search-dataset/default text=text
 
 # Skeleton of most embedding spaces
-hf://wikimedia/wikipedia/20231101.en/train anchor=title positive=text
+hf://wikimedia/wikipedia/20231101.en anchor=title positive=text
 
 # Small wordlist snapshot source
-hf://pfox/71k-English-uncleaned-wordlist/default/train text=text
+# hf://pfox/71k-English-uncleaned-wordlist/default text=text
