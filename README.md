@@ -64,7 +64,7 @@ It is designed for multi-source training pipelines where each batch can mix reco
 - **Background batch prefetching** via `BatchPrefetcher`: spawns its own dedicated background thread that drives a tight production loop — calling the batch-assembly function repeatedly and pushing results into a bounded channel queue. The training loop blocks only on `next()`, which returns the next pre-assembled batch without waiting for source I/O. Within each batch call that background thread makes, the sampler itself fans out to per-source threads for ingestion, so both layers of concurrency are active simultaneously: the prefetch thread keeps the queue warm while per-source threads fetch records in parallel.
 - **Streaming-friendly**: sources can be finite or unbounded.
 
-This crate does **not** perform semantic mining/retrieval scoring by itself; instead, it gives you deterministic, metadata-driven sampling primitives you can feed into your downstream mining/retrieval stack.
+> This crate does **not** perform semantic mining/retrieval scoring by itself; instead, it gives you deterministic, metadata-driven sampling primitives you can feed into your downstream mining/retrieval stack.
 
 ## Sources
 
