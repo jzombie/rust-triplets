@@ -2,7 +2,7 @@
 
 [![made-with-rust][rust-logo]][rust-src-page] [![crates.io][crates-badge]][crates-page] [![MIT licensed][mit-license-badge]][mit-license-page] [![Apache 2.0 licensed][apache-2.0-license-badge]][apache-2.0-license-page] [![Coverage][coveralls-badge]][coveralls-page]
 
-_Automate multi-source training data consumption and dynamically build reproducible, balanced learning batches from configurable rules — composing an effectively unbounded supply of unique triplet combinations on demand as your corpus evolves._
+_Compose an effectively unlimited supply of training triplets from your existing corpus — rule-driven, reproducible, and multi-source. No hand-mining required._
 
 **WORK IN PROGRESS. THIS API IS BEING PROTOTYPED AND MAY CHANGE WITHOUT NOTICE.**
 
