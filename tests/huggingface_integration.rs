@@ -935,6 +935,131 @@ fn huggingface_refresh_wraps_correctly_after_all_rows_consumed() {
 }
 
 #[test]
+fn huggingface_different_epoch_seeds_produce_different_record_orderings() {
+    // Guarantee: calling refresh() with a seed derived from epoch N must yield
+    // a different record ordering than epoch 0, end-to-end through the HF
+    // source's paging path.
+    //
+    // How the epoch seed reaches here: IngestionManager calls
+    // source.refresh(&epoch_config, ...) where epoch_config.seed =
+    // derive_epoch_seed(base_seed, epoch) = base_seed ^ epoch.  This test
+    // exercises that same contract directly on HuggingFaceRowSource so that
+    // if someone ever breaks the paging_seed → IndexPermutation chain the
+    // failure shows up specifically in the HF source, not just in the sampler.
+    //
+    // Assertions mirror the sampler-level test:
+    //   (a) Both epochs return every record exactly once (none lost/gained).
+    //   (b) The full ordered ID sequences differ.
+    //   (c) The first-half record sets differ — real positional movement,
+    //       not just tail re-ordering.
+    //
+    // 20 rows gives 20! / (20!/2) ≈ 1 in 2 chance any two permutations
+    // collide by accident; with a fixed seed the result is fully deterministic.
+    let temp = tempfile::tempdir().expect("failed creating tempdir");
+
+    let n_records: usize = 20;
+    let rows: Vec<String> = (0..n_records)
+        .map(|i| format!(r#"{{"id":"epoch_row_{i:02}","text":"body {i}"}}"#))
+        .collect();
+    let row_refs: Vec<&str> = rows.iter().map(|s| s.as_str()).collect();
+    write_lines(&temp.path().join("part-00000.ndjson"), &row_refs);
+
+    let mut config = HuggingFaceRowsConfig::new(
+        "hf_epoch_order",
+        "local/test-dataset",
+        "default",
+        "train",
+        temp.path(),
+    );
+    config.shard_extensions = vec!["ndjson".to_string()];
+    config.text_columns = vec!["text".to_string()];
+
+    let source = HuggingFaceRowSource::new(config).expect("failed creating source");
+
+    // epoch 0: derive_epoch_seed(base, 0) = base ^ 0 = base
+    let base_seed: u64 = 0xC0FFEE;
+    let epoch0_seed = base_seed ^ 0;
+    let epoch1_seed = base_seed ^ 1;
+
+    let epoch0_snapshot = source
+        .refresh(&seeded_config(epoch0_seed), None, Some(n_records))
+        .expect("epoch-0 refresh must succeed");
+    let epoch1_snapshot = source
+        .refresh(&seeded_config(epoch1_seed), None, Some(n_records))
+        .expect("epoch-1 refresh must succeed");
+
+    let epoch0_ids: Vec<String> = epoch0_snapshot
+        .records
+        .iter()
+        .map(|r| r.id.clone())
+        .collect();
+    let epoch1_ids: Vec<String> = epoch1_snapshot
+        .records
+        .iter()
+        .map(|r| r.id.clone())
+        .collect();
+
+    // (a) Both epochs must cover exactly the same set of records.
+    let mut epoch0_ids_sorted = epoch0_ids.clone();
+    let mut epoch1_ids_sorted = epoch1_ids.clone();
+    epoch0_ids_sorted.sort();
+    epoch1_ids_sorted.sort();
+    assert_eq!(
+        epoch0_ids_sorted, epoch1_ids_sorted,
+        "epoch 1 is missing or duplicating records relative to epoch 0"
+    );
+
+    // (b) The full ordered sequences must differ.
+    assert_ne!(
+        epoch0_ids, epoch1_ids,
+        "epoch-0 and epoch-1 seeds produced identical record orderings — \
+         the epoch seed has no effect on HuggingFaceRowSource paging"
+    );
+
+    // (c) The early draws must differ as a set.
+    let half = n_records / 2;
+    let epoch0_first_half: std::collections::HashSet<&str> =
+        epoch0_ids[..half].iter().map(String::as_str).collect();
+    let epoch1_first_half: std::collections::HashSet<&str> =
+        epoch1_ids[..half].iter().map(String::as_str).collect();
+    assert_ne!(
+        epoch0_first_half, epoch1_first_half,
+        "the first {half} records returned by epoch-0 and epoch-1 are the same set — \
+         records are not actually changing position across epochs"
+    );
+
+    // (d) Each epoch seed must be deterministic: calling refresh() again with
+    //     the same seed must return records in the exact same order.  Without
+    //     this a random shuffle would satisfy (b) and (c) by accident.
+    let epoch0_snapshot_replay = source
+        .refresh(&seeded_config(epoch0_seed), None, Some(n_records))
+        .expect("epoch-0 second refresh must succeed");
+    let epoch1_snapshot_replay = source
+        .refresh(&seeded_config(epoch1_seed), None, Some(n_records))
+        .expect("epoch-1 second refresh must succeed");
+
+    let epoch0_ids_replay: Vec<String> = epoch0_snapshot_replay
+        .records
+        .iter()
+        .map(|r| r.id.clone())
+        .collect();
+    let epoch1_ids_replay: Vec<String> = epoch1_snapshot_replay
+        .records
+        .iter()
+        .map(|r| r.id.clone())
+        .collect();
+
+    assert_eq!(
+        epoch0_ids, epoch0_ids_replay,
+        "epoch-0 seed must produce the same record ordering on every refresh call"
+    );
+    assert_eq!(
+        epoch1_ids, epoch1_ids_replay,
+        "epoch-1 seed must produce the same record ordering on every refresh call"
+    );
+}
+
+#[test]
 #[ignore = "network integration test against live Hugging Face dataset"]
 fn huggingface_reads_live_remote_dataset() {
     let temp = tempfile::tempdir().expect("failed creating tempdir");
