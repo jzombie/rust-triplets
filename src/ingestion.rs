@@ -190,6 +190,8 @@ pub struct IngestionManager {
     sources: Vec<SourceState>,
     max_records: usize,
     sampler_config: SamplerConfig,
+    /// Current source epoch used to vary per-source permutation seeds across epochs.
+    source_epoch: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -215,6 +217,37 @@ impl IngestionManager {
             sources: Vec::new(),
             max_records,
             sampler_config,
+            source_epoch: 0,
+        }
+    }
+
+    /// Update the current source epoch.
+    ///
+    /// Only changes the epoch value so subsequent `refresh` calls pass
+    /// `seed ^ epoch` to sources, producing a different permutation.
+    /// Stream cursors are intentionally NOT reset here — the cursor is a raw
+    /// I/O offset into the source's stream and must continue advancing so
+    /// every record is eventually fetched (resetting it would repeat the
+    /// leading slice of the source on every epoch boundary).
+    pub(crate) fn set_source_epoch(&mut self, epoch: u64) {
+        self.source_epoch = epoch;
+    }
+
+    /// Return the current source epoch.
+    #[cfg(test)]
+    pub fn source_epoch(&self) -> u64 {
+        self.source_epoch
+    }
+
+    /// Reset all raw source stream cursors and drain per-source buffers.
+    ///
+    /// Use this only when starting a deterministic replay from a specific
+    /// epoch (e.g. explicit `set_epoch` calls). A clean-start reset ensures
+    /// the new permutation begins at position 0 of the permuted index space.
+    pub(crate) fn reset_stream_cursors(&mut self) {
+        for state in &mut self.sources {
+            state.cursor = None;
+            state.buffer.clear();
         }
     }
 
@@ -381,12 +414,19 @@ impl IngestionManager {
                     let source = &self.sources[*idx].source;
                     let cursor = cursor.clone();
                     let sampler_config = sampler_config.clone();
+                    let source_epoch = self.source_epoch;
                     handles.push((
                         *idx,
                         scope.spawn(move || {
                             let start = std::time::Instant::now();
+                            // XOR the source epoch into the seed so each epoch
+                            // produces a distinct permutation within the source.
+                            let epoch_config = SamplerConfig {
+                                seed: sampler_config.seed ^ source_epoch,
+                                ..sampler_config
+                            };
                             let result =
-                                source.refresh(&sampler_config, cursor.as_ref(), Some(fetch_limit));
+                                source.refresh(&epoch_config, cursor.as_ref(), Some(fetch_limit));
                             let elapsed = start.elapsed();
                             (result, elapsed)
                         }),

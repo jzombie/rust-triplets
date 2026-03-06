@@ -396,6 +396,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         self.epoch_tracker.ensure_loaded()?;
         self.epoch_tracker.force_epoch(epoch);
         self.source_epoch = epoch;
+        self.ingestion.set_source_epoch(epoch);
+        self.ingestion.reset_stream_cursors();
         self.source_record_cursors.clear();
         self.source_cycle_idx = 0;
         for source in &self.source_order {
@@ -547,6 +549,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 }
             }
             self.source_epoch = state.source_epoch;
+            self.ingestion.set_source_epoch(state.source_epoch);
             self.rng = DeterministicRng::from_state(state.rng_state);
             self.triplet_recipe_rr_idx = state.triplet_recipe_rr_idx as usize;
             self.text_recipe_rr_idx = state.text_recipe_rr_idx as usize;
@@ -873,6 +876,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
 
     fn advance_source_epoch(&mut self) {
         self.source_epoch = self.source_epoch.saturating_add(1);
+        self.ingestion.set_source_epoch(self.source_epoch);
         self.source_record_cursors.clear();
         self.source_cycle_idx = 0;
         for source in &self.source_order {
@@ -1520,6 +1524,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         if !self.ingestion_cursors_loaded {
             if let Some(state) = self.split_store.load_sampler_state()? {
                 self.ingestion.load_cursors(&state.source_stream_cursors);
+                self.ingestion.set_source_epoch(state.source_epoch);
             }
             self.ingestion_cursors_loaded = true;
         }
@@ -1558,6 +1563,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         if !self.ingestion_cursors_loaded {
             if let Some(state) = self.split_store.load_sampler_state()? {
                 self.ingestion.load_cursors(&state.source_stream_cursors);
+                self.ingestion.set_source_epoch(state.source_epoch);
             }
             self.ingestion_cursors_loaded = true;
         }
@@ -1592,6 +1598,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         if !self.ingestion_cursors_loaded {
             if let Some(state) = self.split_store.load_sampler_state()? {
                 self.ingestion.load_cursors(&state.source_stream_cursors);
+                self.ingestion.set_source_epoch(state.source_epoch);
             }
             self.ingestion_cursors_loaded = true;
         }
@@ -6832,6 +6839,95 @@ mod tests {
             }
         }
         assert!(seen.contains("source_a::2025/03-03/restart_c.txt"));
+    }
+
+    #[test]
+    fn source_epoch_is_propagated_to_ingestion_on_resume() {
+        // Verify that when a sampler resumes from persisted state after a
+        // cache wipe (e.g. only simd-r-drive state is kept), the ingestion
+        // manager already has the correct source_epoch before the very first
+        // refresh call fires.  If source_epoch were loaded too late (only in
+        // ensure_source_state, which runs *after* the first refresh), sources
+        // that derive their permutation seed from config.seed inside refresh()
+        // would silently use epoch 0 instead of the persisted epoch.
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let temp = tempdir().unwrap();
+        let store_path = temp.path().join("epoch_propagation_store");
+        let build_config = || SamplerConfig {
+            seed: 77,
+            batch_size: 2,
+            chunking: ChunkingStrategy::default(),
+            recipes: vec![TripletRecipe {
+                name: "ep_triplet".into(),
+                anchor: Selector::Role(SectionRole::Anchor),
+                positive_selector: Selector::Role(SectionRole::Context),
+                negative_selector: Selector::Role(SectionRole::Context),
+                negative_strategy: NegativeStrategy::WrongArticle,
+                weight: 1.0,
+                instruction: None,
+            }],
+            text_recipes: Vec::new(),
+            split,
+            allowed_splits: vec![SplitLabel::Train],
+            ..SamplerConfig::default()
+        };
+        let records: Vec<DataRecord> = (0..4)
+            .map(|i| {
+                trader_record(
+                    &format!("src::ep_record_{i:02}"),
+                    "2025-06-01",
+                    &format!("Title {i}"),
+                    &format!("Body {i}"),
+                )
+            })
+            .collect();
+
+        // First run: advance enough batches to trigger at least one source_epoch
+        // increment so the persisted epoch is non-zero.
+        let persisted_epoch = {
+            let store = Arc::new(FileSplitStore::open(&store_path, split, 11).unwrap());
+            let sampler = TripletSampler::new(build_config(), Arc::clone(&store));
+            sampler.register_source(Box::new(InMemorySource::new("src", records.clone())));
+            // Drive enough batches to cycle through all records and advance epoch.
+            for _ in 0..8 {
+                let _ = sampler.next_triplet_batch(SplitLabel::Train);
+            }
+            sampler.save_sampler_state(None).unwrap();
+            let state = store.load_sampler_state().unwrap().unwrap();
+            state.source_epoch
+        };
+
+        // Epoch must have advanced — the test is meaningless if it stayed at 0.
+        assert!(
+            persisted_epoch > 0,
+            "source_epoch should have advanced; got {persisted_epoch}"
+        );
+
+        // Second run: simulate a cache wipe by NOT reloading the ingestion
+        // stream cursors, i.e. start the sampler fresh but with the same store.
+        // After the very first ingest call the ingestion manager's source_epoch
+        // must equal the persisted value before any refresh fires.
+        let store = Arc::new(FileSplitStore::open(&store_path, split, 11).unwrap());
+        let sampler = TripletSampler::new(build_config(), Arc::clone(&store));
+        sampler.register_source(Box::new(InMemorySource::new("src", records.clone())));
+        {
+            let mut inner = sampler.inner.lock().unwrap();
+            // Trigger cursor loading (the step that must set source_epoch early).
+            inner.ingest_internal(SplitLabel::Train).unwrap();
+            assert_eq!(
+                inner.ingestion.source_epoch(),
+                persisted_epoch,
+                "ingestion source_epoch must match persisted epoch after resume"
+            );
+            assert_eq!(
+                inner.source_epoch, persisted_epoch,
+                "sampler source_epoch must match persisted epoch after resume"
+            );
+        }
     }
 
     #[test]
