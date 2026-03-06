@@ -24,7 +24,7 @@ use crate::data::{
 };
 use crate::epoch::EpochTracker;
 use crate::errors::SamplerError;
-use crate::hash::stable_hash_str;
+use crate::hash::{derive_epoch_seed, stable_hash_str};
 use crate::ingestion::IngestionManager;
 use crate::metadata::{META_FIELD_DATE, MetadataKey};
 use crate::source::DataSource;
@@ -333,7 +333,11 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         };
         let ingestion = IngestionManager::new(buffer_size, config.clone());
         let epoch_backend = Some(Arc::clone(&split_store) as Arc<dyn EpochStateStore>);
-        let epoch_tracker = EpochTracker::new(true, epoch_backend, config.seed ^ EPOCH_SEED_OFFSET);
+        let epoch_tracker = EpochTracker::new(
+            true,
+            epoch_backend,
+            derive_epoch_seed(config.seed, EPOCH_SEED_OFFSET),
+        );
         let mut sampler = Self {
             rng: DeterministicRng::new(config.seed),
             config,
@@ -372,6 +376,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
 
     fn text_recipes(&self) -> &[TextRecipe] {
         &self.text_recipes
+    }
+
+    /// Current epoch-adjusted seed: mixes `source_epoch` into `config.seed` so every epoch
+    /// produces a distinct permutation across all seed-dependent operations.
+    fn epoch_seed(&self) -> u64 {
+        derive_epoch_seed(self.config.seed, self.source_epoch)
     }
 
     fn register_source(&mut self, source: Box<dyn DataSource + 'static>) {
@@ -425,9 +435,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             // - first sampled window is spread across records/sections,
             // - subsequent calls still rotate cyclically through the pool.
             let cursor_key = format!("{}::{}", record_id, section_idx);
-            let start = (stable_hash_str(self.config.seed ^ self.source_epoch, &cursor_key)
-                as usize)
-                % pool.len();
+            let start = (stable_hash_str(self.epoch_seed(), &cursor_key) as usize) % pool.len();
             self.chunk_cursors.insert(key.clone(), start);
         }
         let cursor = self.chunk_cursors.entry(key).or_insert(0);
@@ -483,7 +491,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 .push(idx);
         }
 
-        let shuffle_seed = self.config.seed ^ self.source_epoch;
+        let shuffle_seed = self.epoch_seed();
         for indices in self.source_record_indices.values_mut() {
             indices.sort_by_key(|idx| {
                 self.records
@@ -528,7 +536,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
 
     fn shuffled_source_cycle(&self, cycle: u64) -> Vec<SourceId> {
         let mut sources = self.source_order.clone();
-        let seed = self.config.seed ^ self.source_epoch ^ cycle;
+        let seed = self.epoch_seed() ^ cycle;
         sources.sort_by_key(|source| stable_hash_str(seed, source));
         sources
     }
@@ -816,7 +824,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             }
             let mut cursor = *self.source_record_cursors.get(source).unwrap_or(&0);
             let cycle = cursor / indices.len();
-            let offset_seed = self.config.seed ^ self.source_epoch ^ (cycle as u64);
+            let offset_seed = self.epoch_seed() ^ (cycle as u64);
             let offset = (stable_hash_str(offset_seed, source) as usize) % indices.len();
             let mut wrapped = false;
             let mut selected: Option<DataRecord> = None;
@@ -1343,8 +1351,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 // section offset instead of always starting at the first matching section.
                 // This avoids systematic head-bias while preserving reproducibility.
                 let seed_key = format!("{}::{}", key.0, key.1);
-                (stable_hash_str(self.config.seed ^ self.source_epoch, &seed_key) as usize)
-                    % indices.len()
+                (stable_hash_str(self.epoch_seed(), &seed_key) as usize) % indices.len()
             });
         for offset in 0..indices.len() {
             let section_idx = indices[(start_offset + offset) % indices.len()];
