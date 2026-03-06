@@ -985,7 +985,7 @@ fn huggingface_different_epoch_seeds_produce_different_record_orderings() {
 
     // epoch 0: derive_epoch_seed(base, 0) = base ^ 0 = base
     let base_seed: u64 = 0xC0FFEE;
-    let epoch0_seed = base_seed ^ 0;
+    let epoch0_seed = base_seed;
     let epoch1_seed = base_seed ^ 1;
 
     let epoch0_snapshot = source

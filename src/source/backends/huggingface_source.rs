@@ -702,6 +702,7 @@ struct SourceState {
 
 type ParquetGroupKey = (PathBuf, usize);
 type ParquetGroupRequest = (usize, usize, ShardIndex);
+type ParquetManifestCandidates = (Vec<String>, HashMap<String, u64>, usize);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct PersistedShardSequence {
@@ -1394,7 +1395,7 @@ impl HuggingFaceRowSource {
     fn candidates_from_parquet_manifest_json(
         config: &HuggingFaceRowsConfig,
         json: &Value,
-    ) -> Result<(Vec<String>, HashMap<String, u64>, usize), SamplerError> {
+    ) -> Result<ParquetManifestCandidates, SamplerError> {
         let accepted = Self::normalized_shard_extensions(config);
 
         let mut candidates = Vec::new();
@@ -1714,7 +1715,7 @@ impl HuggingFaceRowSource {
     /// Query datasets-server parquet manifest and derive shard candidates.
     fn list_remote_candidates_from_parquet_manifest(
         config: &HuggingFaceRowsConfig,
-    ) -> Result<(Vec<String>, HashMap<String, u64>, usize), SamplerError> {
+    ) -> Result<ParquetManifestCandidates, SamplerError> {
         let endpoint = Self::parquet_manifest_endpoint();
         info!(
             "[triplets:hf] reading datasets-server parquet manifest for dataset {}",
@@ -1748,7 +1749,7 @@ impl HuggingFaceRowSource {
     fn parse_parquet_manifest_response(
         config: &HuggingFaceRowsConfig,
         body: &str,
-    ) -> Result<(Vec<String>, HashMap<String, u64>, usize), SamplerError> {
+    ) -> Result<ParquetManifestCandidates, SamplerError> {
         let json: Value =
             serde_json::from_str(body).map_err(|err| SamplerError::SourceUnavailable {
                 source_id: config.source_id.clone(),

@@ -147,10 +147,15 @@ pub mod huggingface {
     /// (`step.unwrap_or(max_records)`) to set this source's internal row-read
     /// batch target for each refresh pass.
     pub const HUGGINGFACE_REFRESH_BATCH_MULTIPLIER: usize = 8;
+    /// Version tag for persisted shard-sequence metadata payloads.
     pub const SHARD_SEQUENCE_STATE_VERSION: u32 = 1;
+    /// Filename for persisted shard-sequence metadata.
     pub const SHARD_SEQUENCE_STATE_FILE: &str = "_sequence_state.json";
+    /// Extension used by persisted per-shard row-store files.
     pub const HF_SHARD_STORE_EXTENSION: &str = "simdr";
+    /// Key prefix for individual row payload entries in shard row stores.
     pub const HF_SHARD_STORE_ROW_PREFIX: &[u8] = b"rowv1|";
+    /// Metadata key storing row counts in shard row stores.
     pub const HF_SHARD_STORE_META_ROWS_KEY: &[u8] = b"meta|rows";
     /// Directory segment used when no split is specified (all-splits mode).
     /// Must not collide with any real HF split name; HF split names never start with `_`.
