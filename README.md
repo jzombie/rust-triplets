@@ -253,7 +253,7 @@ Example list (see [examples/common/hf_sources.txt](examples/common/hf_sources.tx
 
 ```text
 # role columns
-hf://labofsahil/hackernews-vector-search-dataset/default text=text
+hf://labofsahil/hackernews-vector-search-dataset/default text=title,text
 hf://wikimedia/wikipedia/20231101.en/train anchor=title positive=text
 
 # explicit text-column mode

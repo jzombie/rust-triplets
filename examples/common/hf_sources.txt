@@ -6,7 +6,7 @@
 # - Use text= for ordered text-columns mode
 
 # Conversational tech
-hf://labofsahil/hackernews-vector-search-dataset/default text=text
+hf://labofsahil/hackernews-vector-search-dataset/default text=title,text
 
 # Skeleton of most embedding spaces
 hf://wikimedia/wikipedia/20231101.en anchor=title positive=text

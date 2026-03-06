@@ -39,7 +39,7 @@ const DEFAULT_SOURCE_LIST: &str = r#"# triplets Hugging Face source-list format:
 # hf://roneneldan/TinyStories/default text=text
 
 # Conversational tech
-hf://labofsahil/hackernews-vector-search-dataset/default text=text
+hf://labofsahil/hackernews-vector-search-dataset/default text=title,text
 
 # Skeleton of most embedding spaces
 hf://wikimedia/wikipedia/20231101.en anchor=title positive=text
