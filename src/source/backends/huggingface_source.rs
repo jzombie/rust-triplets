@@ -3920,7 +3920,12 @@ mod tests {
                 materialized_rows: 0,
                 total_rows: None,
                 shards: Vec::new(),
-                remote_candidates: None,
+                // Use Some(vec![]) rather than None so that trigger_expansion_if_needed
+                // treats this source as "no remote candidates" and never spawns a
+                // background thread that would make live network calls during tests.
+                // Tests that explicitly exercise the remote-fetch path reset this field
+                // to None before the call under test.
+                remote_candidates: Some(vec![]),
                 remote_candidate_sizes: HashMap::new(),
                 next_remote_idx: 0,
                 eviction_queue: VecDeque::new(),
@@ -6665,6 +6670,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
         let source = test_source(config);
+        // Simulate an uninitialized source that hasn't fetched candidates yet.
+        source.state.lock().unwrap().remote_candidates = None;
         assert_eq!(source.len_hint(), Some(1));
     }
 
@@ -7176,6 +7183,9 @@ mod tests {
         let config = test_config(dir.path().to_path_buf());
         let source = test_source(config);
         let (base_url, server) = spawn_manifest_and_shard_http(b"{\"text\":\"hello\"}\n".to_vec());
+
+        // Reset to None so ensure_row_available triggers the manifest-fetch path.
+        source.state.lock().unwrap().remote_candidates = None;
 
         with_env_var(
             "TRIPLETS_HF_PARQUET_ENDPOINT",
