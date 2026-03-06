@@ -14,9 +14,10 @@ use crate::config::{
     ChunkingStrategy, NegativeStrategy, SamplerConfig, Selector, TextRecipe, TripletRecipe,
 };
 use crate::constants::sampler::{
-    EPOCH_SEED_OFFSET, EXHAUSTION_RETRY_LIMIT, NEG_REASON_WRONG_ARTICLE, NEG_REASON_WRONG_DATE,
-    NEG_REASON_WRONG_QA, PREFETCHER_SOURCE_ID, PREFETCHER_STOPPED_REASON, RECIPE_LABEL_TEXT,
-    RECIPE_LABEL_TRIPLETS, ROLE_LABEL_ANCHOR, ROLE_LABEL_CONTEXT, SAME_SELECTOR_PAIR_RETRY_LIMIT,
+    ANCHOR_POSITIVE_SWAP_MASK, EPOCH_SEED_OFFSET, EXHAUSTION_RETRY_LIMIT, NEG_REASON_WRONG_ARTICLE,
+    NEG_REASON_WRONG_DATE, NEG_REASON_WRONG_QA, PREFETCHER_SOURCE_ID, PREFETCHER_STOPPED_REASON,
+    RECIPE_LABEL_TEXT, RECIPE_LABEL_TRIPLETS, ROLE_LABEL_ANCHOR, ROLE_LABEL_CONTEXT,
+    SAME_SELECTOR_PAIR_RETRY_LIMIT,
 };
 use crate::data::{
     ChunkView, DataRecord, PairLabel, RecordChunk, RecordSection, SampleBatch, SamplePair,
@@ -1209,6 +1210,24 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         self.build_triplet_with_selector_pair_policy(recipe, record, false)
     }
 
+    /// Finalize a triplet by selecting a negative and applying a deterministic 50 % coin-flip
+    /// that swaps anchor and positive.
+    ///
+    /// # Anchor/positive swap
+    ///
+    /// Before constructing the [`SampleTriplet`], the sampler tests the least-significant bit of
+    /// the next RNG word. When the bit is zero (≈ 50 % of the time) the anchor and positive
+    /// slots are exchanged so that what was originally selected as the positive becomes the
+    /// anchor, and vice-versa.
+    ///
+    /// **Why this matters:** contrastive objectives such as InfoNCE treat the two non-negative
+    /// slots asymmetrically only in so far as downstream code does. If the model can learn a
+    /// positional shortcut — for example "the anchor is always the shorter text" — it can
+    /// achieve low loss without learning the intended similarity structure. The swap eliminates
+    /// that opportunity by ensuring both orderings appear at equal frequency, forcing the model
+    /// to treat the two positive-pair slots symmetrically.
+    ///
+    /// The negative chunk is unaffected by the swap.
     fn finalize_triplet_with_negative(
         &mut self,
         recipe: &TripletRecipe,
@@ -1220,6 +1239,15 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             self.select_negative_record(record, &recipe.negative_strategy)?;
         let mut negative_chunk = self.select_chunk(&negative_record, &recipe.negative_selector)?;
         self.decorate_chunk(&negative_record, &mut negative_chunk);
+
+        // 50 % coin-flip: swap anchor and positive to prevent positional shortcuts.
+        let (anchor_chunk, positive_chunk) = if self.rng.next_u64() & ANCHOR_POSITIVE_SWAP_MASK == 0
+        {
+            (positive_chunk, anchor_chunk)
+        } else {
+            (anchor_chunk, positive_chunk)
+        };
+
         let weight = recipe.weight
             * self.triplet_chunk_weight(&anchor_chunk, &positive_chunk, &negative_chunk);
         let recipe_name = if fallback_used {

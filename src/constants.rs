@@ -67,6 +67,13 @@ pub mod sampler {
     pub const NEG_REASON_WRONG_ARTICLE: &str = "wrong_article";
     /// Negative-pair reason tag for mismatched question/answer pairings.
     pub const NEG_REASON_WRONG_QA: &str = "wrong_qa_pairing";
+    /// Denominator used for the anchor/positive swap coin-flip (swap when `rng & mask == 0`).
+    ///
+    /// A value of `1` means the least-significant bit is tested, giving a uniform 50 % swap
+    /// rate. This eliminates positional shortcuts — e.g. a model cannot learn to always treat
+    /// the first slot as the "short" anchor — which is especially important for InfoNCE and
+    /// similar contrastive objectives.
+    pub const ANCHOR_POSITIVE_SWAP_MASK: u64 = 1;
 }
 
 /// Constants used by sampler test fixtures and determinism snapshots.
@@ -87,15 +94,15 @@ pub mod sampler_tests {
     /// Expected hash for deterministic text batch sequence.
     pub const TEXT_BATCH_SEQUENCE_HASH: u64 = 16700524736973776041;
     /// Expected hash for deterministic triplet batch sequence.
-    pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 5355337600689408051;
+    pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 14618375830351864347;
     /// Expected hash for deterministic pair batch sequence.
-    pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 8198096084611658104;
+    pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 13133711470950174124;
     /// Expected hash for deterministic prefetch text batch sequence.
     pub const PREFETCH_TEXT_BATCH_SEQUENCE_HASH: u64 = 16740235391902546413;
     /// Expected hash for deterministic prefetch triplet batch sequence.
-    pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 17475118382069588204;
+    pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 11709520942485223708;
     /// Expected hash for deterministic prefetch pair batch sequence.
-    pub const PREFETCH_PAIR_BATCH_SEQUENCE_HASH: u64 = 13723875325938529772;
+    pub const PREFETCH_PAIR_BATCH_SEQUENCE_HASH: u64 = 2553049861003803008;
 }
 
 /// Constants used by split-store persistence and wire encoding.
