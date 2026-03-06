@@ -1395,11 +1395,15 @@ impl HuggingFaceRowSource {
     fn candidates_from_parquet_manifest_json(
         config: &HuggingFaceRowsConfig,
         json: &Value,
-    ) -> Result<(Vec<String>, HashMap<String, u64>), SamplerError> {
+    ) -> Result<(Vec<String>, HashMap<String, u64>, usize), SamplerError> {
         let accepted = Self::normalized_shard_extensions(config);
 
         let mut candidates = Vec::new();
         let mut candidate_sizes = HashMap::new();
+        // Counts entries that matched our accepted extensions before the already-cached
+        // filter.  A non-zero value means the parquet manifest exists for this dataset
+        // and config even when every shard has already been downloaded.
+        let mut matched_manifest_entries = 0usize;
         if let Some(entries) = json.get("parquet_files").and_then(Value::as_array) {
             for entry in entries {
                 let Some(url) = entry.get("url").and_then(Value::as_str) else {
@@ -1417,6 +1421,7 @@ impl HuggingFaceRowSource {
                     continue;
                 }
 
+                matched_manifest_entries += 1;
                 let candidate = format!("{REMOTE_URL_PREFIX}{url}");
                 let expected_size = entry.get("size").and_then(Value::as_u64);
                 let target = Self::candidate_target_path(config, &candidate);
@@ -1454,23 +1459,38 @@ impl HuggingFaceRowSource {
         candidates.sort();
         candidates.dedup();
         candidate_sizes.retain(|candidate, _| candidates.binary_search(candidate).is_ok());
-        Ok((candidates, candidate_sizes))
+        Ok((candidates, candidate_sizes, matched_manifest_entries))
     }
 
     /// Resolve and filter remote shard candidates from manifest or repository listing.
     fn list_remote_candidates(
         config: &HuggingFaceRowsConfig,
     ) -> Result<(Vec<String>, HashMap<String, u64>), SamplerError> {
-        if let Ok((candidates, candidate_sizes)) =
+        if let Ok((candidates, candidate_sizes, matched_manifest_entries)) =
             Self::list_remote_candidates_from_parquet_manifest(config)
-            && !candidates.is_empty()
         {
-            info!(
-                "[triplets:hf] remote parquet manifest candidates matching {:?}: {}",
-                config.shard_extensions,
-                candidates.len()
-            );
-            return Ok((candidates, candidate_sizes));
+            if !candidates.is_empty() {
+                info!(
+                    "[triplets:hf] remote parquet manifest candidates matching {:?}: {}",
+                    config.shard_extensions,
+                    candidates.len()
+                );
+                return Ok((candidates, candidate_sizes));
+            }
+            if matched_manifest_entries > 0 {
+                // The parquet manifest exists and all its shards are already cached;
+                // this dataset config is fully materialized locally.  Do NOT fall
+                // through to the hf-hub siblings listing — that lists every language
+                // config in the repository and would introduce unrelated shards.
+                info!(
+                    "[triplets:hf] all {} parquet manifest shard(s) for dataset='{}' \
+                     config='{}' split='{}' are already cached; source exhausted",
+                    matched_manifest_entries, config.dataset, config.config, config.split
+                );
+                return Ok((Vec::new(), HashMap::new()));
+            }
+            // Manifest returned zero matched entries — this dataset may not support
+            // the datasets-server parquet API.  Fall through to the hf-hub listing.
         }
 
         let api = ApiBuilder::new()
@@ -1695,7 +1715,7 @@ impl HuggingFaceRowSource {
     /// Query datasets-server parquet manifest and derive shard candidates.
     fn list_remote_candidates_from_parquet_manifest(
         config: &HuggingFaceRowsConfig,
-    ) -> Result<(Vec<String>, HashMap<String, u64>), SamplerError> {
+    ) -> Result<(Vec<String>, HashMap<String, u64>, usize), SamplerError> {
         let endpoint = Self::parquet_manifest_endpoint();
         info!(
             "[triplets:hf] reading datasets-server parquet manifest for dataset {}",
@@ -1724,7 +1744,7 @@ impl HuggingFaceRowSource {
     fn parse_parquet_manifest_response(
         config: &HuggingFaceRowsConfig,
         body: &str,
-    ) -> Result<(Vec<String>, HashMap<String, u64>), SamplerError> {
+    ) -> Result<(Vec<String>, HashMap<String, u64>, usize), SamplerError> {
         let json: Value =
             serde_json::from_str(body).map_err(|err| SamplerError::SourceUnavailable {
                 source_id: config.source_id.clone(),
@@ -4360,7 +4380,7 @@ mod tests {
             ]
         });
 
-        let (candidates, sizes) =
+        let (candidates, sizes, matched) =
             HuggingFaceRowSource::candidates_from_parquet_manifest_json(&config, &payload).unwrap();
         assert_eq!(candidates.len(), 2);
         assert!(
@@ -4374,6 +4394,7 @@ mod tests {
                 .any(|c| c.ends_with("https://host/x/train/001.ndjson"))
         );
         assert_eq!(sizes.len(), 2);
+        assert_eq!(matched, 2);
     }
 
     #[test]
@@ -4401,13 +4422,15 @@ mod tests {
             ]
         });
 
-        let (candidates, sizes) =
+        let (candidates, sizes, matched) =
             HuggingFaceRowSource::candidates_from_parquet_manifest_json(&config, &payload).unwrap();
         assert_eq!(candidates.len(), 1);
         assert!(candidates[0].ends_with(stale_url));
         assert!(!stale_target.exists());
         assert_eq!(sizes[&candidates[0]], 9);
         assert!(complete_target.exists());
+        // The complete shard is cached but still counts toward matched_manifest_entries.
+        assert_eq!(matched, 2);
     }
 
     #[test]
@@ -5405,10 +5428,12 @@ mod tests {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
         let payload = json!({"other": []});
-        let (candidates, sizes) =
+        let (candidates, sizes, matched) =
             HuggingFaceRowSource::candidates_from_parquet_manifest_json(&config, &payload).unwrap();
         assert!(candidates.is_empty());
         assert!(sizes.is_empty());
+        // No parquet_files key → zero matched entries.
+        assert_eq!(matched, 0);
     }
 
     #[test]
@@ -5825,10 +5850,11 @@ mod tests {
         }))
         .unwrap();
 
-        let (candidates, sizes) =
+        let (candidates, sizes, matched) =
             HuggingFaceRowSource::parse_parquet_manifest_response(&config, &body).unwrap();
         assert_eq!(candidates.len(), 1);
         assert_eq!(sizes.len(), 1);
+        assert_eq!(matched, 1);
     }
 
     #[test]
@@ -5843,14 +5869,16 @@ mod tests {
         .unwrap();
         let (base_url, server) = spawn_one_shot_http(body);
 
-        let (candidates, sizes) = with_env_var("TRIPLETS_HF_PARQUET_ENDPOINT", &base_url, || {
-            HuggingFaceRowSource::list_remote_candidates_from_parquet_manifest(&config)
-        })
-        .unwrap();
+        let (candidates, sizes, matched) =
+            with_env_var("TRIPLETS_HF_PARQUET_ENDPOINT", &base_url, || {
+                HuggingFaceRowSource::list_remote_candidates_from_parquet_manifest(&config)
+            })
+            .unwrap();
         server.join().unwrap();
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(sizes.len(), 1);
+        assert_eq!(matched, 1);
     }
 
     #[test]
@@ -5950,6 +5978,51 @@ mod tests {
         assert_eq!(candidates.len(), 1);
         assert_eq!(sizes.len(), 1);
         assert!(candidates[0].ends_with("/1.ndjson"));
+    }
+
+    #[test]
+    fn list_remote_candidates_does_not_fall_back_when_all_manifest_shards_cached() {
+        // Regression test: when every shard in the parquet manifest is already
+        // cached locally, list_remote_candidates must return an empty candidate
+        // list and must NOT fall through to the hf-hub siblings listing.
+        //
+        // The original bug: `!candidates.is_empty()` was the fallthrough guard,
+        // so a fully-cached dataset triggered the siblings fallback which returns
+        // files from every language config in the repository — not just the one
+        // requested (e.g. wikimedia/wikipedia/20231101.en → also .fr, .de, …).
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+
+        // Pre-create the .simdr store target so the manifest entry looks cached.
+        let shard_url = "https://host/datasets/org/ds/resolve/main/train/part-000.ndjson";
+        let candidate = format!("{REMOTE_URL_PREFIX}{shard_url}");
+        let target = HuggingFaceRowSource::candidate_target_path(&config, &candidate);
+        let store_target = HuggingFaceRowSource::shard_store_path_for(&target);
+        fs::create_dir_all(store_target.parent().unwrap()).unwrap();
+        fs::write(&store_target, b"cached").unwrap();
+
+        let body = serde_json::to_vec(&json!({
+            "parquet_files": [
+                {"url": shard_url, "size": 6}
+            ]
+        }))
+        .unwrap();
+        let (base_url, server) = spawn_one_shot_http(body);
+
+        // list_remote_candidates must succeed and return empty — not fall through
+        // to the hf-hub sibling listing (which would require a real network call
+        // and would return wrong-language shards for multi-config datasets).
+        let (candidates, sizes) = with_env_var("TRIPLETS_HF_PARQUET_ENDPOINT", &base_url, || {
+            HuggingFaceRowSource::list_remote_candidates(&config)
+        })
+        .unwrap();
+        server.join().unwrap();
+
+        assert!(
+            candidates.is_empty(),
+            "expected empty candidates when all manifest shards are already cached"
+        );
+        assert!(sizes.is_empty());
     }
 
     #[test]
