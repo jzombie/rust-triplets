@@ -4311,10 +4311,25 @@ mod tests {
         .unwrap();
         fs::write(temp_root.path().join(".cache"), b"blocking-file").unwrap();
 
+        // Serve a valid empty-splits response so fetch_global_row_count returns
+        // None cleanly without printing a WARN about a 401 from the real API.
+        let size_payload = serde_json::json!({"size": {"splits": []}})
+            .to_string()
+            .into_bytes();
+        let (size_base_url, size_server) = spawn_one_shot_http(size_payload);
+
         with_current_dir(temp_root.path(), || {
-            let built = build_hf_sources(&roots);
-            assert_eq!(built.len(), 1);
+            with_env_var(
+                "TRIPLETS_HF_SIZE_ENDPOINT",
+                &format!("{size_base_url}/size"),
+                || {
+                    let built = build_hf_sources(&roots);
+                    assert_eq!(built.len(), 1);
+                },
+            );
         });
+
+        size_server.join().unwrap();
     }
 
     #[test]
@@ -4455,6 +4470,14 @@ mod tests {
 
     #[test]
     fn candidates_from_parquet_manifest_skips_complete_cached_and_replaces_incomplete() {
+        // Suppress the expected WARN "incomplete cached shard detected (will redownload)"
+        // that is emitted when a cached shard exists with the wrong on-disk size.
+        // That warn is correct production behaviour; silenced here to keep test output clean.
+        let _quiet = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::ERROR)
+                .finish(),
+        );
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
 
@@ -4491,6 +4514,14 @@ mod tests {
 
     #[test]
     fn candidates_from_parquet_manifest_errors_when_removing_incomplete_target_fails() {
+        // Suppress the expected WARN "incomplete cached shard detected (will redownload)"
+        // emitted before the attempted removal fails.  The removal failure is what this
+        // test asserts on; the warn preceding it is correct production behaviour.
+        let _quiet = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::ERROR)
+                .finish(),
+        );
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
         let url = "https://host/datasets/org/ds/resolve/main/train/blocked.parquet";
@@ -4567,6 +4598,15 @@ mod tests {
 
     #[test]
     fn build_shard_index_errors_when_parquet_present_but_not_accepted() {
+        // Suppress the expected WARN "found persisted parquet under … (transient-only policy)"
+        // that fires when parquet files are present in the snapshot dir but parquet is not
+        // listed in shard_extensions.  That warn is correct production behaviour; this test
+        // only cares that the function returns an error, not the diagnostic message.
+        let _quiet = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::ERROR)
+                .finish(),
+        );
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("rows.parquet"), b"fake").unwrap();
         let mut config = test_config(dir.path().to_path_buf());
@@ -4709,6 +4749,14 @@ mod tests {
 
     #[test]
     fn load_persisted_shard_sequence_returns_none_for_identity_mismatch() {
+        // Suppress the expected WARN "shard-sequence state mismatch" that is emitted when
+        // the persisted source_id does not match the current config.  The mismatch is the
+        // entire point of this test; the warn is correct production behaviour.
+        let _quiet = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::ERROR)
+                .finish(),
+        );
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
         let state_path = HuggingFaceRowSource::shard_sequence_state_path(&config);
@@ -5366,6 +5414,14 @@ mod tests {
 
     #[test]
     fn download_next_remote_shard_skips_zero_row_download() {
+        // Suppress the expected WARN "downloaded shard had zero rows and was skipped"
+        // emitted when a shard file contains no JSON lines after download.  That warn
+        // is correct production behaviour; silenced here to keep test output clean.
+        let _quiet = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::ERROR)
+                .finish(),
+        );
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
         let source = test_source(config);
@@ -5832,6 +5888,14 @@ mod tests {
 
     #[test]
     fn resolve_remote_candidates_from_siblings_falls_back_when_split_filter_misses() {
+        // Suppress the expected WARN "split filter 'train' matched no remote files; falling
+        // back to extension-only remote candidate scan" that fires when no sibling paths
+        // contain the split tag.  The fallback is what this test asserts on.
+        let _quiet = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::ERROR)
+                .finish(),
+        );
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path().to_path_buf());
         config.split = "train".to_string();
@@ -5866,6 +5930,15 @@ mod tests {
 
     #[test]
     fn resolve_remote_candidates_from_siblings_returns_empty_when_no_matches_and_no_parquet() {
+        // Suppress the expected WARN "no remote candidates found for dataset='org/dataset'"
+        // emitted when the sibling list contains no files matching the accepted extensions
+        // and no parquet files.  That warn is correct production behaviour; the empty
+        // return value is what this test asserts on.
+        let _quiet = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::ERROR)
+                .finish(),
+        );
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
         let accepted = HuggingFaceRowSource::normalized_shard_extensions(&config);
@@ -6123,6 +6196,14 @@ mod tests {
 
     #[test]
     fn download_and_materialize_shard_replaces_incomplete_existing_target() {
+        // Suppress the expected WARN "replacing incomplete shard before retry" that fires
+        // when an existing target file's size does not match the expected manifest size.
+        // Detecting and replacing the stale file is what this test asserts on.
+        let _quiet = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::ERROR)
+                .finish(),
+        );
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
         let payload = b"{\"text\":\"a\"}\n".to_vec();
@@ -6446,6 +6527,15 @@ mod tests {
 
     #[test]
     fn persisted_shard_sequence_roundtrip_respects_sampler_seed() {
+        // Suppress the expected WARN "shard-sequence state mismatch" emitted by the second
+        // load call below (seed 9999 ≠ persisted seed 4242).  That mismatch is exactly what
+        // the test exercises to confirm seed-based rejection; the warn is correct production
+        // behaviour.
+        let _quiet = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::ERROR)
+                .finish(),
+        );
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
         let source = test_source(config.clone());

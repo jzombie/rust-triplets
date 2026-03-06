@@ -951,6 +951,15 @@ mod tests {
             .with_sampler_seed(1)
             .with_follow_links(false)
             .with_text_files_only(true);
+
+        // Silence expected WARN-level skip logs: the warn! calls are correct production
+        // behavior (unreadable record skipped), but are noise in test output.
+        let _quiet = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::ERROR)
+                .finish(),
+        );
+
         let indexable = index
             .refresh_indexable(None, Some(10), |path| {
                 build_stub_record(path, &source_id, root, &bad_path)
@@ -1549,6 +1558,13 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let index = FileCorpusIndex::new(&root, "batch_read").with_sampler_seed(5);
         let store = index.open_index_store().unwrap();
+
+        // Silence expected WARN-level skip logs for the deliberately bad path below.
+        let _quiet = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::ERROR)
+                .finish(),
+        );
 
         let path = root.join("one.txt");
         fs::write(&path, "hello").unwrap();
