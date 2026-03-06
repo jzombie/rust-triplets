@@ -8128,4 +8128,247 @@ mod tests {
         assert_eq!(text.next().unwrap().samples.len(), 1);
         assert_eq!(triplet.error_count(), 0);
     }
+
+    // A DataSource with real records that are returned in a seed-dependent order.
+    // It captures every `config.seed` value it receives so tests can assert that
+    // the epoch XOR is actually reaching the source contract boundary.
+    struct SeedCapturingSource {
+        id: SourceId,
+        records: Vec<DataRecord>,
+        received_seeds: Arc<Mutex<Vec<u64>>>,
+    }
+
+    impl SeedCapturingSource {
+        fn new(
+            id: &str,
+            records: Vec<DataRecord>,
+            received_seeds: Arc<Mutex<Vec<u64>>>,
+        ) -> Self {
+            Self {
+                id: id.to_string(),
+                records,
+                received_seeds,
+            }
+        }
+    }
+
+    impl DataSource for SeedCapturingSource {
+        fn id(&self) -> &str {
+            &self.id
+        }
+
+        fn refresh(
+            &self,
+            config: &SamplerConfig,
+            _cursor: Option<&SourceCursor>,
+            _limit: Option<usize>,
+        ) -> Result<SourceSnapshot, SamplerError> {
+            self.received_seeds
+                .lock()
+                .expect("seed lock poisoned")
+                .push(config.seed);
+            // Return records in a seed-dependent order so a different epoch seed
+            // produces a genuinely different record sequence.
+            let mut ordered: Vec<&DataRecord> = self.records.iter().collect();
+            ordered.sort_by_key(|r| stable_hash_str(config.seed, &r.id));
+            let records = ordered.into_iter().cloned().collect();
+            Ok(SourceSnapshot {
+                records,
+                cursor: SourceCursor {
+                    last_seen: Utc::now(),
+                    revision: 0,
+                },
+            })
+        }
+
+        fn reported_record_count(&self, _config: &SamplerConfig) -> Result<u128, SamplerError> {
+            Ok(self.records.len() as u128)
+        }
+
+        fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn different_epochs_produce_different_record_orderings() {
+        // Behavioural guarantee: advancing the epoch must produce a measurably
+        // different sequence of anchor records, not just change an internal
+        // counter with no observable effect.
+        //
+        // How it works: rebuild_chunk_index() sorts source_record_indices by
+        // stable_hash_str(epoch_seed(), record_id), and choose_anchor_record()
+        // derives its offset from epoch_seed() ^ cycle.  Both are keyed to the
+        // current epoch, so a different epoch shuffles the records differently.
+        //
+        // With 6 records the probability that two distinct epoch seeds produce
+        // the same permutation is 1/6! ≈ 0.14%.  We fix the seed so the test
+        // is fully deterministic and will never spuriously pass.
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let store = Arc::new(DeterministicSplitStore::new(split, 55).unwrap());
+
+        let records: Vec<DataRecord> = (0..6)
+            .map(|i| {
+                trader_record(
+                    &format!("epoch_order::rec_{i:02}"),
+                    "2025-01-01",
+                    &format!("Title {i}"),
+                    &format!("Body {i} with enough context for sampling"),
+                )
+            })
+            .collect();
+
+        let config = SamplerConfig {
+            seed: 55,
+            batch_size: 1,
+            recipes: vec![TripletRecipe {
+                name: "epoch_order".into(),
+                anchor: Selector::Role(SectionRole::Anchor),
+                positive_selector: Selector::Role(SectionRole::Context),
+                negative_selector: Selector::Role(SectionRole::Context),
+                negative_strategy: NegativeStrategy::WrongArticle,
+                weight: 1.0,
+                instruction: None,
+            }],
+            text_recipes: Vec::new(),
+            allowed_splits: vec![SplitLabel::Train],
+            ..SamplerConfig::default()
+        };
+
+        let sampler = TripletSampler::new(config, store);
+        sampler.register_source(Box::new(InMemorySource::new("epoch_order", records)));
+
+        // Epoch 0: collect one anchor per batch across all 6 records.
+        let epoch0: Vec<String> = (0..6)
+            .map(|_| {
+                sampler
+                    .next_triplet_batch(SplitLabel::Train)
+                    .expect("epoch-0 batch must succeed")
+                    .triplets[0]
+                    .anchor
+                    .record_id
+                    .clone()
+            })
+            .collect();
+
+        // Advance to epoch 1 — rebuilds the shuffle with a new seed.
+        sampler.set_epoch(1).unwrap();
+
+        // Epoch 1: collect the same number of batches.
+        let epoch1: Vec<String> = (0..6)
+            .map(|_| {
+                sampler
+                    .next_triplet_batch(SplitLabel::Train)
+                    .expect("epoch-1 batch must succeed")
+                    .triplets[0]
+                    .anchor
+                    .record_id
+                    .clone()
+            })
+            .collect();
+
+        assert_ne!(
+            epoch0, epoch1,
+            "epoch 0 and epoch 1 produced identical anchor orderings — \
+             epoch seed has no effect on record selection"
+        );
+    }
+
+    #[test]
+    fn resumed_sampler_uses_persisted_epoch_seed() {
+        // The epoch feature is designed for the save/resume scenario: a sampler
+        // that restarts from a stored state at epoch N must see the same
+        // source-level seed as if it had never stopped.  This test encodes that
+        // contract through the public API only.
+        //
+        // Phase 1 — advance to epoch 1, produce a batch, persit state.
+        // Phase 2 — open a fresh sampler on the same store (no set_epoch call);
+        //           the first batch must arrive with epoch-1 seeds automatically.
+        //
+        // SeedCapturingSource sorts its records by the received seed, so the
+        // assertion is meaningful: the wrong seed produces a different ordering,
+        // not merely a different value in an internal field.
+        let base_seed = 0xC0FFEE_u64;
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let temp = tempdir().unwrap();
+        let store_path = temp.path().join("epoch_seed_resume_store");
+
+        let records: Vec<DataRecord> = (0..6)
+            .map(|i| {
+                trader_record(
+                    &format!("seed_src::rec_{i:02}"),
+                    "2025-01-01",
+                    &format!("Title {i}"),
+                    &format!("Body {i} with enough context for sampling"),
+                )
+            })
+            .collect();
+
+        let make_config = || SamplerConfig {
+            seed: base_seed,
+            batch_size: 2,
+            recipes: vec![TripletRecipe {
+                name: "ep".into(),
+                anchor: Selector::Role(SectionRole::Anchor),
+                positive_selector: Selector::Role(SectionRole::Context),
+                negative_selector: Selector::Role(SectionRole::Context),
+                negative_strategy: NegativeStrategy::WrongArticle,
+                weight: 1.0,
+                instruction: None,
+            }],
+            text_recipes: Vec::new(),
+            allowed_splits: vec![SplitLabel::Train],
+            ..SamplerConfig::default()
+        };
+
+        // Phase 1: advance to epoch 1, run a batch, save state.
+        {
+            let store = Arc::new(FileSplitStore::open(&store_path, split, base_seed).unwrap());
+            let sampler = TripletSampler::new(make_config(), Arc::clone(&store));
+            sampler.register_source(Box::new(SeedCapturingSource::new(
+                "seed_src",
+                records.clone(),
+                Arc::new(Mutex::new(Vec::new())),
+            )));
+            sampler.set_epoch(1).unwrap();
+            sampler
+                .next_triplet_batch(SplitLabel::Train)
+                .expect("epoch-1 batch should succeed");
+            sampler.save_sampler_state(None).unwrap();
+        }
+
+        // Phase 2: fresh sampler from the same store — epoch is loaded from
+        // persisted state, no set_epoch call needed.  The source must receive
+        // the epoch-1 seed on the very first refresh, not the epoch-0 default.
+        let store = Arc::new(FileSplitStore::open(&store_path, split, base_seed).unwrap());
+        let seeds = Arc::new(Mutex::new(Vec::<u64>::new()));
+        let sampler = TripletSampler::new(make_config(), store);
+        sampler.register_source(Box::new(SeedCapturingSource::new(
+            "seed_src",
+            records.clone(),
+            Arc::clone(&seeds),
+        )));
+        let batch = sampler
+            .next_triplet_batch(SplitLabel::Train)
+            .expect("resumed batch should succeed");
+        assert_eq!(batch.triplets.len(), 2, "resumed sampler should produce a full batch");
+
+        let expected = derive_epoch_seed(base_seed, 1);
+        let captured = seeds.lock().unwrap();
+        assert!(!captured.is_empty(), "resumed source was never refreshed");
+        for seed in captured.iter() {
+            assert_eq!(
+                *seed, expected,
+                "resumed sampler used wrong epoch seed (got {seed:#x}, expected {expected:#x})"
+            );
+        }
+    }
 }
