@@ -32,6 +32,8 @@ use walkdir::WalkDir;
 use crate::SamplerError;
 use crate::config::{NegativeStrategy, SamplerConfig, Selector, TripletRecipe};
 use crate::constants::cache::HUGGINGFACE_GROUP;
+#[cfg(test)]
+use crate::constants::env_vars::{TRIPLETS_HF_PARQUET_ENDPOINT, TRIPLETS_HF_SIZE_ENDPOINT};
 use crate::constants::huggingface::{
     ALL_SPLITS_DIR, HF_SHARD_STORE_EXTENSION, HF_SHARD_STORE_META_ROWS_KEY,
     HF_SHARD_STORE_ROW_PREFIX, HUGGINGFACE_REFRESH_BATCH_MULTIPLIER, REMOTE_BOOTSTRAP_SHARDS,
@@ -1694,7 +1696,7 @@ impl HuggingFaceRowSource {
 
     fn parquet_manifest_endpoint() -> String {
         #[cfg(test)]
-        if let Ok(value) = std::env::var("TRIPLETS_HF_PARQUET_ENDPOINT")
+        if let Ok(value) = std::env::var(TRIPLETS_HF_PARQUET_ENDPOINT)
             && !value.trim().is_empty()
         {
             return value;
@@ -1704,7 +1706,7 @@ impl HuggingFaceRowSource {
 
     fn size_endpoint() -> String {
         #[cfg(test)]
-        if let Ok(value) = std::env::var("TRIPLETS_HF_SIZE_ENDPOINT")
+        if let Ok(value) = std::env::var(TRIPLETS_HF_SIZE_ENDPOINT)
             && !value.trim().is_empty()
         {
             return value;
@@ -4274,7 +4276,7 @@ mod tests {
         config.dataset = "invalid///dataset".to_string();
 
         let result = with_env_var(
-            "TRIPLETS_HF_PARQUET_ENDPOINT",
+            TRIPLETS_HF_PARQUET_ENDPOINT,
             "http://127.0.0.1:1/parquet",
             || HuggingFaceRowSource::list_remote_candidates(&config),
         );
@@ -4320,7 +4322,7 @@ mod tests {
 
         with_current_dir(temp_root.path(), || {
             with_env_var(
-                "TRIPLETS_HF_SIZE_ENDPOINT",
+                TRIPLETS_HF_SIZE_ENDPOINT,
                 &format!("{size_base_url}/size"),
                 || {
                     let built = build_hf_sources(&roots);
@@ -5999,7 +6001,7 @@ mod tests {
         let (base_url, server) = spawn_one_shot_http(body);
 
         let (candidates, sizes, matched) =
-            with_env_var("TRIPLETS_HF_PARQUET_ENDPOINT", &base_url, || {
+            with_env_var(TRIPLETS_HF_PARQUET_ENDPOINT, &base_url, || {
                 HuggingFaceRowSource::list_remote_candidates_from_parquet_manifest(&config)
             })
             .unwrap();
@@ -6024,7 +6026,7 @@ mod tests {
         .unwrap();
         let (base_url, server) = spawn_one_shot_http(body);
 
-        let rows = with_env_var("TRIPLETS_HF_SIZE_ENDPOINT", &base_url, || {
+        let rows = with_env_var(TRIPLETS_HF_SIZE_ENDPOINT, &base_url, || {
             HuggingFaceRowSource::fetch_global_row_count(&config)
         })
         .unwrap();
@@ -6034,12 +6036,12 @@ mod tests {
 
     #[test]
     fn endpoint_helpers_fallback_for_empty_env_values() {
-        let parquet = with_env_var("TRIPLETS_HF_PARQUET_ENDPOINT", "   ", || {
+        let parquet = with_env_var(TRIPLETS_HF_PARQUET_ENDPOINT, "   ", || {
             HuggingFaceRowSource::parquet_manifest_endpoint()
         });
         assert_eq!(parquet, "https://datasets-server.huggingface.co/parquet");
 
-        let size = with_env_var("TRIPLETS_HF_SIZE_ENDPOINT", "", || {
+        let size = with_env_var(TRIPLETS_HF_SIZE_ENDPOINT, "", || {
             HuggingFaceRowSource::size_endpoint()
         });
         assert_eq!(size, "https://datasets-server.huggingface.co/size");
@@ -6078,7 +6080,7 @@ mod tests {
         .unwrap();
         let (base_url, server) = spawn_one_shot_http(body);
 
-        let rows = with_env_var("TRIPLETS_HF_SIZE_ENDPOINT", &base_url, || {
+        let rows = with_env_var(TRIPLETS_HF_SIZE_ENDPOINT, &base_url, || {
             HuggingFaceRowSource::fetch_global_row_count(&config)
         })
         .unwrap();
@@ -6098,7 +6100,7 @@ mod tests {
         .unwrap();
         let (base_url, server) = spawn_one_shot_http(body);
 
-        let (candidates, sizes) = with_env_var("TRIPLETS_HF_PARQUET_ENDPOINT", &base_url, || {
+        let (candidates, sizes) = with_env_var(TRIPLETS_HF_PARQUET_ENDPOINT, &base_url, || {
             HuggingFaceRowSource::list_remote_candidates(&config)
         })
         .unwrap();
@@ -6141,7 +6143,7 @@ mod tests {
         // list_remote_candidates must succeed and return empty — not fall through
         // to the hf-hub sibling listing (which would require a real network call
         // and would return wrong-language shards for multi-config datasets).
-        let (candidates, sizes) = with_env_var("TRIPLETS_HF_PARQUET_ENDPOINT", &base_url, || {
+        let (candidates, sizes) = with_env_var(TRIPLETS_HF_PARQUET_ENDPOINT, &base_url, || {
             HuggingFaceRowSource::list_remote_candidates(&config)
         })
         .unwrap();
@@ -6159,7 +6161,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
 
-        let result = with_env_var("TRIPLETS_HF_PARQUET_ENDPOINT", "http://127.0.0.1:1", || {
+        let result = with_env_var(TRIPLETS_HF_PARQUET_ENDPOINT, "http://127.0.0.1:1", || {
             HuggingFaceRowSource::list_remote_candidates_from_parquet_manifest(&config)
         });
         assert!(result.is_err());
@@ -6170,7 +6172,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
 
-        let result = with_env_var("TRIPLETS_HF_SIZE_ENDPOINT", "http://127.0.0.1:1", || {
+        let result = with_env_var(TRIPLETS_HF_SIZE_ENDPOINT, "http://127.0.0.1:1", || {
             HuggingFaceRowSource::fetch_global_row_count(&config)
         });
         assert!(result.is_err());
@@ -7278,7 +7280,7 @@ mod tests {
         source.state.lock().unwrap().remote_candidates = None;
 
         with_env_var(
-            "TRIPLETS_HF_PARQUET_ENDPOINT",
+            TRIPLETS_HF_PARQUET_ENDPOINT,
             &format!("{base_url}/parquet"),
             || {
                 assert!(source.ensure_row_available(0).unwrap());

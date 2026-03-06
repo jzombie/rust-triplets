@@ -1,6 +1,28 @@
 use crate::metadata::MetadataKey;
 use crate::splits::SplitLabel;
 
+/// Environment variable names read at runtime to override default behaviour.
+///
+/// Keeping the strings here ensures every call site references the same name
+/// and makes the full set of supported overrides easy to discover.
+pub mod env_vars {
+    /// Overrides the Hugging Face datasets-server parquet-manifest endpoint URL.
+    ///
+    /// When set to a non-blank value, `parquet_manifest_endpoint()` returns this
+    /// value instead of the default `https://datasets-server.huggingface.co/parquet`.
+    /// Intended for test doubles and air-gapped environments.
+    #[cfg(test)]
+    pub const TRIPLETS_HF_PARQUET_ENDPOINT: &str = "TRIPLETS_HF_PARQUET_ENDPOINT";
+
+    /// Overrides the Hugging Face datasets-server size endpoint URL.
+    ///
+    /// When set to a non-blank value, `size_endpoint()` returns this value instead
+    /// of the default `https://datasets-server.huggingface.co/size`.
+    /// Intended for test doubles and air-gapped environments.
+    #[cfg(test)]
+    pub const TRIPLETS_HF_SIZE_ENDPOINT: &str = "TRIPLETS_HF_SIZE_ENDPOINT";
+}
+
 /// Constants used by capacity estimation heuristics.
 pub mod heuristics {
     /// Effective positive examples sampled per anchor during bounded estimates.
