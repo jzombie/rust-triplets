@@ -32,36 +32,18 @@ use walkdir::WalkDir;
 use crate::SamplerError;
 use crate::config::{NegativeStrategy, SamplerConfig, Selector, TripletRecipe};
 use crate::constants::cache::HUGGINGFACE_GROUP;
+use crate::constants::huggingface::{
+    ALL_SPLITS_DIR, HF_SHARD_STORE_EXTENSION, HF_SHARD_STORE_META_ROWS_KEY,
+    HF_SHARD_STORE_ROW_PREFIX, HUGGINGFACE_REFRESH_BATCH_MULTIPLIER, REMOTE_BOOTSTRAP_SHARDS,
+    REMOTE_EXPANSION_HEADROOM_MULTIPLIER, REMOTE_URL_PREFIX, SHARD_SEQUENCE_STATE_FILE,
+    SHARD_SEQUENCE_STATE_VERSION,
+};
 use crate::data::{DataRecord, QualityScore, SectionRole};
 use crate::utils::make_section;
 use chrono::{DateTime, Utc};
 
 use crate::source::{DataSource, SourceCursor, SourceSnapshot};
 
-const REMOTE_URL_PREFIX: &str = "url::";
-/// Extra row-index headroom above currently materialized rows exposed via `len_hint`.
-///
-/// This is not a file count. It lets sampling look slightly past the local row
-/// frontier so lazy remote expansion can continue without jumping to the full
-/// global row domain at once.
-/// Multiplies the sampler ingestion base (`SamplerConfig.ingestion_max_records`)
-/// to compute `len_hint` expansion headroom rows.
-const REMOTE_EXPANSION_HEADROOM_MULTIPLIER: usize = 4;
-/// Number of initial remote shards to materialize when bootstrapping an empty
-/// local snapshot before regular lazy expansion.
-const REMOTE_BOOTSTRAP_SHARDS: usize = 1;
-/// Multiplies the source `refresh` limit passed by `IngestionManager`
-/// (`step.unwrap_or(max_records)`) to set this source's internal row-read
-/// batch target for each refresh pass.
-const HUGGINGFACE_REFRESH_BATCH_MULTIPLIER: usize = 8;
-const SHARD_SEQUENCE_STATE_VERSION: u32 = 1;
-const SHARD_SEQUENCE_STATE_FILE: &str = "_sequence_state.json";
-const HF_SHARD_STORE_EXTENSION: &str = "simdr";
-const HF_SHARD_STORE_ROW_PREFIX: &[u8] = b"rowv1|";
-const HF_SHARD_STORE_META_ROWS_KEY: &[u8] = b"meta|rows";
-/// Directory segment used when no split is specified (all-splits mode).
-/// Must not collide with any real HF split name; HF split names never start with `_`.
-const ALL_SPLITS_DIR: &str = "_all";
 fn managed_cache_root() -> Result<CacheRoot, String> {
     #[cfg(test)]
     {

@@ -128,6 +128,35 @@ pub mod file_corpus {
     pub const SKIP_UNREADABLE_MSG: &str = "skipping unreadable file record";
 }
 
+/// Constants used by the Hugging Face row source backend.
+pub mod huggingface {
+    /// Prefix added to remote URL shard identifiers to distinguish them from local paths.
+    pub const REMOTE_URL_PREFIX: &str = "url::";
+    /// Extra row-index headroom above currently materialized rows exposed via `len_hint`.
+    ///
+    /// This is not a file count. It lets sampling look slightly past the local row
+    /// frontier so lazy remote expansion can continue without jumping to the full
+    /// global row domain at once.
+    /// Multiplies the sampler ingestion base (`SamplerConfig.ingestion_max_records`)
+    /// to compute `len_hint` expansion headroom rows.
+    pub const REMOTE_EXPANSION_HEADROOM_MULTIPLIER: usize = 4;
+    /// Number of initial remote shards to materialize when bootstrapping an empty
+    /// local snapshot before regular lazy expansion.
+    pub const REMOTE_BOOTSTRAP_SHARDS: usize = 1;
+    /// Multiplies the source `refresh` limit passed by `IngestionManager`
+    /// (`step.unwrap_or(max_records)`) to set this source's internal row-read
+    /// batch target for each refresh pass.
+    pub const HUGGINGFACE_REFRESH_BATCH_MULTIPLIER: usize = 8;
+    pub const SHARD_SEQUENCE_STATE_VERSION: u32 = 1;
+    pub const SHARD_SEQUENCE_STATE_FILE: &str = "_sequence_state.json";
+    pub const HF_SHARD_STORE_EXTENSION: &str = "simdr";
+    pub const HF_SHARD_STORE_ROW_PREFIX: &[u8] = b"rowv1|";
+    pub const HF_SHARD_STORE_META_ROWS_KEY: &[u8] = b"meta|rows";
+    /// Directory segment used when no split is specified (all-splits mode).
+    /// Must not collide with any real HF split name; HF split names never start with `_`.
+    pub const ALL_SPLITS_DIR: &str = "_all";
+}
+
 /// Constants used for managed cache-root groups.
 pub mod cache {
     /// Managed cache group for Hugging Face snapshot-backed sources.
