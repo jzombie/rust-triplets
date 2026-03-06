@@ -351,9 +351,16 @@ fn huggingface_helper_parsers_cover_success_and_error_paths() {
         (
             "org/dataset".to_string(),
             "default".to_string(),
-            "train".to_string()
+            // No split component in the URI → empty string, meaning all-splits mode.
+            // Triplets' own train/validation/test split logic handles partitioning.
+            "".to_string()
         )
     );
+    // Explicit split is preserved exactly.
+    let explicit_split = parse_hf_uri("hf://org/dataset/default/train")
+        .expect("uri with explicit split should parse");
+    assert_eq!(explicit_split.2, "train");
+
     assert!(parse_hf_uri("hf://org").is_err());
     assert!(parse_hf_uri("https://huggingface.co").is_err());
 }
@@ -1056,6 +1063,71 @@ fn huggingface_different_epoch_seeds_produce_different_record_orderings() {
     assert_eq!(
         epoch1_ids, epoch1_ids_replay,
         "epoch-1 seed must produce the same record ordering on every refresh call"
+    );
+}
+
+#[test]
+fn huggingface_empty_split_discovers_all_splits() {
+    // Guarantee: when `split` is an empty string (no split component in the URI),
+    // refresh() must return records from every split present in the snapshot
+    // directory, not just "train".  Triplets' own train/validation/test split
+    // logic is responsible for the actual train/val/test partitioning downstream.
+    let temp = tempfile::tempdir().expect("failed creating tempdir");
+
+    // Write shards that look like they belong to different splits.
+    write_lines(
+        &temp.path().join("train-part-000.ndjson"),
+        &[
+            r#"{"id":"train1","text":"training record one"}"#,
+            r#"{"id":"train2","text":"training record two"}"#,
+        ],
+    );
+    write_lines(
+        &temp.path().join("validation-part-000.ndjson"),
+        &[
+            r#"{"id":"val1","text":"validation record one"}"#,
+            r#"{"id":"val2","text":"validation record two"}"#,
+        ],
+    );
+    write_lines(
+        &temp.path().join("test-part-000.ndjson"),
+        &[r#"{"id":"test1","text":"test record one"}"#],
+    );
+
+    // Empty split string = all-splits mode.
+    let mut config = HuggingFaceRowsConfig::new(
+        "hf_empty_split",
+        "local/test-dataset",
+        "default",
+        "",
+        temp.path(),
+    );
+    config.shard_extensions = vec!["ndjson".to_string()];
+    config.text_columns = vec!["text".to_string()];
+
+    let source = HuggingFaceRowSource::new(config).expect("failed creating source");
+    let seed = seeded_config(71);
+
+    let snapshot = source
+        .refresh(&seed, None, Some(100))
+        .expect("empty-split refresh must succeed");
+
+    let ids: std::collections::HashSet<String> =
+        snapshot.records.iter().map(|r| r.id.clone()).collect();
+
+    assert!(
+        ids.iter()
+            .any(|id| id.contains("train1") || id.contains("train2")),
+        "no train records found in empty-split refresh"
+    );
+    assert!(
+        ids.iter()
+            .any(|id| id.contains("val1") || id.contains("val2")),
+        "no validation records found in empty-split refresh"
+    );
+    assert!(
+        ids.iter().any(|id| id.contains("test1")),
+        "no test records found in empty-split refresh"
     );
 }
 

@@ -59,6 +59,9 @@ const SHARD_SEQUENCE_STATE_FILE: &str = "_sequence_state.json";
 const HF_SHARD_STORE_EXTENSION: &str = "simdr";
 const HF_SHARD_STORE_ROW_PREFIX: &[u8] = b"rowv1|";
 const HF_SHARD_STORE_META_ROWS_KEY: &[u8] = b"meta|rows";
+/// Directory segment used when no split is specified (all-splits mode).
+/// Must not collide with any real HF split name; HF split names never start with `_`.
+const ALL_SPLITS_DIR: &str = "_all";
 fn managed_cache_root() -> Result<CacheRoot, String> {
     #[cfg(test)]
     {
@@ -92,12 +95,19 @@ pub fn managed_hf_list_snapshot_dir(
     split: &str,
     replica_idx: usize,
 ) -> Result<PathBuf, String> {
+    // Empty split (all-splits mode) uses ALL_SPLITS_DIR so the path hierarchy stays valid
+    // and won't collide with a split literally named "" on any filesystem.
+    let split_dir = if split.is_empty() {
+        ALL_SPLITS_DIR
+    } else {
+        split
+    };
     ensure_cache_group(
         PathBuf::from(HUGGINGFACE_GROUP)
             .join("source-list")
             .join(dataset.replace('/', "__"))
             .join(config)
-            .join(split)
+            .join(split_dir)
             .join(format!("replica_{replica_idx}")),
     )
 }
@@ -108,11 +118,16 @@ pub fn managed_hf_snapshot_dir(
     config: &str,
     split: &str,
 ) -> Result<PathBuf, String> {
+    let split_dir = if split.is_empty() {
+        ALL_SPLITS_DIR
+    } else {
+        split
+    };
     ensure_cache_group(
         PathBuf::from(HUGGINGFACE_GROUP)
             .join(dataset.replace('/', "__"))
             .join(config)
-            .join(split),
+            .join(split_dir),
     )
 }
 
@@ -267,7 +282,9 @@ pub fn parse_hf_uri(uri: &str) -> Result<(String, String, String), String> {
 
     let dataset = format!("{}/{}", parts[0], parts[1]);
     let config = parts.get(2).copied().unwrap_or("default").to_string();
-    let split = parts.get(3).copied().unwrap_or("train").to_string();
+    // No trailing split component → empty string, which disables split-filtering
+    // so all HF splits are discovered and triplets' own split logic handles partitioning.
+    let split = parts.get(3).copied().unwrap_or("").to_string();
 
     Ok((dataset, config, split))
 }
@@ -1721,10 +1738,15 @@ impl HuggingFaceRowSource {
             "[triplets:hf] reading datasets-server parquet manifest for dataset {}",
             config.dataset
         );
-        let response = ureq::get(&endpoint)
+        let mut request = ureq::get(&endpoint)
             .query("dataset", &config.dataset)
-            .query("config", &config.config)
-            .query("split", &config.split)
+            .query("config", &config.config);
+        // When split is empty (all-splits mode) omit the split query param so the
+        // datasets-server returns shards for every split in the config.
+        if !config.split.is_empty() {
+            request = request.query("split", &config.split);
+        }
+        let response = request
             .call()
             .map_err(|err| SamplerError::SourceUnavailable {
                 source_id: config.source_id.clone(),
@@ -1880,10 +1902,15 @@ impl HuggingFaceRowSource {
             config.dataset, config.config, config.split
         );
 
-        let response = ureq::get(&endpoint)
+        let mut request = ureq::get(&endpoint)
             .query("dataset", &config.dataset)
-            .query("config", &config.config)
-            .query("split", &config.split)
+            .query("config", &config.config);
+        // When split is empty (all-splits mode) omit the split query param so the
+        // server returns the total row count for the whole config.
+        if !config.split.is_empty() {
+            request = request.query("split", &config.split);
+        }
+        let response = request
             .call()
             .map_err(|err| SamplerError::SourceUnavailable {
                 source_id: config.source_id.clone(),
@@ -4144,6 +4171,47 @@ mod tests {
                 HUGGINGFACE_GROUP
             ))));
             assert!(listed.ends_with("replica_7"));
+        });
+    }
+
+    #[test]
+    fn managed_snapshot_dirs_use_all_splits_dir_for_empty_split() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname='tmp'\nversion='0.0.0'\n",
+        )
+        .unwrap();
+
+        with_current_dir(dir.path(), || {
+            let single = managed_hf_snapshot_dir("org/dataset", "default", "").unwrap();
+            let listed = managed_hf_list_snapshot_dir("org/dataset", "default", "", 0).unwrap();
+
+            assert!(single.exists());
+            assert!(listed.exists());
+            // Both must use ALL_SPLITS_DIR ("_all") in the path, not an empty segment.
+            assert!(
+                single.ends_with(PathBuf::from(format!(
+                    "{}/org__dataset/default/{}",
+                    HUGGINGFACE_GROUP, ALL_SPLITS_DIR
+                ))),
+                "expected single-source path to end with ALL_SPLITS_DIR, got: {}",
+                single.display()
+            );
+            assert!(
+                listed.ends_with(PathBuf::from(format!(
+                    "{}/source-list/org__dataset/default/{}/replica_0",
+                    HUGGINGFACE_GROUP, ALL_SPLITS_DIR
+                ))),
+                "expected list-source path to end with ALL_SPLITS_DIR, got: {}",
+                listed.display()
+            );
+            // Must not collide with the explicit-train path.
+            let train_single = managed_hf_snapshot_dir("org/dataset", "default", "train").unwrap();
+            assert_ne!(
+                single, train_single,
+                "empty-split and train-split paths must differ"
+            );
         });
     }
 
