@@ -8,6 +8,7 @@ use std::hash::{Hash, Hasher};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
+use tempfile::TempDir;
 
 use crate::constants::splits::{
     ALL_SPLITS, BITCODE_PREFIX, EPOCH_HASH_RECORD_VERSION, EPOCH_HASHES_PREFIX, EPOCH_META_PREFIX,
@@ -307,17 +308,32 @@ fn decode_store_meta(bytes: &[u8]) -> Result<StoreMeta, SamplerError> {
 /// File-backed split store for persistent runs.
 ///
 /// Persists assignment metadata, epoch state, and sampler runtime state.
+///
+/// When bootstrapped via [`FileSplitStore::open_with_load_path`] the store works against a
+/// private temporary copy of the source snapshot.  All mutations — including epoch state
+/// writes — accumulate there and are only published to the declared destination when
+/// [`SamplerStateStore::save_sampler_state`] is called.  This guarantees that the original
+/// source file is never modified and that no partial state leaks to the target before an
+/// explicit save.
 pub struct FileSplitStore {
     store: DataStore,
+    /// Working path: either the canonical save path (regular open) or a temp file
+    /// (bootstrapped open).  All reads and writes go here.
     path: PathBuf,
+    /// Declared save destination.  Equals `path` for a regular open; differs from `path`
+    /// when the store is working out of a temp file.
+    save_path: PathBuf,
     ratios: SplitRatios,
     seed: u64,
+    /// Keeps the temporary directory alive for the lifetime of this store.
+    /// `None` when the store is working directly on its canonical path.
+    _temp_dir: Option<TempDir>,
 }
 
 impl fmt::Debug for FileSplitStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FileSplitStore")
-            .field("path", &self.path)
+            .field("path", &self.save_path)
             .field("ratios", &self.ratios)
             .field("seed", &self.seed)
             .finish()
@@ -335,10 +351,17 @@ impl FileSplitStore {
     }
 
     /// Open (or create) a file-backed split store at `save_path`, optionally
-    /// bootstrapping from `load_path` when the target does not yet exist.
+    /// bootstrapping initial state from `load_path`.
     ///
-    /// This makes snapshot movement explicit: callers control exactly where
-    /// state is loaded from and where it is saved.
+    /// When `load_path` is supplied and `save_path` does not yet exist the source
+    /// snapshot is copied into a **private temporary file** that becomes the working
+    /// store for this instance.  All reads, mutations, and intermediate saves operate
+    /// on that temp copy — the original `load_path` file is never modified.  State is
+    /// only published to the declared `save_path` (or to a caller-supplied path) when
+    /// [`SamplerStateStore::save_sampler_state`] is explicitly called.
+    ///
+    /// If `save_path` already exists it is opened directly without any bootstrapping,
+    /// matching the behaviour of [`FileSplitStore::open`].
     pub fn open_with_load_path<LP: Into<PathBuf>, SP: Into<PathBuf>>(
         load_path: Option<LP>,
         save_path: SP,
@@ -346,28 +369,53 @@ impl FileSplitStore {
         seed: u64,
     ) -> Result<Self, SamplerError> {
         let ratios = ratios.normalized()?;
-        let path = coerce_store_path(save_path.into());
-        ensure_parent_dir(&path)?;
-        if !path.exists()
+        let save_path = coerce_store_path(save_path.into());
+        ensure_parent_dir(&save_path)?;
+
+        // When a load source is provided and the declared save target does not yet exist,
+        // stage through a temp file so the source is never mutated and no partial state
+        // leaks to the target before an explicit save.
+        if !save_path.exists()
             && let Some(load_path) = load_path
         {
             let source = coerce_store_path(load_path.into());
-            if source != path && source.exists() {
-                fs::copy(&source, &path).map_err(|err| {
+            if source != save_path && source.exists() {
+                let temp_dir = tempfile::tempdir().map_err(|err| {
                     SamplerError::SplitStore(format!(
-                        "failed to bootstrap split store from '{}' to '{}': {err}",
-                        source.display(),
-                        path.display()
+                        "failed to create temp dir for split store bootstrap: {err}"
                     ))
                 })?;
+                let working_path = temp_dir.path().join("working_store.bin");
+                fs::copy(&source, &working_path).map_err(|err| {
+                    SamplerError::SplitStore(format!(
+                        "failed to copy split store from '{}' to temp: {err}",
+                        source.display()
+                    ))
+                })?;
+                let raw_store = DataStore::open(&working_path).map_err(map_store_err)?;
+                let store = Self {
+                    store: raw_store,
+                    path: working_path,
+                    save_path,
+                    ratios,
+                    seed,
+                    _temp_dir: Some(temp_dir),
+                };
+                store.verify_metadata()?;
+                return Ok(store);
             }
         }
-        let store = DataStore::open(path.as_path()).map_err(map_store_err)?;
+
+        // Regular open: work directly on the declared save path.
+        let raw_store = DataStore::open(&save_path).map_err(map_store_err)?;
+        let path = save_path.clone();
         let store = Self {
-            store,
+            store: raw_store,
             path,
+            save_path,
             ratios,
             seed,
+            _temp_dir: None,
         };
         store.verify_metadata()?;
         Ok(store)
@@ -529,36 +577,57 @@ impl SamplerStateStore for FileSplitStore {
         }
     }
 
+    /// Persist `state` and publish the working store to its final destination.
+    ///
+    /// The write is always made to the internal working store first (which may be a
+    /// private temp file when the store was opened via
+    /// [`FileSplitStore::open_with_load_path`]).  After writing, the working file is
+    /// copied to the publish target:
+    ///
+    /// * `save_to == None`  → publish to the declared `save_path` (the path supplied
+    ///   to `open` / `open_with_load_path`).  Repeated saves are idempotent.
+    /// * `save_to == Some(p)` → publish to `p`, which **must not already exist**.
+    ///
+    /// In both cases the original source file (when bootstrapped via `open_with_load_path`)
+    /// is never touched.
     fn save_sampler_state(
         &self,
         state: &PersistedSamplerState,
-        save_path: Option<&Path>,
+        save_to: Option<&Path>,
     ) -> Result<(), SamplerError> {
+        // Always write to the working store (temp or canonical).
         let payload = encode_sampler_state(state);
         write_bytes(&self.store, SAMPLER_STATE_KEY, &payload)?;
 
-        if let Some(save_path) = save_path {
-            let target_path = coerce_store_path(save_path.to_path_buf());
-            if target_path != self.path {
-                ensure_parent_dir(&target_path)?;
-                if target_path.exists() {
-                    return Err(SamplerError::SplitStore(format!(
-                        "refusing to overwrite existing split store '{}'; choose a new path",
-                        target_path.display()
-                    )));
-                }
-                fs::copy(&self.path, &target_path).map_err(|err| {
-                    SamplerError::SplitStore(format!(
-                        "failed to copy split store from '{}' to '{}': {err}",
-                        self.path.display(),
-                        target_path.display()
-                    ))
-                })?;
-            }
+        // Determine the publish destination.
+        let dest = if let Some(p) = save_to {
+            coerce_store_path(p.to_path_buf())
+        } else {
+            self.save_path.clone()
+        };
 
-            let target = FileSplitStore::open(target_path, self.ratios, self.seed)?;
-            target.save_sampler_state(state, None)?;
+        // Nothing to copy when the working file already is the destination.
+        if dest == self.path {
+            return Ok(());
         }
+
+        // Refuse to overwrite an explicitly-named destination that already exists.
+        // Saving back to the canonical save_path (None) is always allowed.
+        if save_to.is_some() && dest.exists() {
+            return Err(SamplerError::SplitStore(format!(
+                "refusing to overwrite existing split store '{}'; choose a new path",
+                dest.display()
+            )));
+        }
+
+        // Publish: atomically copy the working store to the destination.
+        ensure_parent_dir(&dest)?;
+        fs::copy(&self.path, &dest).map_err(|err| {
+            SamplerError::SplitStore(format!(
+                "failed to publish split store to '{}': {err}",
+                dest.display()
+            ))
+        })?;
 
         Ok(())
     }
@@ -1319,5 +1388,184 @@ mod tests {
         ensure_parent_dir(Path::new("split_store_local.bin")).unwrap();
         let coerced = coerce_store_path(PathBuf::from("explicit_store.bin"));
         assert_eq!(coerced, PathBuf::from("explicit_store.bin"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Temp-dir bootstrap contract
+    // -----------------------------------------------------------------------
+
+    /// `open_with_load_path` must NOT modify the source file while the store is open.
+    #[test]
+    fn load_path_source_is_never_modified_while_open() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.bin");
+        let dest = dir.path().join("dest.bin");
+        let ratios = SplitRatios::default();
+
+        // Seed the source with known state.
+        let seeded = FileSplitStore::open(&source, ratios, 77).unwrap();
+        let state = PersistedSamplerState {
+            source_cycle_idx: 5,
+            source_record_cursors: vec![("s".to_string(), 3)],
+            source_epoch: 9,
+            rng_state: 42,
+            triplet_recipe_rr_idx: 1,
+            text_recipe_rr_idx: 2,
+            source_stream_cursors: vec![("s".to_string(), 4)],
+        };
+        seeded.save_sampler_state(&state, None).unwrap();
+        drop(seeded);
+
+        let source_size_before = std::fs::metadata(&source).unwrap().len();
+
+        // Open bootstrapped store and write mutations to it.
+        let bootstrapped =
+            FileSplitStore::open_with_load_path(Some(&source), &dest, ratios, 77).unwrap();
+        let new_state = PersistedSamplerState {
+            source_cycle_idx: 99,
+            source_record_cursors: vec![("s".to_string(), 77)],
+            source_epoch: 100,
+            rng_state: 0,
+            triplet_recipe_rr_idx: 0,
+            text_recipe_rr_idx: 0,
+            source_stream_cursors: vec![],
+        };
+        bootstrapped.save_sampler_state(&new_state, None).unwrap();
+        drop(bootstrapped);
+
+        // Source must be byte-identical to before bootstrap.
+        let source_size_after = std::fs::metadata(&source).unwrap().len();
+        assert_eq!(
+            source_size_before, source_size_after,
+            "source file was modified during bootstrapped open"
+        );
+
+        // Verify source still holds the original state.
+        let verify_source = FileSplitStore::open(&source, ratios, 77).unwrap();
+        let loaded = verify_source.load_sampler_state().unwrap().unwrap();
+        assert_eq!(loaded.source_cycle_idx, 5);
+        assert_eq!(loaded.source_epoch, 9);
+    }
+
+    /// `save_sampler_state(None)` on a bootstrapped store must publish to the
+    /// declared `save_path` only, not to the source and not to a temp path.
+    #[test]
+    fn save_none_on_bootstrapped_store_publishes_to_save_path() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("load.bin");
+        let dest = dir.path().join("save.bin");
+        let ratios = SplitRatios::default();
+
+        let _ = FileSplitStore::open(&source, ratios, 11).unwrap();
+
+        assert!(!dest.exists(), "dest must not exist before first save");
+
+        let store = FileSplitStore::open_with_load_path(Some(&source), &dest, ratios, 11).unwrap();
+        let state = PersistedSamplerState {
+            source_cycle_idx: 7,
+            source_record_cursors: vec![],
+            source_epoch: 2,
+            rng_state: 1,
+            triplet_recipe_rr_idx: 0,
+            text_recipe_rr_idx: 0,
+            source_stream_cursors: vec![],
+        };
+        store.save_sampler_state(&state, None).unwrap();
+        drop(store);
+
+        assert!(dest.exists(), "dest must exist after save(None)");
+
+        let loaded_dest = FileSplitStore::open(&dest, ratios, 11).unwrap();
+        assert_eq!(
+            loaded_dest
+                .load_sampler_state()
+                .unwrap()
+                .unwrap()
+                .source_cycle_idx,
+            7
+        );
+    }
+
+    /// `save_sampler_state(Some(other))` on a bootstrapped store must publish to
+    /// `other` only — the declared `save_path` must remain absent.
+    #[test]
+    fn save_some_on_bootstrapped_store_publishes_to_explicit_path_only() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("load.bin");
+        let save = dir.path().join("save.bin"); // canonical — should stay empty
+        let other = dir.path().join("other.bin"); // explicit target
+        let ratios = SplitRatios::default();
+
+        let _ = FileSplitStore::open(&source, ratios, 22).unwrap();
+
+        let store = FileSplitStore::open_with_load_path(Some(&source), &save, ratios, 22).unwrap();
+        let state = PersistedSamplerState {
+            source_cycle_idx: 3,
+            source_record_cursors: vec![],
+            source_epoch: 1,
+            rng_state: 0,
+            triplet_recipe_rr_idx: 0,
+            text_recipe_rr_idx: 0,
+            source_stream_cursors: vec![],
+        };
+        store
+            .save_sampler_state(&state, Some(other.as_path()))
+            .unwrap();
+        drop(store);
+
+        assert!(
+            !save.exists(),
+            "canonical save_path must not be created when saving to explicit path"
+        );
+        assert!(other.exists(), "explicit target must be created");
+
+        let loaded_other = FileSplitStore::open(&other, ratios, 22).unwrap();
+        assert_eq!(
+            loaded_other
+                .load_sampler_state()
+                .unwrap()
+                .unwrap()
+                .source_cycle_idx,
+            3
+        );
+    }
+
+    /// Repeated `save(None)` calls on a bootstrapped store are idempotent: the
+    /// canonical save_path is overwritten cleanly each time.
+    #[test]
+    fn repeated_save_none_on_bootstrapped_store_is_idempotent() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("load.bin");
+        let dest = dir.path().join("save.bin");
+        let ratios = SplitRatios::default();
+
+        let _ = FileSplitStore::open(&source, ratios, 33).unwrap();
+
+        let store = FileSplitStore::open_with_load_path(Some(&source), &dest, ratios, 33).unwrap();
+
+        for cycle_idx in [1_u64, 2, 3] {
+            let state = PersistedSamplerState {
+                source_cycle_idx: cycle_idx,
+                source_record_cursors: vec![],
+                source_epoch: 0,
+                rng_state: 0,
+                triplet_recipe_rr_idx: 0,
+                text_recipe_rr_idx: 0,
+                source_stream_cursors: vec![],
+            };
+            store.save_sampler_state(&state, None).unwrap();
+        }
+        drop(store);
+
+        let reloaded = FileSplitStore::open(&dest, ratios, 33).unwrap();
+        assert_eq!(
+            reloaded
+                .load_sampler_state()
+                .unwrap()
+                .unwrap()
+                .source_cycle_idx,
+            3,
+            "dest should hold the last-saved state"
+        );
     }
 }

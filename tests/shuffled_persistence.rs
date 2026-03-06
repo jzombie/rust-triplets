@@ -436,3 +436,186 @@ fn save_sampler_state_some_creates_missing_parent_directories() {
     let mirror_store = FileSplitStore::open(&deep_mirror_path, split, 73).unwrap();
     assert!(mirror_store.load_sampler_state().unwrap().is_some());
 }
+
+#[test]
+/// Loading from an existing store via `open_with_load_path` and then saving with `None`
+/// must write to the declared `save_path` only.  The original `load_path` file must
+/// remain byte-identical (never mutated).
+fn open_with_load_path_and_save_none_writes_only_to_declared_save_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let load_path = temp.path().join("original.bin");
+    let save_path = temp.path().join("new.bin");
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+
+    // Create the source store with state.
+    {
+        let store = Arc::new(FileSplitStore::open(&load_path, split, 73).unwrap());
+        let sampler = TripletSampler::new(build_config(4, split), store);
+        sampler.register_source(Box::new(InMemorySource::new(
+            "source_a",
+            vec![
+                build_record("source_a", "a1", 1),
+                build_record("source_a", "a2", 2),
+                build_record("source_a", "a3", 3),
+                build_record("source_a", "a4", 4),
+            ],
+        )));
+        sampler.register_source(Box::new(InMemorySource::new(
+            "source_b",
+            vec![
+                build_record("source_b", "b1", 1),
+                build_record("source_b", "b2", 2),
+                build_record("source_b", "b3", 3),
+                build_record("source_b", "b4", 4),
+            ],
+        )));
+        sampler.next_triplet_batch(SplitLabel::Train).unwrap();
+        sampler.save_sampler_state(None).unwrap();
+    }
+
+    let load_path_size_before = std::fs::metadata(&load_path).unwrap().len();
+    assert!(!save_path.exists());
+
+    // Bootstrap from load_path into save_path and perform a save(None).
+    {
+        let store = Arc::new(
+            FileSplitStore::open_with_load_path(Some(&load_path), &save_path, split, 73).unwrap(),
+        );
+        let sampler = TripletSampler::new(build_config(4, split), store);
+        sampler.register_source(Box::new(InMemorySource::new(
+            "source_a",
+            vec![
+                build_record("source_a", "a1", 1),
+                build_record("source_a", "a2", 2),
+                build_record("source_a", "a3", 3),
+                build_record("source_a", "a4", 4),
+            ],
+        )));
+        sampler.register_source(Box::new(InMemorySource::new(
+            "source_b",
+            vec![
+                build_record("source_b", "b1", 1),
+                build_record("source_b", "b2", 2),
+                build_record("source_b", "b3", 3),
+                build_record("source_b", "b4", 4),
+            ],
+        )));
+        sampler.next_triplet_batch(SplitLabel::Train).unwrap();
+        // save(None) should go to save_path only.
+        sampler.save_sampler_state(None).unwrap();
+    }
+
+    // original must not have changed.
+    let load_path_size_after = std::fs::metadata(&load_path).unwrap().len();
+    assert_eq!(
+        load_path_size_before, load_path_size_after,
+        "load_path was modified despite bootstrapped open"
+    );
+
+    // The new save_path must hold valid state.
+    assert!(save_path.exists());
+    let saved = FileSplitStore::open(&save_path, split, 73).unwrap();
+    assert!(
+        saved.load_sampler_state().unwrap().is_some(),
+        "save_path should contain sampler state after save(None)"
+    );
+}
+
+#[test]
+/// Loading from an existing store via `open_with_load_path` and then saving with
+/// `Some(other)` must write to `other` only.  Neither the original `load_path` nor
+/// the declared `save_path` should be created or modified.
+fn open_with_load_path_and_save_some_writes_only_to_explicit_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let load_path = temp.path().join("original.bin");
+    let save_path = temp.path().join("new.bin"); // canonical — must stay absent
+    let other_path = temp.path().join("other.bin"); // explicit — receives the state
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+
+    // Create the source store with state.
+    {
+        let store = Arc::new(FileSplitStore::open(&load_path, split, 73).unwrap());
+        let sampler = TripletSampler::new(build_config(4, split), store);
+        sampler.register_source(Box::new(InMemorySource::new(
+            "source_a",
+            vec![
+                build_record("source_a", "a1", 1),
+                build_record("source_a", "a2", 2),
+                build_record("source_a", "a3", 3),
+                build_record("source_a", "a4", 4),
+            ],
+        )));
+        sampler.register_source(Box::new(InMemorySource::new(
+            "source_b",
+            vec![
+                build_record("source_b", "b1", 1),
+                build_record("source_b", "b2", 2),
+                build_record("source_b", "b3", 3),
+                build_record("source_b", "b4", 4),
+            ],
+        )));
+        sampler.next_triplet_batch(SplitLabel::Train).unwrap();
+        sampler.save_sampler_state(None).unwrap();
+    }
+
+    let load_path_size_before = std::fs::metadata(&load_path).unwrap().len();
+
+    // Bootstrap and save to explicit other_path.
+    {
+        let store = Arc::new(
+            FileSplitStore::open_with_load_path(Some(&load_path), &save_path, split, 73).unwrap(),
+        );
+        let sampler = TripletSampler::new(build_config(4, split), store);
+        sampler.register_source(Box::new(InMemorySource::new(
+            "source_a",
+            vec![
+                build_record("source_a", "a1", 1),
+                build_record("source_a", "a2", 2),
+                build_record("source_a", "a3", 3),
+                build_record("source_a", "a4", 4),
+            ],
+        )));
+        sampler.register_source(Box::new(InMemorySource::new(
+            "source_b",
+            vec![
+                build_record("source_b", "b1", 1),
+                build_record("source_b", "b2", 2),
+                build_record("source_b", "b3", 3),
+                build_record("source_b", "b4", 4),
+            ],
+        )));
+        sampler.next_triplet_batch(SplitLabel::Train).unwrap();
+        sampler
+            .save_sampler_state(Some(other_path.as_path()))
+            .unwrap();
+    }
+
+    // original must not have changed.
+    let load_path_size_after = std::fs::metadata(&load_path).unwrap().len();
+    assert_eq!(
+        load_path_size_before, load_path_size_after,
+        "load_path was modified despite bootstrapped open"
+    );
+
+    // canonical save_path must not have been created.
+    assert!(
+        !save_path.exists(),
+        "save_path must not be created when using save(Some(other))"
+    );
+
+    // The explicit other_path must hold valid state.
+    assert!(other_path.exists());
+    let saved = FileSplitStore::open(&other_path, split, 73).unwrap();
+    assert!(
+        saved.load_sampler_state().unwrap().is_some(),
+        "other_path should contain sampler state after save(Some(other))"
+    );
+}
