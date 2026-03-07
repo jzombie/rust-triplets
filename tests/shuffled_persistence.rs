@@ -177,10 +177,12 @@ fn negatives_persist_across_restart() {
     assert_ne!(first_run_negatives, restart_negatives);
 }
 
+/// `save(None)` must write to the sampler's own `save_path` only.  A
+/// separately-published store at a different path must remain unchanged.
 #[test]
-fn save_sampler_state_none_writes_to_loaded_store_path() {
+fn save_none_writes_to_save_path_only() {
     let temp = tempfile::tempdir().unwrap();
-    let store_path = temp.path().join("loaded_store.bin");
+    let store_path = temp.path().join("sampler_store.bin");
     let other_path = temp.path().join("other_store.bin");
     let split = SplitRatios {
         train: 1.0,
@@ -188,7 +190,21 @@ fn save_sampler_state_none_writes_to_loaded_store_path() {
         test: 0.0,
     };
 
-    let _other_store = FileSplitStore::open(&other_path, split, 73).unwrap();
+    // Pre-publish a sentinel state to other_path so we can verify it is untouched
+    // after the sampler writes to its own store_path.
+    let sentinel = PersistedSamplerState {
+        source_cycle_idx: 0xDEAD,
+        source_record_cursors: vec![],
+        source_epoch: 0xBEEF,
+        rng_state: 0,
+        triplet_recipe_rr_idx: 0,
+        text_recipe_rr_idx: 0,
+        source_stream_cursors: vec![],
+    };
+    FileSplitStore::open(&other_path, split, 73)
+        .unwrap()
+        .save_sampler_state(&sentinel, None)
+        .unwrap();
 
     let store = Arc::new(FileSplitStore::open(&store_path, split, 73).unwrap());
     let sampler = TripletSampler::new(build_config(4, split), store);
@@ -214,11 +230,30 @@ fn save_sampler_state_none_writes_to_loaded_store_path() {
     sampler.next_triplet_batch(SplitLabel::Train).unwrap();
     sampler.save_sampler_state(None).unwrap();
 
-    let loaded_store = FileSplitStore::open(&store_path, split, 73).unwrap();
-    let other_store = FileSplitStore::open(&other_path, split, 73).unwrap();
+    // store_path must have the new sampler state.
+    assert!(
+        FileSplitStore::open(&store_path, split, 73)
+            .unwrap()
+            .load_sampler_state()
+            .unwrap()
+            .is_some(),
+        "save(None) must publish state to save_path"
+    );
 
-    assert!(loaded_store.load_sampler_state().unwrap().is_some());
-    assert!(other_store.load_sampler_state().unwrap().is_none());
+    // other_path must still hold only the sentinel — save(None) must not touch it.
+    let other_state = FileSplitStore::open(&other_path, split, 73)
+        .unwrap()
+        .load_sampler_state()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        other_state.source_cycle_idx, 0xDEAD,
+        "save(None) must not modify other store paths"
+    );
+    assert_eq!(
+        other_state.source_epoch, 0xBEEF,
+        "save(None) must not modify other store paths"
+    );
 }
 
 #[test]
@@ -254,6 +289,10 @@ fn save_sampler_state_some_mirrors_to_new_store_path() {
     )));
 
     sampler.next_triplet_batch(SplitLabel::Train).unwrap();
+    // Publish current state to the canonical source store path, then snapshot
+    // to the mirror.  Both calls see the same in-memory state so the resulting
+    // files must be equivalent.
+    sampler.save_sampler_state(None).unwrap();
     sampler
         .save_sampler_state(Some(mirror_store_path.as_path()))
         .unwrap();
@@ -363,7 +402,21 @@ fn save_sampler_state_some_errors_if_destination_store_exists() {
     };
 
     let source_store = FileSplitStore::open(&source_store_path, split, 73).unwrap();
-    let _existing_dest_store = FileSplitStore::open(&existing_dest_path, split, 73).unwrap();
+    let existing_dest_store = FileSplitStore::open(&existing_dest_path, split, 73).unwrap();
+    // Publish so the file exists on disk before we try to save over it.
+    let dummy_state = PersistedSamplerState {
+        source_cycle_idx: 0,
+        source_record_cursors: vec![],
+        source_epoch: 0,
+        rng_state: 0,
+        triplet_recipe_rr_idx: 0,
+        text_recipe_rr_idx: 0,
+        source_stream_cursors: vec![],
+    };
+    existing_dest_store
+        .save_sampler_state(&dummy_state, None)
+        .unwrap();
+    drop(existing_dest_store);
 
     let state = PersistedSamplerState {
         source_cycle_idx: 1,

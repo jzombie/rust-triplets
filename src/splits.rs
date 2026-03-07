@@ -309,25 +309,27 @@ fn decode_store_meta(bytes: &[u8]) -> Result<StoreMeta, SamplerError> {
 ///
 /// Persists assignment metadata, epoch state, and sampler runtime state.
 ///
-/// When bootstrapped via [`FileSplitStore::open_with_load_path`] the store works against a
-/// private temporary copy of the source snapshot.  All mutations — including epoch state
-/// writes — accumulate there and are only published to the declared destination when
-/// [`SamplerStateStore::save_sampler_state`] is called.  This guarantees that the original
-/// source file is never modified and that no partial state leaks to the target before an
-/// explicit save.
+/// The store **always** works against a private temporary copy of the source
+/// snapshot.  All reads and mutations accumulate in the temp file.
+/// State is published to permanent storage only when
+/// [`SamplerStateStore::save_sampler_state`] is called:
+///
+/// * `save_to == None`  → publish temp to `save_path` (may overwrite).
+/// * `save_to == Some(p)` → publish temp to `p` only; `save_path` is left
+///   untouched.
+///
+/// This guarantees that the original source file is never modified and that
+/// no partial state leaks to the target before an explicit save.
 pub struct FileSplitStore {
     store: DataStore,
-    /// Working path: either the canonical save path (regular open) or a temp file
-    /// (bootstrapped open).  All reads and writes go here.
+    /// Working path: always a private temp file; all reads and writes go here.
     path: PathBuf,
-    /// Declared save destination.  Equals `path` for a regular open; differs from `path`
-    /// when the store is working out of a temp file.
+    /// Declared save destination; published to on `save_sampler_state(None)`.
     save_path: PathBuf,
     ratios: SplitRatios,
     seed: u64,
     /// Keeps the temporary directory alive for the lifetime of this store.
-    /// `None` when the store is working directly on its canonical path.
-    _temp_dir: Option<TempDir>,
+    _temp_dir: TempDir,
 }
 
 impl fmt::Debug for FileSplitStore {
@@ -353,15 +355,16 @@ impl FileSplitStore {
     /// Open (or create) a file-backed split store at `save_path`, optionally
     /// bootstrapping initial state from `load_path`.
     ///
-    /// When `load_path` is supplied and `save_path` does not yet exist the source
-    /// snapshot is copied into a **private temporary file** that becomes the working
-    /// store for this instance.  All reads, mutations, and intermediate saves operate
-    /// on that temp copy — the original `load_path` file is never modified.  State is
-    /// only published to the declared `save_path` (or to a caller-supplied path) when
-    /// [`SamplerStateStore::save_sampler_state`] is explicitly called.
+    /// Always stages through a **private temporary file**.  The source used to
+    /// seed the temp is chosen as follows:
     ///
-    /// If `save_path` already exists it is opened directly without any bootstrapping,
-    /// matching the behaviour of [`FileSplitStore::open`].
+    /// 1. `load_path` if supplied and it exists.
+    /// 2. `save_path` if it already exists.
+    /// 3. Nothing — a fresh empty store is created in the temp.
+    ///
+    /// All mutations accumulate in the temp.  State is published to permanent
+    /// storage only when [`SamplerStateStore::save_sampler_state`] is called.
+    /// The original source file is never modified.
     pub fn open_with_load_path<LP: Into<PathBuf>, SP: Into<PathBuf>>(
         load_path: Option<LP>,
         save_path: SP,
@@ -372,50 +375,38 @@ impl FileSplitStore {
         let save_path = coerce_store_path(save_path.into());
         ensure_parent_dir(&save_path)?;
 
-        // When a load source is provided and the declared save target does not yet exist,
-        // stage through a temp file so the source is never mutated and no partial state
-        // leaks to the target before an explicit save.
-        if !save_path.exists()
-            && let Some(load_path) = load_path
-        {
-            let source = coerce_store_path(load_path.into());
-            if source != save_path && source.exists() {
-                let temp_dir = tempfile::tempdir().map_err(|err| {
-                    SamplerError::SplitStore(format!(
-                        "failed to create temp dir for split store bootstrap: {err}"
-                    ))
-                })?;
-                let working_path = temp_dir.path().join("working_store.bin");
-                fs::copy(&source, &working_path).map_err(|err| {
-                    SamplerError::SplitStore(format!(
-                        "failed to copy split store from '{}' to temp: {err}",
-                        source.display()
-                    ))
-                })?;
-                let raw_store = DataStore::open(&working_path).map_err(map_store_err)?;
-                let store = Self {
-                    store: raw_store,
-                    path: working_path,
-                    save_path,
-                    ratios,
-                    seed,
-                    _temp_dir: Some(temp_dir),
-                };
-                store.verify_metadata()?;
-                return Ok(store);
-            }
+        // Determine source to seed the working temp from.
+        // Priority: explicit load_path > existing save_path > fresh (nothing).
+        let source: Option<PathBuf> = if let Some(lp) = load_path {
+            let lp = coerce_store_path(lp.into());
+            if lp.exists() { Some(lp) } else { None }
+        } else if save_path.exists() {
+            Some(save_path.clone())
+        } else {
+            None
+        };
+
+        let temp_dir = tempfile::tempdir().map_err(|err| {
+            SamplerError::SplitStore(format!("failed to create temp dir for split store: {err}"))
+        })?;
+        let working_path = temp_dir.path().join("working_store.bin");
+        if let Some(src) = &source {
+            fs::copy(src, &working_path).map_err(|err| {
+                SamplerError::SplitStore(format!(
+                    "failed to copy split store from '{}' to temp: {err}",
+                    src.display()
+                ))
+            })?;
         }
 
-        // Regular open: work directly on the declared save path.
-        let raw_store = DataStore::open(&save_path).map_err(map_store_err)?;
-        let path = save_path.clone();
+        let raw_store = DataStore::open(&working_path).map_err(map_store_err)?;
         let store = Self {
             store: raw_store,
-            path,
+            path: working_path,
             save_path,
             ratios,
             seed,
-            _temp_dir: None,
+            _temp_dir: temp_dir,
         };
         store.verify_metadata()?;
         Ok(store)
@@ -577,39 +568,22 @@ impl SamplerStateStore for FileSplitStore {
         }
     }
 
-    /// Persist `state` and publish the working store to its final destination.
+    /// Persist `state` to the working temp store and publish to the destination.
     ///
-    /// The write is always made to the internal working store first (which may be a
-    /// private temp file when the store was opened via
-    /// [`FileSplitStore::open_with_load_path`]).  After writing, the working file is
-    /// copied to the publish target:
-    ///
-    /// * `save_to == None`  → publish to the declared `save_path` (the path supplied
-    ///   to `open` / `open_with_load_path`).  Repeated saves are idempotent.
-    /// * `save_to == Some(p)` → publish to `p`, which **must not already exist**.
-    ///
-    /// In both cases the original source file (when bootstrapped via `open_with_load_path`)
-    /// is never touched.
+    /// * `save_to == None`  → publish temp to `save_path` (may overwrite).
+    /// * `save_to == Some(p)` → publish temp to `p` only; `save_path` is left
+    ///   untouched.  `p` must not already exist.
     fn save_sampler_state(
         &self,
         state: &PersistedSamplerState,
         save_to: Option<&Path>,
     ) -> Result<(), SamplerError> {
-        // Always write to the working store (temp or canonical).
-        let payload = encode_sampler_state(state);
-        write_bytes(&self.store, SAMPLER_STATE_KEY, &payload)?;
-
-        // Determine the publish destination.
+        // Determine publish destination before writing anything.
         let dest = if let Some(p) = save_to {
             coerce_store_path(p.to_path_buf())
         } else {
             self.save_path.clone()
         };
-
-        // Nothing to copy when the working file already is the destination.
-        if dest == self.path {
-            return Ok(());
-        }
 
         // Refuse to overwrite an explicitly-named destination that already exists.
         // Saving back to the canonical save_path (None) is always allowed.
@@ -620,7 +594,11 @@ impl SamplerStateStore for FileSplitStore {
             )));
         }
 
-        // Publish: atomically copy the working store to the destination.
+        // Write state into the working temp store.
+        let payload = encode_sampler_state(state);
+        write_bytes(&self.store, SAMPLER_STATE_KEY, &payload)?;
+
+        // Publish: copy the temp store to the destination.
         ensure_parent_dir(&dest)?;
         fs::copy(&self.path, &dest).map_err(|err| {
             SamplerError::SplitStore(format!(
@@ -871,21 +849,51 @@ mod tests {
         assert!(saw_validation);
     }
 
+    /// `save(None)` must publish the temp to `save_path` on disk.  A fresh
+    /// `open` of that path must see everything that was written before the save.
     #[test]
-    fn file_store_persists_assignments() {
+    fn save_none_publishes_to_save_path_and_reloads_cleanly() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("splits.json");
+        let path = dir.path().join("persist.bin");
         let ratios = SplitRatios::default();
-        let store = FileSplitStore::open(&path, ratios, 123).unwrap();
-        let label = store.ensure("abc".to_string()).unwrap();
-        assert!(matches!(
-            label,
-            SplitLabel::Train | SplitLabel::Validation | SplitLabel::Test
-        ));
-        drop(store);
 
-        let store_again = FileSplitStore::open(&path, ratios, 123).unwrap();
-        assert_eq!(store_again.label_for(&"abc".to_string()).unwrap(), label);
+        {
+            let store = FileSplitStore::open(&path, ratios, 123).unwrap();
+            let mut meta = HashMap::new();
+            meta.insert(
+                SplitLabel::Train,
+                PersistedSplitMeta {
+                    epoch: 3,
+                    offset: 7,
+                    hashes_checksum: 42,
+                },
+            );
+            store.save_epoch_meta(&meta).unwrap();
+            let state = PersistedSamplerState {
+                source_cycle_idx: 11,
+                source_record_cursors: vec![("s".to_string(), 1)],
+                source_epoch: 5,
+                rng_state: 99,
+                triplet_recipe_rr_idx: 2,
+                text_recipe_rr_idx: 3,
+                source_stream_cursors: vec![],
+            };
+            assert!(!path.exists(), "save_path must not exist before save(None)");
+            store.save_sampler_state(&state, None).unwrap();
+            assert!(
+                path.exists(),
+                "save(None) must publish to save_path on disk"
+            );
+        }
+
+        // Fresh open must read everything back from disk.
+        let reopened = FileSplitStore::open(&path, ratios, 123).unwrap();
+        let loaded_state = reopened.load_sampler_state().unwrap().unwrap();
+        assert_eq!(loaded_state.source_cycle_idx, 11);
+        assert_eq!(loaded_state.source_epoch, 5);
+        assert_eq!(loaded_state.rng_state, 99);
+        let loaded_meta = reopened.load_epoch_meta().unwrap();
+        assert_eq!(loaded_meta.get(&SplitLabel::Train).unwrap().epoch, 3);
     }
 
     #[test]
@@ -895,6 +903,21 @@ mod tests {
         let ratios = SplitRatios::default();
         let store = FileSplitStore::open(&path, ratios, 123).unwrap();
         store.ensure("abc".to_string()).unwrap();
+        // Publish to disk so the seed is committed before the next open.
+        store
+            .save_sampler_state(
+                &PersistedSamplerState {
+                    source_cycle_idx: 0,
+                    source_record_cursors: vec![],
+                    source_epoch: 0,
+                    rng_state: 0,
+                    triplet_recipe_rr_idx: 0,
+                    text_recipe_rr_idx: 0,
+                    source_stream_cursors: vec![],
+                },
+                None,
+            )
+            .unwrap();
         drop(store);
 
         let err = FileSplitStore::open(&path, ratios, 999).unwrap_err();
@@ -983,6 +1006,21 @@ mod tests {
             loaded_state.source_stream_cursors,
             vec![("source_a".to_string(), 9)]
         );
+
+        // Verify the same data survives a drop + fresh open from disk.
+        drop(store);
+        let reopened = FileSplitStore::open(&path, SplitRatios::default(), 222).unwrap();
+        let disk_state = reopened.load_sampler_state().unwrap().unwrap();
+        assert_eq!(disk_state.source_cycle_idx, 11);
+        assert_eq!(disk_state.source_epoch, 8);
+        assert_eq!(disk_state.rng_state, 1234);
+        let disk_meta = reopened.load_epoch_meta().unwrap();
+        assert_eq!(disk_meta.get(&SplitLabel::Train).unwrap().epoch, 3);
+        let disk_hashes = reopened
+            .load_epoch_hashes(SplitLabel::Validation)
+            .unwrap()
+            .unwrap();
+        assert_eq!(disk_hashes.checksum, 99);
     }
 
     #[test]
@@ -1284,6 +1322,7 @@ mod tests {
             .save_sampler_state(&sampler_state, Some(path_b.as_path()))
             .unwrap();
 
+        // Destination gets the existing store data AND the new sampler state.
         let store_b = FileSplitStore::open(&path_b, ratios, 42).unwrap();
         assert_eq!(
             store_b.label_for(&assigned_id),
@@ -1292,6 +1331,72 @@ mod tests {
         assert_eq!(
             store_b.load_sampler_state().unwrap().unwrap().source_epoch,
             9
+        );
+
+        // save_to=Some(path_b) must not publish to path_a (the canonical save_path).
+        assert!(
+            !path_a.exists(),
+            "save_to=Some(...) must not publish to the canonical save_path"
+        );
+    }
+
+    /// Saving to a custom path on a plain `open` store must not mutate the
+    /// working store file -- i.e. a previously-saved state is preserved.
+    #[test]
+    fn save_some_on_regular_open_does_not_modify_working_store() {
+        let dir = tempdir().unwrap();
+        let path_a = dir.path().join("working_store.bin");
+        let path_b = dir.path().join("checkpoint_store.bin");
+        let ratios = SplitRatios::default();
+
+        let store_a = FileSplitStore::open(&path_a, ratios, 42).unwrap();
+
+        // Establish a baseline state in the working store.
+        let initial_state = PersistedSamplerState {
+            source_cycle_idx: 1,
+            source_record_cursors: vec![],
+            source_epoch: 1,
+            rng_state: 0,
+            triplet_recipe_rr_idx: 0,
+            text_recipe_rr_idx: 0,
+            source_stream_cursors: vec![],
+        };
+        store_a.save_sampler_state(&initial_state, None).unwrap();
+
+        // Snapshot a newer state to a separate checkpoint path.
+        let checkpoint_state = PersistedSamplerState {
+            source_cycle_idx: 99,
+            source_record_cursors: vec![],
+            source_epoch: 99,
+            rng_state: 42,
+            triplet_recipe_rr_idx: 0,
+            text_recipe_rr_idx: 0,
+            source_stream_cursors: vec![],
+        };
+        store_a
+            .save_sampler_state(&checkpoint_state, Some(path_b.as_path()))
+            .unwrap();
+
+        // The on-disk save_path (path_a) must not have been overwritten by save_to=Some(...).
+        // Re-open from disk to verify; path_a was last published by save_to=None above.
+        drop(store_a);
+        let store_a_disk = FileSplitStore::open(&path_a, ratios, 42).unwrap();
+        assert_eq!(
+            store_a_disk
+                .load_sampler_state()
+                .unwrap()
+                .unwrap()
+                .source_epoch,
+            1,
+            "save_to=Some(...) must not overwrite the on-disk save_path"
+        );
+
+        // The checkpoint must hold the new state.
+        let store_b = FileSplitStore::open(&path_b, ratios, 42).unwrap();
+        let state_from_b = store_b.load_sampler_state().unwrap().unwrap();
+        assert_eq!(
+            state_from_b.source_epoch, 99,
+            "checkpoint store must hold the snapshotted state"
         );
     }
 
@@ -1312,13 +1417,44 @@ mod tests {
         };
         let payload = encode_store_meta(&wrong_version);
         store.store.write(META_KEY, &payload).unwrap();
+        // Publish the corrupted temp to disk so the next open reads the bad version.
+        store
+            .save_sampler_state(
+                &PersistedSamplerState {
+                    source_cycle_idx: 0,
+                    source_record_cursors: vec![],
+                    source_epoch: 0,
+                    rng_state: 0,
+                    triplet_recipe_rr_idx: 0,
+                    text_recipe_rr_idx: 0,
+                    source_stream_cursors: vec![],
+                },
+                None,
+            )
+            .unwrap();
         drop(store);
 
         let err = FileSplitStore::open(&path, ratios, 123).unwrap_err();
         assert!(matches!(err, SamplerError::SplitStore(msg) if msg.contains("version mismatch")));
 
         let ratio_path = dir.path().join("ratio_mismatch.bin");
-        let _baseline = FileSplitStore::open(&ratio_path, ratios, 777).unwrap();
+        let baseline = FileSplitStore::open(&ratio_path, ratios, 777).unwrap();
+        // Publish so ratio_path exists on disk before reopening with different ratios.
+        baseline
+            .save_sampler_state(
+                &PersistedSamplerState {
+                    source_cycle_idx: 0,
+                    source_record_cursors: vec![],
+                    source_epoch: 0,
+                    rng_state: 0,
+                    triplet_recipe_rr_idx: 0,
+                    text_recipe_rr_idx: 0,
+                    source_stream_cursors: vec![],
+                },
+                None,
+            )
+            .unwrap();
+        drop(baseline);
 
         let different_ratios = SplitRatios {
             train: 0.7,
