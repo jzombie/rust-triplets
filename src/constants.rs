@@ -178,8 +178,6 @@ pub mod huggingface {
     pub const HUGGINGFACE_REFRESH_BATCH_MULTIPLIER: usize = 8;
     /// Version tag for persisted shard-sequence metadata payloads.
     pub const SHARD_SEQUENCE_STATE_VERSION: u32 = 1;
-    /// Filename for persisted shard-sequence metadata.
-    pub const SHARD_SEQUENCE_STATE_FILE: &str = "_sequence_state.json";
     /// Extension used by persisted per-shard row-store files.
     pub const HF_SHARD_STORE_EXTENSION: &str = "simdr";
     /// Key prefix for individual row payload entries in shard row stores.

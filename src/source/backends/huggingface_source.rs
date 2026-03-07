@@ -38,8 +38,7 @@ use crate::constants::env_vars::{TRIPLETS_HF_PARQUET_ENDPOINT, TRIPLETS_HF_SIZE_
 use crate::constants::huggingface::{
     ALL_SPLITS_DIR, HF_SHARD_STORE_EXTENSION, HF_SHARD_STORE_META_ROWS_KEY,
     HF_SHARD_STORE_ROW_PREFIX, HUGGINGFACE_REFRESH_BATCH_MULTIPLIER, REMOTE_BOOTSTRAP_SHARDS,
-    REMOTE_EXPANSION_HEADROOM_MULTIPLIER, REMOTE_URL_PREFIX, SHARD_SEQUENCE_STATE_FILE,
-    SHARD_SEQUENCE_STATE_VERSION,
+    REMOTE_EXPANSION_HEADROOM_MULTIPLIER, REMOTE_URL_PREFIX,
 };
 use crate::data::{DataRecord, QualityScore, SectionRole};
 use crate::utils::make_section;
@@ -695,31 +694,21 @@ struct SourceState {
     materialized_rows: usize,
     total_rows: Option<usize>,
     shards: Vec<ShardIndex>,
+    /// Sorted, immutable list of all remote candidate identifiers.  Never
+    /// shuffled in-place — ordering is expressed via `remote_candidate_order`.
     remote_candidates: Option<Vec<String>>,
     remote_candidate_sizes: HashMap<String, u64>,
+    /// Seed-derived permutation of indices into `remote_candidates`.  For a
+    /// given (seed, total) this is always the same sequence, regardless of
+    /// how many shards have been consumed previously.
+    remote_candidate_order: Vec<usize>,
     next_remote_idx: usize,
-    /// Candidates whose local shard files were evicted from the cache and
-    /// must be re-downloaded before new candidates are consumed.
-    eviction_queue: VecDeque<String>,
 }
 
 type ParquetGroupKey = (PathBuf, usize);
 type ParquetGroupRequest = (usize, usize, ShardIndex);
 type ParquetManifestCandidates = (Vec<String>, HashMap<String, u64>, usize);
 type ShardIndexResult = (Vec<ShardIndex>, usize, HashMap<PathBuf, Arc<DataStore>>);
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct PersistedShardSequence {
-    version: u32,
-    source_id: String,
-    dataset: String,
-    config: String,
-    split: String,
-    sampler_seed: u64,
-    candidates: Vec<String>,
-    candidate_sizes: HashMap<String, u64>,
-    next_remote_idx: usize,
-}
 
 impl HuggingFaceRowSource {
     /// Build a new source by indexing local shard files.
@@ -796,7 +785,7 @@ impl HuggingFaceRowSource {
                 remote_candidates: None,
                 remote_candidate_sizes: HashMap::new(),
                 next_remote_idx: 0,
-                eviction_queue: VecDeque::new(),
+                remote_candidate_order: Vec::new(),
             })),
             cache: Arc::new(Mutex::new(RowCache::default())),
             parquet_cache: Arc::new(Mutex::new(ParquetCache::default())),
@@ -1218,26 +1207,28 @@ impl HuggingFaceRowSource {
     }
 
     fn set_active_sampler_config(&self, config: &SamplerConfig) {
+        let seed_changed = self
+            .sampler_config
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(|c| c.seed != config.seed))
+            .unwrap_or(false);
+
         if let Ok(mut slot) = self.sampler_config.lock() {
             *slot = Some(config.clone());
         }
-        // Lazily restore persisted candidate sequence on first sampler
-        // configuration so the background expansion thread never needs to
-        // hit the network just to confirm the source is already fully cached.
-        let needs_load = self
-            .state
-            .lock()
-            .map(|s| s.remote_candidates.is_none())
-            .unwrap_or(false);
-        if needs_load
-            && let Ok(Some(persisted)) =
-                Self::load_persisted_shard_sequence(&self.config, config.seed)
+
+        // When the epoch seed changes, rebuild the permuted order index from the
+        // sorted immutable candidates list and reset the consumption pointer.
+        // For a given (seed, sorted-list) this always produces the same order,
+        // so epoch N is deterministic whether it is the first or the hundredth epoch.
+        if seed_changed
             && let Ok(mut state) = self.state.lock()
-            && state.remote_candidates.is_none()
+            && let Some(candidates) = state.remote_candidates.as_ref()
         {
-            state.remote_candidates = Some(persisted.candidates);
-            state.remote_candidate_sizes = persisted.candidate_sizes;
-            state.next_remote_idx = persisted.next_remote_idx;
+            state.remote_candidate_order =
+                Self::build_candidate_order(&self.config, candidates, config.seed);
+            state.next_remote_idx = 0;
         }
     }
 
@@ -1415,7 +1406,7 @@ impl HuggingFaceRowSource {
         Ok((candidates, HashMap::new()))
     }
 
-    fn candidates_from_parquet_manifest_json(
+    fn uncached_candidates_from_parquet_manifest(
         config: &HuggingFaceRowsConfig,
         json: &Value,
     ) -> Result<ParquetManifestCandidates, SamplerError> {
@@ -1550,139 +1541,23 @@ impl HuggingFaceRowSource {
         Self::resolve_remote_candidates_from_siblings(config, &siblings, &accepted)
     }
 
-    /// Return the persistence file path for shard sequence state.
-    fn shard_sequence_state_path(config: &HuggingFaceRowsConfig) -> PathBuf {
-        config
-            .snapshot_dir
-            .join("_parquet_manifest")
-            .join(SHARD_SEQUENCE_STATE_FILE)
-    }
-
-    /// Load persisted shard candidate sequence when metadata and sampler seed match.
-    fn load_persisted_shard_sequence(
-        config: &HuggingFaceRowsConfig,
-        current_sampler_seed: u64,
-    ) -> Result<Option<PersistedShardSequence>, SamplerError> {
-        let path = Self::shard_sequence_state_path(config);
-        if !path.exists() {
-            return Ok(None);
-        }
-
-        let raw = fs::read_to_string(&path).map_err(|err| SamplerError::SourceUnavailable {
-            source_id: config.source_id.clone(),
-            reason: format!(
-                "failed reading shard-sequence state {}: {err}",
-                path.display()
-            ),
-        })?;
-
-        let mut persisted: PersistedShardSequence =
-            serde_json::from_str(&raw).map_err(|err| SamplerError::SourceUnavailable {
-                source_id: config.source_id.clone(),
-                reason: format!(
-                    "failed parsing shard-sequence state {}: {err}",
-                    path.display()
-                ),
-            })?;
-
-        if persisted.version != SHARD_SEQUENCE_STATE_VERSION
-            || persisted.source_id != config.source_id
-            || persisted.dataset != config.dataset
-            || persisted.config != config.config
-            || persisted.split != config.split
-            || persisted.sampler_seed != current_sampler_seed
-        {
-            warn!(
-                "[triplets:hf] shard-sequence state mismatch for {}; rebuilding candidate order",
-                path.display()
-            );
-            return Ok(None);
-        }
-
-        if persisted.next_remote_idx > persisted.candidates.len() {
-            persisted.next_remote_idx = persisted.candidates.len();
-        }
-
-        Ok(Some(persisted))
-    }
-
-    /// Persist current shard candidate sequence and position atomically.
-    fn persist_shard_sequence_locked(&self, state: &SourceState) -> Result<(), SamplerError> {
-        let Some(candidates) = state.remote_candidates.as_ref() else {
-            return Ok(());
-        };
-
-        let path = Self::shard_sequence_state_path(&self.config);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|err| SamplerError::SourceUnavailable {
-                source_id: self.config.source_id.clone(),
-                reason: format!(
-                    "failed creating shard-sequence state dir {}: {err}",
-                    parent.display()
-                ),
-            })?;
-        }
-
-        let persisted = PersistedShardSequence {
-            version: SHARD_SEQUENCE_STATE_VERSION,
-            source_id: self.config.source_id.clone(),
-            dataset: self.config.dataset.clone(),
-            config: self.config.config.clone(),
-            split: self.config.split.clone(),
-            sampler_seed: self.configured_sampler_seed()?,
-            candidates: candidates.clone(),
-            candidate_sizes: state.remote_candidate_sizes.clone(),
-            next_remote_idx: state.next_remote_idx.min(candidates.len()),
-        };
-
-        let raw = serde_json::to_vec_pretty(&persisted).map_err(|err| {
-            SamplerError::SourceUnavailable {
-                source_id: self.config.source_id.clone(),
-                reason: format!(
-                    "failed encoding shard-sequence state {}: {err}",
-                    path.display()
-                ),
-            }
-        })?;
-
-        let tmp_path = path.with_extension("tmp");
-        fs::write(&tmp_path, raw).map_err(|err| SamplerError::SourceUnavailable {
-            source_id: self.config.source_id.clone(),
-            reason: format!(
-                "failed writing shard-sequence state temp {}: {err}",
-                tmp_path.display()
-            ),
-        })?;
-        fs::rename(&tmp_path, &path).map_err(|err| SamplerError::SourceUnavailable {
-            source_id: self.config.source_id.clone(),
-            reason: format!(
-                "failed replacing shard-sequence state {}: {err}",
-                path.display()
-            ),
-        })?;
-
-        Ok(())
-    }
-
-    /// Rotate candidate ordering deterministically using source identity.
-    /// Shuffle remote shard candidates into a deterministic-but-random order.
+    /// Build a seed-derived permutation of indices 0..candidates.len().
     ///
-    /// A Fisher-Yates shuffle seeded from source identity and the sampler seed
-    /// ensures that downloaded shards are spread broadly across the full
-    /// positional space of the dataset rather than walking file-name order from
-    /// a fixed offset.  The same seed always produces the same shuffle, so runs
-    /// are reproducible.
-    fn shuffle_candidates_deterministically(
+    /// The candidates slice is never modified.  The returned Vec maps
+    /// download-position → candidate index, so for epoch seed S position N
+    /// always resolves to the same shard regardless of how many shards have
+    /// been consumed before.
+    fn build_candidate_order(
         config: &HuggingFaceRowsConfig,
-        candidates: &mut [String],
+        candidates: &[String],
         sampler_seed: u64,
-    ) {
+    ) -> Vec<usize> {
         let n = candidates.len();
+        let mut order: Vec<usize> = (0..n).collect();
         if n <= 1 {
-            return;
+            return order;
         }
         let base_seed = Self::shard_candidate_seed(config, n, sampler_seed);
-        // xorshift64 — fast, no dependency, deterministic.
         let mut rng = if base_seed == 0 {
             0xdeadbeef_cafebabe
         } else {
@@ -1693,7 +1568,26 @@ impl HuggingFaceRowSource {
             rng ^= rng >> 7;
             rng ^= rng << 17;
             let j = (rng as usize) % (i + 1);
-            candidates.swap(i, j);
+            order.swap(i, j);
+        }
+        order
+    }
+
+    /// Shuffle remote shard candidates into a deterministic-but-random order.
+    ///
+    /// Retained for use in tests that directly assert on shuffled slices.
+    /// Production code uses `build_candidate_order` and keeps the list immutable.
+    #[cfg(test)]
+    fn shuffle_candidates_deterministically(
+        config: &HuggingFaceRowsConfig,
+        candidates: &mut [String],
+        sampler_seed: u64,
+    ) {
+        let order = Self::build_candidate_order(config, candidates, sampler_seed);
+        // Apply the permutation in-place via a temporary clone.
+        let original = candidates.to_vec();
+        for (pos, &src) in order.iter().enumerate() {
+            candidates[pos] = original[src].clone();
         }
     }
 
@@ -1778,7 +1672,7 @@ impl HuggingFaceRowSource {
                 reason: format!("failed parsing datasets-server parquet response: {err}"),
             })?;
 
-        Self::candidates_from_parquet_manifest_json(config, &json)
+        Self::uncached_candidates_from_parquet_manifest(config, &json)
     }
 
     /// Map a candidate identifier to the local snapshot target path.
@@ -1810,14 +1704,14 @@ impl HuggingFaceRowSource {
         true
     }
 
-    /// Return root directory used for manifest-cached remote shards.
-    fn manifest_cache_root(&self) -> PathBuf {
-        self.config.snapshot_dir.join("_parquet_manifest")
-    }
-
     /// Return on-disk size for a shard path, or 0 if metadata lookup fails.
     fn shard_size_bytes(path: &Path) -> u64 {
         fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
+    }
+
+    /// Return root directory used for manifest-cached remote shards.
+    fn manifest_cache_root(&self) -> PathBuf {
+        self.config.snapshot_dir.join("_parquet_manifest")
     }
 
     /// Recompute shard `global_start` offsets and total materialized row count.
@@ -1832,21 +1726,21 @@ impl HuggingFaceRowSource {
 
     /// Sync in-memory shard state from current on-disk snapshot tree.
     fn sync_shard_state_from_disk_locked(&self, state: &mut SourceState) {
-        // Collect remote candidates for shards whose files have been evicted so
-        // they can be re-downloaded before new candidates are consumed.
-        for shard in &state.shards {
-            if !shard.path.exists()
-                && let Some(candidate) = &shard.remote_candidate
-                && !state.eviction_queue.contains(candidate)
-            {
-                state.eviction_queue.push_back(candidate.clone());
-            }
-        }
+        // If any shards have been evicted by the cache manager, remove them from
+        // the in-memory index and reset the candidate list so the next expansion
+        // cycle re-queries HF.  `uncached_candidates_from_parquet_manifest` skips
+        // shards whose .simdr already exists, so evicted ones will reappear.
+        let any_missing = state.shards.iter().any(|shard| !shard.path.exists());
         state.shards.retain(|shard| shard.path.exists());
         Self::recompute_shard_offsets(state);
+        if any_missing {
+            state.remote_candidates = None;
+            state.remote_candidate_order = Vec::new();
+            state.next_remote_idx = 0;
+        }
     }
 
-    /// Apply cache-manager eviction policy and sync in-memory shard state.
+    /// Apply cache-manager eviction policy to manifest shards and sync in-memory state.
     fn enforce_disk_cap_locked(
         &self,
         state: &mut SourceState,
@@ -2505,17 +2399,15 @@ impl HuggingFaceRowSource {
                 if state.remote_candidates.is_none() {
                     let (mut candidates, candidate_sizes) =
                         Self::list_remote_candidates(&self.config)?;
+                    candidates.sort();
+                    candidates.dedup();
                     let sampler_seed = self.configured_sampler_seed().unwrap_or(0);
-                    Self::shuffle_candidates_deterministically(
-                        &self.config,
-                        &mut candidates,
-                        sampler_seed,
-                    );
+                    let order =
+                        Self::build_candidate_order(&self.config, &candidates, sampler_seed);
                     state.remote_candidates = Some(candidates);
+                    state.remote_candidate_order = order;
                     state.remote_candidate_sizes = candidate_sizes;
                     state.next_remote_idx = 0;
-
-                    self.persist_shard_sequence_locked(&state)?;
 
                     let candidate_count = state
                         .remote_candidates
@@ -2573,7 +2465,7 @@ impl HuggingFaceRowSource {
 
     /// Download and register the next remote shard candidate.
     fn download_next_remote_shard(&self) -> Result<bool, SamplerError> {
-        let (is_recovery, remote_ordinal, remote_total, remote_path, expected_bytes) = {
+        let (remote_ordinal, remote_total, remote_path, expected_bytes) = {
             let mut state = self
                 .state
                 .lock()
@@ -2581,12 +2473,7 @@ impl HuggingFaceRowSource {
                     source_id: self.config.source_id.clone(),
                     reason: "huggingface source state lock poisoned".to_string(),
                 })?;
-            // Drain the eviction queue first so evicted shards are recovered
-            // before new candidates are consumed.
-            if let Some(candidate) = state.eviction_queue.pop_front() {
-                let expected = state.remote_candidate_sizes.get(&candidate).copied();
-                (true, 0usize, 0usize, candidate, expected)
-            } else {
+            {
                 let Some(candidates) = &state.remote_candidates else {
                     return Ok(false);
                 };
@@ -2596,33 +2483,28 @@ impl HuggingFaceRowSource {
                 let sequence_pos = state.next_remote_idx;
                 let remote_ordinal = sequence_pos + 1;
                 let remote_total = candidates.len();
-                let candidate_idx = sequence_pos;
+                // Use the seed-derived order index so the mapping from position →
+                // shard is stable and independent of how many shards were previously
+                // consumed.  Fall back to direct indexing only if the order vec is
+                // somehow not populated (should never happen after candidates are set).
+                let candidate_idx = state
+                    .remote_candidate_order
+                    .get(sequence_pos)
+                    .copied()
+                    .unwrap_or(sequence_pos);
                 let remote_path = candidates[candidate_idx].clone();
                 let expected_bytes = state.remote_candidate_sizes.get(&remote_path).copied();
                 state.next_remote_idx += 1;
-                (
-                    false,
-                    remote_ordinal,
-                    remote_total,
-                    remote_path,
-                    expected_bytes,
-                )
+                (remote_ordinal, remote_total, remote_path, expected_bytes)
             }
         };
 
-        if is_recovery {
-            info!(
-                "[triplets:hf] re-downloading evicted shard: {}",
-                remote_path.as_str()
-            );
-        } else {
-            info!(
-                "[triplets:hf] lazy downloading shard {}/{}: {}",
-                remote_ordinal,
-                remote_total,
-                remote_path.as_str()
-            );
-        }
+        info!(
+            "[triplets:hf] lazy downloading shard {}/{}: {}",
+            remote_ordinal,
+            remote_total,
+            remote_path.as_str()
+        );
         let local_path =
             Self::download_and_materialize_shard(&self.config, &remote_path, expected_bytes)?;
 
@@ -2764,7 +2646,6 @@ impl HuggingFaceRowSource {
             })?;
 
         let evicted_any = self.enforce_disk_cap_locked(&mut state, &local_path)?;
-        self.persist_shard_sequence_locked(&state)?;
         let materialized_rows = state.materialized_rows;
         let shard_count = state.shards.len();
         let active_shards = state.shards.clone();
@@ -3984,7 +3865,7 @@ mod tests {
                 remote_candidates: Some(vec![]),
                 remote_candidate_sizes: HashMap::new(),
                 next_remote_idx: 0,
-                eviction_queue: VecDeque::new(),
+                remote_candidate_order: Vec::new(),
             })),
             cache: Arc::new(Mutex::new(RowCache::default())),
             parquet_cache: Arc::new(Mutex::new(ParquetCache::default())),
@@ -4304,26 +4185,6 @@ mod tests {
     }
 
     #[test]
-    fn persist_shard_sequence_errors_when_manifest_dir_is_blocked_by_file() {
-        let dir = tempdir().unwrap();
-        let config = test_config(dir.path().to_path_buf());
-        fs::write(config.snapshot_dir.join("_parquet_manifest"), b"blocked").unwrap();
-        let source = test_source(config);
-        let state = SourceState {
-            materialized_rows: 0,
-            total_rows: None,
-            shards: Vec::new(),
-            remote_candidates: Some(vec!["train/a.ndjson".to_string()]),
-            remote_candidate_sizes: HashMap::new(),
-            next_remote_idx: 0,
-            eviction_queue: VecDeque::new(),
-        };
-
-        let err = source.persist_shard_sequence_locked(&state);
-        assert!(err.is_err());
-    }
-
-    #[test]
     fn list_remote_candidates_falls_back_when_manifest_query_fails() {
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path().to_path_buf());
@@ -4495,7 +4356,7 @@ mod tests {
     }
 
     #[test]
-    fn candidates_from_parquet_manifest_json_filters_and_records_sizes() {
+    fn uncached_candidates_from_parquet_manifest_filters_and_records_sizes() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
         let payload = json!({
@@ -4508,7 +4369,8 @@ mod tests {
         });
 
         let (candidates, sizes, matched) =
-            HuggingFaceRowSource::candidates_from_parquet_manifest_json(&config, &payload).unwrap();
+            HuggingFaceRowSource::uncached_candidates_from_parquet_manifest(&config, &payload)
+                .unwrap();
         assert_eq!(candidates.len(), 2);
         assert!(
             candidates
@@ -4558,7 +4420,8 @@ mod tests {
         });
 
         let (candidates, sizes, matched) =
-            HuggingFaceRowSource::candidates_from_parquet_manifest_json(&config, &payload).unwrap();
+            HuggingFaceRowSource::uncached_candidates_from_parquet_manifest(&config, &payload)
+                .unwrap();
         assert_eq!(candidates.len(), 1);
         assert!(candidates[0].ends_with(stale_url));
         assert!(!stale_target.exists());
@@ -4591,7 +4454,8 @@ mod tests {
             ]
         });
 
-        let err = HuggingFaceRowSource::candidates_from_parquet_manifest_json(&config, &payload);
+        let err =
+            HuggingFaceRowSource::uncached_candidates_from_parquet_manifest(&config, &payload);
         assert!(err.is_err());
     }
 
@@ -4646,7 +4510,7 @@ mod tests {
             remote_candidates: None,
             remote_candidate_sizes: HashMap::new(),
             next_remote_idx: 0,
-            eviction_queue: VecDeque::new(),
+            remote_candidate_order: Vec::new(),
         };
 
         assert_eq!(source.manifest_usage_bytes_locked(&state), 7);
@@ -4783,60 +4647,6 @@ mod tests {
         let candidate = "url::https://example.com/raw/file.parquet";
         let target = HuggingFaceRowSource::candidate_target_path(&config, candidate);
         assert!(target.ends_with("_parquet_manifest/parquet/unknown.parquet"));
-    }
-
-    #[test]
-    fn persist_shard_sequence_is_noop_without_remote_candidates() {
-        let dir = tempdir().unwrap();
-        let config = test_config(dir.path().to_path_buf());
-        let source = test_source(config.clone());
-        let state = SourceState {
-            materialized_rows: 0,
-            total_rows: None,
-            shards: Vec::new(),
-            remote_candidates: None,
-            remote_candidate_sizes: HashMap::new(),
-            next_remote_idx: 0,
-            eviction_queue: VecDeque::new(),
-        };
-
-        source.persist_shard_sequence_locked(&state).unwrap();
-        assert!(!HuggingFaceRowSource::shard_sequence_state_path(&config).exists());
-    }
-
-    #[test]
-    fn load_persisted_shard_sequence_returns_none_for_identity_mismatch() {
-        // Suppress the expected WARN "shard-sequence state mismatch" that is emitted when
-        // the persisted source_id does not match the current config.  The mismatch is the
-        // entire point of this test; the warn is correct production behaviour.
-        let _quiet = tracing::subscriber::set_default(
-            tracing_subscriber::fmt()
-                .with_max_level(tracing::Level::ERROR)
-                .finish(),
-        );
-        let dir = tempdir().unwrap();
-        let config = test_config(dir.path().to_path_buf());
-        let state_path = HuggingFaceRowSource::shard_sequence_state_path(&config);
-        fs::create_dir_all(state_path.parent().unwrap()).unwrap();
-        fs::write(
-            &state_path,
-            serde_json::to_vec_pretty(&json!({
-                "version": 1,
-                "source_id": "different",
-                "dataset": config.dataset,
-                "config": config.config,
-                "split": config.split,
-                "sampler_seed": 1,
-                "candidates": ["train/0.ndjson"],
-                "candidate_sizes": {},
-                "next_remote_idx": 0
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-
-        let loaded = HuggingFaceRowSource::load_persisted_shard_sequence(&config, 1).unwrap();
-        assert!(loaded.is_none());
     }
 
     #[test]
@@ -4978,7 +4788,7 @@ mod tests {
             remote_candidates: None,
             remote_candidate_sizes: HashMap::new(),
             next_remote_idx: 0,
-            eviction_queue: VecDeque::new(),
+            remote_candidate_order: Vec::new(),
         };
         let protected = dir.path().join("p");
         assert!(
@@ -5009,7 +4819,7 @@ mod tests {
             remote_candidates: None,
             remote_candidate_sizes: HashMap::new(),
             next_remote_idx: 0,
-            eviction_queue: VecDeque::new(),
+            remote_candidate_order: Vec::new(),
         };
         assert!(
             !source2
@@ -5058,7 +4868,7 @@ mod tests {
             remote_candidates: None,
             remote_candidate_sizes: HashMap::new(),
             next_remote_idx: 0,
-            eviction_queue: VecDeque::new(),
+            remote_candidate_order: Vec::new(),
         };
 
         let evicted = source.enforce_disk_cap_locked(&mut state, &second).unwrap();
@@ -5097,7 +4907,7 @@ mod tests {
             remote_candidates: None,
             remote_candidate_sizes: HashMap::new(),
             next_remote_idx: 0,
-            eviction_queue: VecDeque::new(),
+            remote_candidate_order: Vec::new(),
         };
 
         let evicted = source
@@ -5123,7 +4933,7 @@ mod tests {
                 remote_candidates: None,
                 remote_candidate_sizes: HashMap::new(),
                 next_remote_idx: 0,
-                eviction_queue: VecDeque::new(),
+                remote_candidate_order: Vec::new(),
             })),
             cache: Arc::new(Mutex::new(RowCache::default())),
             parquet_cache: Arc::new(Mutex::new(ParquetCache::default())),
@@ -5397,36 +5207,6 @@ mod tests {
     }
 
     #[test]
-    fn load_persisted_shard_sequence_clamps_next_remote_index() {
-        let dir = tempdir().unwrap();
-        let config = test_config(dir.path().to_path_buf());
-        let state_path = HuggingFaceRowSource::shard_sequence_state_path(&config);
-        fs::create_dir_all(state_path.parent().unwrap()).unwrap();
-        fs::write(
-            &state_path,
-            serde_json::to_vec_pretty(&json!({
-                "version": SHARD_SEQUENCE_STATE_VERSION,
-                "source_id": config.source_id,
-                "dataset": config.dataset,
-                "config": config.config,
-                "split": config.split,
-                "sampler_seed": 7,
-                "candidates": ["train/0.ndjson", "train/1.ndjson"],
-                "candidate_sizes": {},
-                "next_remote_idx": 99
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-
-        let loaded = HuggingFaceRowSource::load_persisted_shard_sequence(&config, 7)
-            .unwrap()
-            .unwrap();
-        assert_eq!(loaded.candidates.len(), 2);
-        assert_eq!(loaded.next_remote_idx, 2);
-    }
-
-    #[test]
     fn default_triplet_recipes_returns_expected_shape() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
@@ -5569,18 +5349,6 @@ mod tests {
     }
 
     #[test]
-    fn load_persisted_shard_sequence_errors_on_invalid_json() {
-        let dir = tempdir().unwrap();
-        let config = test_config(dir.path().to_path_buf());
-        let path = HuggingFaceRowSource::shard_sequence_state_path(&config);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, b"{not-valid-json").unwrap();
-
-        let loaded = HuggingFaceRowSource::load_persisted_shard_sequence(&config, 1);
-        assert!(loaded.is_err());
-    }
-
-    #[test]
     fn shuffle_candidates_deterministically_is_noop_for_singleton() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
@@ -5599,12 +5367,13 @@ mod tests {
     }
 
     #[test]
-    fn candidates_from_parquet_manifest_json_returns_empty_without_entries() {
+    fn uncached_candidates_from_parquet_manifest_returns_empty_without_entries() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
         let payload = json!({"other": []});
         let (candidates, sizes, matched) =
-            HuggingFaceRowSource::candidates_from_parquet_manifest_json(&config, &payload).unwrap();
+            HuggingFaceRowSource::uncached_candidates_from_parquet_manifest(&config, &payload)
+                .unwrap();
         assert!(candidates.is_empty());
         assert!(sizes.is_empty());
         // No parquet_files key → zero matched entries.
@@ -5628,39 +5397,6 @@ mod tests {
 
         let err = source.read_line_at(&shard, 1);
         assert!(err.is_err());
-    }
-
-    #[test]
-    fn load_persisted_shard_sequence_returns_none_when_state_missing() {
-        let dir = tempdir().unwrap();
-        let config = test_config(dir.path().to_path_buf());
-        let loaded = HuggingFaceRowSource::load_persisted_shard_sequence(&config, 1).unwrap();
-        assert!(loaded.is_none());
-    }
-
-    #[test]
-    fn persist_shard_sequence_clamps_next_index_on_write() {
-        let dir = tempdir().unwrap();
-        let config = test_config(dir.path().to_path_buf());
-        let source = test_source(config.clone());
-        let state = SourceState {
-            materialized_rows: 0,
-            total_rows: None,
-            shards: Vec::new(),
-            remote_candidates: Some(vec!["a".into(), "b".into()]),
-            remote_candidate_sizes: HashMap::new(),
-            next_remote_idx: 99,
-            eviction_queue: VecDeque::new(),
-        };
-
-        source.persist_shard_sequence_locked(&state).unwrap();
-        let raw =
-            fs::read_to_string(HuggingFaceRowSource::shard_sequence_state_path(&config)).unwrap();
-        let parsed: Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(
-            parsed.get("next_remote_idx").and_then(Value::as_u64),
-            Some(2)
-        );
     }
 
     #[test]
@@ -5893,51 +5629,6 @@ mod tests {
         source.configure_sampler(&sampler);
 
         assert_eq!(source.reported_record_count().unwrap(), 11);
-    }
-
-    #[test]
-    fn refresh_ignores_persisted_remote_sequence_state() {
-        let dir = tempdir().unwrap();
-        let config = test_config(dir.path().to_path_buf());
-        let source = test_source(config.clone());
-
-        let payload = b"{\"id\":\"rr\",\"text\":\"hello\"}\n".to_vec();
-        let (base_url, server) = spawn_one_shot_http(payload);
-        let candidate =
-            format!("url::{base_url}/datasets/org/ds/resolve/main/train/refresh.ndjson");
-
-        let state_path = HuggingFaceRowSource::shard_sequence_state_path(&config);
-        fs::create_dir_all(state_path.parent().unwrap()).unwrap();
-        fs::write(
-            &state_path,
-            serde_json::to_vec_pretty(&json!({
-                "version": 1,
-                "source_id": config.source_id,
-                "dataset": config.dataset,
-                "config": config.config,
-                "split": config.split,
-                "sampler_seed": 1,
-                "candidates": [candidate],
-                "candidate_sizes": {},
-                "next_remote_idx": 1
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-
-        {
-            let mut state = source.state.lock().unwrap();
-            state.remote_candidates = Some(vec![format!(
-                "url::{base_url}/datasets/org/ds/resolve/main/train/refresh.ndjson"
-            )]);
-            state.next_remote_idx = 0;
-        }
-
-        let snapshot = source.refresh(None, Some(1)).unwrap();
-        server.join().unwrap();
-
-        assert_eq!(snapshot.records.len(), 1);
-        assert!(snapshot.records[0].id.contains("hf_test::rr"));
     }
 
     #[test]
@@ -6630,58 +6321,6 @@ mod tests {
     }
 
     #[test]
-    fn persisted_shard_sequence_roundtrip_respects_sampler_seed() {
-        // Suppress the expected WARN "shard-sequence state mismatch" emitted by the second
-        // load call below (seed 9999 ≠ persisted seed 4242).  That mismatch is exactly what
-        // the test exercises to confirm seed-based rejection; the warn is correct production
-        // behaviour.
-        let _quiet = tracing::subscriber::set_default(
-            tracing_subscriber::fmt()
-                .with_max_level(tracing::Level::ERROR)
-                .finish(),
-        );
-        let dir = tempdir().unwrap();
-        let config = test_config(dir.path().to_path_buf());
-        let source = test_source(config.clone());
-
-        {
-            let sampler = SamplerConfig {
-                seed: 4242,
-                ..SamplerConfig::default()
-            };
-            source.configure_sampler(&sampler);
-        }
-
-        let mut state = SourceState {
-            materialized_rows: 0,
-            total_rows: None,
-            shards: Vec::new(),
-            remote_candidates: Some(vec![
-                "url::https://x/resolve/main/train/000.parquet".to_string(),
-                "url::https://x/resolve/main/train/001.parquet".to_string(),
-            ]),
-            remote_candidate_sizes: HashMap::new(),
-            next_remote_idx: 1,
-            eviction_queue: VecDeque::new(),
-        };
-        state.remote_candidate_sizes.insert(
-            "url::https://x/resolve/main/train/000.parquet".to_string(),
-            10,
-        );
-
-        source.persist_shard_sequence_locked(&state).unwrap();
-
-        let restored = HuggingFaceRowSource::load_persisted_shard_sequence(&config, 4242).unwrap();
-        assert!(restored.is_some());
-        let restored = restored.unwrap();
-        assert_eq!(restored.next_remote_idx, 1);
-        assert_eq!(restored.candidates.len(), 2);
-
-        let rejected = HuggingFaceRowSource::load_persisted_shard_sequence(&config, 9999).unwrap();
-        assert!(rejected.is_none());
-    }
-
-    #[test]
     fn value_to_text_handles_scalar_and_structured_values() {
         assert_eq!(HuggingFaceRowSource::value_to_text(&json!(null)), None);
         assert_eq!(HuggingFaceRowSource::value_to_text(&json!("   ")), None);
@@ -6828,7 +6467,7 @@ mod tests {
             remote_candidates: None,
             remote_candidate_sizes: HashMap::new(),
             next_remote_idx: 0,
-            eviction_queue: VecDeque::new(),
+            remote_candidate_order: Vec::new(),
         };
         HuggingFaceRowSource::recompute_shard_offsets(&mut state);
         assert_eq!(state.shards[0].global_start, 0);
@@ -6972,35 +6611,6 @@ mod tests {
     }
 
     #[test]
-    fn load_persisted_shard_sequence_clamps_next_index_to_candidate_len() {
-        let dir = tempdir().unwrap();
-        let config = test_config(dir.path().to_path_buf());
-        let state_path = HuggingFaceRowSource::shard_sequence_state_path(&config);
-        fs::create_dir_all(state_path.parent().unwrap()).unwrap();
-        fs::write(
-            &state_path,
-            serde_json::to_vec_pretty(&json!({
-                "version": 1,
-                "source_id": config.source_id,
-                "dataset": config.dataset,
-                "config": config.config,
-                "split": config.split,
-                "sampler_seed": 1,
-                "candidates": ["url::http://x/resolve/main/train/000.ndjson"],
-                "candidate_sizes": {},
-                "next_remote_idx": 99
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-
-        let loaded = HuggingFaceRowSource::load_persisted_shard_sequence(&config, 1)
-            .unwrap()
-            .unwrap();
-        assert_eq!(loaded.next_remote_idx, 1);
-    }
-
-    #[test]
     fn materialize_local_file_copies_and_is_idempotent_when_size_matches() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
@@ -7055,7 +6665,7 @@ mod tests {
             remote_candidates: None,
             remote_candidate_sizes: HashMap::new(),
             next_remote_idx: 0,
-            eviction_queue: VecDeque::new(),
+            remote_candidate_order: Vec::new(),
         };
 
         let evicted = source
@@ -7094,7 +6704,7 @@ mod tests {
             remote_candidates: None,
             remote_candidate_sizes: HashMap::new(),
             next_remote_idx: 0,
-            eviction_queue: VecDeque::new(),
+            remote_candidate_order: Vec::new(),
         };
 
         let evicted = source
@@ -7642,5 +7252,68 @@ mod tests {
 
         assert_eq!(ids_a, ids_b);
         assert_ne!(ids_a, ids_c);
+    }
+
+    #[test]
+    fn set_active_sampler_config_rebuilds_order_on_seed_change() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config.clone());
+
+        let candidates = vec![
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "d".to_string(),
+            "e".to_string(),
+        ];
+
+        // Prime the source at seed=7 BEFORE injecting state, so the subsequent
+        // configure_sampler(seed=7) calls are not seen as seed changes.
+        source.configure_sampler(&SamplerConfig {
+            seed: 7,
+            ..SamplerConfig::default()
+        });
+
+        {
+            let mut state = source.state.lock().unwrap();
+            // Candidates stored sorted/immutable; order derived from seed 7.
+            let order = HuggingFaceRowSource::build_candidate_order(&config, &candidates, 7);
+            state.remote_candidates = Some(candidates.clone());
+            state.remote_candidate_order = order.clone();
+            state.next_remote_idx = 3;
+        }
+
+        // Same seed — order and pointer must not change.
+        source.configure_sampler(&SamplerConfig {
+            seed: 7,
+            ..SamplerConfig::default()
+        });
+        source.configure_sampler(&SamplerConfig {
+            seed: 7,
+            ..SamplerConfig::default()
+        });
+        {
+            let state = source.state.lock().unwrap();
+            let order = HuggingFaceRowSource::build_candidate_order(&config, &candidates, 7);
+            assert_eq!(state.remote_candidate_order, order);
+            assert_eq!(state.next_remote_idx, 3, "same seed must not move pointer");
+        }
+
+        // Different seed — candidates list untouched, order rebuilt, pointer reset to 0.
+        source.configure_sampler(&SamplerConfig {
+            seed: 18,
+            ..SamplerConfig::default()
+        });
+        {
+            let state = source.state.lock().unwrap();
+            // List is immutable — same sorted candidates.
+            assert_eq!(state.remote_candidates.as_ref().unwrap(), &candidates);
+            // Order is now derived from seed 18.
+            let expected_order =
+                HuggingFaceRowSource::build_candidate_order(&config, &candidates, 18);
+            assert_eq!(state.remote_candidate_order, expected_order);
+            assert_eq!(state.next_remote_idx, 0);
+        }
     }
 }
