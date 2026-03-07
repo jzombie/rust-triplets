@@ -1406,7 +1406,20 @@ impl HuggingFaceRowSource {
         Ok((candidates, HashMap::new()))
     }
 
-    fn uncached_candidates_from_parquet_manifest(
+    /// Return ALL shards from the parquet manifest regardless of what is already cached
+    /// on disk.  Determinism and cache are orthogonal concerns:
+    ///
+    /// * **Determinism** — the seed-derived download order must be computed from the
+    ///   complete HF manifest so that position N for seed S always maps to the same
+    ///   shard, independent of what has been previously downloaded.
+    /// * **Cache** — which shards are already on disk is handled downstream:
+    ///   `ensure_row_available` advances `next_remote_idx` past already-materialised
+    ///   positions, and `download_next_remote_shard` skips any position whose store
+    ///   file already exists without re-fetching it.
+    ///
+    /// The only cleanup performed here is deleting stale/incomplete transient parquet
+    /// downloads (wrong on-disk size) so they are re-fetched on the next download cycle.
+    fn all_candidates_from_parquet_manifest(
         config: &HuggingFaceRowsConfig,
         json: &Value,
     ) -> Result<ParquetManifestCandidates, SamplerError> {
@@ -1414,9 +1427,6 @@ impl HuggingFaceRowSource {
 
         let mut candidates = Vec::new();
         let mut candidate_sizes = HashMap::new();
-        // Counts entries that matched our accepted extensions before the already-cached
-        // filter.  A non-zero value means the parquet manifest exists for this dataset
-        // and config even when every shard has already been downloaded.
         let mut matched_manifest_entries = 0usize;
         if let Some(entries) = json.get("parquet_files").and_then(Value::as_array) {
             for entry in entries {
@@ -1438,15 +1448,13 @@ impl HuggingFaceRowSource {
                 matched_manifest_entries += 1;
                 let candidate = format!("{REMOTE_URL_PREFIX}{url}");
                 let expected_size = entry.get("size").and_then(Value::as_u64);
+
+                // Remove stale/incomplete transient parquet downloads so they get
+                // re-fetched.  Fully-materialised `.simdr` stores are intentionally
+                // kept — `download_next_remote_shard` will detect them and skip the
+                // download without re-fetching.
                 let target = Self::candidate_target_path(config, &candidate);
-                let store_target = Self::shard_store_path_for(&target);
-                if store_target.exists() {
-                    continue;
-                }
-                if target.exists() {
-                    if Self::target_matches_expected_size(&target, expected_size) {
-                        continue;
-                    }
+                if target.exists() && !Self::target_matches_expected_size(&target, expected_size) {
                     warn!(
                         "[triplets:hf] incomplete cached shard detected (will redownload): {}",
                         target.display()
@@ -1463,6 +1471,7 @@ impl HuggingFaceRowSource {
                         });
                     }
                 }
+
                 if let Some(size) = expected_size {
                     candidate_sizes.insert(candidate.clone(), size);
                 }
@@ -1482,29 +1491,26 @@ impl HuggingFaceRowSource {
     ) -> Result<(Vec<String>, HashMap<String, u64>), SamplerError> {
         if let Ok((candidates, candidate_sizes, matched_manifest_entries)) =
             Self::list_remote_candidates_from_parquet_manifest(config)
+            && matched_manifest_entries > 0
         {
-            if !candidates.is_empty() {
-                info!(
-                    "[triplets:hf] remote parquet manifest candidates matching {:?}: {}",
-                    config.shard_extensions,
-                    candidates.len()
-                );
-                return Ok((candidates, candidate_sizes));
-            }
-            if matched_manifest_entries > 0 {
-                // The parquet manifest exists and all its shards are already cached;
-                // this dataset config is fully materialized locally.  Do NOT fall
-                // through to the hf-hub siblings listing — that lists every language
-                // config in the repository and would introduce unrelated shards.
-                info!(
-                    "[triplets:hf] all {} parquet manifest shard(s) for dataset='{}' \
-                     config='{}' split='{}' are already cached; source exhausted",
-                    matched_manifest_entries, config.dataset, config.config, config.split
-                );
-                return Ok((Vec::new(), HashMap::new()));
-            }
-            // Manifest returned zero matched entries — this dataset may not support
-            // the datasets-server parquet API.  Fall through to the hf-hub listing.
+            // Parquet manifest exists for this dataset.  Return the full candidate
+            // list — including already-cached shards — so the seed-derived order is
+            // always built from the complete HF manifest, independent of what has
+            // been downloaded.  Never fall through to the hf-hub siblings listing,
+            // which returns every language config in the repository, not just the
+            // one requested.
+            info!(
+                "[triplets:hf] remote parquet manifest: {} shard(s) for dataset='{}' \
+                     config='{}' split='{}'",
+                candidates.len(),
+                config.dataset,
+                config.config,
+                config.split
+            );
+            return Ok((candidates, candidate_sizes));
+
+            // matched_manifest_entries == 0: parquet manifest does not cover this
+            // dataset/config.  Fall through to the hf-hub siblings listing.
         }
 
         let api = ApiBuilder::new()
@@ -1672,7 +1678,7 @@ impl HuggingFaceRowSource {
                 reason: format!("failed parsing datasets-server parquet response: {err}"),
             })?;
 
-        Self::uncached_candidates_from_parquet_manifest(config, &json)
+        Self::all_candidates_from_parquet_manifest(config, &json)
     }
 
     /// Map a candidate identifier to the local snapshot target path.
@@ -1728,8 +1734,8 @@ impl HuggingFaceRowSource {
     fn sync_shard_state_from_disk_locked(&self, state: &mut SourceState) {
         // If any shards have been evicted by the cache manager, remove them from
         // the in-memory index and reset the candidate list so the next expansion
-        // cycle re-queries HF.  `uncached_candidates_from_parquet_manifest` skips
-        // shards whose .simdr already exists, so evicted ones will reappear.
+        // cycle re-queries HF.  `all_candidates_from_parquet_manifest` returns every
+        // shard from the manifest; evicted ones will be re-downloaded on next iteration.
         let any_missing = state.shards.iter().any(|shard| !shard.path.exists());
         state.shards.retain(|shard| shard.path.exists());
         Self::recompute_shard_offsets(state);
@@ -2404,10 +2410,29 @@ impl HuggingFaceRowSource {
                     let sampler_seed = self.configured_sampler_seed().unwrap_or(0);
                     let order =
                         Self::build_candidate_order(&self.config, &candidates, sampler_seed);
+
+                    // Skip positions whose shard is already materialised on disk.
+                    // Determinism: order is built from the full HF manifest regardless of
+                    // cache state — position N for seed S always maps to the same shard.
+                    // Cache: on restart we advance past already-downloaded shards so we
+                    // don't redundantly re-download what we already have.
+                    let existing_store_paths: HashSet<PathBuf> =
+                        state.shards.iter().map(|s| s.path.clone()).collect();
+                    let next_idx = order
+                        .iter()
+                        .position(|&candidate_idx| {
+                            let store = Self::shard_store_path_for(&Self::candidate_target_path(
+                                &self.config,
+                                &candidates[candidate_idx],
+                            ));
+                            !existing_store_paths.contains(&store)
+                        })
+                        .unwrap_or(candidates.len());
+
                     state.remote_candidates = Some(candidates);
                     state.remote_candidate_order = order;
                     state.remote_candidate_sizes = candidate_sizes;
-                    state.next_remote_idx = 0;
+                    state.next_remote_idx = next_idx;
 
                     let candidate_count = state
                         .remote_candidates
@@ -2464,6 +2489,11 @@ impl HuggingFaceRowSource {
     }
 
     /// Download and register the next remote shard candidate.
+    ///
+    /// If the shard's store file already exists on disk (materialised from a previous
+    /// run), the download is skipped and `next_remote_idx` is still advanced.  This
+    /// keeps determinism and cache decoupled: the ordered position is consumed either
+    /// way, but no redundant network traffic occurs.
     fn download_next_remote_shard(&self) -> Result<bool, SamplerError> {
         let (remote_ordinal, remote_total, remote_path, expected_bytes) = {
             let mut state = self
@@ -2495,6 +2525,25 @@ impl HuggingFaceRowSource {
                 let remote_path = candidates[candidate_idx].clone();
                 let expected_bytes = state.remote_candidate_sizes.get(&remote_path).copied();
                 state.next_remote_idx += 1;
+
+                // If this shard is already materialised on disk (from a previous run),
+                // skip the download — it is already counted in materialized_rows via
+                // build_shard_index.  Cache and order are fully decoupled: the position
+                // is consumed regardless, but no network request is made.
+                let store_path = Self::shard_store_path_for(&Self::candidate_target_path(
+                    &self.config,
+                    &remote_path,
+                ));
+                if store_path.exists() {
+                    debug!(
+                        "[triplets:hf] shard {}/{} already materialised, skipping download: {}",
+                        remote_ordinal,
+                        remote_total,
+                        remote_path.as_str()
+                    );
+                    return Ok(true);
+                }
+
                 (remote_ordinal, remote_total, remote_path, expected_bytes)
             }
         };
@@ -4356,7 +4405,7 @@ mod tests {
     }
 
     #[test]
-    fn uncached_candidates_from_parquet_manifest_filters_and_records_sizes() {
+    fn all_candidates_from_parquet_manifest_returns_all_with_sizes() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
         let payload = json!({
@@ -4369,8 +4418,7 @@ mod tests {
         });
 
         let (candidates, sizes, matched) =
-            HuggingFaceRowSource::uncached_candidates_from_parquet_manifest(&config, &payload)
-                .unwrap();
+            HuggingFaceRowSource::all_candidates_from_parquet_manifest(&config, &payload).unwrap();
         assert_eq!(candidates.len(), 2);
         assert!(
             candidates
@@ -4387,10 +4435,8 @@ mod tests {
     }
 
     #[test]
-    fn candidates_from_parquet_manifest_skips_complete_cached_and_replaces_incomplete() {
-        // Suppress the expected WARN "incomplete cached shard detected (will redownload)"
-        // that is emitted when a cached shard exists with the wrong on-disk size.
-        // That warn is correct production behaviour; silenced here to keep test output clean.
+    fn all_candidates_from_parquet_manifest_includes_cached_and_replaces_stale() {
+        // Suppress the expected WARN "incomplete cached shard detected (will redownload)".
         let _quiet = tracing::subscriber::set_default(
             tracing_subscriber::fmt()
                 .with_max_level(tracing::Level::ERROR)
@@ -4399,6 +4445,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
 
+        // A parquet file with the correct declared size — considered fully cached.
         let complete_url = "https://host/datasets/org/ds/resolve/main/train/000.parquet";
         let complete_candidate = format!("{REMOTE_URL_PREFIX}{complete_url}");
         let complete_target =
@@ -4406,6 +4453,7 @@ mod tests {
         fs::create_dir_all(complete_target.parent().unwrap()).unwrap();
         fs::write(&complete_target, vec![1u8; 7]).unwrap();
 
+        // A parquet file with the WRONG size — stale/incomplete, must be deleted.
         let stale_url = "https://host/datasets/org/ds/resolve/main/train/001.parquet";
         let stale_candidate = format!("{REMOTE_URL_PREFIX}{stale_url}");
         let stale_target = HuggingFaceRowSource::candidate_target_path(&config, &stale_candidate);
@@ -4420,14 +4468,18 @@ mod tests {
         });
 
         let (candidates, sizes, matched) =
-            HuggingFaceRowSource::uncached_candidates_from_parquet_manifest(&config, &payload)
-                .unwrap();
-        assert_eq!(candidates.len(), 1);
-        assert!(candidates[0].ends_with(stale_url));
-        assert!(!stale_target.exists());
-        assert_eq!(sizes[&candidates[0]], 9);
-        assert!(complete_target.exists());
-        // The complete shard is cached but still counts toward matched_manifest_entries.
+            HuggingFaceRowSource::all_candidates_from_parquet_manifest(&config, &payload).unwrap();
+
+        // Both shards are returned — cache state does not affect the candidate list.
+        assert_eq!(candidates.len(), 2, "both shards must appear in candidates");
+        // Complete shard: file exists and was not deleted.
+        assert!(
+            complete_target.exists(),
+            "complete shard must not be deleted"
+        );
+        // Stale shard: wrong-size file was deleted so it will be re-fetched.
+        assert!(!stale_target.exists(), "stale shard must be deleted");
+        assert_eq!(sizes.len(), 2);
         assert_eq!(matched, 2);
     }
 
@@ -4454,8 +4506,7 @@ mod tests {
             ]
         });
 
-        let err =
-            HuggingFaceRowSource::uncached_candidates_from_parquet_manifest(&config, &payload);
+        let err = HuggingFaceRowSource::all_candidates_from_parquet_manifest(&config, &payload);
         assert!(err.is_err());
     }
 
@@ -5372,8 +5423,7 @@ mod tests {
         let config = test_config(dir.path().to_path_buf());
         let payload = json!({"other": []});
         let (candidates, sizes, matched) =
-            HuggingFaceRowSource::uncached_candidates_from_parquet_manifest(&config, &payload)
-                .unwrap();
+            HuggingFaceRowSource::all_candidates_from_parquet_manifest(&config, &payload).unwrap();
         assert!(candidates.is_empty());
         assert!(sizes.is_empty());
         // No parquet_files key → zero matched entries.
@@ -5869,18 +5919,18 @@ mod tests {
 
     #[test]
     fn list_remote_candidates_does_not_fall_back_when_all_manifest_shards_cached() {
-        // Regression test: when every shard in the parquet manifest is already
-        // cached locally, list_remote_candidates must return an empty candidate
-        // list and must NOT fall through to the hf-hub siblings listing.
+        // Regression test: list_remote_candidates must NOT fall through to the hf-hub
+        // siblings listing when a parquet manifest exists, regardless of whether all
+        // shards are already cached on disk.
         //
-        // The original bug: `!candidates.is_empty()` was the fallthrough guard,
-        // so a fully-cached dataset triggered the siblings fallback which returns
-        // files from every language config in the repository — not just the one
-        // requested (e.g. wikimedia/wikipedia/20231101.en → also .fr, .de, …).
+        // The hf-hub siblings listing returns every language config in the repository,
+        // not just the one requested (e.g. wikimedia/wikipedia/20231101.en → also
+        // .fr, .de, …).  The guard is `matched_manifest_entries > 0`, which is
+        // independent of cache state.
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
 
-        // Pre-create the .simdr store target so the manifest entry looks cached.
+        // Pre-create the .simdr store target so the manifest entry is "fully cached".
         let shard_url = "https://host/datasets/org/ds/resolve/main/train/part-000.ndjson";
         let candidate = format!("{REMOTE_URL_PREFIX}{shard_url}");
         let target = HuggingFaceRowSource::candidate_target_path(&config, &candidate);
@@ -5896,20 +5946,20 @@ mod tests {
         .unwrap();
         let (base_url, server) = spawn_one_shot_http(body);
 
-        // list_remote_candidates must succeed and return empty — not fall through
-        // to the hf-hub sibling listing (which would require a real network call
-        // and would return wrong-language shards for multi-config datasets).
+        // Must return the full manifest candidate list without falling through to hf-hub.
         let (candidates, sizes) = with_env_var(TRIPLETS_HF_PARQUET_ENDPOINT, &base_url, || {
             HuggingFaceRowSource::list_remote_candidates(&config)
         })
         .unwrap();
         server.join().unwrap();
 
-        assert!(
-            candidates.is_empty(),
-            "expected empty candidates when all manifest shards are already cached"
+        assert_eq!(
+            candidates.len(),
+            1,
+            "fully-cached shard must still appear in candidates (cache ≠ order)"
         );
-        assert!(sizes.is_empty());
+        assert_eq!(sizes.len(), 1);
+        assert!(candidates[0].ends_with(shard_url));
     }
 
     #[test]
@@ -6156,6 +6206,53 @@ mod tests {
         assert_eq!(state.next_remote_idx, 2);
         assert_eq!(state.shards.len(), 2);
         assert_ne!(state.shards[0].path, state.shards[1].path);
+    }
+
+    #[test]
+    fn download_next_remote_shard_skips_already_materialised_shard() {
+        // Verifies the cache/determinism decoupling: if a shard's store file already
+        // exists on disk, download_next_remote_shard must advance next_remote_idx
+        // without making any network request, leaving materialized_rows unchanged.
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config.clone());
+
+        let candidate =
+            "url::http://127.0.0.1:1/datasets/org/ds/resolve/main/train/pre-cached.ndjson"
+                .to_string();
+        let target = HuggingFaceRowSource::candidate_target_path(&config, &candidate);
+        let store_path = HuggingFaceRowSource::shard_store_path_for(&target);
+        fs::create_dir_all(store_path.parent().unwrap()).unwrap();
+        fs::write(&store_path, b"dummy").unwrap();
+
+        {
+            let mut state = source.state.lock().unwrap();
+            state.remote_candidates = Some(vec![candidate.clone()]);
+            state.remote_candidate_order = vec![0];
+            state.remote_candidate_sizes.insert(candidate, 5);
+            state.next_remote_idx = 0;
+        }
+
+        // No HTTP server is running — if a real download were attempted it would fail.
+        assert!(
+            source.download_next_remote_shard().unwrap(),
+            "should return true (candidate consumed)"
+        );
+
+        let state = source.state.lock().unwrap();
+        assert_eq!(
+            state.next_remote_idx, 1,
+            "pointer advanced past cached shard"
+        );
+        assert_eq!(
+            state.materialized_rows, 0,
+            "materialized_rows unchanged — shard was already counted at startup"
+        );
+        assert_eq!(
+            state.shards.len(),
+            0,
+            "no new shard added to in-memory list"
+        );
     }
 
     #[test]
@@ -7004,6 +7101,70 @@ mod tests {
         );
 
         server.join().unwrap();
+    }
+
+    #[test]
+    fn ensure_row_available_skips_past_all_cached_candidates_on_restart() {
+        // Verifies the restart scenario: when every candidate in the manifest is
+        // already materialised on disk, next_remote_idx jumps to candidates.len()
+        // and ensure_row_available returns Ok(false) without any download attempt.
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config.clone());
+
+        // Construct the candidate URL that the manifest will list.
+        let shard_raw_url = "http://127.0.0.1:1/datasets/org/ds/resolve/main/train/a.ndjson";
+        let shard_candidate = format!("{REMOTE_URL_PREFIX}{shard_raw_url}");
+        let target = HuggingFaceRowSource::candidate_target_path(&config, &shard_candidate);
+        let store_path = HuggingFaceRowSource::shard_store_path_for(&target);
+        fs::create_dir_all(store_path.parent().unwrap()).unwrap();
+        fs::write(&store_path, b"dummy").unwrap();
+
+        // Inject an already-materialised shard so materialized_rows == 1.
+        {
+            let mut state = source.state.lock().unwrap();
+            state.shards = vec![ShardIndex {
+                path: store_path,
+                global_start: 0,
+                row_count: 1,
+                random_access: true,
+                parquet_row_groups: vec![(0, 1)],
+                checkpoints: Vec::new(),
+                remote_candidate: None,
+            }];
+            state.materialized_rows = 1;
+            state.remote_candidates = None;
+        }
+
+        // Serve a manifest that lists the same (already-cached) shard.
+        let manifest_body = serde_json::to_vec(&json!({
+            "parquet_files": [{"url": shard_raw_url, "size": 5}]
+        }))
+        .unwrap();
+        let (base_url, server) = spawn_one_shot_http(manifest_body);
+
+        // Row 1 is not yet materialised; this triggers the candidate-init path.
+        // all candidates are already on disk → next_remote_idx = candidates.len() → Ok(false).
+        let result = with_env_var(TRIPLETS_HF_PARQUET_ENDPOINT, &base_url, || {
+            source.ensure_row_available(1)
+        })
+        .unwrap();
+        server.join().unwrap();
+
+        assert!(
+            !result,
+            "no new rows available — all candidates already cached"
+        );
+        let state = source.state.lock().unwrap();
+        assert_eq!(
+            state.next_remote_idx,
+            state
+                .remote_candidates
+                .as_ref()
+                .map(|c| c.len())
+                .unwrap_or(0),
+            "next_remote_idx must equal candidates.len() when all are cached"
+        );
     }
 
     #[test]
