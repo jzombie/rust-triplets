@@ -2864,9 +2864,7 @@ impl HuggingFaceRowSource {
     }
 
     /// Build deterministic local shard index for accepted extensions.
-    fn build_shard_index(
-        config: &HuggingFaceRowsConfig,
-    ) -> Result<ShardIndexResult, SamplerError> {
+    fn build_shard_index(config: &HuggingFaceRowsConfig) -> Result<ShardIndexResult, SamplerError> {
         let start_index = Instant::now();
         let mut shard_paths = Vec::new();
         let manifest_root = config.snapshot_dir.join("_parquet_manifest");
