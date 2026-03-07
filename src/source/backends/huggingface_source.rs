@@ -36,8 +36,12 @@ use crate::constants::cache::HUGGINGFACE_GROUP;
 #[cfg(test)]
 use crate::constants::env_vars::{TRIPLETS_HF_PARQUET_ENDPOINT, TRIPLETS_HF_SIZE_ENDPOINT};
 use crate::constants::huggingface::{
-    ALL_SPLITS_DIR, HF_SHARD_STORE_EXTENSION, HF_SHARD_STORE_META_ROWS_KEY,
-    HF_SHARD_STORE_ROW_PREFIX, HUGGINGFACE_REFRESH_BATCH_MULTIPLIER, REMOTE_BOOTSTRAP_SHARDS,
+    ALL_SPLITS_DIR, HF_JSON_KEY_CONFIG, HF_JSON_KEY_CONFIG_NAME, HF_JSON_KEY_CONFIGS,
+    HF_JSON_KEY_DATASET, HF_JSON_KEY_NUM_ROWS, HF_JSON_KEY_PARQUET_FILES, HF_JSON_KEY_SIZE,
+    HF_JSON_KEY_SPLIT, HF_JSON_KEY_SPLIT_NAME, HF_JSON_KEY_SPLITS, HF_JSON_KEY_URL,
+    HF_RESOLVE_UNKNOWN_FALLBACK_PATH, HF_RESOLVE_URL_SEPARATOR, HF_SHARD_CANDIDATE_SEED_TAG,
+    HF_SHARD_STORE_EXTENSION, HF_SHARD_STORE_META_ROWS_KEY, HF_SHARD_STORE_ROW_PREFIX,
+    HUGGINGFACE_REFRESH_BATCH_MULTIPLIER, PARQUET_MANIFEST_DIR, REMOTE_BOOTSTRAP_SHARDS,
     REMOTE_EXPANSION_HEADROOM_MULTIPLIER, REMOTE_URL_PREFIX,
 };
 use crate::data::{DataRecord, QualityScore, SectionRole};
@@ -1428,9 +1432,12 @@ impl HuggingFaceRowSource {
         let mut candidates = Vec::new();
         let mut candidate_sizes = HashMap::new();
         let mut matched_manifest_entries = 0usize;
-        if let Some(entries) = json.get("parquet_files").and_then(Value::as_array) {
+        if let Some(entries) = json
+            .get(HF_JSON_KEY_PARQUET_FILES)
+            .and_then(Value::as_array)
+        {
             for entry in entries {
-                let Some(url) = entry.get("url").and_then(Value::as_str) else {
+                let Some(url) = entry.get(HF_JSON_KEY_URL).and_then(Value::as_str) else {
                     continue;
                 };
 
@@ -1447,7 +1454,7 @@ impl HuggingFaceRowSource {
 
                 matched_manifest_entries += 1;
                 let candidate = format!("{REMOTE_URL_PREFIX}{url}");
-                let expected_size = entry.get("size").and_then(Value::as_u64);
+                let expected_size = entry.get(HF_JSON_KEY_SIZE).and_then(Value::as_u64);
 
                 // Remove stale/incomplete transient parquet downloads so they get
                 // re-fetched.  Fully-materialised `.simdr` stores are intentionally
@@ -1604,7 +1611,7 @@ impl HuggingFaceRowSource {
         sampler_seed: u64,
     ) -> u64 {
         let mut hasher = DefaultHasher::new();
-        "hf_shard_candidate_sequence_v1".hash(&mut hasher);
+        HF_SHARD_CANDIDATE_SEED_TAG.hash(&mut hasher);
         sampler_seed.hash(&mut hasher);
         config.source_id.hash(&mut hasher);
         config.dataset.hash(&mut hasher);
@@ -1644,12 +1651,12 @@ impl HuggingFaceRowSource {
             config.dataset
         );
         let mut request = ureq::get(&endpoint)
-            .query("dataset", &config.dataset)
-            .query("config", &config.config);
+            .query(HF_JSON_KEY_DATASET, &config.dataset)
+            .query(HF_JSON_KEY_CONFIG, &config.config);
         // When split is empty (all-splits mode) omit the split query param so the
         // datasets-server returns shards for every split in the config.
         if !config.split.is_empty() {
-            request = request.query("split", &config.split);
+            request = request.query(HF_JSON_KEY_SPLIT, &config.split);
         }
         let response = request
             .call()
@@ -1685,12 +1692,12 @@ impl HuggingFaceRowSource {
     fn candidate_target_path(config: &HuggingFaceRowsConfig, candidate: &str) -> PathBuf {
         if let Some(url) = candidate.strip_prefix(REMOTE_URL_PREFIX) {
             let suffix = url
-                .split("/resolve/")
+                .split(HF_RESOLVE_URL_SEPARATOR)
                 .nth(1)
                 .map(|value| value.trim_start_matches('/'))
                 .filter(|value| !value.is_empty())
-                .unwrap_or("parquet/unknown.parquet");
-            return config.snapshot_dir.join("_parquet_manifest").join(suffix);
+                .unwrap_or(HF_RESOLVE_UNKNOWN_FALLBACK_PATH);
+            return config.snapshot_dir.join(PARQUET_MANIFEST_DIR).join(suffix);
         }
         config.snapshot_dir.join(candidate)
     }
@@ -1717,7 +1724,7 @@ impl HuggingFaceRowSource {
 
     /// Return root directory used for manifest-cached remote shards.
     fn manifest_cache_root(&self) -> PathBuf {
-        self.config.snapshot_dir.join("_parquet_manifest")
+        self.config.snapshot_dir.join(PARQUET_MANIFEST_DIR)
     }
 
     /// Recompute shard `global_start` offsets and total materialized row count.
@@ -1768,7 +1775,7 @@ impl HuggingFaceRowSource {
 
         let cache_root = CacheRoot::from_root(&self.config.snapshot_dir);
         cache_root
-            .ensure_group_with_policy("_parquet_manifest", Some(&policy))
+            .ensure_group_with_policy(PARQUET_MANIFEST_DIR, Some(&policy))
             .map_err(|err| SamplerError::SourceUnavailable {
                 source_id: self.config.source_id.clone(),
                 reason: format!(
@@ -1808,12 +1815,12 @@ impl HuggingFaceRowSource {
         );
 
         let mut request = ureq::get(&endpoint)
-            .query("dataset", &config.dataset)
-            .query("config", &config.config);
+            .query(HF_JSON_KEY_DATASET, &config.dataset)
+            .query(HF_JSON_KEY_CONFIG, &config.config);
         // When split is empty (all-splits mode) omit the split query param so the
         // server returns the total row count for the whole config.
         if !config.split.is_empty() {
-            request = request.query("split", &config.split);
+            request = request.query(HF_JSON_KEY_SPLIT, &config.split);
         }
         let response = request
             .call()
@@ -2026,49 +2033,53 @@ impl HuggingFaceRowSource {
     ) -> Option<usize> {
         let to_usize = |value: &Value| value.as_u64().and_then(|raw| usize::try_from(raw).ok());
 
-        let size = json.get("size")?;
+        let size = json.get(HF_JSON_KEY_SIZE)?;
 
-        if let Some(splits) = size.get("splits").and_then(Value::as_array) {
+        if let Some(splits) = size.get(HF_JSON_KEY_SPLITS).and_then(Value::as_array) {
             for entry in splits {
                 let entry_config = entry
-                    .get("config")
-                    .or_else(|| entry.get("config_name"))
+                    .get(HF_JSON_KEY_CONFIG)
+                    .or_else(|| entry.get(HF_JSON_KEY_CONFIG_NAME))
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 let entry_split = entry
-                    .get("split")
-                    .or_else(|| entry.get("name"))
+                    .get(HF_JSON_KEY_SPLIT)
+                    .or_else(|| entry.get(HF_JSON_KEY_SPLIT_NAME))
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 if entry_config == config_name
                     && entry_split == split_name
-                    && let Some(rows) = entry.get("num_rows").and_then(to_usize)
+                    && let Some(rows) = entry.get(HF_JSON_KEY_NUM_ROWS).and_then(to_usize)
                 {
                     return Some(rows);
                 }
             }
         }
 
-        if let Some(configs) = size.get("configs").and_then(Value::as_array) {
+        if let Some(configs) = size.get(HF_JSON_KEY_CONFIGS).and_then(Value::as_array) {
             for config_entry in configs {
                 let entry_config = config_entry
-                    .get("config")
-                    .or_else(|| config_entry.get("config_name"))
+                    .get(HF_JSON_KEY_CONFIG)
+                    .or_else(|| config_entry.get(HF_JSON_KEY_CONFIG_NAME))
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 if entry_config != config_name {
                     continue;
                 }
 
-                if let Some(splits) = config_entry.get("splits").and_then(Value::as_array) {
+                if let Some(splits) = config_entry
+                    .get(HF_JSON_KEY_SPLITS)
+                    .and_then(Value::as_array)
+                {
                     for split_entry in splits {
                         let entry_split = split_entry
-                            .get("split")
-                            .or_else(|| split_entry.get("name"))
+                            .get(HF_JSON_KEY_SPLIT)
+                            .or_else(|| split_entry.get(HF_JSON_KEY_SPLIT_NAME))
                             .and_then(Value::as_str)
                             .unwrap_or_default();
                         if entry_split == split_name
-                            && let Some(rows) = split_entry.get("num_rows").and_then(to_usize)
+                            && let Some(rows) =
+                                split_entry.get(HF_JSON_KEY_NUM_ROWS).and_then(to_usize)
                         {
                             return Some(rows);
                         }
@@ -2076,7 +2087,7 @@ impl HuggingFaceRowSource {
                 }
 
                 if split_name.is_empty()
-                    && let Some(rows) = config_entry.get("num_rows").and_then(to_usize)
+                    && let Some(rows) = config_entry.get(HF_JSON_KEY_NUM_ROWS).and_then(to_usize)
                 {
                     return Some(rows);
                 }
@@ -2085,8 +2096,8 @@ impl HuggingFaceRowSource {
 
         if split_name.is_empty() {
             return size
-                .get("dataset")
-                .and_then(|dataset| dataset.get("num_rows"))
+                .get(HF_JSON_KEY_DATASET)
+                .and_then(|dataset| dataset.get(HF_JSON_KEY_NUM_ROWS))
                 .and_then(to_usize);
         }
 
@@ -2797,7 +2808,7 @@ impl HuggingFaceRowSource {
     fn build_shard_index(config: &HuggingFaceRowsConfig) -> Result<ShardIndexResult, SamplerError> {
         let start_index = Instant::now();
         let mut shard_paths = Vec::new();
-        let manifest_root = config.snapshot_dir.join("_parquet_manifest");
+        let manifest_root = config.snapshot_dir.join(PARQUET_MANIFEST_DIR);
         let accepted = config
             .shard_extensions
             .iter()

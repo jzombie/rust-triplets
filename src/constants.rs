@@ -187,6 +187,39 @@ pub mod huggingface {
     /// Directory segment used when no split is specified (all-splits mode).
     /// Must not collide with any real HF split name; HF split names never start with `_`.
     pub const ALL_SPLITS_DIR: &str = "_all";
+    /// Sub-directory under `snapshot_dir` that holds manifest-cached remote shard files.
+    pub const PARQUET_MANIFEST_DIR: &str = "_parquet_manifest";
+    /// Path separator component used to extract a local path suffix from HF CDN resolve URLs.
+    pub const HF_RESOLVE_URL_SEPARATOR: &str = "/resolve/";
+    /// Fallback relative path used when a CDN resolve URL cannot yield a valid suffix.
+    pub const HF_RESOLVE_UNKNOWN_FALLBACK_PATH: &str = "parquet/unknown.parquet";
+    /// Domain tag mixed into the shard-candidate permutation seed hash for forward isolation.
+    pub const HF_SHARD_CANDIDATE_SEED_TAG: &str = "hf_shard_candidate_sequence_v1";
+    /// JSON field key for the parquet files array in the datasets-server manifest response.
+    pub const HF_JSON_KEY_PARQUET_FILES: &str = "parquet_files";
+    /// JSON field key for the shard URL within a parquet file manifest entry.
+    pub const HF_JSON_KEY_URL: &str = "url";
+    /// JSON field key for shard byte sizes (parquet entry) and the size response root object.
+    pub const HF_JSON_KEY_SIZE: &str = "size";
+    /// JSON field key for the splits array in size response objects.
+    pub const HF_JSON_KEY_SPLITS: &str = "splits";
+    /// JSON field key for the configs array in size response objects.
+    pub const HF_JSON_KEY_CONFIGS: &str = "configs";
+    /// JSON field key for config name in size response entries (primary form); also used as
+    /// the HTTP query parameter name sent to the datasets-server API.
+    pub const HF_JSON_KEY_CONFIG: &str = "config";
+    /// JSON field key for config name in size response entries (alternate form).
+    pub const HF_JSON_KEY_CONFIG_NAME: &str = "config_name";
+    /// JSON field key for split name in size response entries (primary form); also used as
+    /// the HTTP query parameter name sent to the datasets-server API.
+    pub const HF_JSON_KEY_SPLIT: &str = "split";
+    /// JSON field key for split name in size response entries (alternate form).
+    pub const HF_JSON_KEY_SPLIT_NAME: &str = "name";
+    /// JSON field key for the row count in size response entries.
+    pub const HF_JSON_KEY_NUM_ROWS: &str = "num_rows";
+    /// JSON field key for dataset-level size metrics in size response; also the HTTP query
+    /// parameter name for the dataset identifier sent to the datasets-server API.
+    pub const HF_JSON_KEY_DATASET: &str = "dataset";
 }
 
 /// Constants used for managed cache-root groups.
