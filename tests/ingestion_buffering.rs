@@ -363,7 +363,7 @@ fn test_weighted_refresh_all_prefers_weighted_sources() {
     weights.insert("A".to_string(), 2.0);
     weights.insert("B".to_string(), 1.0);
 
-    manager.refresh_all_with_weights(&weights);
+    manager.refresh_all_with_weights(&weights).unwrap();
     let batch = manager.cache().snapshot();
     let count_a = batch.iter().filter(|r| r.source == "A").count();
     let count_b = batch.iter().filter(|r| r.source == "B").count();
@@ -389,7 +389,7 @@ fn test_weighted_refresh_all_skips_zero_weight_sources() {
     weights.insert("A".to_string(), 1.0);
     weights.insert("B".to_string(), 0.0);
 
-    manager.refresh_all_with_weights(&weights);
+    manager.refresh_all_with_weights(&weights).unwrap();
     let batch = manager.cache().snapshot();
     assert_eq!(batch.len(), 6);
     let count_a = batch.iter().filter(|r| r.source == "A").count();
@@ -423,7 +423,7 @@ fn test_weighted_refresh_all_zero_weight_does_not_reduce_batch() {
     weights.insert("B".to_string(), 0.0);
     weights.insert("C".to_string(), 1.0);
 
-    manager.refresh_all_with_weights(&weights);
+    manager.refresh_all_with_weights(&weights).unwrap();
     let batch = manager.cache().snapshot();
     assert_eq!(batch.len(), 9);
     let count_b = batch.iter().filter(|r| r.source == "B").count();
@@ -483,6 +483,83 @@ fn test_refresh_stats_track_success_metrics() {
     assert!(stat.last_record_count > 0);
     assert!(stat.last_records_per_sec >= 0.0);
     assert!(stat.last_error.is_none());
+}
+
+#[test]
+fn advance_on_empty_buffer_fills_to_max_records_not_step() {
+    // When advance(step) is called and the per-source buffer is empty, the
+    // ingestion manager must ask the source for max_records (not `step`)
+    // records. This ensures the buffer survives many advance calls before
+    // the next refresh, preventing a new shard download on every step.
+    //
+    // Regression test: before the fix, fetch_limit = step, so advance(2)
+    // with max_records=10 would only fill 2 records, drain them immediately,
+    // and trigger a source refresh again on the very next advance(2) call.
+    let max_records = 10usize;
+    let step = 2usize;
+
+    // InMemorySource respects the limit parameter passed to refresh().
+    let records: Vec<DataRecord> = (0..max_records)
+        .map(|i| create_dummy_record(&format!("r{i}")))
+        .collect();
+    let calls = Arc::new(AtomicUsize::new(0));
+
+    // Wrap InMemorySource in a call-counting shim.
+    struct CountingSource {
+        inner: triplets::source::InMemorySource,
+        calls: Arc<AtomicUsize>,
+    }
+    impl DataSource for CountingSource {
+        fn id(&self) -> &str {
+            self.inner.id()
+        }
+        fn refresh(
+            &self,
+            config: &SamplerConfig,
+            cursor: Option<&SourceCursor>,
+            limit: Option<usize>,
+        ) -> Result<SourceSnapshot, SamplerError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.inner.refresh(config, cursor, limit)
+        }
+        fn reported_record_count(&self, config: &SamplerConfig) -> Result<u128, SamplerError> {
+            self.inner.reported_record_count(config)
+        }
+    }
+
+    let mut manager = IngestionManager::new(max_records, SamplerConfig::default());
+    manager.register_source(Box::new(CountingSource {
+        inner: triplets::source::InMemorySource::new("counted", records),
+        calls: calls.clone(),
+    }));
+
+    // First advance: buffer is empty, must call source.refresh() once.
+    manager.advance(step);
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        1,
+        "first advance must trigger exactly one source refresh"
+    );
+    assert_eq!(
+        manager.cache().len(),
+        step,
+        "cache should contain `step` records after first advance"
+    );
+
+    // Subsequent advances must drain the buffer without calling source.refresh() again.
+    for i in 2..=(max_records / step) {
+        manager.advance(step);
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "advance #{i} must not trigger a new source refresh (buffer still has records)"
+        );
+        assert_eq!(
+            manager.cache().len(),
+            step * i,
+            "cache should accumulate records across advances"
+        );
+    }
 }
 
 #[test]

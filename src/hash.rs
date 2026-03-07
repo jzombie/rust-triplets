@@ -21,3 +21,13 @@ pub fn stable_hash_path(seed: u64, path: &Path) -> u64 {
         path.to_string_lossy().hash(hasher);
     })
 }
+
+/// Derive a per-epoch seed by mixing an epoch counter (or constant offset) into a base seed.
+///
+/// All seed derivations that incorporate an epoch value must go through this function so the
+/// derivation strategy can be changed in one place.  Both the source-shuffling path
+/// (`base_seed ^ source_epoch`) and the epoch-tracker initialisation path
+/// (`base_seed ^ EPOCH_SEED_OFFSET`) are expressed as `derive_epoch_seed(base_seed, epoch)`.
+pub fn derive_epoch_seed(base_seed: u64, epoch: u64) -> u64 {
+    base_seed ^ epoch
+}

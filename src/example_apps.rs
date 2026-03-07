@@ -4,9 +4,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Once;
 
+use cache_manager::CacheRoot;
 use clap::{Parser, ValueEnum, error::ErrorKind};
 
 use crate::config::{ChunkingStrategy, SamplerConfig, TripletRecipe};
+use crate::constants::cache::{MULTI_SOURCE_DEMO_GROUP, MULTI_SOURCE_DEMO_STORE_FILENAME};
 use crate::data::ChunkView;
 use crate::heuristics::{
     CapacityTotals, EFFECTIVE_NEGATIVES_PER_ANCHOR, EFFECTIVE_POSITIVES_PER_ANCHOR,
@@ -23,6 +25,19 @@ use crate::{
 };
 
 type DynSource = Box<dyn DataSource + 'static>;
+
+fn managed_demo_split_store_path() -> Result<PathBuf, String> {
+    let cache_root = CacheRoot::from_discovery()
+        .map_err(|err| format!("failed discovering managed cache root: {err}"))?;
+    let group = PathBuf::from(MULTI_SOURCE_DEMO_GROUP);
+    let dir = cache_root.ensure_group(&group).map_err(|err| {
+        format!(
+            "failed creating managed demo cache group '{}': {err}",
+            group.display()
+        )
+    })?;
+    Ok(dir.join(MULTI_SOURCE_DEMO_STORE_FILENAME))
+}
 
 fn init_example_tracing() {
     static INIT: Once = Once::new();
@@ -96,9 +111,8 @@ struct EstimateCapacityCli {
 /// CLI for `multi_source_demo`.
 ///
 /// Common usage:
-/// - Keep default persistence file location: `.sampler_store/split_store.bin`
+/// - Use managed cache-group default path (no flag)
 /// - Set an explicit file path: `--split-store-path /tmp/split_store.bin`
-/// - Set a custom directory and keep default filename: `--split-store-dir /tmp/sampler_store`
 /// - Repeat `--source-root <PATH>` to override source roots in order
 struct MultiSourceDemoCli {
     #[arg(
@@ -136,16 +150,9 @@ struct MultiSourceDemoCli {
     #[arg(
         long = "split-store-path",
         value_name = "SPLIT_STORE_PATH",
-        help = "Optional path for persisted split/epoch state file"
+        help = "Optional explicit path for persisted split/epoch state file"
     )]
     split_store_path: Option<PathBuf>,
-    #[arg(
-        long = "split-store-dir",
-        value_name = "DIR",
-        conflicts_with = "split_store_path",
-        help = "Optional directory for persisted split/epoch state file (uses split_store.bin filename)"
-    )]
-    split_store_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -524,10 +531,10 @@ where
 
     let split_store_path = if let Some(path) = cli.split_store_path {
         path
-    } else if let Some(dir) = cli.split_store_dir {
-        FileSplitStore::default_path_in_dir(dir)
     } else {
-        FileSplitStore::default_path()
+        managed_demo_split_store_path().map_err(|err| {
+            Box::<dyn Error>::from(format!("failed to resolve demo split-store path: {err}"))
+        })?
     };
 
     println!(
@@ -549,7 +556,7 @@ where
                 } else {
                     print_pair_batch(&chunking, &pair_batch, split_store.as_ref());
                 }
-                sampler.persist_state()?;
+                sampler.save_sampler_state(None)?;
             }
             Err(SamplerError::Exhausted(name)) => {
                 eprintln!(
@@ -569,7 +576,7 @@ where
                 } else {
                     print_text_batch(&chunking, &text_batch, split_store.as_ref());
                 }
-                sampler.persist_state()?;
+                sampler.save_sampler_state(None)?;
             }
             Err(SamplerError::Exhausted(name)) => {
                 eprintln!(
@@ -598,7 +605,7 @@ where
                 } else {
                     print_triplet_batch(&chunking, &triplet_batch, split_store.as_ref());
                 }
-                sampler.persist_state()?;
+                sampler.save_sampler_state(None)?;
             }
             Err(SamplerError::Exhausted(name)) => {
                 eprintln!(
@@ -1212,9 +1219,10 @@ mod tests {
 
         for mode in ["--pair-batch", "--text-recipes", ""] {
             let dir = tempdir().unwrap();
+            let split_store_path = dir.path().join("split_store.bin");
             let mut args = vec![
-                "--split-store-dir".to_string(),
-                dir.path().to_string_lossy().to_string(),
+                "--split-store-path".to_string(),
+                split_store_path.to_string_lossy().to_string(),
             ];
             if !mode.is_empty() {
                 args.push(mode.to_string());
@@ -1237,14 +1245,8 @@ mod tests {
         let err = parse_cli::<MultiSourceDemoCli, _>(["multi_source_demo", "--batch-size", "0"]);
         assert!(err.is_err());
 
-        let conflict = parse_cli::<MultiSourceDemoCli, _>([
-            "multi_source_demo",
-            "--split-store-dir",
-            "./a",
-            "--split-store-path",
-            "./b.bin",
-        ]);
-        assert!(conflict.is_err());
+        let parsed = parse_cli::<MultiSourceDemoCli, _>(["multi_source_demo"]);
+        assert!(parsed.is_ok());
     }
 
     #[test]
@@ -1260,10 +1262,11 @@ mod tests {
     #[test]
     fn run_multi_source_demo_list_text_recipes_path_succeeds() {
         let dir = tempdir().unwrap();
+        let split_store_path = dir.path().join("recipes_split_store.bin");
         let mut args = vec![
             "--list-text-recipes".to_string(),
-            "--split-store-dir".to_string(),
-            dir.path().to_string_lossy().to_string(),
+            "--split-store-path".to_string(),
+            split_store_path.to_string_lossy().to_string(),
         ];
         let result = run_multi_source_demo(
             args.drain(..),
@@ -1313,9 +1316,10 @@ mod tests {
             vec![],
         ] {
             let dir = tempdir().unwrap();
+            let split_store_path = dir.path().join("empty_sources_split_store.bin");
             let mut args = mode;
-            args.push("--split-store-dir".to_string());
-            args.push(dir.path().to_string_lossy().to_string());
+            args.push("--split-store-path".to_string());
+            args.push(split_store_path.to_string_lossy().to_string());
             args.push("--split".to_string());
             args.push("validation".to_string());
 
@@ -1337,8 +1341,14 @@ mod tests {
 
     #[test]
     fn run_multi_source_demo_propagates_root_resolution_error() {
+        let dir = tempdir().unwrap();
+        let split_store_path = dir.path().join("root_resolution_error_store.bin");
         let result = run_multi_source_demo(
-            std::iter::empty::<String>(),
+            [
+                "--split-store-path".to_string(),
+                split_store_path.to_string_lossy().to_string(),
+            ]
+            .into_iter(),
             |_| Err("demo root resolution failed".into()),
             |_: &()| Vec::<DynSource>::new(),
         );
@@ -1478,9 +1488,10 @@ mod tests {
             Vec::new(),
         ] {
             let dir = tempdir().unwrap();
+            let split_store_path = dir.path().join("exhausted_split_store.bin");
             let mut args = mode;
-            args.push("--split-store-dir".to_string());
-            args.push(dir.path().to_string_lossy().to_string());
+            args.push("--split-store-path".to_string());
+            args.push(split_store_path.to_string_lossy().to_string());
 
             let result = run_multi_source_demo(
                 args.into_iter(),

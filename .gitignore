@@ -1,3 +1,6 @@
 target
+.cache
+
+# These might can be removed now
 .sampler_store
 .hf-snapshots

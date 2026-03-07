@@ -1,6 +1,7 @@
 use crate::config::SamplerConfig;
 use crate::data::DataRecord;
 use crate::errors::SamplerError;
+use crate::hash::derive_epoch_seed;
 use crate::source::{DataSource, SourceCursor, SourceSnapshot};
 use crate::types::{RecordId, SourceId};
 use chrono::Utc;
@@ -190,6 +191,8 @@ pub struct IngestionManager {
     sources: Vec<SourceState>,
     max_records: usize,
     sampler_config: SamplerConfig,
+    /// Current source epoch used to vary per-source permutation seeds across epochs.
+    source_epoch: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -215,6 +218,37 @@ impl IngestionManager {
             sources: Vec::new(),
             max_records,
             sampler_config,
+            source_epoch: 0,
+        }
+    }
+
+    /// Update the current source epoch.
+    ///
+    /// Only changes the epoch value so subsequent `refresh` calls pass
+    /// `seed ^ epoch` to sources, producing a different permutation.
+    /// Stream cursors are intentionally NOT reset here — the cursor is a raw
+    /// I/O offset into the source's stream and must continue advancing so
+    /// every record is eventually fetched (resetting it would repeat the
+    /// leading slice of the source on every epoch boundary).
+    pub(crate) fn set_source_epoch(&mut self, epoch: u64) {
+        self.source_epoch = epoch;
+    }
+
+    /// Return the current source epoch.
+    #[cfg(test)]
+    pub fn source_epoch(&self) -> u64 {
+        self.source_epoch
+    }
+
+    /// Reset all raw source stream cursors and drain per-source buffers.
+    ///
+    /// Use this only when starting a deterministic replay from a specific
+    /// epoch (e.g. explicit `set_epoch` calls). A clean-start reset ensures
+    /// the new permutation begins at position 0 of the permuted index space.
+    pub(crate) fn reset_stream_cursors(&mut self) {
+        for state in &mut self.sources {
+            state.cursor = None;
+            state.buffer.clear();
         }
     }
 
@@ -282,8 +316,17 @@ impl IngestionManager {
     }
 
     /// Advance the ingestion window by ingesting `step` new records with weights.
-    pub fn advance_with_weights(&mut self, step: usize, weights: &HashMap<SourceId, f32>) {
+    ///
+    /// Returns `Err(SamplerError::InvalidWeight)` if `weights` contains an unregistered
+    /// source ID or a negative value.
+    pub fn advance_with_weights(
+        &mut self,
+        step: usize,
+        weights: &HashMap<SourceId, f32>,
+    ) -> Result<(), SamplerError> {
+        self.validate_weights(weights)?;
         self.refresh_all_internal(false, Some(step), Some(weights));
+        Ok(())
     }
 
     /// Force refresh all registered sources, discarding buffered records.
@@ -292,13 +335,49 @@ impl IngestionManager {
     }
 
     /// Refresh all registered sources once with per-call source weights.
-    pub fn refresh_all_with_weights(&mut self, weights: &HashMap<SourceId, f32>) {
+    ///
+    /// Returns `Err(SamplerError::InvalidWeight)` if `weights` contains an unregistered
+    /// source ID or a negative value.
+    pub fn refresh_all_with_weights(
+        &mut self,
+        weights: &HashMap<SourceId, f32>,
+    ) -> Result<(), SamplerError> {
+        self.validate_weights(weights)?;
         self.refresh_all_internal(false, None, Some(weights));
+        Ok(())
     }
 
     /// Force refresh all registered sources with per-call source weights.
-    pub fn force_refresh_all_with_weights(&mut self, weights: &HashMap<SourceId, f32>) {
+    ///
+    /// Returns `Err(SamplerError::InvalidWeight)` if `weights` contains an unregistered
+    /// source ID or a negative value.
+    pub fn force_refresh_all_with_weights(
+        &mut self,
+        weights: &HashMap<SourceId, f32>,
+    ) -> Result<(), SamplerError> {
+        self.validate_weights(weights)?;
         self.refresh_all_internal(true, None, Some(weights));
+        Ok(())
+    }
+
+    fn validate_weights(&self, weights: &HashMap<SourceId, f32>) -> Result<(), SamplerError> {
+        let known_ids: std::collections::HashSet<&str> =
+            self.sources.iter().map(|s| s.source.id()).collect();
+        for (id, &w) in weights {
+            if !known_ids.contains(id.as_str()) {
+                return Err(SamplerError::InvalidWeight {
+                    source_id: id.clone(),
+                    reason: "source is not registered".to_string(),
+                });
+            }
+            if w < 0.0 {
+                return Err(SamplerError::InvalidWeight {
+                    source_id: id.clone(),
+                    reason: format!("weight {w} is negative"),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Rebuild the shared cache by round-robin draining per-source buffers.
@@ -328,7 +407,7 @@ impl IngestionManager {
                 Option<(Result<SourceSnapshot, SamplerError>, std::time::Duration)>,
             > = Vec::with_capacity(self.sources.len());
             results.resize_with(self.sources.len(), || None);
-            let fetch_limit = step.unwrap_or(self.max_records);
+            let fetch_limit = self.max_records;
             let sampler_config = self.sampler_config.clone();
             thread::scope(|scope| {
                 let mut handles = Vec::with_capacity(refresh_plan.len());
@@ -336,12 +415,19 @@ impl IngestionManager {
                     let source = &self.sources[*idx].source;
                     let cursor = cursor.clone();
                     let sampler_config = sampler_config.clone();
+                    let source_epoch = self.source_epoch;
                     handles.push((
                         *idx,
                         scope.spawn(move || {
                             let start = std::time::Instant::now();
+                            // XOR the source epoch into the seed so each epoch
+                            // produces a distinct permutation within the source.
+                            let epoch_config = SamplerConfig {
+                                seed: derive_epoch_seed(sampler_config.seed, source_epoch),
+                                ..sampler_config
+                            };
                             let result =
-                                source.refresh(&sampler_config, cursor.as_ref(), Some(fetch_limit));
+                                source.refresh(&epoch_config, cursor.as_ref(), Some(fetch_limit));
                             let elapsed = start.elapsed();
                             (result, elapsed)
                         }),
@@ -470,11 +556,6 @@ impl IngestionManager {
         let mut any_positive = false;
         for state in &self.sources {
             let weight = weights.get(state.source.id()).copied().unwrap_or(1.0);
-            let weight = if weight.is_sign_negative() {
-                0.0
-            } else {
-                weight
-            };
             if weight > 0.0 {
                 any_positive = true;
             }
@@ -815,7 +896,7 @@ mod tests {
         let mut only_b = HashMap::new();
         only_b.insert("a".to_string(), 0.0);
         only_b.insert("b".to_string(), 1.0);
-        manager.refresh_all_with_weights(&only_b);
+        manager.refresh_all_with_weights(&only_b).unwrap();
         let ids: Vec<String> = manager
             .cache()
             .snapshot()
@@ -848,10 +929,12 @@ mod tests {
             })],
         )));
 
-        let mut non_positive = HashMap::new();
-        non_positive.insert("a".to_string(), -3.0);
-        non_positive.insert("b".to_string(), 0.0);
-        manager_fallback.refresh_all_with_weights(&non_positive);
+        let mut all_zero = HashMap::new();
+        all_zero.insert("a".to_string(), 0.0);
+        all_zero.insert("b".to_string(), 0.0);
+        manager_fallback
+            .refresh_all_with_weights(&all_zero)
+            .unwrap();
         let ids: Vec<String> = manager_fallback
             .cache()
             .snapshot()
@@ -923,7 +1006,175 @@ mod tests {
 
         let mut weights = HashMap::new();
         weights.insert("w".to_string(), 1.0);
-        manager.force_refresh_all_with_weights(&weights);
+        manager.force_refresh_all_with_weights(&weights).unwrap();
         assert_eq!(manager.cache().len(), 1);
+    }
+
+    #[test]
+    fn advance_with_weights_rejects_unknown_source() {
+        let mut manager = IngestionManager::new(4, SamplerConfig::default());
+        manager.register_source(Box::new(ScriptedSource::new(
+            "known",
+            Arc::new(AtomicUsize::new(0)),
+            vec![],
+        )));
+
+        let mut weights = HashMap::new();
+        weights.insert("known".to_string(), 1.0);
+        weights.insert("unknown".to_string(), 0.5);
+
+        let err = manager.advance_with_weights(1, &weights).unwrap_err();
+        assert!(
+            matches!(err, SamplerError::InvalidWeight { ref source_id, .. } if source_id == "unknown"),
+            "expected InvalidWeight for unknown source, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn refresh_all_with_weights_rejects_negative_weight() {
+        let mut manager = IngestionManager::new(4, SamplerConfig::default());
+        manager.register_source(Box::new(ScriptedSource::new(
+            "src",
+            Arc::new(AtomicUsize::new(0)),
+            vec![],
+        )));
+
+        let mut weights = HashMap::new();
+        weights.insert("src".to_string(), -1.0);
+
+        let err = manager.refresh_all_with_weights(&weights).unwrap_err();
+        assert!(
+            matches!(err, SamplerError::InvalidWeight { ref source_id, .. } if source_id == "src"),
+            "expected InvalidWeight for negative weight, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn force_refresh_all_with_weights_rejects_unknown_source() {
+        let mut manager = IngestionManager::new(4, SamplerConfig::default());
+        manager.register_source(Box::new(ScriptedSource::new(
+            "real",
+            Arc::new(AtomicUsize::new(0)),
+            vec![],
+        )));
+
+        let mut weights = HashMap::new();
+        weights.insert("ghost".to_string(), 1.0);
+
+        let err = manager
+            .force_refresh_all_with_weights(&weights)
+            .unwrap_err();
+        assert!(
+            matches!(err, SamplerError::InvalidWeight { ref source_id, .. } if source_id == "ghost"),
+            "expected InvalidWeight for unknown source, got {err:?}"
+        );
+    }
+
+    /// A source that records the `config.seed` value it receives on each `refresh()` call.
+    struct SeedCapturingSource {
+        id: String,
+        received_seeds: Arc<Mutex<Vec<u64>>>,
+    }
+
+    impl SeedCapturingSource {
+        fn new(id: &str, received_seeds: Arc<Mutex<Vec<u64>>>) -> Self {
+            Self {
+                id: id.to_string(),
+                received_seeds,
+            }
+        }
+    }
+
+    impl DataSource for SeedCapturingSource {
+        fn id(&self) -> &str {
+            &self.id
+        }
+
+        fn refresh(
+            &self,
+            config: &SamplerConfig,
+            _cursor: Option<&SourceCursor>,
+            _limit: Option<usize>,
+        ) -> Result<SourceSnapshot, SamplerError> {
+            self.received_seeds
+                .lock()
+                .expect("seed lock poisoned")
+                .push(config.seed);
+            Ok(SourceSnapshot {
+                records: Vec::new(),
+                cursor: SourceCursor {
+                    last_seen: Utc::now(),
+                    revision: 0,
+                },
+            })
+        }
+
+        fn reported_record_count(&self, _config: &SamplerConfig) -> Result<u128, SamplerError> {
+            Ok(0)
+        }
+
+        fn default_triplet_recipes(&self) -> Vec<crate::config::TripletRecipe> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn source_epoch_xor_changes_seed_received_by_source() {
+        // Verify that derive_epoch_seed(base, epoch) is actually threaded through to
+        // the source's refresh() call, and that different epochs produce different seeds.
+        let base_seed = 0xDEAD_BEEF_u64;
+        let config = SamplerConfig {
+            seed: base_seed,
+            ..SamplerConfig::default()
+        };
+
+        let seeds_epoch0 = Arc::new(Mutex::new(Vec::<u64>::new()));
+        let seeds_epoch1 = Arc::new(Mutex::new(Vec::<u64>::new()));
+
+        // --- epoch 0 ---
+        let mut manager = IngestionManager::new(4, config.clone());
+        manager.register_source(Box::new(SeedCapturingSource::new(
+            "src",
+            Arc::clone(&seeds_epoch0),
+        )));
+        // source_epoch defaults to 0; refresh_all passes derive_epoch_seed(base, 0)
+        manager.refresh_all();
+
+        // --- epoch 1 ---
+        let mut manager2 = IngestionManager::new(4, config.clone());
+        manager2.register_source(Box::new(SeedCapturingSource::new(
+            "src",
+            Arc::clone(&seeds_epoch1),
+        )));
+        manager2.set_source_epoch(1);
+        manager2.refresh_all();
+
+        let received0 = seeds_epoch0.lock().unwrap();
+        let received1 = seeds_epoch1.lock().unwrap();
+
+        assert!(!received0.is_empty(), "epoch-0 source was never refreshed");
+        assert!(!received1.is_empty(), "epoch-1 source was never refreshed");
+
+        let seed_at_epoch0 = received0[0];
+        let seed_at_epoch1 = received1[0];
+
+        // The seeds must differ — epoch XOR has a real effect.
+        assert_ne!(
+            seed_at_epoch0, seed_at_epoch1,
+            "epoch 0 and epoch 1 both produced seed {seed_at_epoch0:#x}; \
+             derive_epoch_seed is not reaching the source"
+        );
+
+        // They must match the expected derive_epoch_seed values.
+        assert_eq!(
+            seed_at_epoch0,
+            derive_epoch_seed(base_seed, 0),
+            "epoch-0 seed mismatch"
+        );
+        assert_eq!(
+            seed_at_epoch1,
+            derive_epoch_seed(base_seed, 1),
+            "epoch-1 seed mismatch"
+        );
     }
 }
