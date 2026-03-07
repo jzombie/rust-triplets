@@ -20,13 +20,14 @@ use std::path::Path;
 use std::path::PathBuf;
 #[cfg(test)]
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 #[cfg(test)]
 use tempfile::TempDir;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use walkdir::WalkDir;
 
 use crate::SamplerError;
@@ -705,6 +706,7 @@ struct SourceState {
 type ParquetGroupKey = (PathBuf, usize);
 type ParquetGroupRequest = (usize, usize, ShardIndex);
 type ParquetManifestCandidates = (Vec<String>, HashMap<String, u64>, usize);
+type ShardIndexResult = (Vec<ShardIndex>, usize, HashMap<PathBuf, Arc<DataStore>>);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct PersistedShardSequence {
@@ -749,7 +751,8 @@ impl HuggingFaceRowSource {
             "[triplets:hf] indexing local shards in {}",
             config.snapshot_dir.display()
         );
-        let (shards, discovered) = Self::build_shard_index(&config).unwrap_or_default();
+        let (shards, discovered, initial_store_cache) =
+            Self::build_shard_index(&config).unwrap_or_default();
         if discovered == 0 {
             info!(
                 "[triplets:hf] no local shards found in {} — lazy remote download enabled",
@@ -797,7 +800,7 @@ impl HuggingFaceRowSource {
             })),
             cache: Arc::new(Mutex::new(RowCache::default())),
             parquet_cache: Arc::new(Mutex::new(ParquetCache::default())),
-            store_cache: Arc::new(Mutex::new(HashMap::new())),
+            store_cache: Arc::new(Mutex::new(initial_store_cache)),
             eligible_index: Arc::new(Mutex::new(EligibleIndexCache::default())),
             expansion_thread: Arc::new(Mutex::new(None)),
         })
@@ -1218,6 +1221,24 @@ impl HuggingFaceRowSource {
         if let Ok(mut slot) = self.sampler_config.lock() {
             *slot = Some(config.clone());
         }
+        // Lazily restore persisted candidate sequence on first sampler
+        // configuration so the background expansion thread never needs to
+        // hit the network just to confirm the source is already fully cached.
+        let needs_load = self
+            .state
+            .lock()
+            .map(|s| s.remote_candidates.is_none())
+            .unwrap_or(false);
+        if needs_load
+            && let Ok(Some(persisted)) =
+                Self::load_persisted_shard_sequence(&self.config, config.seed)
+            && let Ok(mut state) = self.state.lock()
+            && state.remote_candidates.is_none()
+        {
+            state.remote_candidates = Some(persisted.candidates);
+            state.remote_candidate_sizes = persisted.candidate_sizes;
+            state.next_remote_idx = persisted.next_remote_idx;
+        }
     }
 
     #[cfg(test)]
@@ -1538,7 +1559,6 @@ impl HuggingFaceRowSource {
     }
 
     /// Load persisted shard candidate sequence when metadata and sampler seed match.
-    #[cfg(test)]
     fn load_persisted_shard_sequence(
         config: &HuggingFaceRowsConfig,
         current_sampler_seed: u64,
@@ -2303,7 +2323,7 @@ impl HuggingFaceRowSource {
         config: &HuggingFaceRowsConfig,
         path: &Path,
         global_start: usize,
-    ) -> Result<Option<ShardIndex>, SamplerError> {
+    ) -> Result<(Option<ShardIndex>, Option<Arc<DataStore>>), SamplerError> {
         let is_store = Self::is_store_shard_path(path);
         // Parquet is treated as a transient decode artifact only.
         // Persisted shard artifacts should be per-shard .simdr stores.
@@ -2312,8 +2332,8 @@ impl HuggingFaceRowSource {
             .and_then(|v| v.to_str())
             .is_some_and(|ext| ext.eq_ignore_ascii_case("parquet"));
 
-        let (rows, parquet_row_groups, checkpoints) = if is_store {
-            let store = Self::open_shard_store(config, path)?;
+        let (rows, parquet_row_groups, checkpoints, maybe_store) = if is_store {
+            let store = Arc::new(Self::open_shard_store(config, path)?);
             let rows = if let Some(entry) =
                 store.read(HF_SHARD_STORE_META_ROWS_KEY).map_err(|err| {
                     SamplerError::SourceUnavailable {
@@ -2339,10 +2359,10 @@ impl HuggingFaceRowSource {
             } else {
                 Vec::new()
             };
-            (rows, groups, Vec::new())
+            (rows, groups, Vec::new(), Some(store))
         } else if is_transient_parquet {
             let (rows, parquet_row_groups) = Self::parquet_row_group_map(config, path)?;
-            (rows, parquet_row_groups, Vec::new())
+            (rows, parquet_row_groups, Vec::new(), None)
         } else {
             let file = File::open(path).map_err(|err| SamplerError::SourceUnavailable {
                 source_id: config.source_id.clone(),
@@ -2373,22 +2393,25 @@ impl HuggingFaceRowSource {
                 offset = offset.saturating_add(bytes as u64);
             }
 
-            (rows, Vec::new(), checkpoints)
+            (rows, Vec::new(), checkpoints, None)
         };
 
         if rows == 0 {
-            return Ok(None);
+            return Ok((None, None));
         }
 
-        Ok(Some(ShardIndex {
-            path: path.to_path_buf(),
-            global_start,
-            row_count: rows,
-            random_access: is_transient_parquet || is_store,
-            parquet_row_groups,
-            checkpoints,
-            remote_candidate: None,
-        }))
+        Ok((
+            Some(ShardIndex {
+                path: path.to_path_buf(),
+                global_start,
+                row_count: rows,
+                random_access: is_transient_parquet || is_store,
+                parquet_row_groups,
+                checkpoints,
+                remote_candidate: None,
+            }),
+            maybe_store,
+        ))
     }
 
     /// Build parquet row-group map for random-access row reads.
@@ -2614,7 +2637,8 @@ impl HuggingFaceRowSource {
             state.materialized_rows
         };
 
-        let Some(shard) = Self::index_single_shard(&self.config, &local_path, global_start)? else {
+        let (maybe_shard, _) = Self::index_single_shard(&self.config, &local_path, global_start)?;
+        let Some(shard) = maybe_shard else {
             warn!(
                 "[triplets:hf] downloaded shard had zero rows and was skipped: {}",
                 local_path.display()
@@ -2842,7 +2866,7 @@ impl HuggingFaceRowSource {
     /// Build deterministic local shard index for accepted extensions.
     fn build_shard_index(
         config: &HuggingFaceRowsConfig,
-    ) -> Result<(Vec<ShardIndex>, usize), SamplerError> {
+    ) -> Result<ShardIndexResult, SamplerError> {
         let start_index = Instant::now();
         let mut shard_paths = Vec::new();
         let manifest_root = config.snapshot_dir.join("_parquet_manifest");
@@ -2861,14 +2885,20 @@ impl HuggingFaceRowSource {
             if !entry.file_type().is_file() {
                 continue;
             }
-            if entry.path().starts_with(&manifest_root) {
-                continue;
-            }
+            let in_manifest = entry.path().starts_with(&manifest_root);
             let Some(ext) = entry.path().extension().and_then(|v| v.to_str()) else {
                 continue;
             };
             if ext.eq_ignore_ascii_case("parquet") {
-                saw_parquet = true;
+                // Parquet files under _parquet_manifest are transient download
+                // artifacts (replaced by .simdr stores after transcoding).
+                // Delete them quietly and skip — do NOT set saw_parquet, since
+                // the .simdr stores may still be present and usable.
+                // Parquet files outside the manifest are unexpected legacy
+                // artifacts; flag them so the caller can warn and repopulate.
+                if !in_manifest {
+                    saw_parquet = true;
+                }
                 if let Err(err) = fs::remove_file(entry.path()) {
                     warn!(
                         "[triplets:hf] found persisted parquet shard (expected transient only) and failed to remove {}: {}",
@@ -2876,6 +2906,15 @@ impl HuggingFaceRowSource {
                         err
                     );
                 }
+                continue;
+            }
+            // For non-parquet files inside _parquet_manifest: only accept
+            // shard store files (.simdr).  Metadata files like
+            // _sequence_state.json and any other non-shard artifacts are
+            // skipped.  Remote-sourced shards are stored as .simdr files
+            // under _parquet_manifest and must be indexed here so that
+            // materialized_rows is correctly populated on restart.
+            if in_manifest && !ext.eq_ignore_ascii_case(HF_SHARD_STORE_EXTENSION) {
                 continue;
             }
             if accepted
@@ -2904,22 +2943,36 @@ impl HuggingFaceRowSource {
             });
         }
 
-        let mut indexed_shards = Vec::with_capacity(shard_paths.len());
-        for (ordinal, path) in shard_paths.into_iter().enumerate() {
-            info!(
-                "[triplets:hf] indexing shard {}: {}",
-                ordinal + 1,
-                path.display()
-            );
-            let shard = Self::index_single_shard(config, &path, 0)?;
-            indexed_shards.push((ordinal, shard));
-        }
+        let total_shards = shard_paths.len();
+        info!("[triplets:hf] indexing {} shards in parallel", total_shards);
+        let completed = AtomicUsize::new(0);
+        let indexed_shards: Result<Vec<_>, _> = shard_paths
+            .into_par_iter()
+            .enumerate()
+            .map(|(ordinal, path)| {
+                let result = Self::index_single_shard(config, &path, 0)?;
+                let n = completed.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+                let row_count = result.0.as_ref().map_or(0, |s| s.row_count);
+                debug!(
+                    "[triplets:hf] indexed shard {}/{}: {} ({} rows)",
+                    n,
+                    total_shards,
+                    path.file_name()
+                        .unwrap_or(path.as_os_str())
+                        .to_string_lossy(),
+                    row_count,
+                );
+                Ok::<_, SamplerError>((ordinal, result))
+            })
+            .collect();
+        let mut indexed_shards = indexed_shards?;
 
         indexed_shards.sort_by_key(|(ordinal, _)| *ordinal);
 
         let mut shards = Vec::new();
         let mut running_total = 0usize;
-        for (_, maybe_shard) in indexed_shards {
+        let mut store_cache: HashMap<PathBuf, Arc<DataStore>> = HashMap::new();
+        for (_, (maybe_shard, maybe_store)) in indexed_shards {
             let Some(mut shard) = maybe_shard else {
                 continue;
             };
@@ -2928,6 +2981,9 @@ impl HuggingFaceRowSource {
                 continue;
             }
 
+            if let Some(store) = maybe_store {
+                store_cache.insert(shard.path.clone(), store);
+            }
             shard.global_start = running_total;
             running_total = running_total.saturating_add(shard.row_count);
             shards.push(shard);
@@ -2940,7 +2996,7 @@ impl HuggingFaceRowSource {
             shards.len()
         );
 
-        Ok((shards, running_total))
+        Ok((shards, running_total, store_cache))
     }
 
     /// Locate containing shard and local offset for a global row index.
@@ -4704,6 +4760,7 @@ mod tests {
         let source = test_source(config.clone());
         let mut shard = HuggingFaceRowSource::index_single_shard(&config, &path, 0)
             .unwrap()
+            .0
             .unwrap();
         shard.checkpoints = vec![0];
 
@@ -5198,7 +5255,9 @@ mod tests {
         fs::write(dir.path().join("notes.txt"), b"plain").unwrap();
         let config = test_config(dir.path().to_path_buf());
 
-        let err = HuggingFaceRowSource::build_shard_index(&config).unwrap_err();
+        let err = HuggingFaceRowSource::build_shard_index(&config)
+            .err()
+            .expect("build_shard_index should fail");
         assert!(matches!(
             err,
             SamplerError::SourceUnavailable { ref reason, .. } if reason.contains("no shard files found")
@@ -5241,7 +5300,9 @@ mod tests {
         let config = test_config(dir.path().to_path_buf());
         let missing = dir.path().join("missing.ndjson");
 
-        let err = HuggingFaceRowSource::index_single_shard(&config, &missing, 0).unwrap_err();
+        let err = HuggingFaceRowSource::index_single_shard(&config, &missing, 0)
+            .err()
+            .expect("index_single_shard should fail");
         assert!(matches!(err, SamplerError::SourceUnavailable { .. }));
     }
 
@@ -5259,6 +5320,7 @@ mod tests {
 
         let shard = HuggingFaceRowSource::index_single_shard(&config, &path, 5)
             .unwrap()
+            .0
             .unwrap();
         assert_eq!(shard.global_start, 5);
         assert_eq!(shard.row_count, 3);
@@ -5487,6 +5549,7 @@ mod tests {
         let source = test_source(config.clone());
         let shard = HuggingFaceRowSource::index_single_shard(&config, &path, 0)
             .unwrap()
+            .0
             .unwrap();
 
         {
@@ -5560,6 +5623,7 @@ mod tests {
         let source = test_source(config.clone());
         let mut shard = HuggingFaceRowSource::index_single_shard(&config, &path, 0)
             .unwrap()
+            .0
             .unwrap();
         let end = fs::metadata(&path).unwrap().len();
         shard.checkpoints = vec![0, end];
@@ -5664,6 +5728,7 @@ mod tests {
         let source = test_source(config.clone());
         let shard = HuggingFaceRowSource::index_single_shard(&config, &path, 0)
             .unwrap()
+            .0
             .unwrap();
         {
             let mut state = source.state.lock().unwrap();
@@ -5745,6 +5810,7 @@ mod tests {
 
         let shard = HuggingFaceRowSource::index_single_shard(&config, &path, 0)
             .unwrap()
+            .0
             .unwrap();
         assert!(shard.random_access);
         assert_eq!(shard.row_count, 3);
@@ -5761,6 +5827,7 @@ mod tests {
         let source = test_source(config.clone());
         let shard = HuggingFaceRowSource::index_single_shard(&config, &path, 0)
             .unwrap()
+            .0
             .unwrap();
         {
             let mut state = source.state.lock().unwrap();
@@ -5882,7 +5949,7 @@ mod tests {
         fs::write(dir.path().join("b.ndjson"), b"{\"text\":\"x\"}\n").unwrap();
         let config = test_config(dir.path().to_path_buf());
 
-        let (shards, discovered) = HuggingFaceRowSource::build_shard_index(&config).unwrap();
+        let (shards, discovered, _) = HuggingFaceRowSource::build_shard_index(&config).unwrap();
         assert_eq!(discovered, 1);
         assert_eq!(shards.len(), 1);
         assert_eq!(shards[0].row_count, 1);
@@ -6490,7 +6557,10 @@ mod tests {
     }
 
     #[test]
-    fn build_shard_index_ignores_manifest_cache_artifacts() {
+    fn build_shard_index_ignores_manifest_non_shard_artifacts() {
+        // Non-shard-store files under _parquet_manifest (e.g. .ndjson, .json
+        // metadata) must be skipped even though .ndjson is in shard_extensions.
+        // Only .simdr stores inside _parquet_manifest should be indexed.
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path().to_path_buf());
         config.shard_extensions = vec!["ndjson".to_string()];
@@ -6498,17 +6568,51 @@ mod tests {
         let local = dir.path().join("local.ndjson");
         fs::write(&local, b"{\"id\":\"l1\",\"text\":\"x\"}\n").unwrap();
 
-        let manifest_cached = dir
+        // A .ndjson file under _parquet_manifest is a non-shard artifact and
+        // must NOT be indexed (it does not match HF_SHARD_STORE_EXTENSION).
+        let manifest_meta = dir
             .path()
             .join("_parquet_manifest")
             .join("main/train/cached.ndjson");
-        fs::create_dir_all(manifest_cached.parent().unwrap()).unwrap();
-        fs::write(&manifest_cached, b"{\"id\":\"r1\",\"text\":\"y\"}\n").unwrap();
+        fs::create_dir_all(manifest_meta.parent().unwrap()).unwrap();
+        fs::write(&manifest_meta, b"{\"id\":\"r1\",\"text\":\"y\"}\n").unwrap();
 
-        let (shards, discovered) = HuggingFaceRowSource::build_shard_index(&config).unwrap();
+        let (shards, discovered, _) = HuggingFaceRowSource::build_shard_index(&config).unwrap();
         assert_eq!(discovered, 1);
         assert_eq!(shards.len(), 1);
         assert_eq!(shards[0].path, local);
+    }
+
+    #[test]
+    fn build_shard_index_indexes_simdr_stores_under_manifest() {
+        // Remote-sourced shards are stored as .simdr stores under
+        // _parquet_manifest after transcoding from parquet.  build_shard_index
+        // must discover and index them so materialized_rows is correct on
+        // restart — the regression that caused every refresh to return 0 rows.
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+
+        // A .simdr store under _parquet_manifest (simulates a previously
+        // downloaded and transcoded remote shard).
+        let store_path = dir
+            .path()
+            .join("_parquet_manifest")
+            .join("refs%2Fconvert%2Fparquet/20231101.en/train/0000.simdr");
+        fs::create_dir_all(store_path.parent().unwrap()).unwrap();
+        write_simdr_fixture(&store_path, &[("row0", "hello"), ("row1", "world")]);
+
+        // A non-shard metadata file that must be ignored.
+        let seq_state_path = dir
+            .path()
+            .join("_parquet_manifest")
+            .join("_sequence_state.json");
+        fs::write(&seq_state_path, b"{}").unwrap();
+
+        let (shards, discovered, _) = HuggingFaceRowSource::build_shard_index(&config).unwrap();
+        assert_eq!(discovered, 2, "simdr store rows should be indexed");
+        assert_eq!(shards.len(), 1);
+        assert_eq!(shards[0].path, store_path);
+        assert_eq!(shards[0].row_count, 2);
     }
 
     #[test]
@@ -6796,6 +6900,7 @@ mod tests {
         fs::write(&appended_path, b"{\"id\":\"r1\",\"text\":\"hello\"}\n").unwrap();
         let appended = HuggingFaceRowSource::index_single_shard(&config, &appended_path, 1)
             .unwrap()
+            .0
             .unwrap();
 
         let baseline = ShardIndex {
@@ -6842,6 +6947,7 @@ mod tests {
         let source = test_source(config.clone());
         let shard = HuggingFaceRowSource::index_single_shard(&config, &path, 0)
             .unwrap()
+            .0
             .unwrap();
 
         let line = source.read_line_at(&shard, 2).unwrap();
@@ -6859,6 +6965,7 @@ mod tests {
         let source = test_source(config.clone());
         let mut shard = HuggingFaceRowSource::index_single_shard(&config, &path, 0)
             .unwrap()
+            .0
             .unwrap();
         shard.checkpoints.clear();
 
@@ -7008,7 +7115,7 @@ mod tests {
         fs::write(root.join("b.ndjson"), b"{\"text\":\"b\"}\n").unwrap();
 
         let config = test_config(root.clone());
-        let (shards, discovered) = HuggingFaceRowSource::build_shard_index(&config).unwrap();
+        let (shards, discovered, _) = HuggingFaceRowSource::build_shard_index(&config).unwrap();
         assert_eq!(discovered, 2);
         assert_eq!(shards.len(), 2);
     }
@@ -7020,7 +7127,7 @@ mod tests {
         let path = dir.path().join("empty.jsonl");
         fs::write(&path, b"").unwrap();
         let shard = HuggingFaceRowSource::index_single_shard(&config, &path, 0).unwrap();
-        assert!(shard.is_none());
+        assert!(shard.0.is_none());
     }
 
     #[test]
@@ -7039,6 +7146,7 @@ mod tests {
         let source = test_source(config.clone());
         let shard = HuggingFaceRowSource::index_single_shard(&config, &path, 0)
             .unwrap()
+            .0
             .unwrap();
         {
             let mut state = source.state.lock().unwrap();
@@ -7340,6 +7448,7 @@ mod tests {
         let source = test_source(config.clone());
         let shard = HuggingFaceRowSource::index_single_shard(&config, &path, 0)
             .unwrap()
+            .0
             .unwrap();
         {
             let mut state = source.state.lock().unwrap();
@@ -7388,6 +7497,7 @@ mod tests {
         let source2 = test_source(cfg2.clone());
         let shard = HuggingFaceRowSource::index_single_shard(&cfg2, &path, 0)
             .unwrap()
+            .0
             .unwrap();
         {
             let mut state = source2.state.lock().unwrap();
@@ -7483,6 +7593,7 @@ mod tests {
         let source_c = test_source(config.clone());
         let shard = HuggingFaceRowSource::index_single_shard(&config, &path, 0)
             .unwrap()
+            .0
             .unwrap();
 
         for source in [&source_a, &source_b, &source_c] {
