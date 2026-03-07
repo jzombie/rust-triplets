@@ -2,7 +2,7 @@
 
 [![made-with-rust][rust-logo]][rust-src-page] [![crates.io][crates-badge]][crates-page] [![MIT licensed][mit-license-badge]][mit-license-page] [![Apache 2.0 licensed][apache-2.0-license-badge]][apache-2.0-license-page] [![Coverage][coveralls-badge]][coveralls-page]
 
-_Compose an effectively unlimited supply of training triplets from your existing corpus — rule-driven, reproducible, and multi-source. No hand-mining required for domain-rooted sources; hard mining integrates cleanly when you need it._
+_Compose an effectively unlimited supply of training triplets from your existing corpus — rule-driven, reproducible splits and source/shard ordering, and multi-source. No hand-mining required for domain-rooted sources; hard mining integrates cleanly when you need it._
 
 **WORK IN PROGRESS. THIS API IS BEING PROTOTYPED AND MAY CHANGE WITHOUT NOTICE.**
 
@@ -45,7 +45,7 @@ It is designed for multi-source training pipelines where each batch can mix reco
 ## High-level features
 
 - **Automatic deterministic splits** (train/validation/test) from record IDs + seed.
-- **Sampler-seed-driven source determinism** for built-in deterministic source ordering (file + Hugging Face).
+- **Sampler-seed-driven source determinism** for built-in deterministic source ordering (file source) and deterministic shard download order (Hugging Face). Note: HF row-level selection within a `refresh` call depends on how many shards are locally cached and is not reproducible across cache wipes — only split assignment and shard download order are stable end-to-end for HF sources.
 - **Runtime batch sampling** via `next_triplet_batch`, `next_pair_batch`, and `next_text_batch`.
 - **Recipe-driven sample construction** for triplet/pair/text generation (anchor/positive/negative selectors).
 - **Per-source independent recipe rules**: when `SamplerConfig.recipes` is left empty, each source supplies its own `default_triplet_recipes()` so sources with different data shapes — documents, QA pairs, structured logs — can each use tailored anchor/positive/negative strategies without affecting one another. A global recipe set can still be provided to override all sources uniformly. Batch contribution defaults to equal weighting across all registered sources; per-call source weights let you shift that balance at any time without reconfiguring the sampler.
@@ -194,7 +194,10 @@ let _batch = sampler.next_triplet_batch(SplitLabel::Train)?;
 
 ### Integrated sources
 
-`triplets` ships with two built-in sources; if you use either, deterministic paging is always enabled (`FileSource`, `HuggingFaceRowSource`).
+`triplets` ships with two built-in sources:
+
+- **`FileSource`**: fully deterministic paging — same seed and corpus always produces the same row order.
+- **`HuggingFaceRowSource`**: deterministic shard download order (same seed + same HF manifest → same download sequence). Row-level selection within each `refresh` call is seeded by the number of locally materialized rows, so it is **not reproducible across cache wipes**. Split assignment (Train/Val/Test) remains fully deterministic and cache-independent for both sources.
 
 - **File source (`FileSource`)**: local files and folders.
 - **Hugging Face source (`HuggingFaceRowSource`)** *(feature: `huggingface`)*: HF dataset rows.
@@ -555,7 +558,7 @@ This reflects the built-in file-corpus helpers (`FileCorpusIndex`) used by files
 - **Memory bound**: refresh/cache limits are bounded by `ingestion_max_records` with a floor at `batch_size`.
 - **`ingestion_max_records` tuning**: setting this above `batch_size` usually improves sample diversity (broader anchor/negative candidate pool) and reduces near-term repetition, but returns diminish once source availability, split boundaries, and recipe constraints dominate. For remote backends such as Hugging Face, larger initial ingestion targets can require pulling more initial shards before the first batch, so startup latency can increase depending on shard sizes and network throughput.
 - **File indexing**: deterministic path ordering + deterministic index permutation for paging.
-- **Source ordering**: round-robin by source, deterministic within-source ordering by seed/epoch.
+- **Source ordering**: round-robin by source, deterministic within-source ordering by seed/epoch (file source). For `HuggingFaceRowSource`, shard download order is deterministic by seed, but row selection within a refresh is not stable across cache wipes (see `HuggingFaceRowSource` doc).
 - **Splits**: labels are deterministic from `record_id + seed + ratios`; split APIs enforce `allowed_splits`.
 - **Coverage caveat**: if `len_hint` drifts mid-epoch in streaming backends, strict single-pass coverage is not guaranteed.
 - **Weights**: recipe/source/chunk weights affect scaling, not deterministic ordering.

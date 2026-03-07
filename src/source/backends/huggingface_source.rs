@@ -663,6 +663,25 @@ impl RowCache {
 }
 
 /// Bulk-oriented Hugging Face source backed by local shard files.
+///
+/// ## Determinism guarantees
+///
+/// * **Split assignment** — fully deterministic and cache-independent.  A record's
+///   Train/Validation/Test label is derived solely from its stable ID and the sampler
+///   seed.  The same ID always maps to the same split regardless of when or how the
+///   shard was downloaded.
+///
+/// * **Shard download order** — fully deterministic.  Given the same sampler seed and
+///   the same HF manifest, position N in the download sequence always resolves to the
+///   same shard file, independent of which shards are currently cached on disk.
+///
+/// * **Row selection within `refresh`** — **not deterministic across cache wipes.**
+///   The permutation used to select rows in a given `refresh` call is seeded by
+///   `(source_id, materialized_rows, sampler_seed)`.  `materialized_rows` grows as
+///   shards are downloaded in the background; it is an accident of download timing,
+///   not a stable property of the dataset.  After a cache wipe and re-download the
+///   same epoch number will produce different rows.  Within a single run (stable
+///   `materialized_rows`), repeated calls with the same cursor are reproducible.
 pub struct HuggingFaceRowSource {
     config: HuggingFaceRowsConfig,
     sampler_config: Arc<Mutex<Option<SamplerConfig>>>,
@@ -1224,8 +1243,10 @@ impl HuggingFaceRowSource {
 
         // When the epoch seed changes, rebuild the permuted order index from the
         // sorted immutable candidates list and reset the consumption pointer.
-        // For a given (seed, sorted-list) this always produces the same order,
-        // so epoch N is deterministic whether it is the first or the hundredth epoch.
+        // For a given (seed, sorted-list) this always produces the same shard download
+        // order, so shard N is always the same file whether it is the first or the
+        // hundredth epoch.  Note: row selection within refresh() is NOT deterministic
+        // across cache wipes — see HuggingFaceRowSource doc comment.
         if seed_changed
             && let Ok(mut state) = self.state.lock()
             && let Some(candidates) = state.remote_candidates.as_ref()
@@ -1411,15 +1432,18 @@ impl HuggingFaceRowSource {
     }
 
     /// Return ALL shards from the parquet manifest regardless of what is already cached
-    /// on disk.  Determinism and cache are orthogonal concerns:
+    /// on disk.  Shard download order and local cache are orthogonal concerns:
     ///
-    /// * **Determinism** — the seed-derived download order must be computed from the
-    ///   complete HF manifest so that position N for seed S always maps to the same
-    ///   shard, independent of what has been previously downloaded.
+    /// * **Shard download order** — must be computed from the complete HF manifest so
+    ///   that position N for seed S always maps to the same shard file, independent of
+    ///   what has been previously downloaded or evicted.
     /// * **Cache** — which shards are already on disk is handled downstream:
     ///   `ensure_row_available` advances `next_remote_idx` past already-materialised
     ///   positions, and `download_next_remote_shard` skips any position whose store
     ///   file already exists without re-fetching it.
+    ///
+    /// Note: row-level selection within `refresh` is *not* deterministic across cache
+    /// wipes.  Only the shard download sequence is stable end-to-end.
     ///
     /// The only cleanup performed here is deleting stale/incomplete transient parquet
     /// downloads (wrong on-disk size) so they are re-fetched on the next download cycle.
@@ -2503,8 +2527,8 @@ impl HuggingFaceRowSource {
     ///
     /// If the shard's store file already exists on disk (materialised from a previous
     /// run), the download is skipped and `next_remote_idx` is still advanced.  This
-    /// keeps determinism and cache decoupled: the ordered position is consumed either
-    /// way, but no redundant network traffic occurs.
+    /// keeps the shard download order stable regardless of cache state: the ordered
+    /// position is consumed either way, but no redundant network traffic occurs.
     fn download_next_remote_shard(&self) -> Result<bool, SamplerError> {
         let (remote_ordinal, remote_total, remote_path, expected_bytes) = {
             let mut state = self
