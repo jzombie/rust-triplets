@@ -311,8 +311,81 @@ pub fn resolve_hf_list_roots(source_list: String) -> Result<HfListRoots, String>
     })
 }
 
+/// Sanitize a single component string for use in a source ID.
+///
+/// Replaces any character that is not alphanumeric, `-`, or `_` with `-`.
+fn sanitize_source_id_component(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+/// Derive a human-readable source ID slug from parsed HF URI components.
+///
+/// Uses the short dataset name (the portion after the last `/`), then appends
+/// `.{config}` when config is not `"default"` and `.{split}` when split is
+/// not empty and not `"train"`.  Any character that is not alphanumeric,
+/// `-`, or `_` is replaced with `-`.
+fn hf_source_id_slug(dataset: &str, config: &str, split: &str) -> String {
+    let short_name = dataset.rfind('/').map_or(dataset, |i| &dataset[i + 1..]);
+    let mut slug = sanitize_source_id_component(short_name);
+    if !config.is_empty() && config != "default" {
+        slug.push('.');
+        slug.push_str(&sanitize_source_id_component(config));
+    }
+    if !split.is_empty() && split != "train" {
+        slug.push('.');
+        slug.push_str(&sanitize_source_id_component(split));
+    }
+    if slug.is_empty() {
+        slug = "hf".to_string();
+    }
+    slug
+}
+
 /// Build Hugging Face row sources from a parsed source list.
 pub fn build_hf_sources(roots: &HfListRoots) -> Vec<Box<dyn DataSource + 'static>> {
+    // Phase 1: generate base slugs for every entry (fallback for unparseable URIs).
+    let base_slugs: Vec<String> = roots
+        .sources
+        .iter()
+        .enumerate()
+        .map(|(idx, source)| match parse_hf_uri(&source.uri) {
+            Ok((dataset, config, split)) => hf_source_id_slug(&dataset, &config, &split),
+            Err(_) => format!("hf_list_{idx}"),
+        })
+        .collect();
+
+    // Phase 2: find any slugs that appear more than once so they can be disambiguated.
+    let mut slug_count: HashMap<&str, usize> = HashMap::new();
+    for slug in &base_slugs {
+        *slug_count.entry(slug.as_str()).or_insert(0) += 1;
+    }
+    let duplicated: HashSet<&str> = slug_count
+        .into_iter()
+        .filter(|(_, n)| *n > 1)
+        .map(|(s, _)| s)
+        .collect();
+
+    // Phase 3: resolve final IDs (append `.{idx}` only for colliding slugs).
+    let source_ids: Vec<String> = base_slugs
+        .iter()
+        .enumerate()
+        .map(|(idx, slug)| {
+            if duplicated.contains(slug.as_str()) {
+                format!("{slug}.{idx}")
+            } else {
+                slug.clone()
+            }
+        })
+        .collect();
+
     roots
         .sources
         .iter()
@@ -326,7 +399,7 @@ pub fn build_hf_sources(roots: &HfListRoots) -> Vec<Box<dyn DataSource + 'static
                 }
             };
 
-            let source_id = format!("hf_list_{idx}");
+            let source_id = source_ids[idx].clone();
             let snapshot_dir = match managed_hf_list_snapshot_dir(&dataset, &config, &split, idx)
             {
                 Ok(path) => path,
@@ -4358,6 +4431,195 @@ mod tests {
         });
 
         size_server.join().unwrap();
+    }
+
+    #[test]
+    fn build_hf_sources_duplicate_uri_gets_distinct_ids_and_snapshot_dirs() {
+        // Two identical entries must produce two built sources whose IDs are
+        // disambiguated (".0" / ".1") and whose snapshot directories are
+        // independent (replica_0 vs replica_1).
+        let dup_entry = HfSourceEntry {
+            uri: "hf://org/dataset/default/train".to_string(),
+            anchor_columns: vec!["title".to_string()],
+            positive_columns: vec!["body".to_string()],
+            context_columns: Vec::new(),
+            text_columns: Vec::new(),
+        };
+        let roots = HfListRoots {
+            source_list: "inline".to_string(),
+            sources: vec![dup_entry.clone(), dup_entry],
+        };
+
+        let temp_root = tempdir().unwrap();
+        fs::write(
+            temp_root.path().join("Cargo.toml"),
+            "[package]\nname='tmp'\nversion='0.0.0'\n",
+        )
+        .unwrap();
+
+        // Two sources → two size-endpoint calls; serve both responses.
+        let size_payload = || {
+            serde_json::json!({"size": {"splits": []}})
+                .to_string()
+                .into_bytes()
+        };
+        let (size_base_url_a, size_server_a) = spawn_one_shot_http(size_payload());
+        let (size_base_url_b, size_server_b) = spawn_one_shot_http(size_payload());
+        // Both servers share the same base URL pattern; use the first for the env-var
+        // (the second call may hit a different port, but both start with the same host).
+        // In practice each spawn_one_shot_http binds its own ephemeral port, so we
+        // point the env-var at either — what matters is that both succeed and the
+        // test doesn't make real network calls.
+        let _ = size_base_url_b; // second URL not needed since we assert on IDs, not rows
+
+        with_current_dir(temp_root.path(), || {
+            with_env_var(
+                TRIPLETS_HF_SIZE_ENDPOINT,
+                &format!("{size_base_url_a}/size"),
+                || {
+                    let built = build_hf_sources(&roots);
+                    assert_eq!(built.len(), 2, "both duplicate sources should be built");
+
+                    let id_0 = built[0].id().to_string();
+                    let id_1 = built[1].id().to_string();
+                    assert_ne!(
+                        id_0, id_1,
+                        "duplicate sources must have distinct source IDs"
+                    );
+                    assert!(
+                        id_0.ends_with(".0"),
+                        "first duplicate should have .0 suffix, got: {id_0}"
+                    );
+                    assert!(
+                        id_1.ends_with(".1"),
+                        "second duplicate should have .1 suffix, got: {id_1}"
+                    );
+
+                    // Snapshot dirs are derived from managed_hf_list_snapshot_dir with
+                    // the list index, so replica_0 and replica_1 must differ.
+                    let dir_0 =
+                        managed_hf_list_snapshot_dir("org/dataset", "default", "train", 0).unwrap();
+                    let dir_1 =
+                        managed_hf_list_snapshot_dir("org/dataset", "default", "train", 1).unwrap();
+                    assert_ne!(
+                        dir_0, dir_1,
+                        "duplicate sources must have distinct snapshot dirs"
+                    );
+                    assert!(dir_0.ends_with("replica_0"));
+                    assert!(dir_1.ends_with("replica_1"));
+                },
+            );
+        });
+
+        size_server_a.join().unwrap();
+        // size_server_b may not have been contacted if cache resolved both paths;
+        // drop it without joining to avoid blocking.
+        drop(size_server_b);
+    }
+
+    #[test]
+    fn hf_source_id_slug_uses_short_dataset_name() {
+        assert_eq!(
+            hf_source_id_slug("allenai/dolmino-mix-1124", "default", "train"),
+            "dolmino-mix-1124"
+        );
+    }
+
+    #[test]
+    fn hf_source_id_slug_appends_non_default_config() {
+        assert_eq!(
+            hf_source_id_slug("org/dataset", "en", "train"),
+            "dataset.en"
+        );
+    }
+
+    #[test]
+    fn hf_source_id_slug_appends_non_train_split() {
+        assert_eq!(
+            hf_source_id_slug("org/dataset", "default", "validation"),
+            "dataset.validation"
+        );
+    }
+
+    #[test]
+    fn hf_source_id_slug_omits_empty_split() {
+        assert_eq!(hf_source_id_slug("org/dataset", "default", ""), "dataset");
+    }
+
+    #[test]
+    fn hf_source_id_slug_appends_both_config_and_split() {
+        assert_eq!(
+            hf_source_id_slug("org/dataset", "en", "validation"),
+            "dataset.en.validation"
+        );
+    }
+
+    #[test]
+    fn hf_source_id_slug_sanitizes_special_chars() {
+        // dots and slashes in names become dashes
+        assert_eq!(
+            hf_source_id_slug("org/data.set", "v1.0", "train"),
+            "data-set.v1-0"
+        );
+    }
+
+    #[test]
+    fn hf_source_id_slug_no_org_prefix() {
+        // dataset without org/ prefix — falls back to using the full string
+        assert_eq!(hf_source_id_slug("dataset", "default", "train"), "dataset");
+    }
+
+    #[test]
+    fn build_hf_sources_disambiguates_duplicate_slugs() {
+        // Two sources pointing at the same dataset/config/split should get
+        // distinct IDs via the index suffix rather than silently colliding.
+        let sources = [
+            HfSourceEntry {
+                uri: "hf://org/dataset/default/train".to_string(),
+                anchor_columns: vec!["title".to_string()],
+                positive_columns: vec!["body".to_string()],
+                context_columns: Vec::new(),
+                text_columns: Vec::new(),
+            },
+            HfSourceEntry {
+                uri: "hf://org/dataset/default/train".to_string(),
+                anchor_columns: vec!["title".to_string()],
+                positive_columns: vec!["body".to_string()],
+                context_columns: Vec::new(),
+                text_columns: Vec::new(),
+            },
+        ];
+        let base_slugs: Vec<String> = sources
+            .iter()
+            .enumerate()
+            .map(|(idx, source)| match parse_hf_uri(&source.uri) {
+                Ok((dataset, config, split)) => hf_source_id_slug(&dataset, &config, &split),
+                Err(_) => format!("hf_list_{idx}"),
+            })
+            .collect();
+        let mut slug_count: std::collections::HashMap<&str, usize> =
+            std::collections::HashMap::new();
+        for s in &base_slugs {
+            *slug_count.entry(s.as_str()).or_insert(0) += 1;
+        }
+        let duplicated: HashSet<&str> = slug_count
+            .into_iter()
+            .filter(|(_, n)| *n > 1)
+            .map(|(s, _)| s)
+            .collect();
+        let resolved: Vec<String> = base_slugs
+            .iter()
+            .enumerate()
+            .map(|(idx, slug)| {
+                if duplicated.contains(slug.as_str()) {
+                    format!("{slug}.{idx}")
+                } else {
+                    slug.clone()
+                }
+            })
+            .collect();
+        assert_eq!(resolved[0], "dataset.0");
+        assert_eq!(resolved[1], "dataset.1");
     }
 
     #[test]
