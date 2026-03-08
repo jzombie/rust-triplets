@@ -15,8 +15,8 @@ pub struct QualityScore {
 impl Default for QualityScore {
     fn default() -> Self {
         Self {
-            // Assume full trust unless a source overrides it.
-            trust: 1.0,
+            // Assume medium trust by default, allowing recipes to upweight or downweight based on other signals.
+            trust: 0.5,
         }
     }
 }
@@ -225,9 +225,9 @@ mod tests {
     }
 
     #[test]
-    fn quality_score_defaults_to_full_trust() {
+    fn quality_score_defaults_to_medium_trust() {
         let quality = QualityScore::default();
-        assert!((quality.trust - 1.0).abs() < f32::EPSILON);
+        assert!((quality.trust - 0.5).abs() < f32::EPSILON);
     }
 
     #[test]

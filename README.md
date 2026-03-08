@@ -84,7 +84,7 @@ Why this matters:
 - When a source has limited fresh records, replay/oversampling can happen for that source without coupling all other sources to the same behavior.
 
 Key weighting concepts:
-
+- **Default trust** (`QualityScore::default().trust`): 0.5 (used when a record/source doesn't override trust).
 - **Source weights** control how often each source contributes in a batch (`next_*_batch_with_weights`).
 - **Trust weights** (`DataRecord.quality.trust`, optional taxonomy overrides) scale sample influence by source/record quality.
 - **Recipe weights** (`TripletRecipe.weight`) control how often each recipe path is selected.

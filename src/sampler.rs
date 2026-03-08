@@ -3416,7 +3416,7 @@ mod tests {
         };
         assert_eq!(
             sampler.inner.lock().unwrap().chunk_weight(&early_chunk),
-            0.9
+            0.45
         );
     }
 
@@ -3524,7 +3524,9 @@ mod tests {
             .lock()
             .unwrap()
             .triplet_chunk_weight(&anchor, &positive, &negative);
-        assert!((avg - (1.0 + 0.5 + 0.0) / 3.0).abs() < f32::EPSILON);
+        let trust = QualityScore::default().trust;
+        let expected = trust * (1.0 + 0.5 + 0.0) / 3.0;
+        assert!((avg - expected).abs() < f32::EPSILON);
     }
 
     // Enforcement test: text, pair, and triplet samples must all be drawn from
@@ -3711,8 +3713,9 @@ mod tests {
         let first = sampler.next_text_batch(SplitLabel::Train).unwrap();
         let second = sampler.next_text_batch(SplitLabel::Train).unwrap();
 
-        assert!((first.samples[0].weight - 2.0).abs() < f32::EPSILON);
-        assert!((second.samples[0].weight - 1.0).abs() < f32::EPSILON);
+        let trust = QualityScore::default().trust;
+        assert!((first.samples[0].weight - (2.0 * trust)).abs() < f32::EPSILON);
+        assert!((second.samples[0].weight - (1.0 * trust)).abs() < f32::EPSILON);
     }
 
     #[test]
