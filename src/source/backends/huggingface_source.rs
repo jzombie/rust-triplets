@@ -1242,18 +1242,33 @@ impl HuggingFaceRowSource {
         }
 
         // When the epoch seed changes, rebuild the permuted order index from the
-        // sorted immutable candidates list and reset the consumption pointer.
+        // sorted immutable candidates list and advance the consumption pointer past
+        // shards already materialised on disk in the new order.  Resetting to 0
+        // causes every source-epoch advance to appear to restart from shard 1 even
+        // when many shards are already cached, permanently stalling expansion.
         // For a given (seed, sorted-list) this always produces the same shard download
         // order, so shard N is always the same file whether it is the first or the
         // hundredth epoch.  Note: row selection within refresh() is NOT deterministic
         // across cache wipes — see HuggingFaceRowSource doc comment.
         if seed_changed
             && let Ok(mut state) = self.state.lock()
-            && let Some(candidates) = state.remote_candidates.as_ref()
+            && let Some(candidates) = state.remote_candidates.clone()
         {
-            state.remote_candidate_order =
-                Self::build_candidate_order(&self.config, candidates, config.seed);
-            state.next_remote_idx = 0;
+            let new_order = Self::build_candidate_order(&self.config, &candidates, config.seed);
+            let existing_store_paths: HashSet<PathBuf> =
+                state.shards.iter().map(|s| s.path.clone()).collect();
+            let next_idx = new_order
+                .iter()
+                .position(|&candidate_idx| {
+                    let store = Self::shard_store_path_for(&Self::candidate_target_path(
+                        &self.config,
+                        &candidates[candidate_idx],
+                    ));
+                    !existing_store_paths.contains(&store)
+                })
+                .unwrap_or(candidates.len());
+            state.remote_candidate_order = new_order;
+            state.next_remote_idx = next_idx;
         }
     }
 
@@ -7509,7 +7524,87 @@ mod tests {
             let expected_order =
                 HuggingFaceRowSource::build_candidate_order(&config, &candidates, 18);
             assert_eq!(state.remote_candidate_order, expected_order);
+            // No shards are materialised on disk so the pointer lands at 0
+            // (the first non-materialised position in the new order).
             assert_eq!(state.next_remote_idx, 0);
+        }
+    }
+
+    #[test]
+    fn set_active_sampler_config_skips_materialised_shards_after_seed_change() {
+        // This is the regression test for the bug where every source-epoch advance
+        // reset next_remote_idx to 0, causing the expansion thread to always report
+        // "shard 1/N already materialised" and never actually download new shards.
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config.clone());
+
+        let candidates: Vec<String> = (0..5)
+            .map(|i| {
+                format!("url::http://host/datasets/org/ds/resolve/main/train/part-{i:04}.ndjson")
+            })
+            .collect();
+
+        // Prime source at seed 7 so the subsequent call at seed 7 is not a "change".
+        source.configure_sampler(&SamplerConfig {
+            seed: 7,
+            ..SamplerConfig::default()
+        });
+
+        // Build the order for the *new* seed (18) up-front so we know which
+        // positions map to which candidates and can pre-materialise the first 3.
+        let new_order = HuggingFaceRowSource::build_candidate_order(&config, &candidates, 18);
+        let materialised_count = 3;
+        let shards_to_inject: Vec<ShardIndex> = (0..materialised_count)
+            .map(|pos| {
+                let candidate_idx = new_order[pos];
+                let target = HuggingFaceRowSource::candidate_target_path(
+                    &config,
+                    &candidates[candidate_idx],
+                );
+                let store = HuggingFaceRowSource::shard_store_path_for(&target);
+                ShardIndex {
+                    path: store,
+                    global_start: pos * 100,
+                    row_count: 100,
+                    random_access: true,
+                    parquet_row_groups: vec![(0, 100)],
+                    checkpoints: Vec::new(),
+                    remote_candidate: None,
+                }
+            })
+            .collect();
+
+        {
+            let mut state = source.state.lock().unwrap();
+            let order_7 = HuggingFaceRowSource::build_candidate_order(&config, &candidates, 7);
+            state.remote_candidates = Some(candidates.clone());
+            state.remote_candidate_order = order_7;
+            state.next_remote_idx = 0;
+            state.shards = shards_to_inject;
+            state.materialized_rows = materialised_count * 100;
+        }
+
+        // Change the seed — must advance pointer past the 3 materialised shards
+        // in the new order rather than resetting to 0.
+        source.configure_sampler(&SamplerConfig {
+            seed: 18,
+            ..SamplerConfig::default()
+        });
+
+        {
+            let state = source.state.lock().unwrap();
+            assert_eq!(
+                state.remote_candidate_order,
+                HuggingFaceRowSource::build_candidate_order(&config, &candidates, 18),
+                "order must be rebuilt from new seed"
+            );
+            assert_eq!(
+                state.next_remote_idx, materialised_count,
+                "pointer must skip the {} already-materialised shards in the new order, \
+                 not reset to 0",
+                materialised_count
+            );
         }
     }
 }
