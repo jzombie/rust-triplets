@@ -833,14 +833,16 @@ impl HuggingFaceRowSource {
         })?;
 
         info!(
-            "[triplets:hf] indexing local shards in {}",
+            "[triplets:hf] {} indexing local shards in {}",
+            config.source_id,
             config.snapshot_dir.display()
         );
         let (shards, discovered, initial_store_cache) =
             Self::build_shard_index(&config).unwrap_or_default();
         if discovered == 0 {
             info!(
-                "[triplets:hf] no local shards found in {} — lazy remote download enabled",
+                "[triplets:hf] {} no local shards found in {} — lazy remote download enabled",
+                config.source_id,
                 config.snapshot_dir.display()
             );
         }
@@ -850,8 +852,8 @@ impl HuggingFaceRowSource {
             Ok(value) => value,
             Err(err) => {
                 warn!(
-                    "[triplets:hf] global row count request failed; continuing with discovered rows only: {}",
-                    err
+                    "[triplets:hf] {} global row count request failed; continuing with discovered rows only: {}",
+                    config.source_id, err
                 );
                 None
             }
@@ -859,13 +861,14 @@ impl HuggingFaceRowSource {
 
         if let Some(global_total) = total_rows {
             info!(
-                "[triplets:hf] global split row count reported: {} (known_local_rows={})",
-                global_total, materialized_rows
+                "[triplets:hf] {} global split row count reported: {} (known_local_rows={})",
+                config.source_id, global_total, materialized_rows
             );
         }
 
         info!(
-            "[triplets:hf] source ready in {:.2}s (rows={}, shards={})",
+            "[triplets:hf] {} source ready in {:.2}s (rows={}, shards={})",
+            config.source_id,
             start_new.elapsed().as_secs_f64(),
             materialized_rows,
             shards.len()
@@ -2008,6 +2011,7 @@ impl HuggingFaceRowSource {
         remote_url: &str,
         target: &Path,
         expected_bytes: Option<u64>,
+        shard_label: &str,
     ) -> Result<(), SamplerError> {
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent).map_err(|err| SamplerError::SourceUnavailable {
@@ -2041,7 +2045,9 @@ impl HuggingFaceRowSource {
                 ),
             })?;
         info!(
-            "[triplets:hf] downloading shard payload -> {}",
+            "[triplets:hf] {} {} downloading shard payload -> {}",
+            config.source_id,
+            shard_label,
             target.display()
         );
         let started = Instant::now();
@@ -2084,8 +2090,9 @@ impl HuggingFaceRowSource {
                         0.0
                     };
                     info!(
-                        "[triplets:hf] download progress {}: {:.1}/{:.1} MiB ({:.1}%, {:.1}s elapsed, ETA {:.1}s)",
-                        target.display(),
+                        "[triplets:hf] {} {} download progress: {:.1}/{:.1} MiB ({:.1}%, {:.1}s elapsed, ETA {:.1}s)",
+                        config.source_id,
+                        shard_label,
                         total_bytes as f64 / (1024.0 * 1024.0),
                         expected as f64 / (1024.0 * 1024.0),
                         pct,
@@ -2094,8 +2101,9 @@ impl HuggingFaceRowSource {
                     );
                 } else {
                     info!(
-                        "[triplets:hf] download progress {}: {:.1} MiB ({:.1}s)",
-                        target.display(),
+                        "[triplets:hf] {} {} download progress: {:.1} MiB ({:.1}s)",
+                        config.source_id,
+                        shard_label,
                         total_bytes as f64 / (1024.0 * 1024.0),
                         elapsed
                     );
@@ -2109,8 +2117,9 @@ impl HuggingFaceRowSource {
         {
             let pct = ((total_bytes as f64 / expected as f64) * 100.0).clamp(0.0, 100.0);
             info!(
-                "[triplets:hf] download complete {}: {:.1}/{:.1} MiB ({:.1}%) in {:.1}s",
-                target.display(),
+                "[triplets:hf] {} {} download complete: {:.1}/{:.1} MiB ({:.1}%) in {:.1}s",
+                config.source_id,
+                shard_label,
                 total_bytes as f64 / (1024.0 * 1024.0),
                 expected as f64 / (1024.0 * 1024.0),
                 pct,
@@ -2118,8 +2127,9 @@ impl HuggingFaceRowSource {
             );
         } else {
             info!(
-                "[triplets:hf] download complete {}: {:.1} MiB in {:.1}s",
-                target.display(),
+                "[triplets:hf] {} {} download complete: {:.1} MiB in {:.1}s",
+                config.source_id,
+                shard_label,
                 total_bytes as f64 / (1024.0 * 1024.0),
                 elapsed
             );
@@ -2221,6 +2231,7 @@ impl HuggingFaceRowSource {
         config: &HuggingFaceRowsConfig,
         remote_path: &str,
         expected_bytes: Option<u64>,
+        shard_label: &str,
     ) -> Result<PathBuf, SamplerError> {
         if let Some(remote_url) = remote_path.strip_prefix(REMOTE_URL_PREFIX) {
             let target = Self::candidate_target_path(config, remote_path);
@@ -2240,6 +2251,7 @@ impl HuggingFaceRowSource {
                     remote_url,
                     &temp_target,
                     expected_bytes,
+                    shard_label,
                 )?;
                 return Ok(temp_target);
             }
@@ -2260,7 +2272,13 @@ impl HuggingFaceRowSource {
                 })?;
             }
 
-            Self::download_remote_url_to_target(config, remote_url, &target, expected_bytes)?;
+            Self::download_remote_url_to_target(
+                config,
+                remote_url,
+                &target,
+                expected_bytes,
+                shard_label,
+            )?;
             return Ok(target);
         }
 
@@ -2280,7 +2298,13 @@ impl HuggingFaceRowSource {
                 remote_path.trim_start_matches('/')
             );
             let temp_target = Self::allocate_temp_download_path(config, remote_path, "parquet")?;
-            Self::download_remote_url_to_target(config, &remote_url, &temp_target, expected_bytes)?;
+            Self::download_remote_url_to_target(
+                config,
+                &remote_url,
+                &temp_target,
+                expected_bytes,
+                shard_label,
+            )?;
             return Ok(temp_target);
         }
 
@@ -2568,7 +2592,8 @@ impl HuggingFaceRowSource {
                     let known_rows = state.materialized_rows;
                     let shard_count = state.shards.len();
                     info!(
-                        "[triplets:hf] state: candidates={} known_rows={} active_shards={} disk_cap={}",
+                        "[triplets:hf] {} state: candidates={} known_rows={} active_shards={} disk_cap={}",
+                        self.config.source_id,
                         candidate_count,
                         known_rows,
                         shard_count,
@@ -2585,12 +2610,13 @@ impl HuggingFaceRowSource {
                     if bootstrap_needed {
                         let bootstrap_target = REMOTE_BOOTSTRAP_SHARDS.min(candidate_count);
                         info!(
-                            "[triplets:hf] bootstrapping remote shard diversity: target={} shard(s)",
-                            bootstrap_target
+                            "[triplets:hf] {} bootstrapping remote shard diversity: target={} shard(s)",
+                            self.config.source_id, bootstrap_target
                         );
                         for step in 0..bootstrap_target {
                             info!(
-                                "[triplets:hf] bootstrap progress: {}/{}",
+                                "[triplets:hf] {} bootstrap progress: {}/{}",
+                                self.config.source_id,
                                 step + 1,
                                 bootstrap_target
                             );
@@ -2598,7 +2624,7 @@ impl HuggingFaceRowSource {
                                 break;
                             }
                         }
-                        info!("[triplets:hf] bootstrap complete");
+                        info!("[triplets:hf] {} bootstrap complete", self.config.source_id);
                     }
                 } else {
                     drop(state);
@@ -2689,8 +2715,16 @@ impl HuggingFaceRowSource {
             remote_total,
             remote_path.as_str()
         );
-        let local_path =
-            Self::download_and_materialize_shard(&self.config, &remote_path, expected_bytes)?;
+        let local_path = Self::download_and_materialize_shard(
+            &self.config,
+            &remote_path,
+            expected_bytes,
+            &format!(
+                "shard {remote_ordinal}/{remote_total} (candidate {}/{})",
+                candidate_idx + 1,
+                remote_total
+            ),
+        )?;
 
         let global_start = {
             let state = self
@@ -2862,8 +2896,13 @@ impl HuggingFaceRowSource {
         }
 
         info!(
-            "[triplets:hf] state: rows={} shards={} remaining_candidates={} disk_usage={:.2} GiB cap={}",
-            materialized_rows, shard_count, remaining_candidates, usage_gib, cap_str,
+            "[triplets:hf] {} state: rows={} shards={} remaining_candidates={} disk_usage={:.2} GiB cap={}",
+            self.config.source_id,
+            materialized_rows,
+            shard_count,
+            remaining_candidates,
+            usage_gib,
+            cap_str,
         );
 
         Ok(true)
@@ -5472,6 +5511,7 @@ mod tests {
             &config,
             "train/part-000.parquet",
             None,
+            "shard 1/1",
         )
         .unwrap_err();
         assert!(matches!(err, SamplerError::SourceUnavailable { .. }));
@@ -5603,9 +5643,13 @@ mod tests {
         fs::create_dir_all(target.parent().unwrap()).unwrap();
         fs::write(&target, b"ok").unwrap();
 
-        let resolved =
-            HuggingFaceRowSource::download_and_materialize_shard(&config, candidate, Some(2))
-                .unwrap();
+        let resolved = HuggingFaceRowSource::download_and_materialize_shard(
+            &config,
+            candidate,
+            Some(2),
+            "shard 1/1",
+        )
+        .unwrap();
         assert_eq!(resolved, target);
     }
 
@@ -5621,8 +5665,13 @@ mod tests {
         fs::create_dir_all(temp_target.parent().unwrap()).unwrap();
         fs::write(&temp_target, b"stale").unwrap();
 
-        let out = HuggingFaceRowSource::download_and_materialize_shard(&config, &candidate, None)
-            .unwrap();
+        let out = HuggingFaceRowSource::download_and_materialize_shard(
+            &config,
+            &candidate,
+            None,
+            "shard 1/1",
+        )
+        .unwrap();
         server.join().unwrap();
 
         assert_eq!(out, target);
@@ -6317,9 +6366,13 @@ mod tests {
         let candidate =
             format!("url::{base_url}/datasets/org/ds/resolve/main/train/part-000.ndjson");
 
-        let target =
-            HuggingFaceRowSource::download_and_materialize_shard(&config, &candidate, None)
-                .unwrap();
+        let target = HuggingFaceRowSource::download_and_materialize_shard(
+            &config,
+            &candidate,
+            None,
+            "shard 1/1",
+        )
+        .unwrap();
 
         server.join().unwrap();
         assert!(target.exists());
@@ -6351,6 +6404,7 @@ mod tests {
             &config,
             &candidate,
             Some(payload.len() as u64),
+            "shard 1/1",
         )
         .unwrap();
 
