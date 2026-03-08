@@ -2226,6 +2226,27 @@ impl HuggingFaceRowSource {
         None
     }
 
+    /// Build the stable human-readable label used in every shard-related log line.
+    ///
+    /// Format: `<file> (shard <M>/<total>)` where `M` is the 1-based index of this
+    /// shard file in the sorted remote manifest and `total` is the total number of
+    /// remote shards.  This label is purely file-derived and never depends on the
+    /// ephemeral shuffle-position counter (`next_remote_idx`), which can reset
+    /// whenever the candidate list is rebuilt for any reason, making position-based
+    /// counters unfit for human interpretation.
+    fn format_shard_label(
+        remote_path: &str,
+        candidate_idx: usize,
+        candidate_total: usize,
+    ) -> String {
+        let file = remote_path
+            .rsplit('/')
+            .next()
+            .unwrap_or(remote_path)
+            .trim_start_matches("url::");
+        format!("{file} (shard {}/{candidate_total})", candidate_idx + 1)
+    }
+
     /// Download a shard (URL or hf-hub path) and materialize it under snapshot dir.
     fn download_and_materialize_shard(
         config: &HuggingFaceRowsConfig,
@@ -2610,21 +2631,18 @@ impl HuggingFaceRowSource {
                     if bootstrap_needed {
                         let bootstrap_target = REMOTE_BOOTSTRAP_SHARDS.min(candidate_count);
                         info!(
-                            "[triplets:hf] {} bootstrapping remote shard diversity: target={} shard(s)",
+                            "[triplets:hf] {} cold start: downloading {} initial shard(s) before first read",
                             self.config.source_id, bootstrap_target
                         );
-                        for step in 0..bootstrap_target {
-                            info!(
-                                "[triplets:hf] {} bootstrap progress: {}/{}",
-                                self.config.source_id,
-                                step + 1,
-                                bootstrap_target
-                            );
+                        for _ in 0..bootstrap_target {
                             if !self.download_next_remote_shard()? {
                                 break;
                             }
                         }
-                        info!("[triplets:hf] {} bootstrap complete", self.config.source_id);
+                        info!(
+                            "[triplets:hf] {} cold start complete",
+                            self.config.source_id
+                        );
                     }
                 } else {
                     drop(state);
@@ -2644,7 +2662,7 @@ impl HuggingFaceRowSource {
     /// keeps the shard download order stable regardless of cache state: the ordered
     /// position is consumed either way, but no redundant network traffic occurs.
     fn download_next_remote_shard(&self) -> Result<bool, SamplerError> {
-        let (remote_ordinal, remote_total, candidate_idx, remote_path, expected_bytes) = {
+        let (remote_total, candidate_idx, remote_path, expected_bytes) = {
             let mut state = self
                 .state
                 .lock()
@@ -2660,7 +2678,6 @@ impl HuggingFaceRowSource {
                     return Ok(false);
                 }
                 let sequence_pos = state.next_remote_idx;
-                let remote_ordinal = sequence_pos + 1;
                 let remote_total = candidates.len();
                 // Use the seed-derived order index so the mapping from position →
                 // shard is stable and independent of how many shards were previously
@@ -2685,45 +2702,27 @@ impl HuggingFaceRowSource {
                 ));
                 if store_path.exists() {
                     debug!(
-                        "[triplets:hf] {} shard {}/{} (candidate {}/{}) already materialised, skipping download: {}",
+                        "[triplets:hf] {} {} already on disk, skipping download",
                         self.config.source_id,
-                        remote_ordinal,
-                        remote_total,
-                        candidate_idx + 1,
-                        remote_total,
-                        remote_path.as_str()
+                        Self::format_shard_label(remote_path.as_str(), candidate_idx, remote_total),
                     );
                     return Ok(true);
                 }
 
-                (
-                    remote_ordinal,
-                    remote_total,
-                    candidate_idx,
-                    remote_path,
-                    expected_bytes,
-                )
+                (remote_total, candidate_idx, remote_path, expected_bytes)
             }
         };
 
+        let label = Self::format_shard_label(remote_path.as_str(), candidate_idx, remote_total);
         info!(
-            "[triplets:hf] {} downloading shard {}/{} (candidate {}/{}): {}",
-            self.config.source_id,
-            remote_ordinal,
-            remote_total,
-            candidate_idx + 1,
-            remote_total,
-            remote_path.as_str()
+            "[triplets:hf] {} downloading {}",
+            self.config.source_id, label,
         );
         let local_path = Self::download_and_materialize_shard(
             &self.config,
             &remote_path,
             expected_bytes,
-            &format!(
-                "shard {remote_ordinal}/{remote_total} (candidate {}/{})",
-                candidate_idx + 1,
-                remote_total
-            ),
+            &label,
         )?;
 
         let global_start = {
@@ -2866,12 +2865,12 @@ impl HuggingFaceRowSource {
         let evicted_any = self.enforce_disk_cap_locked(&mut state, &local_path)?;
         let materialized_rows = state.materialized_rows;
         let shard_count = state.shards.len();
-        let active_shards = state.shards.clone();
-        let remaining_candidates = state
+        let total_remote = state
             .remote_candidates
             .as_ref()
-            .map(|candidates| candidates.len().saturating_sub(state.next_remote_idx))
+            .map(|c| c.len())
             .unwrap_or(0);
+        let active_shards = state.shards.clone();
         let usage_bytes = self.manifest_usage_bytes_locked(&state);
         let usage_gib = usage_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
         let cap_str = self
@@ -2895,14 +2894,11 @@ impl HuggingFaceRowSource {
             self.invalidate_eligible_index();
         }
 
+        // `shard_count` is the number of shards currently on disk; `total_remote` is
+        // how many shards the remote manifest reports in total for this dataset.
         info!(
-            "[triplets:hf] {} state: rows={} shards={} remaining_candidates={} disk_usage={:.2} GiB cap={}",
-            self.config.source_id,
-            materialized_rows,
-            shard_count,
-            remaining_candidates,
-            usage_gib,
-            cap_str,
+            "[triplets:hf] {} rows={} shards_on_disk={}/{} disk_usage={:.2} GiB cap={}",
+            self.config.source_id, materialized_rows, shard_count, total_remote, usage_gib, cap_str,
         );
 
         Ok(true)
