@@ -907,6 +907,11 @@ impl HuggingFaceRowSource {
         path.with_extension(HF_SHARD_STORE_EXTENSION)
     }
 
+    /// Map a candidate identifier directly to its canonical on-disk shard store path.
+    fn candidate_store_path(config: &HuggingFaceRowsConfig, candidate: &str) -> PathBuf {
+        Self::shard_store_path_for(&Self::candidate_target_path(config, candidate))
+    }
+
     fn open_shard_store(
         config: &HuggingFaceRowsConfig,
         shard_store_path: &Path,
@@ -1331,18 +1336,12 @@ impl HuggingFaceRowSource {
             && let Some(candidates) = state.remote_candidates.clone()
         {
             let new_order = Self::build_candidate_order(&self.config, &candidates, config.seed);
-            let existing_store_paths: HashSet<PathBuf> =
-                state.shards.iter().map(|s| s.path.clone()).collect();
-            let next_idx = new_order
-                .iter()
-                .position(|&candidate_idx| {
-                    let store = Self::shard_store_path_for(&Self::candidate_target_path(
-                        &self.config,
-                        &candidates[candidate_idx],
-                    ));
-                    !existing_store_paths.contains(&store)
-                })
-                .unwrap_or(candidates.len());
+            let next_idx = Self::first_uncached_order_position(
+                &self.config,
+                &candidates,
+                &new_order,
+                &state.shards,
+            );
             state.remote_candidate_order = new_order;
             state.next_remote_idx = next_idx;
         }
@@ -1699,6 +1698,24 @@ impl HuggingFaceRowSource {
             order.swap(i, j);
         }
         order
+    }
+
+    /// Return the first position in `order` whose shard store is not yet on disk
+    /// according to the in-memory shard list.  Returns `candidates.len()` when
+    /// every position is already cached (nothing left to download).
+    fn first_uncached_order_position(
+        config: &HuggingFaceRowsConfig,
+        candidates: &[String],
+        order: &[usize],
+        shards: &[ShardIndex],
+    ) -> usize {
+        let existing: HashSet<PathBuf> = shards.iter().map(|s| s.path.clone()).collect();
+        order
+            .iter()
+            .position(|&idx| {
+                !existing.contains(&Self::candidate_store_path(config, &candidates[idx]))
+            })
+            .unwrap_or(candidates.len())
     }
 
     /// Shuffle remote shard candidates into a deterministic-but-random order.
@@ -2584,18 +2601,12 @@ impl HuggingFaceRowSource {
                     // cache state — position N for seed S always maps to the same shard.
                     // Cache: on restart we advance past already-downloaded shards so we
                     // don't redundantly re-download what we already have.
-                    let existing_store_paths: HashSet<PathBuf> =
-                        state.shards.iter().map(|s| s.path.clone()).collect();
-                    let next_idx = order
-                        .iter()
-                        .position(|&candidate_idx| {
-                            let store = Self::shard_store_path_for(&Self::candidate_target_path(
-                                &self.config,
-                                &candidates[candidate_idx],
-                            ));
-                            !existing_store_paths.contains(&store)
-                        })
-                        .unwrap_or(candidates.len());
+                    let next_idx = Self::first_uncached_order_position(
+                        &self.config,
+                        &candidates,
+                        &order,
+                        &state.shards,
+                    );
 
                     state.remote_candidates = Some(candidates);
                     state.remote_candidate_order = order;
@@ -2662,7 +2673,7 @@ impl HuggingFaceRowSource {
     /// keeps the shard download order stable regardless of cache state: the ordered
     /// position is consumed either way, but no redundant network traffic occurs.
     fn download_next_remote_shard(&self) -> Result<bool, SamplerError> {
-        let (remote_total, candidate_idx, remote_path, expected_bytes) = {
+        let (remote_total, cached_shards, candidate_idx, remote_path, expected_bytes) = {
             let mut state = self
                 .state
                 .lock()
@@ -2679,6 +2690,7 @@ impl HuggingFaceRowSource {
                 }
                 let sequence_pos = state.next_remote_idx;
                 let remote_total = candidates.len();
+                let cached_shards = state.shards.len();
                 // Use the seed-derived order index so the mapping from position →
                 // shard is stable and independent of how many shards were previously
                 // consumed.  Fall back to direct indexing only if the order vec is
@@ -2696,10 +2708,7 @@ impl HuggingFaceRowSource {
                 // skip the download — it is already counted in materialized_rows via
                 // build_shard_index.  Cache and order are fully decoupled: the position
                 // is consumed regardless, but no network request is made.
-                let store_path = Self::shard_store_path_for(&Self::candidate_target_path(
-                    &self.config,
-                    &remote_path,
-                ));
+                let store_path = Self::candidate_store_path(&self.config, &remote_path);
                 if store_path.exists() {
                     debug!(
                         "[triplets:hf] {} {} already on disk, skipping download",
@@ -2709,14 +2718,20 @@ impl HuggingFaceRowSource {
                     return Ok(true);
                 }
 
-                (remote_total, candidate_idx, remote_path, expected_bytes)
+                (
+                    remote_total,
+                    cached_shards,
+                    candidate_idx,
+                    remote_path,
+                    expected_bytes,
+                )
             }
         };
 
         let label = Self::format_shard_label(remote_path.as_str(), candidate_idx, remote_total);
         info!(
-            "[triplets:hf] {} downloading {}",
-            self.config.source_id, label,
+            "[triplets:hf] {} downloading {} ({} cached before)",
+            self.config.source_id, label, cached_shards,
         );
         let local_path = Self::download_and_materialize_shard(
             &self.config,
