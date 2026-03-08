@@ -2545,7 +2545,7 @@ impl HuggingFaceRowSource {
     /// keeps the shard download order stable regardless of cache state: the ordered
     /// position is consumed either way, but no redundant network traffic occurs.
     fn download_next_remote_shard(&self) -> Result<bool, SamplerError> {
-        let (remote_ordinal, remote_total, remote_path, expected_bytes) = {
+        let (remote_ordinal, remote_total, candidate_idx, remote_path, expected_bytes) = {
             let mut state = self
                 .state
                 .lock()
@@ -2586,21 +2586,33 @@ impl HuggingFaceRowSource {
                 ));
                 if store_path.exists() {
                     debug!(
-                        "[triplets:hf] shard {}/{} already materialised, skipping download: {}",
+                        "[triplets:hf] {} shard {}/{} (candidate {}/{}) already materialised, skipping download: {}",
+                        self.config.source_id,
                         remote_ordinal,
+                        remote_total,
+                        candidate_idx + 1,
                         remote_total,
                         remote_path.as_str()
                     );
                     return Ok(true);
                 }
 
-                (remote_ordinal, remote_total, remote_path, expected_bytes)
+                (
+                    remote_ordinal,
+                    remote_total,
+                    candidate_idx,
+                    remote_path,
+                    expected_bytes,
+                )
             }
         };
 
         info!(
-            "[triplets:hf] lazy downloading shard {}/{}: {}",
+            "[triplets:hf] {} downloading shard {}/{} (candidate {}/{}): {}",
+            self.config.source_id,
             remote_ordinal,
+            remote_total,
+            candidate_idx + 1,
             remote_total,
             remote_path.as_str()
         );
