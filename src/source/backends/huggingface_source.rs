@@ -133,7 +133,7 @@ struct RowView {
 }
 
 /// Parsed Hugging Face source-list entry with explicit field mappings.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct HfSourceEntry {
     /// Full hf:// URI for dataset/config/split.
     pub uri: String,
@@ -169,7 +169,35 @@ pub struct HfSourceEntry {
     /// non-empty is used as the single text content for the row.  When the
     /// list is non-empty and no candidate yields content, the row is skipped.
     pub text_columns: Vec<String>,
+    /// Optional trust/quality override for all records produced by this source.
+    ///
+    /// When set, overrides the default `QualityScore::default().trust` (0.5)
+    /// for every record emitted by this source.  Must be in `[0.0, 1.0]`.
+    pub trust: Option<f32>,
+    /// Optional source ID override.
+    ///
+    /// When set, this string is used as the source identifier instead of the
+    /// auto-derived slug from the dataset URI.  Useful for giving a stable,
+    /// human-readable name to a source independently of its dataset/config/split
+    /// path.  Deduplication suffixes are **not** applied to explicit source IDs.
+    pub source_id: Option<String>,
 }
+
+impl PartialEq for HfSourceEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.uri == other.uri
+            && self.anchor_columns == other.anchor_columns
+            && self.positive_columns == other.positive_columns
+            && self.context_columns == other.context_columns
+            && self.text_columns == other.text_columns
+            && self.source_id == other.source_id
+            // Compare f32 bits so that identical bit patterns are considered equal.
+            // Valid trust values are never NaN, so bit-level comparison is correct.
+            && self.trust.map(f32::to_bits) == other.trust.map(f32::to_bits)
+    }
+}
+
+impl Eq for HfSourceEntry {}
 
 /// Parsed Hugging Face source list with explicit mappings.
 #[derive(Debug, Clone)]
@@ -207,6 +235,8 @@ pub fn parse_hf_source_line(line: &str) -> Result<HfSourceEntry, String> {
         positive_columns: Vec::new(),
         context_columns: Vec::new(),
         text_columns: Vec::new(),
+        trust: None,
+        source_id: None,
     };
 
     for token in parts {
@@ -229,6 +259,21 @@ pub fn parse_hf_source_line(line: &str) -> Result<HfSourceEntry, String> {
             }
             "text" | "text_columns" => {
                 entry.text_columns = parse_csv_fields(value);
+            }
+            "trust" => {
+                let t: f32 = value.parse().map_err(|_| {
+                    format!("invalid trust value '{value}': expected a float in [0.0, 1.0]")
+                })?;
+                if !(0.0..=1.0).contains(&t) {
+                    return Err(format!("trust value {t} is out of range [0.0, 1.0]"));
+                }
+                entry.trust = Some(t);
+            }
+            "source_id" => {
+                if value.is_empty() {
+                    return Err("source_id must not be empty".to_string());
+                }
+                entry.source_id = Some(value.to_string());
             }
             _ => {
                 return Err(format!("unsupported mapping key '{raw_key}'"));
@@ -351,20 +396,29 @@ fn hf_source_id_slug(dataset: &str, config: &str, split: &str) -> String {
 
 /// Build Hugging Face row sources from a parsed source list.
 pub fn build_hf_sources(roots: &HfListRoots) -> Vec<Box<dyn DataSource + 'static>> {
-    // Phase 1: generate base slugs for every entry (fallback for unparseable URIs).
-    let base_slugs: Vec<String> = roots
+    // Phase 1: compute auto-slugs for entries that don't have an explicit source_id.
+    // Entries with an explicit source_id bypass slug computation and deduplication.
+    let base_slugs: Vec<Option<String>> = roots
         .sources
         .iter()
         .enumerate()
-        .map(|(idx, source)| match parse_hf_uri(&source.uri) {
-            Ok((dataset, config, split)) => hf_source_id_slug(&dataset, &config, &split),
-            Err(_) => format!("hf_list_{idx}"),
+        .map(|(idx, source)| {
+            if source.source_id.is_some() {
+                // Explicit source_id — skip slug generation entirely.
+                None
+            } else {
+                Some(match parse_hf_uri(&source.uri) {
+                    Ok((dataset, config, split)) => hf_source_id_slug(&dataset, &config, &split),
+                    Err(_) => format!("hf_list_{idx}"),
+                })
+            }
         })
         .collect();
 
-    // Phase 2: find any slugs that appear more than once so they can be disambiguated.
+    // Phase 2: find auto-slugs that appear more than once so they can be disambiguated.
+    // Explicit source_ids are not subject to deduplication.
     let mut slug_count: HashMap<&str, usize> = HashMap::new();
-    for slug in &base_slugs {
+    for slug in base_slugs.iter().flatten() {
         *slug_count.entry(slug.as_str()).or_insert(0) += 1;
     }
     let duplicated: HashSet<&str> = slug_count
@@ -373,15 +427,24 @@ pub fn build_hf_sources(roots: &HfListRoots) -> Vec<Box<dyn DataSource + 'static
         .map(|(s, _)| s)
         .collect();
 
-    // Phase 3: resolve final IDs (append `.{idx}` only for colliding slugs).
-    let source_ids: Vec<String> = base_slugs
+    // Phase 3: resolve final IDs.
+    // Explicit source_ids are used as-is; auto-slugs get `.{idx}` only when they collide.
+    let source_ids: Vec<String> = roots
+        .sources
         .iter()
+        .zip(base_slugs.iter())
         .enumerate()
-        .map(|(idx, slug)| {
-            if duplicated.contains(slug.as_str()) {
-                format!("{slug}.{idx}")
+        .map(|(idx, (source, base_slug))| {
+            if let Some(explicit_id) = &source.source_id {
+                explicit_id.clone()
+            } else if let Some(slug) = base_slug {
+                if duplicated.contains(slug.as_str()) {
+                    format!("{slug}.{idx}")
+                } else {
+                    slug.clone()
+                }
             } else {
-                slug.clone()
+                format!("hf_list_{idx}")
             }
         })
         .collect();
@@ -423,6 +486,7 @@ pub fn build_hf_sources(roots: &HfListRoots) -> Vec<Box<dyn DataSource + 'static
             hf.positive_columns = source.positive_columns.clone();
             hf.context_columns = source.context_columns.clone();
             hf.text_columns = source.text_columns.clone();
+            hf.trust_override = source.trust;
             println!(
                 "source {idx}: hf://{}/{}/{} -> anchor={:?}, positive={:?}, context={:?}, text_columns={:?}",
                 hf.dataset,
@@ -524,6 +588,12 @@ pub struct HuggingFaceRowsConfig {
     /// Ignored in **text-columns mode** (when `anchor_columns` is empty and
     /// `text_columns` is non-empty).
     pub context_columns: Vec<String>,
+    /// Optional trust/quality override applied to all records produced by this source.
+    ///
+    /// When set, overrides the default `QualityScore::default().trust` (0.5) for
+    /// every record emitted by this source.  Set this on sources that provide
+    /// higher- or lower-quality data than the default.
+    pub trust_override: Option<f32>,
 }
 
 impl HuggingFaceRowsConfig {
@@ -558,6 +628,7 @@ impl HuggingFaceRowsConfig {
             anchor_columns: Vec::new(),
             positive_columns: Vec::new(),
             context_columns: Vec::new(),
+            trust_override: None,
         }
     }
 
@@ -3466,7 +3537,10 @@ impl HuggingFaceRowSource {
             source: self.config.source_id.clone(),
             created_at: timestamp,
             updated_at: timestamp,
-            quality: QualityScore::default(),
+            quality: self
+                .config
+                .trust_override
+                .map_or_else(QualityScore::default, |t| QualityScore { trust: t }),
             taxonomy: vec![
                 format!("dataset={}", self.config.dataset),
                 format!("config={}", self.config.config),
@@ -4443,6 +4517,8 @@ mod tests {
                     positive_columns: Vec::new(),
                     context_columns: Vec::new(),
                     text_columns: Vec::new(),
+                    trust: None,
+                    source_id: None,
                 },
                 HfSourceEntry {
                     uri: "hf://org/dataset/default/train".to_string(),
@@ -4450,6 +4526,8 @@ mod tests {
                     positive_columns: vec!["body".to_string()],
                     context_columns: Vec::new(),
                     text_columns: Vec::new(),
+                    trust: None,
+                    source_id: None,
                 },
             ],
         };
@@ -4494,6 +4572,8 @@ mod tests {
             positive_columns: vec!["body".to_string()],
             context_columns: Vec::new(),
             text_columns: Vec::new(),
+            trust: None,
+            source_id: None,
         };
         let roots = HfListRoots {
             source_list: "inline".to_string(),
@@ -4630,6 +4710,8 @@ mod tests {
                 positive_columns: vec!["body".to_string()],
                 context_columns: Vec::new(),
                 text_columns: Vec::new(),
+                trust: None,
+                source_id: None,
             },
             HfSourceEntry {
                 uri: "hf://org/dataset/default/train".to_string(),
@@ -4637,6 +4719,8 @@ mod tests {
                 positive_columns: vec!["body".to_string()],
                 context_columns: Vec::new(),
                 text_columns: Vec::new(),
+                trust: None,
+                source_id: None,
             },
         ];
         let base_slugs: Vec<String> = sources

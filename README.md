@@ -228,14 +228,14 @@ Hugging Face source defaults use:
 Define HF sources in a text file and pass it to the demo or your own loader. The `hf://` prefix is a `triplets`-specific shorthand used only in these lists:
 
 ```text
-hf://org/dataset/config/split anchor=... positive=... context=a,b text=x,y
+hf://org/dataset/config/split anchor=... positive=... context=a,b text=x,y [trust=<f32>] [source_id=<name>]
 ```
 
 Rules:
 
 - Lines are whitespace-delimited; comments start with `#`.
-- `anchor=`, `positive=`, `context=`, and `text=` are the only accepted keys.
-- At least one mapping key is required per line.
+- `anchor=`, `positive=`, `context=`, `text=`, `trust=`, and `source_id=` are the accepted keys.
+- At least one of `anchor=`, `positive=`, `context=`, or `text=` is required per line.
 - HF row extraction is strict: no auto-detect fallback is used when mappings are absent.
 
 **Two extraction modes — pick one per source line:**
@@ -253,12 +253,23 @@ Column-list semantics:
 - `context=` accepts a comma-delimited list of columns; **all** listed columns must be present and non-empty, or the row is skipped.  Each one becomes a separate context section.
 - `anchor=`, `positive=`, and `text=` accept comma-delimited **candidate** column lists.  Candidates are tried in order; the **first** non-empty value found is used.  The row is skipped only when **no** candidate yields content.  Use multiple candidates when a field is sometimes absent (for example `anchor=title,text` uses `title` when present and falls back to `text`).
 
+**Optional per-source overrides:**
+
+- `trust=<f32>` — overrides the default trust score (`0.5`) for every record produced by this source.  Must be in `[0.0, 1.0]`.  Use higher values for high-quality authoritative sources and lower values for noisier ones.
+- `source_id=<name>` — overrides the auto-derived source identifier slug for this entry.  When set, the provided name is used verbatim (no deduplication suffix is applied).  Useful for giving a stable, human-readable name to a source regardless of its dataset/config/split path.
+
 Example list (see [examples/common/hf_sources.txt](examples/common/hf_sources.txt)):
 
 ```text
-# role columns
+# role columns with default trust and auto slug
 hf://labofsahil/hackernews-vector-search-dataset/default text=title,text
 hf://wikimedia/wikipedia/20231101.en/train anchor=title positive=text
+
+# high-trust source with an explicit stable name
+hf://wikimedia/wikipedia/20231101.en/train anchor=title positive=text trust=0.9 source_id=wiki-en
+
+# lower-trust noisy dataset, custom stable id
+hf://org/noisy-web-crawl/default text=text trust=0.3 source_id=noisy-web
 
 # explicit text-column mode
 hf://pfox/71k-English-uncleaned-wordlist/default text=text

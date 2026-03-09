@@ -383,6 +383,8 @@ fn huggingface_list_root_and_builder_helpers_cover_invalid_inputs() {
             positive_columns: Vec::new(),
             context_columns: Vec::new(),
             text_columns: Vec::new(),
+            trust: None,
+            source_id: None,
         }],
     };
     let built = build_hf_sources(&roots);
@@ -1160,4 +1162,225 @@ fn huggingface_reads_live_remote_dataset() {
             .iter()
             .all(|record| record.source == "hf_live_rotten_tomatoes")
     );
+}
+
+// ── trust= and source_id= column tests ─────────────────────────────────────
+
+#[test]
+fn parse_hf_source_line_accepts_trust_override() {
+    let entry =
+        parse_hf_source_line("hf://org/dataset/default/train anchor=title positive=text trust=0.8")
+            .expect("line with trust= should parse");
+    assert_eq!(entry.uri, "hf://org/dataset/default/train");
+    assert_eq!(entry.anchor_columns, vec!["title".to_string()]);
+    assert_eq!(entry.positive_columns, vec!["text".to_string()]);
+    let trust = entry.trust.expect("trust should be Some");
+    assert!(
+        (trust - 0.8_f32).abs() < f32::EPSILON,
+        "trust should be 0.8, got {trust}"
+    );
+}
+
+#[test]
+fn parse_hf_source_line_accepts_trust_boundary_values() {
+    let zero = parse_hf_source_line("hf://org/dataset/default/train text=body trust=0.0")
+        .expect("trust=0.0 should parse");
+    assert_eq!(zero.trust, Some(0.0_f32));
+
+    let one = parse_hf_source_line("hf://org/dataset/default/train text=body trust=1.0")
+        .expect("trust=1.0 should parse");
+    assert_eq!(one.trust, Some(1.0_f32));
+}
+
+#[test]
+fn parse_hf_source_line_rejects_trust_above_one() {
+    let err = parse_hf_source_line("hf://org/dataset/default/train text=body trust=1.1")
+        .expect_err("trust > 1.0 should be rejected");
+    assert!(
+        err.contains("out of range"),
+        "expected 'out of range' in error message, got: {err}"
+    );
+}
+
+#[test]
+fn parse_hf_source_line_rejects_negative_trust() {
+    let err = parse_hf_source_line("hf://org/dataset/default/train text=body trust=-0.1")
+        .expect_err("negative trust should be rejected");
+    assert!(
+        err.contains("out of range"),
+        "expected 'out of range' in error message, got: {err}"
+    );
+}
+
+#[test]
+fn parse_hf_source_line_rejects_non_float_trust() {
+    let err = parse_hf_source_line("hf://org/dataset/default/train text=body trust=high")
+        .expect_err("non-float trust value should be rejected");
+    assert!(
+        err.contains("invalid trust value"),
+        "expected 'invalid trust value' in error message, got: {err}"
+    );
+}
+
+#[test]
+fn parse_hf_source_line_accepts_source_id_override() {
+    let entry =
+        parse_hf_source_line("hf://org/dataset/default/train text=body source_id=my_custom_source")
+            .expect("line with source_id= should parse");
+    assert_eq!(
+        entry.source_id,
+        Some("my_custom_source".to_string()),
+        "source_id should be overridden"
+    );
+}
+
+#[test]
+fn parse_hf_source_line_rejects_empty_source_id() {
+    let err = parse_hf_source_line("hf://org/dataset/default/train text=body source_id=")
+        .expect_err("empty source_id should be rejected");
+    assert!(
+        err.contains("source_id must not be empty"),
+        "expected 'source_id must not be empty' in error message, got: {err}"
+    );
+}
+
+#[test]
+fn parse_hf_source_line_accepts_trust_and_source_id_together() {
+    let entry = parse_hf_source_line(
+        "hf://org/dataset/default/train anchor=title positive=text trust=0.9 source_id=wiki-en",
+    )
+    .expect("line with both trust= and source_id= should parse");
+    let trust = entry.trust.expect("trust should be Some");
+    assert!(
+        (trust - 0.9_f32).abs() < f32::EPSILON,
+        "trust should be 0.9, got {trust}"
+    );
+    assert_eq!(entry.source_id, Some("wiki-en".to_string()));
+}
+
+#[test]
+fn parse_hf_source_line_defaults_trust_and_source_id_to_none() {
+    let entry = parse_hf_source_line("hf://org/dataset/default/train anchor=title")
+        .expect("line without trust= or source_id= should parse");
+    assert!(entry.trust.is_none(), "trust should default to None");
+    assert!(
+        entry.source_id.is_none(),
+        "source_id should default to None"
+    );
+}
+
+#[test]
+fn huggingface_rows_config_trust_override_propagates_to_records() {
+    let temp = tempfile::tempdir().expect("failed creating tempdir");
+    let shard_path = temp.path().join("part-00000.ndjson");
+    write_lines(
+        &shard_path,
+        &[
+            r#"{"id":"t1","text":"alpha content"}"#,
+            r#"{"id":"t2","text":"beta content"}"#,
+        ],
+    );
+
+    let mut config = HuggingFaceRowsConfig::new(
+        "hf_trust_override",
+        "local/test-dataset",
+        "default",
+        "train",
+        temp.path(),
+    );
+    config.shard_extensions = vec!["ndjson".to_string()];
+    config.text_columns = vec!["text".to_string()];
+    config.trust_override = Some(0.9);
+
+    let source = HuggingFaceRowSource::new(config).expect("failed creating huggingface source");
+    let seed = seeded_config(53);
+    let snapshot = source
+        .refresh(&seed, None, Some(2))
+        .expect("refresh should succeed");
+
+    assert_eq!(snapshot.records.len(), 2, "expected 2 records");
+    for record in &snapshot.records {
+        assert!(
+            (record.quality.trust - 0.9_f32).abs() < f32::EPSILON,
+            "expected trust 0.9, got {}",
+            record.quality.trust
+        );
+    }
+}
+
+#[test]
+fn huggingface_rows_config_without_trust_override_uses_default_trust() {
+    let temp = tempfile::tempdir().expect("failed creating tempdir");
+    let shard_path = temp.path().join("part-00000.ndjson");
+    write_lines(&shard_path, &[r#"{"id":"u1","text":"content"}"#]);
+
+    let mut config = HuggingFaceRowsConfig::new(
+        "hf_default_trust",
+        "local/test-dataset",
+        "default",
+        "train",
+        temp.path(),
+    );
+    config.shard_extensions = vec!["ndjson".to_string()];
+    config.text_columns = vec!["text".to_string()];
+    // trust_override not set → should default to QualityScore::default().trust (0.5)
+
+    let source = HuggingFaceRowSource::new(config).expect("failed creating huggingface source");
+    let seed = seeded_config(59);
+    let snapshot = source
+        .refresh(&seed, None, Some(1))
+        .expect("refresh should succeed");
+
+    assert_eq!(snapshot.records.len(), 1);
+    assert!(
+        (snapshot.records[0].quality.trust - 0.5_f32).abs() < f32::EPSILON,
+        "expected default trust 0.5, got {}",
+        snapshot.records[0].quality.trust
+    );
+}
+
+#[test]
+fn huggingface_source_list_file_parses_trust_and_source_id() {
+    let temp = tempfile::tempdir().expect("failed creating tempdir");
+    let list_path = temp.path().join("hf_sources_trust.txt");
+
+    fs::write(
+        &list_path,
+        "# sources with trust and source_id overrides\n\
+         hf://org/dataset-a/default/train anchor=title positive=text trust=0.9 source_id=dataset-a-train\n\
+         hf://org/dataset-b/default/train text=body trust=0.3\n\
+         hf://org/dataset-c/default/train text=content source_id=my-corpus\n",
+    )
+    .expect("failed writing source list");
+
+    let entries = load_hf_sources_from_list(list_path.to_str().expect("utf8 path"))
+        .expect("failed parsing source list");
+
+    assert_eq!(entries.len(), 3);
+
+    // Entry 0: both trust and source_id
+    let e0 = &entries[0];
+    assert_eq!(e0.uri, "hf://org/dataset-a/default/train");
+    assert_eq!(e0.source_id, Some("dataset-a-train".to_string()));
+    let t0 = e0.trust.expect("entry 0 should have trust");
+    assert!(
+        (t0 - 0.9_f32).abs() < f32::EPSILON,
+        "entry 0 trust should be 0.9, got {t0}"
+    );
+
+    // Entry 1: trust only
+    let e1 = &entries[1];
+    assert_eq!(e1.uri, "hf://org/dataset-b/default/train");
+    assert!(e1.source_id.is_none(), "entry 1 source_id should be None");
+    let t1 = e1.trust.expect("entry 1 should have trust");
+    assert!(
+        (t1 - 0.3_f32).abs() < f32::EPSILON,
+        "entry 1 trust should be 0.3, got {t1}"
+    );
+
+    // Entry 2: source_id only
+    let e2 = &entries[2];
+    assert_eq!(e2.uri, "hf://org/dataset-c/default/train");
+    assert_eq!(e2.source_id, Some("my-corpus".to_string()));
+    assert!(e2.trust.is_none(), "entry 2 trust should be None");
 }
