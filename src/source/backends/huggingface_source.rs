@@ -4246,7 +4246,7 @@ mod tests {
 
     fn with_env_var<R>(key: &str, value: &str, run: impl FnOnce() -> R) -> R {
         static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let guard = ENV_LOCK
+        let _guard = ENV_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -4269,14 +4269,15 @@ mod tests {
             previous,
         };
         unsafe { env::set_var(key, value) };
-        let result = run();
-        drop(guard);
-        result
+        // Locals drop in reverse-declaration order: _restore first (env restored),
+        // then _guard (lock released), so the env var is always restored while the
+        // lock is still held.
+        run()
     }
 
     fn with_current_dir<R>(dir: &Path, run: impl FnOnce() -> R) -> R {
         static CWD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let guard = CWD_LOCK
+        let _guard = CWD_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -4291,9 +4292,9 @@ mod tests {
         }
         let _restore = CwdRestore { previous };
         env::set_current_dir(dir).expect("set cwd");
-        let result = run();
-        drop(guard);
-        result
+        // Locals drop in reverse-declaration order: _restore first (cwd restored),
+        // then _guard (lock released).
+        run()
     }
 
     fn write_parquet_fixture(path: &Path, rows: &[(&str, &str)]) {
