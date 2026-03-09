@@ -199,6 +199,8 @@ let _batch = sampler.next_triplet_batch(SplitLabel::Train)?;
 - **`FileSource`**: fully deterministic paging — same seed and corpus always produces the same row order.
 - **`HuggingFaceRowSource`**: deterministic shard download order (same seed + same HF manifest → same download sequence). Row-level selection within each `refresh` call is seeded by the number of locally materialized rows, so it is **not reproducible across cache wipes**. Split assignment (Train/Val/Test) remains fully deterministic and cache-independent for both sources.
 
+  Shard download failures in the background thread are logged as warnings and the sequence position is skipped for the current run — no automatic retry is performed. The skipped position becomes reachable again when the candidate list is rebuilt, which happens on disk-cap eviction (the cache manager removes a shard, the manifest is re-fetched, and the cursor skips past already-cached shards), an epoch-seed change (the permutation is rebuilt for the new seed), or source reconstruction. For small datasets that fit within the disk cap, all shards are typically on disk before the cursor exhausts, so a transient failure only delays that shard until the next reset. For large datasets without eviction, a failed shard is not revisited in the current run.
+
 - **File source (`FileSource`)**: local files and folders.
 - **Hugging Face source (`HuggingFaceRowSource`)** *(feature: `huggingface`)*: HF dataset rows.
 

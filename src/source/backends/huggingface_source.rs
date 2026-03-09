@@ -826,6 +826,38 @@ impl RowCache {
 ///   not a stable property of the dataset.  After a cache wipe and re-download the
 ///   same epoch number will produce different rows.  Within a single run (stable
 ///   `materialized_rows`), repeated calls with the same cursor are reproducible.
+///
+/// ## Shard download failures
+///
+/// `next_remote_idx` is a cursor into `remote_candidate_order`, which is a
+/// seed-derived permutation of the sorted HF manifest — not a simple sequential
+/// counter.  It is **not** a wrapping ring buffer: when the cursor reaches the end
+/// of the candidate list the background expansion thread stops spawning (normal
+/// behavior once all shards are on disk).
+///
+/// When a shard download fails in the **background expansion thread** the error is
+/// logged as a warning and that sequence position is skipped — `next_remote_idx`
+/// was already incremented before the attempt, so no retry is performed in the
+/// current cycle.  The skipped position becomes available again when the candidate
+/// list is next rebuilt, which happens on:
+///
+/// * **Disk-cap eviction** — `sync_shard_state_from_disk_locked` nulls
+///   `remote_candidates` and resets `next_remote_idx` to 0 whenever the cache
+///   manager removes any shard from disk.  The next expansion cycle re-fetches the
+///   HF manifest, rebuilds the permutation, and advances the cursor past shards
+///   still present on disk via `first_uncached_order_position`.
+/// * **Epoch-seed change** — the permutation is rebuilt for the new seed and the
+///   cursor resets to `first_uncached_order_position`.
+/// * **Source reconstruction** — `HuggingFaceRowSource::new()` starts from zero.
+///
+/// For **small datasets** that fit within the disk cap, all shards are typically
+/// on disk before the cursor exhausts, so a transient network failure only delays
+/// that shard until the next reset cycle.  For **large datasets without eviction**,
+/// a skipped position is not revisited within the current run.
+///
+/// Failures on the **synchronous cold-start path** propagate immediately as
+/// `SamplerError::SourceUnavailable` to the caller; the global row-count request
+/// is non-fatal and only produces a warning.
 pub struct HuggingFaceRowSource {
     config: HuggingFaceRowsConfig,
     sampler_config: Arc<Mutex<Option<SamplerConfig>>>,
