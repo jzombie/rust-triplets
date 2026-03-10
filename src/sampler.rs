@@ -1248,6 +1248,18 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             (anchor_chunk, positive_chunk)
         };
 
+        // Reject if any two slots share identical rendered text.  This catches sources
+        // that produce multiple records with the same string content: a negative whose
+        // text matches the positive (or the anchor) would produce a trivially-invalid
+        // training example.  String equality short-circuits on the first differing byte,
+        // so the guard is effectively free when texts differ (the common case).
+        if anchor_chunk.text == positive_chunk.text
+            || negative_chunk.text == positive_chunk.text
+            || negative_chunk.text == anchor_chunk.text
+        {
+            return None;
+        }
+
         let weight = recipe.weight
             * self.triplet_chunk_weight(&anchor_chunk, &positive_chunk, &negative_chunk);
         let recipe_name = if fallback_used {
@@ -5944,37 +5956,37 @@ mod tests {
                 &find_id(SplitLabel::Train, "fallback_train_a"),
                 "2025-01-01",
                 "Train A",
-                "Body",
+                "Body train a",
             ),
             trader_record(
                 &find_id(SplitLabel::Train, "fallback_train_b"),
                 "2025-01-01",
                 "Train B",
-                "Body",
+                "Body train b",
             ),
             trader_record(
                 &find_id(SplitLabel::Validation, "fallback_val_a"),
                 "2025-01-01",
                 "Val A",
-                "Body",
+                "Body val a",
             ),
             trader_record(
                 &find_id(SplitLabel::Validation, "fallback_val_b"),
                 "2025-01-01",
                 "Val B",
-                "Body",
+                "Body val b",
             ),
             trader_record(
                 &find_id(SplitLabel::Test, "fallback_test_a"),
                 "2025-01-01",
                 "Test A",
-                "Body",
+                "Body test a",
             ),
             trader_record(
                 &find_id(SplitLabel::Test, "fallback_test_b"),
                 "2025-01-01",
                 "Test B",
-                "Body",
+                "Body test b",
             ),
         ];
 
@@ -6065,37 +6077,37 @@ mod tests {
                 &find_id(SplitLabel::Train, "triplet_split_train_a"),
                 "2025-01-01",
                 "Train A",
-                "Body",
+                "Body train a",
             ),
             trader_record(
                 &find_id(SplitLabel::Train, "triplet_split_train_b"),
                 "2025-01-02",
                 "Train B",
-                "Body",
+                "Body train b",
             ),
             trader_record(
                 &find_id(SplitLabel::Validation, "triplet_split_val_a"),
                 "2025-01-03",
                 "Val A",
-                "Body",
+                "Body val a",
             ),
             trader_record(
                 &find_id(SplitLabel::Validation, "triplet_split_val_b"),
                 "2025-01-04",
                 "Val B",
-                "Body",
+                "Body val b",
             ),
             trader_record(
                 &find_id(SplitLabel::Test, "triplet_split_test_a"),
                 "2025-01-05",
                 "Test A",
-                "Body",
+                "Body test a",
             ),
             trader_record(
                 &find_id(SplitLabel::Test, "triplet_split_test_b"),
                 "2025-01-06",
                 "Test B",
-                "Body",
+                "Body test b",
             ),
         ];
 
@@ -6162,7 +6174,7 @@ mod tests {
                     &id,
                     "2025-01-01",
                     &format!("{split_label:?} {idx}"),
-                    "body",
+                    &format!("{split_label:?} body {idx}"),
                 ));
             }
         }
@@ -6270,7 +6282,7 @@ mod tests {
                     &id,
                     "2025-01-01",
                     &format!("{split_label:?} {idx}"),
-                    "body",
+                    &format!("{split_label:?} body {idx}"),
                 ));
             }
         }
@@ -6462,16 +6474,12 @@ mod tests {
         config.text_recipes = Vec::new();
         let store = Arc::new(DeterministicSplitStore::new(split, 11).unwrap());
         let sampler = TripletSampler::new(config, store);
-        let mut rec_a = sample_record();
-        rec_a.id = "record_a".into();
-        let mut rec_b = sample_record();
-        rec_b.id = "record_b".into();
-        let mut rec_c = sample_record();
-        rec_c.id = "record_c".into();
-        sampler.register_source(Box::new(InMemorySource::new(
-            "unit",
-            vec![rec_a, rec_b, rec_c],
-        )));
+        let records = vec![
+            trader_record("src::cycle_a", "2025-01-01", "Cycle A", "Body cycle a"),
+            trader_record("src::cycle_b", "2025-01-02", "Cycle B", "Body cycle b"),
+            trader_record("src::cycle_c", "2025-01-03", "Cycle C", "Body cycle c"),
+        ];
+        sampler.register_source(Box::new(InMemorySource::new("unit", records)));
 
         let mut seen = std::collections::HashSet::new();
         for _ in 0..10 {
@@ -8091,13 +8099,18 @@ mod tests {
         }];
 
         let sampler = Arc::new(TripletSampler::new(config, store));
-        let mut records = Vec::new();
-        for idx in 0..4 {
-            let mut record = sample_record();
-            record.id = format!("prefetch_{idx}");
-            record.source = "prefetch_source".to_string();
-            records.push(record);
-        }
+        let records: Vec<DataRecord> = (0..4)
+            .map(|idx| {
+                let mut record = trader_record(
+                    &format!("prefetch_{idx}"),
+                    "2025-01-01",
+                    &format!("Prefetch title {idx}"),
+                    &format!("Prefetch body {idx}"),
+                );
+                record.source = "prefetch_source".to_string();
+                record
+            })
+            .collect();
         sampler.register_source(Box::new(InMemorySource::new("prefetch_source", records)));
         sampler
     }
@@ -8380,5 +8393,76 @@ mod tests {
             "the first {half} records drawn in epoch 0 and epoch 1 (resumed) are the same set — \
              records are not actually changing position across epochs"
         );
+    }
+
+    #[test]
+    fn triplet_rejects_negative_with_duplicate_text_content() {
+        // Three records: two share the same context body, one is unique.
+        // With WrongArticle negatives the sampler will first attempt to draw the
+        // shared-text record as a negative — that attempt must be rejected
+        // (negative.text == positive.text) and the unique record used instead.
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let mut config = base_config();
+        config.batch_size = 1;
+        config.allowed_splits = vec![SplitLabel::Train];
+        config.split = split;
+        config.recipes = vec![TripletRecipe {
+            name: "content_dedup".into(),
+            anchor: Selector::Role(SectionRole::Anchor),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 1.0,
+            instruction: None,
+        }];
+
+        let store = Arc::new(DeterministicSplitStore::new(split, 55).unwrap());
+        let sampler = TripletSampler::new(config, store);
+
+        // Two records share the same context text; one is genuinely distinct.
+        let records = vec![
+            trader_record(
+                "src::content_dup_a",
+                "2025-01-01",
+                "Title A",
+                "Shared body text",
+            ),
+            trader_record(
+                "src::content_dup_b",
+                "2025-01-02",
+                "Title B",
+                "Shared body text",
+            ),
+            trader_record(
+                "src::content_unique",
+                "2025-01-03",
+                "Title C",
+                "Completely different body",
+            ),
+        ];
+        sampler.register_source(Box::new(InMemorySource::new("tt", records)));
+
+        // Draw many batches; every triplet must have all-distinct slot texts.
+        for _ in 0..32 {
+            let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
+            for triplet in &batch.triplets {
+                assert_ne!(
+                    triplet.anchor.text, triplet.positive.text,
+                    "anchor and positive must not share text"
+                );
+                assert_ne!(
+                    triplet.negative.text, triplet.positive.text,
+                    "negative must not share text with positive"
+                );
+                assert_ne!(
+                    triplet.negative.text, triplet.anchor.text,
+                    "negative must not share text with anchor"
+                );
+            }
+        }
     }
 }
