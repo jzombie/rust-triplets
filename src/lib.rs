@@ -27,8 +27,7 @@ pub mod sampler;
 pub mod source;
 /// Split stores and persistence helpers.
 pub mod splits;
-/// Input transports used by sources (filesystem today; DBs later).
-pub mod transport;
+
 /// Shared type aliases.
 pub mod types;
 /// Text normalization helpers.

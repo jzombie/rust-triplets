@@ -3,6 +3,7 @@ use std::hash::Hash;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use super::file_stream::FileStream;
 use crate::constants::cache::FILE_CORPUS_GROUP;
 use crate::constants::file_corpus::{
     FILE_INDEX_META_KEY, FILE_INDEX_PATH_KEY_PREFIX, FILE_INDEX_READ_BATCH, FILE_INDEX_STORE_DIR,
@@ -11,8 +12,8 @@ use crate::constants::file_corpus::{
 use crate::errors::SamplerError;
 use crate::hash::{stable_hash_path, stable_hash_with};
 use crate::source::{SourceCursor, SourceSnapshot};
-use crate::transport::fs::{FileStream, is_text_file};
 use crate::types::{GroupKey, PathString, SourceId};
+use crate::utils::is_text_file;
 use crate::utils::normalize_inline_whitespace;
 use cache_manager::CacheRoot;
 use simd_r_drive::storage_engine::DataStore;
