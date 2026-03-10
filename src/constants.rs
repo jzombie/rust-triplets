@@ -10,17 +10,22 @@ pub mod env_vars {
     ///
     /// When set to a non-blank value, `parquet_manifest_endpoint()` returns this
     /// value instead of the default `https://datasets-server.huggingface.co/parquet`.
-    /// Intended for test doubles and air-gapped environments.
-    #[cfg(test)]
+    /// Useful for test doubles and air-gapped / on-premises deployments.
     pub const TRIPLETS_HF_PARQUET_ENDPOINT: &str = "TRIPLETS_HF_PARQUET_ENDPOINT";
 
     /// Overrides the Hugging Face datasets-server size endpoint URL.
     ///
     /// When set to a non-blank value, `size_endpoint()` returns this value instead
     /// of the default `https://datasets-server.huggingface.co/size`.
-    /// Intended for test doubles and air-gapped environments.
-    #[cfg(test)]
+    /// Useful for test doubles and air-gapped / on-premises deployments.
     pub const TRIPLETS_HF_SIZE_ENDPOINT: &str = "TRIPLETS_HF_SIZE_ENDPOINT";
+
+    /// Overrides the Hugging Face datasets-server info endpoint URL.
+    ///
+    /// When set to a non-blank value, `info_endpoint()` returns this value instead
+    /// of the default `https://datasets-server.huggingface.co/info`.
+    /// Useful for test doubles and air-gapped / on-premises deployments.
+    pub const TRIPLETS_HF_INFO_ENDPOINT: &str = "TRIPLETS_HF_INFO_ENDPOINT";
 }
 
 /// Constants used by capacity estimation heuristics.
@@ -220,6 +225,16 @@ pub mod huggingface {
     /// JSON field key for dataset-level size metrics in size response; also the HTTP query
     /// parameter name for the dataset identifier sent to the datasets-server API.
     pub const HF_JSON_KEY_DATASET: &str = "dataset";
+    /// JSON key for the top-level dataset info object in the /info response.
+    pub const HF_JSON_KEY_DATASET_INFO: &str = "dataset_info";
+    /// JSON key for the features map within the dataset info object.
+    pub const HF_JSON_KEY_FEATURES: &str = "features";
+    /// JSON key for the feature type discriminator within a feature entry.
+    pub const HF_JSON_KEY_FEATURE_TYPE: &str = "_type";
+    /// JSON key for the label names array within a ClassLabel feature entry.
+    pub const HF_JSON_KEY_LABEL_NAMES: &str = "names";
+    /// Feature type string that identifies a ClassLabel column.
+    pub const HF_CLASSLABEL_TYPE: &str = "ClassLabel";
 }
 
 /// Constants used for managed cache-root groups.

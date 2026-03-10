@@ -260,6 +260,15 @@ Column-list semantics:
 - `trust=<f32>` — overrides the default trust score (`0.5`) for every record produced by this source.  Must be in `[0.0, 1.0]`.  Use higher values for high-quality authoritative sources and lower values for noisier ones.
 - `source_id=<name>` — overrides the auto-derived source identifier slug for this entry.  When set, the provided name is used verbatim (no deduplication suffix is applied).  Useful for giving a stable, human-readable name to a source regardless of its dataset/config/split path.
 
+**ClassLabel auto-resolution:**
+
+HuggingFace datasets frequently encode categorical columns (such as `sentiment`, `label`, or `category`) as integers using the `ClassLabel` feature type. `HuggingFaceRowSource` automatically resolves those integers to their human-readable string names by querying the datasets-server `/info` endpoint at source construction time. No user-side annotation or manual label mapping is required in the source list.
+
+- Resolution happens once per source construction, before any rows are fetched.
+- Resolved labels are written directly into the `.simdr` row stores as strings — there is no integer-to-label lookup at batch time.
+- If the `/info` endpoint is unreachable or returns no feature metadata, the source falls back to raw integer strings (e.g. `"0"`, `"1"`, `"2"`) and continues normally.
+- **Pre-existing stores are not retroactively updated.** Rows cached before ClassLabel resolution was available retain their raw integer values. Delete the affected shard cache to trigger a fresh transcode with label resolution.
+
 Example list (see [examples/common/hf_sources.txt](examples/common/hf_sources.txt)):
 
 ```text
@@ -275,6 +284,9 @@ hf://org/noisy-web-crawl/default text=text trust=0.3 source_id=noisy-web
 
 # explicit text-column mode
 hf://pfox/71k-English-uncleaned-wordlist/default text=text
+
+# ClassLabel column — integers auto-resolved to "neutral"/"bullish"/"bearish" via /info endpoint
+hf://TimKoornstra/financial-tweets-sentiment anchor=tweet positive=sentiment
 ```
 
 HF backend persistence and lookup model:
@@ -283,6 +295,18 @@ HF backend persistence and lookup model:
 - `.parquet` is treated as transient decode input only and is removed after transcode.
 - Store keys use a single canonical key type: positional local row offset (`rowv1|<u64-le>`).
 - Reads use batch key lookups (`batch_read`) over these positional keys.
+
+Endpoint overrides:
+
+Three environment variables let you redirect the datasets-server base URLs — useful for test doubles, local mirrors, or air-gapped / on-premises deployments:
+
+| Environment variable           | Endpoint controlled                 |
+| ------------------------------ | ----------------------------------- |
+| `TRIPLETS_HF_PARQUET_ENDPOINT` | `/parquet` shard manifest           |
+| `TRIPLETS_HF_SIZE_ENDPOINT`    | `/size` total row count             |
+| `TRIPLETS_HF_INFO_ENDPOINT`    | `/info` ClassLabel feature metadata |
+
+When set, the variable value replaces the default `https://datasets-server.huggingface.co` base URL for that endpoint. All three are checked at runtime so they work in both unit tests and integration tests.
 
 ### Adding new sources
 

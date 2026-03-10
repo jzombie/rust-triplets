@@ -33,16 +33,18 @@ use walkdir::WalkDir;
 use crate::SamplerError;
 use crate::config::{NegativeStrategy, SamplerConfig, Selector, TripletRecipe};
 use crate::constants::cache::HUGGINGFACE_GROUP;
-#[cfg(test)]
-use crate::constants::env_vars::{TRIPLETS_HF_PARQUET_ENDPOINT, TRIPLETS_HF_SIZE_ENDPOINT};
+use crate::constants::env_vars::{
+    TRIPLETS_HF_INFO_ENDPOINT, TRIPLETS_HF_PARQUET_ENDPOINT, TRIPLETS_HF_SIZE_ENDPOINT,
+};
 use crate::constants::huggingface::{
-    ALL_SPLITS_DIR, HF_JSON_KEY_CONFIG, HF_JSON_KEY_CONFIG_NAME, HF_JSON_KEY_CONFIGS,
-    HF_JSON_KEY_DATASET, HF_JSON_KEY_NUM_ROWS, HF_JSON_KEY_PARQUET_FILES, HF_JSON_KEY_SIZE,
-    HF_JSON_KEY_SPLIT, HF_JSON_KEY_SPLIT_NAME, HF_JSON_KEY_SPLITS, HF_JSON_KEY_URL,
-    HF_RESOLVE_UNKNOWN_FALLBACK_PATH, HF_RESOLVE_URL_SEPARATOR, HF_SHARD_CANDIDATE_SEED_TAG,
-    HF_SHARD_STORE_EXTENSION, HF_SHARD_STORE_META_ROWS_KEY, HF_SHARD_STORE_ROW_PREFIX,
-    HUGGINGFACE_REFRESH_BATCH_MULTIPLIER, PARQUET_MANIFEST_DIR, REMOTE_BOOTSTRAP_SHARDS,
-    REMOTE_EXPANSION_HEADROOM_MULTIPLIER, REMOTE_URL_PREFIX,
+    ALL_SPLITS_DIR, HF_CLASSLABEL_TYPE, HF_JSON_KEY_CONFIG, HF_JSON_KEY_CONFIG_NAME,
+    HF_JSON_KEY_CONFIGS, HF_JSON_KEY_DATASET, HF_JSON_KEY_DATASET_INFO, HF_JSON_KEY_FEATURE_TYPE,
+    HF_JSON_KEY_FEATURES, HF_JSON_KEY_LABEL_NAMES, HF_JSON_KEY_NUM_ROWS, HF_JSON_KEY_PARQUET_FILES,
+    HF_JSON_KEY_SIZE, HF_JSON_KEY_SPLIT, HF_JSON_KEY_SPLIT_NAME, HF_JSON_KEY_SPLITS,
+    HF_JSON_KEY_URL, HF_RESOLVE_UNKNOWN_FALLBACK_PATH, HF_RESOLVE_URL_SEPARATOR,
+    HF_SHARD_CANDIDATE_SEED_TAG, HF_SHARD_STORE_EXTENSION, HF_SHARD_STORE_META_ROWS_KEY,
+    HF_SHARD_STORE_ROW_PREFIX, HUGGINGFACE_REFRESH_BATCH_MULTIPLIER, PARQUET_MANIFEST_DIR,
+    REMOTE_BOOTSTRAP_SHARDS, REMOTE_EXPANSION_HEADROOM_MULTIPLIER, REMOTE_URL_PREFIX,
 };
 use crate::data::{DataRecord, QualityScore, SectionRole};
 use crate::utils::make_section;
@@ -594,6 +596,20 @@ pub struct HuggingFaceRowsConfig {
     /// every record emitted by this source.  Set this on sources that provide
     /// higher- or lower-quality data than the default.
     pub trust_override: Option<f32>,
+    /// Optional integer-to-label maps for ClassLabel (or other integer) columns.
+    ///
+    /// Keyed by column name; value is an ordered list of label strings.  When a
+    /// column value is an integer `n` and a map entry exists for that column,
+    /// `label_maps[col][n]` is used as the text instead of the raw integer string.
+    ///
+    /// This field is auto-populated by [`HuggingFaceRowSource::new`] via a
+    /// single call to the datasets-server `/info` endpoint.  Resolved label
+    /// strings are written into the `.simdr` row store **at parquet-transcode
+    /// time** and are not re-evaluated on subsequent reads.  Pre-existing
+    /// stores that were transcoded before label resolution was introduced will
+    /// continue to contain raw integer strings until their shard is evicted
+    /// and re-transcoded.
+    pub label_maps: HashMap<String, Vec<String>>,
 }
 
 impl HuggingFaceRowsConfig {
@@ -629,6 +645,7 @@ impl HuggingFaceRowsConfig {
             positive_columns: Vec::new(),
             context_columns: Vec::new(),
             trust_override: None,
+            label_maps: HashMap::new(),
         }
     }
 
@@ -911,7 +928,7 @@ type ShardIndexResult = (Vec<ShardIndex>, usize, HashMap<PathBuf, Arc<DataStore>
 
 impl HuggingFaceRowSource {
     /// Build a new source by indexing local shard files.
-    pub fn new(config: HuggingFaceRowsConfig) -> Result<Self, SamplerError> {
+    pub fn new(mut config: HuggingFaceRowsConfig) -> Result<Self, SamplerError> {
         let start_new = Instant::now();
         if config.checkpoint_stride == 0 {
             return Err(SamplerError::Configuration(
@@ -924,6 +941,10 @@ impl HuggingFaceRowSource {
                     .to_string(),
             ));
         }
+
+        // Auto-resolve ClassLabel columns from the datasets-server /info endpoint.
+        // If the fetch fails the label_maps stay empty and raw integers are used.
+        config.label_maps = Self::fetch_classlabel_maps(&config);
 
         fs::create_dir_all(&config.snapshot_dir).map_err(|err| {
             SamplerError::SourceUnavailable {
@@ -995,6 +1016,16 @@ impl HuggingFaceRowSource {
             eligible_index: Arc::new(Mutex::new(EligibleIndexCache::default())),
             expansion_thread: Arc::new(Mutex::new(None)),
         })
+    }
+
+    /// Total row count for the dataset split as reported by the datasets-server
+    /// `/size` endpoint, populated once during [`new`].
+    ///
+    /// Returns `None` if the endpoint was unreachable, returned a non-200
+    /// response, or changed its response format.  The source continues to
+    /// operate normally in that case (graceful degradation).
+    pub fn known_total_rows(&self) -> Option<usize> {
+        self.state.lock().ok()?.total_rows
     }
 
     fn is_store_shard_path(path: &Path) -> bool {
@@ -1857,7 +1888,6 @@ impl HuggingFaceRowSource {
     }
 
     fn parquet_manifest_endpoint() -> String {
-        #[cfg(test)]
         if let Ok(value) = std::env::var(TRIPLETS_HF_PARQUET_ENDPOINT)
             && !value.trim().is_empty()
         {
@@ -1867,13 +1897,115 @@ impl HuggingFaceRowSource {
     }
 
     fn size_endpoint() -> String {
-        #[cfg(test)]
         if let Ok(value) = std::env::var(TRIPLETS_HF_SIZE_ENDPOINT)
             && !value.trim().is_empty()
         {
             return value;
         }
         "https://datasets-server.huggingface.co/size".to_string()
+    }
+
+    fn info_endpoint() -> String {
+        if let Ok(value) = std::env::var(TRIPLETS_HF_INFO_ENDPOINT)
+            && !value.trim().is_empty()
+        {
+            return value;
+        }
+        "https://datasets-server.huggingface.co/info".to_string()
+    }
+
+    /// Fetch ClassLabel name mappings from the datasets-server `/info` endpoint.
+    ///
+    /// Returns a map of column name → ordered label names for every feature whose
+    /// `_type` is `"ClassLabel"`.  Called once per [`HuggingFaceRowSource::new`]
+    /// call; the result is stored in [`HuggingFaceRowsConfig::label_maps`] and
+    /// consulted at parquet-shard transcode time only.
+    ///
+    /// All failure paths (unreachable endpoint, HTTP error, unreadable body,
+    /// invalid JSON) emit a `warn!` log and return an empty map.  The caller
+    /// continues normally with raw integer strings as a fallback.
+    fn fetch_classlabel_maps(config: &HuggingFaceRowsConfig) -> HashMap<String, Vec<String>> {
+        let endpoint = Self::info_endpoint();
+        let response = match ureq::get(&endpoint)
+            .query(HF_JSON_KEY_DATASET, &config.dataset)
+            .query(HF_JSON_KEY_CONFIG, &config.config)
+            .call()
+        {
+            Ok(r) => r,
+            Err(err) => {
+                warn!(
+                    "[triplets:hf] {} could not fetch dataset info for ClassLabel resolution: {}",
+                    config.source_id, err
+                );
+                return HashMap::new();
+            }
+        };
+        let body = match response.into_body().read_to_string() {
+            Ok(b) => b,
+            Err(err) => {
+                warn!(
+                    "[triplets:hf] {} failed reading dataset info response: {}",
+                    config.source_id, err
+                );
+                return HashMap::new();
+            }
+        };
+        let json: Value = match serde_json::from_str(&body) {
+            Ok(v) => v,
+            Err(err) => {
+                warn!(
+                    "[triplets:hf] {} failed parsing dataset info response: {}",
+                    config.source_id, err
+                );
+                return HashMap::new();
+            }
+        };
+        let maps = Self::extract_classlabel_maps(&json);
+        if !maps.is_empty() {
+            info!(
+                "[triplets:hf] {} resolved ClassLabel mappings for columns: {:?}",
+                config.source_id,
+                maps.keys().collect::<Vec<_>>()
+            );
+        }
+        maps
+    }
+
+    /// Extract ClassLabel mappings from a parsed `/info` response payload.
+    ///
+    /// Exposed as a separate function so it can be unit-tested without a live
+    /// network.
+    fn extract_classlabel_maps(info: &Value) -> HashMap<String, Vec<String>> {
+        let mut maps = HashMap::new();
+        let Some(features) = info
+            .get(HF_JSON_KEY_DATASET_INFO)
+            .and_then(|di| di.get(HF_JSON_KEY_FEATURES))
+            .and_then(|f| f.as_object())
+        else {
+            return maps;
+        };
+        for (col, field) in features {
+            if field.get(HF_JSON_KEY_FEATURE_TYPE).and_then(Value::as_str)
+                != Some(HF_CLASSLABEL_TYPE)
+            {
+                continue;
+            }
+            let Some(names_arr) = field
+                .get(HF_JSON_KEY_LABEL_NAMES)
+                .and_then(|n| n.as_array())
+            else {
+                continue;
+            };
+            let label_names: Vec<String> = names_arr
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(str::to_string)
+                .collect();
+            if !label_names.is_empty() {
+                maps.insert(col.clone(), label_names);
+            }
+        }
+        maps
     }
 
     /// Query datasets-server parquet manifest and derive shard candidates.
@@ -3330,7 +3462,12 @@ impl HuggingFaceRowSource {
     }
 
     /// Convert a serde JSON value into non-empty text when possible.
-    fn value_to_text(value: &Value) -> Option<String> {
+    ///
+    /// `label_names` optionally provides an ordered list of label strings for
+    /// ClassLabel-style integer columns.  When the value is an integer `n` and
+    /// `label_names[n]` exists, that label string is returned instead of the
+    /// raw numeric string.
+    fn value_to_text(value: &Value, label_names: Option<&[String]>) -> Option<String> {
         match value {
             Value::Null => None,
             Value::String(s) => {
@@ -3341,8 +3478,18 @@ impl HuggingFaceRowSource {
                 }
             }
             Value::Bool(b) => Some(b.to_string()),
-            Value::Number(n) => Some(n.to_string()),
-            Value::Array(_) | Value::Object(_) => Some(value.to_string()),
+            Value::Number(n) => {
+                if let Some(labels) = label_names
+                    && let Some(idx) = n.as_u64().map(|u| u as usize)
+                    && let Some(label) = labels.get(idx)
+                    && !label.trim().is_empty()
+                {
+                    return Some(label.clone());
+                }
+                Some(n.to_string())
+            }
+            Value::Array(arr) => serde_json::to_string(arr).ok().filter(|s| !s.is_empty()),
+            Value::Object(obj) => serde_json::to_string(obj).ok().filter(|s| !s.is_empty()),
         }
     }
 
@@ -3352,10 +3499,12 @@ impl HuggingFaceRowSource {
     fn coalesce_field(
         candidates: &[String],
         row_obj: &serde_json::Map<String, Value>,
+        label_maps: &HashMap<String, Vec<String>>,
     ) -> Option<RowTextField> {
         for name in candidates {
+            let label_names = label_maps.get(name).map(|v| v.as_slice());
             if let Some(value) = row_obj.get(name)
-                && let Some(text) = Self::value_to_text(value)
+                && let Some(text) = Self::value_to_text(value, label_names)
             {
                 return Some(RowTextField {
                     name: name.clone(),
@@ -3394,7 +3543,7 @@ impl HuggingFaceRowSource {
             .id_column
             .as_ref()
             .and_then(|col| row_obj.get(col))
-            .and_then(Self::value_to_text)
+            .and_then(|v| Self::value_to_text(v, None))
             .unwrap_or_else(|| {
                 format!(
                     "{}:{}:{}",
@@ -3412,7 +3561,11 @@ impl HuggingFaceRowSource {
             // whose value is present and non-empty.  Skip the row when the
             // list is non-empty but no candidate yields content.
             if !self.config.anchor_columns.is_empty() {
-                match Self::coalesce_field(&self.config.anchor_columns, row_obj) {
+                match Self::coalesce_field(
+                    &self.config.anchor_columns,
+                    row_obj,
+                    &self.config.label_maps,
+                ) {
                     Some(field) => text_fields.push(field),
                     None => return Ok(None),
                 }
@@ -3422,7 +3575,11 @@ impl HuggingFaceRowSource {
             // whose value is present and non-empty.  Skip the row when the
             // list is non-empty but no candidate yields content.
             if !self.config.positive_columns.is_empty() {
-                match Self::coalesce_field(&self.config.positive_columns, row_obj) {
+                match Self::coalesce_field(
+                    &self.config.positive_columns,
+                    row_obj,
+                    &self.config.label_maps,
+                ) {
                     Some(field) => text_fields.push(field),
                     None => return Ok(None),
                 }
@@ -3432,7 +3589,8 @@ impl HuggingFaceRowSource {
                 let Some(value) = row_obj.get(name) else {
                     return Ok(None);
                 };
-                let Some(text) = Self::value_to_text(value) else {
+                let label_names = self.config.label_maps.get(name).map(|v| v.as_slice());
+                let Some(text) = Self::value_to_text(value, label_names) else {
                     return Ok(None);
                 };
                 text_fields.push(RowTextField {
@@ -3445,7 +3603,9 @@ impl HuggingFaceRowSource {
             // first whose value is present and non-empty.  The row is skipped
             // when no candidate yields content (handled by the is_empty guard
             // below).
-            if let Some(field) = Self::coalesce_field(&self.config.text_columns, row_obj) {
+            if let Some(field) =
+                Self::coalesce_field(&self.config.text_columns, row_obj, &self.config.label_maps)
+            {
                 text_fields.push(field);
             }
         }
@@ -3493,7 +3653,7 @@ impl HuggingFaceRowSource {
                 let payload = value.get("row").unwrap_or(&value);
                 if payload.is_object() {
                     Ok(value)
-                } else if let Some(text) = Self::value_to_text(payload) {
+                } else if let Some(text) = Self::value_to_text(payload, None) {
                     Ok(json!({ "text": text }))
                 } else {
                     Err(SamplerError::SourceInconsistent {
@@ -4230,6 +4390,35 @@ mod tests {
             let _ = stream.read(&mut request_buf);
             let headers = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                payload.len()
+            );
+            stream.write_all(headers.as_bytes()).unwrap();
+            stream.write_all(&payload).unwrap();
+            let _ = stream.flush();
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    /// Like `spawn_one_shot_http` but returns a specific HTTP status code.
+    fn spawn_one_shot_http_with_status(
+        status: u16,
+        payload: Vec<u8>,
+    ) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request_buf = [0u8; 1024];
+            let _ = stream.read(&mut request_buf);
+            let reason = match status {
+                200 => "OK",
+                400 => "Bad Request",
+                404 => "Not Found",
+                500 => "Internal Server Error",
+                _ => "Unknown",
+            };
+            let headers = format!(
+                "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 payload.len()
             );
             stream.write_all(headers.as_bytes()).unwrap();
@@ -6352,6 +6541,11 @@ mod tests {
             HuggingFaceRowSource::size_endpoint()
         });
         assert_eq!(size, "https://datasets-server.huggingface.co/size");
+
+        let info = with_env_var(TRIPLETS_HF_INFO_ENDPOINT, "   ", || {
+            HuggingFaceRowSource::info_endpoint()
+        });
+        assert_eq!(info, "https://datasets-server.huggingface.co/info");
     }
 
     #[test]
@@ -6925,22 +7119,28 @@ mod tests {
 
     #[test]
     fn value_to_text_handles_scalar_and_structured_values() {
-        assert_eq!(HuggingFaceRowSource::value_to_text(&json!(null)), None);
-        assert_eq!(HuggingFaceRowSource::value_to_text(&json!("   ")), None);
         assert_eq!(
-            HuggingFaceRowSource::value_to_text(&json!("hello")),
+            HuggingFaceRowSource::value_to_text(&json!(null), None),
+            None
+        );
+        assert_eq!(
+            HuggingFaceRowSource::value_to_text(&json!("   "), None),
+            None
+        );
+        assert_eq!(
+            HuggingFaceRowSource::value_to_text(&json!("hello"), None),
             Some("hello".into())
         );
         assert_eq!(
-            HuggingFaceRowSource::value_to_text(&json!(true)),
+            HuggingFaceRowSource::value_to_text(&json!(true), None),
             Some("true".into())
         );
         assert_eq!(
-            HuggingFaceRowSource::value_to_text(&json!(3.5)),
+            HuggingFaceRowSource::value_to_text(&json!(3.5), None),
             Some("3.5".into())
         );
         assert_eq!(
-            HuggingFaceRowSource::value_to_text(&json!([1, 2])),
+            HuggingFaceRowSource::value_to_text(&json!([1, 2]), None),
             Some("[1,2]".into())
         );
     }
@@ -8062,5 +8262,207 @@ mod tests {
                 materialised_count
             );
         }
+    }
+
+    // ── extract_classlabel_maps ───────────────────────────────────────────────
+
+    #[test]
+    fn extract_classlabel_maps_returns_label_names_for_classlabel_columns() {
+        let info = json!({
+            "dataset_info": {
+                "features": {
+                    "text": {"dtype": "string", "_type": "Value"},
+                    "sentiment": {
+                        "_type": "ClassLabel",
+                        "names": ["neutral", "bullish", "bearish"]
+                    }
+                }
+            }
+        });
+        let maps = HuggingFaceRowSource::extract_classlabel_maps(&info);
+        assert_eq!(maps.len(), 1);
+        assert_eq!(maps["sentiment"], vec!["neutral", "bullish", "bearish"]);
+    }
+
+    #[test]
+    fn extract_classlabel_maps_handles_multiple_classlabel_columns() {
+        let info = json!({
+            "dataset_info": {
+                "features": {
+                    "label_a": {"_type": "ClassLabel", "names": ["no", "yes"]},
+                    "label_b": {"_type": "ClassLabel", "names": ["low", "mid", "high"]}
+                }
+            }
+        });
+        let maps = HuggingFaceRowSource::extract_classlabel_maps(&info);
+        assert_eq!(maps.len(), 2);
+        assert_eq!(maps["label_a"], vec!["no", "yes"]);
+        assert_eq!(maps["label_b"], vec!["low", "mid", "high"]);
+    }
+
+    #[test]
+    fn extract_classlabel_maps_ignores_non_classlabel_features() {
+        let info = json!({
+            "dataset_info": {
+                "features": {
+                    "text":  {"dtype": "string", "_type": "Value"},
+                    "score": {"dtype": "float32", "_type": "Value"}
+                }
+            }
+        });
+        let maps = HuggingFaceRowSource::extract_classlabel_maps(&info);
+        assert!(maps.is_empty());
+    }
+
+    #[test]
+    fn extract_classlabel_maps_skips_empty_names_array() {
+        let info = json!({
+            "dataset_info": {
+                "features": {
+                    "empty_labels": {"_type": "ClassLabel", "names": []}
+                }
+            }
+        });
+        let maps = HuggingFaceRowSource::extract_classlabel_maps(&info);
+        assert!(
+            maps.is_empty(),
+            "columns with empty names arrays must not be included"
+        );
+    }
+
+    #[test]
+    fn extract_classlabel_maps_returns_empty_for_missing_dataset_info() {
+        // Top-level key missing entirely.
+        let maps = HuggingFaceRowSource::extract_classlabel_maps(&json!({}));
+        assert!(maps.is_empty());
+
+        // `dataset_info` present but no `features`.
+        let maps2 = HuggingFaceRowSource::extract_classlabel_maps(
+            &json!({"dataset_info": {"description": "x"}}),
+        );
+        assert!(maps2.is_empty());
+    }
+
+    #[test]
+    fn extract_classlabel_maps_returns_empty_for_non_object_features() {
+        // `features` is an array instead of an object — must not panic.
+        let info = json!({
+            "dataset_info": {
+                "features": ["sentiment", "text"]
+            }
+        });
+        let maps = HuggingFaceRowSource::extract_classlabel_maps(&info);
+        assert!(maps.is_empty());
+    }
+
+    // ── fetch_classlabel_maps ─────────────────────────────────────────────────
+
+    #[test]
+    fn fetch_classlabel_maps_returns_empty_when_endpoint_unreachable() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        // Port 1 is always unreachable; ureq returns an Err which must be handled.
+        let maps = with_env_var(TRIPLETS_HF_INFO_ENDPOINT, "http://127.0.0.1:1", || {
+            HuggingFaceRowSource::fetch_classlabel_maps(&config)
+        });
+        assert!(
+            maps.is_empty(),
+            "unreachable endpoint must yield empty map, got: {maps:?}"
+        );
+    }
+
+    #[test]
+    fn fetch_classlabel_maps_returns_empty_on_non_200_response() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let (base_url, server) = spawn_one_shot_http_with_status(404, b"not found".to_vec());
+
+        let maps = with_env_var(TRIPLETS_HF_INFO_ENDPOINT, &base_url, || {
+            HuggingFaceRowSource::fetch_classlabel_maps(&config)
+        });
+        server.join().unwrap();
+        assert!(
+            maps.is_empty(),
+            "HTTP 404 response must yield empty map, got: {maps:?}"
+        );
+    }
+
+    #[test]
+    fn fetch_classlabel_maps_returns_empty_on_malformed_json() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let (base_url, server) = spawn_one_shot_http(b"this is not json".to_vec());
+
+        let maps = with_env_var(TRIPLETS_HF_INFO_ENDPOINT, &base_url, || {
+            HuggingFaceRowSource::fetch_classlabel_maps(&config)
+        });
+        server.join().unwrap();
+        assert!(
+            maps.is_empty(),
+            "malformed JSON must yield empty map, got: {maps:?}"
+        );
+    }
+
+    #[test]
+    fn fetch_classlabel_maps_resolves_classlabel_columns_from_info_response() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let body = serde_json::to_vec(&json!({
+            "dataset_info": {
+                "features": {
+                    "text": {"dtype": "string", "_type": "Value"},
+                    "sentiment": {
+                        "_type": "ClassLabel",
+                        "names": ["neutral", "bullish", "bearish"]
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        let (base_url, server) = spawn_one_shot_http(body);
+
+        let maps = with_env_var(TRIPLETS_HF_INFO_ENDPOINT, &base_url, || {
+            HuggingFaceRowSource::fetch_classlabel_maps(&config)
+        });
+        server.join().unwrap();
+        assert_eq!(maps.len(), 1);
+        assert_eq!(maps["sentiment"], vec!["neutral", "bullish", "bearish"]);
+    }
+
+    // ── value_to_text with label resolution ──────────────────────────────────
+
+    #[test]
+    fn value_to_text_resolves_integer_to_label_name() {
+        let labels = vec![
+            "negative".to_string(),
+            "neutral".to_string(),
+            "positive".to_string(),
+        ];
+        assert_eq!(
+            HuggingFaceRowSource::value_to_text(&json!(0), Some(&labels)),
+            Some("negative".into())
+        );
+        assert_eq!(
+            HuggingFaceRowSource::value_to_text(&json!(2), Some(&labels)),
+            Some("positive".into())
+        );
+    }
+
+    #[test]
+    fn value_to_text_falls_back_to_raw_integer_when_index_out_of_range() {
+        let labels = vec!["a".to_string(), "b".to_string()];
+        // Index 5 is beyond the label list — must return the integer as a string.
+        assert_eq!(
+            HuggingFaceRowSource::value_to_text(&json!(5), Some(&labels)),
+            Some("5".into())
+        );
+    }
+
+    #[test]
+    fn value_to_text_falls_back_to_raw_integer_when_no_label_names_provided() {
+        assert_eq!(
+            HuggingFaceRowSource::value_to_text(&json!(1), None),
+            Some("1".into())
+        );
     }
 }

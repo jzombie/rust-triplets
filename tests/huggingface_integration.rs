@@ -1164,6 +1164,104 @@ fn huggingface_reads_live_remote_dataset() {
     );
 }
 
+#[test]
+#[ignore = "network integration test — verifies /size endpoint returns a plausible row count"]
+fn huggingface_live_size_endpoint_reports_dataset_row_count() {
+    // Exercises the datasets-server /size endpoint called inside new().
+    // If the endpoint changes its response schema, fetch_global_row_count()
+    // returns None and known_total_rows() will be None — the first assert fails.
+    // If the endpoint returns an implausibly small count for a well-known dataset
+    // the second assert fails.
+    //
+    // Each test owns its own tempdir so snapshots never pollute each other or
+    // the library's own managed cache directory.
+    let temp = tempfile::tempdir().expect("failed creating tempdir");
+
+    let mut config = HuggingFaceRowsConfig::new(
+        "hf_live_size_endpoint",
+        "cornell-movie-review-data/rotten_tomatoes",
+        "default",
+        "train",
+        temp.path(),
+    );
+    config.text_columns = vec!["text".to_string()];
+
+    let source = HuggingFaceRowSource::new(config).expect("failed creating source");
+
+    let total = source.known_total_rows();
+    assert!(
+        total.is_some_and(|t| t > 0),
+        "/size endpoint should report a positive row count for rotten_tomatoes; \
+         got {:?} — endpoint may have changed response format or become unreachable",
+        total
+    );
+    // The rotten_tomatoes train split has 8530 rows per its dataset card.
+    // A significantly different number indicates the endpoint contract changed.
+    let rows = total.unwrap();
+    assert!(
+        rows > 1_000,
+        "rotten_tomatoes train reports {rows} rows; expected > 1000 — \
+         /size endpoint response format may have changed"
+    );
+}
+
+#[test]
+#[ignore = "network integration test — verifies /info endpoint ClassLabel resolution end-to-end"]
+fn huggingface_live_classlabel_resolution_maps_integers_to_label_strings() {
+    // Exercises three live endpoints in sequence:
+    //   1. /info  — called in new() to resolve ClassLabel column names
+    //   2. /parquet — called in refresh() to obtain the shard manifest
+    //   3. HF CDN — actual parquet shard download URL
+    //
+    // TimKoornstra/financial-tweets-sentiment has a `sentiment` column declared
+    // as ClassLabel with names = ["neutral", "bullish", "bearish"].  In the
+    // parquet file the column is stored as integer (0/1/2).
+    //
+    // With successful /info resolution the transcoded records will contain the
+    // label strings.  Without it (endpoint unreachable or format changed) they
+    // will contain raw integer strings.  The final assertion distinguishes the
+    // two cases and fails on any regression in the /info endpoint contract.
+    //
+    // snapshot_dir is a fresh tempdir — no shared cache is used.
+    let temp = tempfile::tempdir().expect("failed creating tempdir");
+
+    let mut config = HuggingFaceRowsConfig::new(
+        "hf_live_classlabel",
+        "TimKoornstra/financial-tweets-sentiment",
+        "default",
+        "train",
+        temp.path(),
+    );
+    // Using sentiment as the sole text column so every record's text IS the
+    // resolved label.  Without ClassLabel resolution the text would be "0",
+    // "1", or "2" instead of a named label.
+    config.text_columns = vec!["sentiment".to_string()];
+
+    let source = HuggingFaceRowSource::new(config).expect("failed creating source");
+    let seed = seeded_config(43);
+    let snapshot = source
+        .refresh(&seed, None, Some(5))
+        .expect("refresh should download and read live rows");
+
+    assert!(
+        !snapshot.records.is_empty(),
+        "expected records from TimKoornstra/financial-tweets-sentiment"
+    );
+
+    const KNOWN_LABELS: &[&str] = &["neutral", "bullish", "bearish"];
+    for record in &snapshot.records {
+        for section in &record.sections {
+            let text = section.text.as_str();
+            assert!(
+                KNOWN_LABELS.contains(&text),
+                "/info ClassLabel resolution failed: expected one of {KNOWN_LABELS:?} \
+                 but got {text:?} — raw integers (\"0\"/\"1\"/\"2\") indicate the /info \
+                 endpoint no longer returns a 'names' array for this ClassLabel column"
+            );
+        }
+    }
+}
+
 // ── trust= and source_id= column tests ─────────────────────────────────────
 
 #[test]
