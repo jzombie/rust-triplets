@@ -4433,10 +4433,15 @@ mod tests {
         (format!("http://{addr}"), handle)
     }
 
-    fn spawn_manifest_and_shard_http(shard_payload: Vec<u8>) -> (String, thread::JoinHandle<()>) {
+    fn spawn_manifest_and_shard_http(
+        max_accepts: usize,
+        shard_payload: Vec<u8>,
+    ) -> (String, Arc<AtomicUsize>, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let base_url = format!("http://{addr}");
+        let manifest_counter = Arc::new(AtomicUsize::new(0));
+        let manifest_counter_arc = Arc::clone(&manifest_counter);
         let manifest_body = serde_json::json!({
             "parquet_files": [
                 {
@@ -4447,27 +4452,32 @@ mod tests {
         })
         .to_string();
         let handle = thread::spawn(move || {
-            for _ in 0..2 {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut request_buf = [0u8; 4096];
-                let read = stream.read(&mut request_buf).unwrap_or(0);
-                let request = String::from_utf8_lossy(&request_buf[..read]);
-                let first_line = request.lines().next().unwrap_or_default();
-                let body = if first_line.contains("/parquet") {
-                    manifest_body.as_bytes().to_vec()
-                } else {
-                    shard_payload.clone()
-                };
-                let headers = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
-                );
-                stream.write_all(headers.as_bytes()).unwrap();
-                stream.write_all(&body).unwrap();
-                let _ = stream.flush();
+            for _ in 0..max_accepts {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut request_buf = [0u8; 4096];
+                        let read = stream.read(&mut request_buf).unwrap_or(0);
+                        let request = String::from_utf8_lossy(&request_buf[..read]);
+                        let first_line = request.lines().next().unwrap_or_default();
+                        let body = if first_line.contains("/parquet") {
+                            manifest_counter_arc.fetch_add(1, AtomicOrdering::SeqCst);
+                            manifest_body.as_bytes().to_vec()
+                        } else {
+                            shard_payload.clone()
+                        };
+                        let headers = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(headers.as_bytes());
+                        let _ = stream.write_all(&body);
+                        let _ = stream.flush();
+                    }
+                    Err(_) => break,
+                }
             }
         });
-        (base_url, handle)
+        (base_url, manifest_counter, handle)
     }
 
     fn with_env_var<R>(key: &str, value: &str, run: impl FnOnce() -> R) -> R {
@@ -7828,7 +7838,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
         let source = test_source(config);
-        let (base_url, server) = spawn_manifest_and_shard_http(b"{\"text\":\"hello\"}\n".to_vec());
+        let (base_url, _, server) =
+            spawn_manifest_and_shard_http(2, b"{\"text\":\"hello\"}\n".to_vec());
 
         // Reset to None so ensure_row_available triggers the manifest-fetch path.
         source.state.lock().unwrap().remote_candidates = None;
@@ -8501,58 +8512,6 @@ mod tests {
         );
     }
 
-    /// Like `spawn_manifest_and_shard_http`, but counts `/parquet` manifest hits
-    /// separately.  Accepts up to `max_accepts` total connections, dispatching on
-    /// URL path: requests containing `/parquet` get the manifest body; all others
-    /// get the shard payload.
-    fn spawn_counting_manifest_and_shard_http(
-        max_accepts: usize,
-        shard_payload: Vec<u8>,
-    ) -> (String, Arc<AtomicUsize>, thread::JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let base_url = format!("http://{addr}");
-        let manifest_counter = Arc::new(AtomicUsize::new(0));
-        let manifest_counter_arc = Arc::clone(&manifest_counter);
-        let manifest_body = serde_json::json!({
-            "parquet_files": [{
-                "url": format!("{base_url}/resolve/main/train/bootstrap.ndjson"),
-                "size": shard_payload.len()
-            }]
-        })
-        .to_string();
-        let handle = thread::spawn(move || {
-            for _ in 0..max_accepts {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        let mut buf = [0u8; 4096];
-                        let read = stream.read(&mut buf).unwrap_or(0);
-                        let request = String::from_utf8_lossy(&buf[..read]);
-                        let first_line = request.lines().next().unwrap_or_default();
-                        let (body, is_manifest): (Vec<u8>, bool) =
-                            if first_line.contains("/parquet") {
-                                (manifest_body.as_bytes().to_vec(), true)
-                            } else {
-                                (shard_payload.clone(), false)
-                            };
-                        if is_manifest {
-                            manifest_counter_arc.fetch_add(1, AtomicOrdering::SeqCst);
-                        }
-                        let response = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                            body.len()
-                        );
-                        let _ = stream.write_all(response.as_bytes());
-                        let _ = stream.write_all(&body);
-                        let _ = stream.flush();
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-        (base_url, manifest_counter, handle)
-    }
-
     #[test]
     fn info_endpoint_called_exactly_once_per_source_construction() {
         // Verify that /info is called exactly once during new() and never during
@@ -8678,7 +8637,7 @@ mod tests {
         let shard_payload = b"{\"text\":\"hello\"}\n".to_vec();
         // Counting manifest+shard server: 4 slots so a second /parquet hit is caught.
         let (base_url, manifest_counter, _manifest_handle) =
-            spawn_counting_manifest_and_shard_http(4, shard_payload);
+            spawn_manifest_and_shard_http(4, shard_payload);
 
         // First call: remote_candidates is None → fetches manifest (counter→1) → downloads shard.
         let first_available = with_env_var(
