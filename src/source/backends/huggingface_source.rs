@@ -4337,9 +4337,14 @@ mod tests {
     use std::env;
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::sync::OnceLock;
+    use std::sync::{Mutex, OnceLock};
     use std::thread;
     use tempfile::tempdir;
+
+    // Shared lock for all helpers that mutate process-global env vars.
+    // Using a single shared static ensures with_env_var and with_env_vars
+    // are mutually exclusive with each other, preventing races between tests.
+    static TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     fn test_config(snapshot_dir: PathBuf) -> HuggingFaceRowsConfig {
         let mut config =
@@ -4466,8 +4471,7 @@ mod tests {
     }
 
     fn with_env_var<R>(key: &str, value: &str, run: impl FnOnce() -> R) -> R {
-        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let _guard = ENV_LOCK
+        let _guard = TEST_ENV_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -4493,6 +4497,37 @@ mod tests {
         // Locals drop in reverse-declaration order: _restore first (env restored),
         // then _guard (lock released), so the env var is always restored while the
         // lock is still held.
+        run()
+    }
+
+    /// Like `with_env_var` but sets multiple `(key, value)` pairs atomically under
+    /// the same `TEST_ENV_LOCK`.  Use this instead of nesting `with_env_var` calls
+    /// (nested calls would deadlock on the shared mutex).
+    fn with_env_vars<R>(pairs: &[(&str, &str)], run: impl FnOnce() -> R) -> R {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous: Vec<(String, Option<String>)> = pairs
+            .iter()
+            .map(|(key, _)| (key.to_string(), env::var(key).ok()))
+            .collect();
+        struct EnvRestore(Vec<(String, Option<String>)>);
+        impl Drop for EnvRestore {
+            fn drop(&mut self) {
+                for (key, prev) in &self.0 {
+                    if let Some(old) = prev {
+                        unsafe { env::set_var(key, old) };
+                    } else {
+                        unsafe { env::remove_var(key) };
+                    }
+                }
+            }
+        }
+        let _restore = EnvRestore(previous);
+        for (key, value) in pairs {
+            unsafe { env::set_var(key, value) };
+        }
         run()
     }
 
@@ -8463,6 +8498,211 @@ mod tests {
         assert_eq!(
             HuggingFaceRowSource::value_to_text(&json!(1), None),
             Some("1".into())
+        );
+    }
+
+    /// Like `spawn_manifest_and_shard_http`, but counts `/parquet` manifest hits
+    /// separately.  Accepts up to `max_accepts` total connections, dispatching on
+    /// URL path: requests containing `/parquet` get the manifest body; all others
+    /// get the shard payload.
+    fn spawn_counting_manifest_and_shard_http(
+        max_accepts: usize,
+        shard_payload: Vec<u8>,
+    ) -> (String, Arc<AtomicUsize>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base_url = format!("http://{addr}");
+        let manifest_counter = Arc::new(AtomicUsize::new(0));
+        let manifest_counter_arc = Arc::clone(&manifest_counter);
+        let manifest_body = serde_json::json!({
+            "parquet_files": [{
+                "url": format!("{base_url}/resolve/main/train/bootstrap.ndjson"),
+                "size": shard_payload.len()
+            }]
+        })
+        .to_string();
+        let handle = thread::spawn(move || {
+            for _ in 0..max_accepts {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut buf = [0u8; 4096];
+                        let read = stream.read(&mut buf).unwrap_or(0);
+                        let request = String::from_utf8_lossy(&buf[..read]);
+                        let first_line = request.lines().next().unwrap_or_default();
+                        let (body, is_manifest): (Vec<u8>, bool) =
+                            if first_line.contains("/parquet") {
+                                (manifest_body.as_bytes().to_vec(), true)
+                            } else {
+                                (shard_payload.clone(), false)
+                            };
+                        if is_manifest {
+                            manifest_counter_arc.fetch_add(1, AtomicOrdering::SeqCst);
+                        }
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(response.as_bytes());
+                        let _ = stream.write_all(&body);
+                        let _ = stream.flush();
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        (base_url, manifest_counter, handle)
+    }
+
+    #[test]
+    fn info_endpoint_called_exactly_once_per_source_construction() {
+        // Verify that /info is called exactly once during new() and never during
+        // refresh().  Two separate strategies are used to avoid fragile TCP
+        // connection counting:
+        //
+        //   Phase 1 — new(): one-shot /info server returning a real ClassLabel
+        //             mapping.  After new(), source.config.label_maps must reflect
+        //             the mock response (proves /info was called) and joining the
+        //             server thread proves it was called exactly once.
+        //
+        //   Phase 2 — refresh(): fresh one-shot server for /info.  After 3x
+        //             refresh() calls, is_finished() must be false, proving /info
+        //             was never contacted during refresh().
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.anchor_columns = vec!["title".into()];
+        config.positive_columns = vec!["body".into()];
+        config.checkpoint_stride = 1;
+
+        let shard_path = dir.path().join("shard.ndjson");
+        fs::write(
+            &shard_path,
+            b"{\"title\":\"t1\",\"body\":\"b1\"}\n{\"title\":\"t2\",\"body\":\"b2\"}\n",
+        )
+        .unwrap();
+
+        // Phase 1: /info during new().  Return a non-trivial ClassLabel response so
+        // source.config.label_maps is populated and the assertion can verify the call.
+        let info_payload_1 = serde_json::json!({
+            "dataset_info": {
+                "features": {
+                    "sentiment": {
+                        "_type": "ClassLabel",
+                        "names": ["negative", "neutral", "positive"]
+                    }
+                }
+            }
+        })
+        .to_string()
+        .into_bytes();
+        let size_payload = serde_json::json!({"size": {"splits": []}})
+            .to_string()
+            .into_bytes();
+
+        let (info_url_1, info_server_1) = spawn_one_shot_http(info_payload_1);
+        let (size_url, size_server) = spawn_one_shot_http(size_payload);
+
+        let config_for_index = config.clone();
+        let source = with_env_vars(
+            &[
+                (TRIPLETS_HF_INFO_ENDPOINT, info_url_1.as_str()),
+                (TRIPLETS_HF_SIZE_ENDPOINT, size_url.as_str()),
+            ],
+            || HuggingFaceRowSource::new(config).unwrap(),
+        );
+
+        // Verify /info was actually called: label_maps must match the mock response.
+        assert_eq!(
+            source.config.label_maps.get("sentiment"),
+            Some(&vec![
+                "negative".to_string(),
+                "neutral".to_string(),
+                "positive".to_string()
+            ]),
+            "fetch_classlabel_maps must have been called during new() \
+             and populated label_maps from the mock /info response"
+        );
+        // Joining the one-shot server confirms it was called exactly once.
+        info_server_1.join().unwrap();
+        size_server.join().unwrap();
+
+        // Phase 2: inject local shard state.
+        // Set remote_candidates = Some(vec![]) so trigger_expansion_if_needed
+        // treats this source as having no remote shards — no background network
+        // thread is spawned from refresh().
+        let shard = HuggingFaceRowSource::index_single_shard(&config_for_index, &shard_path, 0)
+            .unwrap()
+            .0
+            .unwrap();
+        {
+            let mut state = source.state.lock().unwrap();
+            state.shards = vec![shard.clone()];
+            state.materialized_rows = shard.row_count;
+            state.total_rows = Some(shard.row_count);
+            state.remote_candidates = Some(vec![]);
+        }
+
+        // Create a fresh one-shot server for the refresh phase.  If any refresh()
+        // call hits /info the server will serve the request and its thread will
+        // exit — is_finished() would then be true.  We assert it stays false.
+        let info_payload_2 = serde_json::json!({"dataset_info": {"features": {}}})
+            .to_string()
+            .into_bytes();
+        let (info_url_2, info_server_2) = spawn_one_shot_http(info_payload_2);
+
+        for _ in 0..3 {
+            let _ = with_env_vars(&[(TRIPLETS_HF_INFO_ENDPOINT, info_url_2.as_str())], || {
+                source.refresh(None, Some(1))
+            });
+        }
+
+        assert!(
+            !info_server_2.is_finished(),
+            "fetch_classlabel_maps must NOT be called during refresh() — \
+             /info server was unexpectedly hit"
+        );
+    }
+
+    #[test]
+    fn parquet_manifest_fetched_exactly_once_per_candidate_list_population() {
+        // Verify that the /parquet manifest endpoint is contacted only once per
+        // source lifetime.  After the first ensure_row_available() populates
+        // state.remote_candidates, subsequent calls must not re-fetch the manifest.
+        // The counting server stays alive so a spurious second request would be
+        // recorded and the final assertion would catch it.
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config);
+        // Reset to None so the first ensure_row_available() triggers the lazy fetch.
+        source.state.lock().unwrap().remote_candidates = None;
+
+        let shard_payload = b"{\"text\":\"hello\"}\n".to_vec();
+        // Counting manifest+shard server: 4 slots so a second /parquet hit is caught.
+        let (base_url, manifest_counter, _manifest_handle) =
+            spawn_counting_manifest_and_shard_http(4, shard_payload);
+
+        // First call: remote_candidates is None → fetches manifest (counter→1) → downloads shard.
+        let first_available = with_env_var(
+            TRIPLETS_HF_PARQUET_ENDPOINT,
+            &format!("{base_url}/parquet"),
+            || source.ensure_row_available(0).unwrap(),
+        );
+        assert!(first_available);
+        assert_eq!(
+            manifest_counter.load(AtomicOrdering::SeqCst),
+            1,
+            "parquet manifest must be fetched exactly once on first ensure_row_available"
+        );
+
+        // Second call: remote_candidates is now Some(...) → must NOT re-fetch manifest.
+        let _ = with_env_var(
+            TRIPLETS_HF_PARQUET_ENDPOINT,
+            &format!("{base_url}/parquet"),
+            || source.ensure_row_available(0),
+        );
+        assert_eq!(
+            manifest_counter.load(AtomicOrdering::SeqCst),
+            1,
+            "parquet manifest must not be re-fetched on subsequent ensure_row_available calls"
         );
     }
 }
