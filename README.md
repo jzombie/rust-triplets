@@ -337,6 +337,15 @@ Three environment variables let you redirect the datasets-server base URLs — u
 
 When set, the variable value replaces the default `https://datasets-server.huggingface.co` base URL for that endpoint. All three are checked at runtime so they work in both unit tests and integration tests.
 
+#### Authentication and private datasets
+
+**Only public HuggingFace datasets are currently supported.** There is no authentication support:
+
+- The `hf-hub` client is constructed with `.with_token(None)` — the HF Hub token is explicitly disabled and `HF_TOKEN` (or any other credential source) is never consulted.
+- The three `ureq` HTTP calls to the datasets-server (`/parquet`, `/size`, `/info`) are made without an `Authorization` header.
+
+Datasets that require authentication (gated models, private repos, or organization-private datasets) will return HTTP 401/403 errors from both the datasets-server manifest endpoints and the `hf-hub` shard download path, and the source will fail to construct.
+
 ### Adding new sources
 
 Use one of these two paths:
