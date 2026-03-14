@@ -262,7 +262,8 @@ Rules:
 
 - Lines are whitespace-delimited; comments start with `#`.
 - `anchor=`, `positive=`, `context=`, `text=`, `trust=`, and `source_id=` are the accepted keys.
-- At least one of `anchor=`, `positive=`, `context=`, or `text=` is required per line.
+- **Any other key is an error.** Unknown or misspelled keys (for example `positve=`, `iajfaijww=`) are rejected immediately with `"unsupported mapping key '<key>'"` — the parser never silently ignores unrecognised tokens, so typos surface at load time rather than producing silently empty mappings.
+- At least one of `anchor=`, `positive=`, `context=`, or `text=` is required per line; a line with a valid URI but no mapping keys is also an error.
 - HF row extraction is strict: no auto-detect fallback is used when mappings are absent.
 
 **Two extraction modes — pick one per source line:**

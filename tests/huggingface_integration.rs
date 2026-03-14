@@ -1368,6 +1368,28 @@ fn parse_hf_source_line_defaults_trust_and_source_id_to_none() {
 }
 
 #[test]
+fn parse_hf_source_line_rejects_unknown_key_typo() {
+    // "positve" is a typo for "positive" — the parser must reject it, not silently ignore
+    // or fall back to a default, since accepting unknown keys would mask configuration mistakes.
+    let err = parse_hf_source_line("hf://org/dataset/default/train positve=body")
+        .expect_err("typo key 'positve' should be rejected");
+    assert!(
+        err.contains("unsupported mapping key") && err.contains("positve"),
+        "expected 'unsupported mapping key' mentioning 'positve', got: {err}"
+    );
+}
+
+#[test]
+fn parse_hf_source_line_rejects_arbitrary_unknown_key() {
+    let err = parse_hf_source_line("hf://org/dataset/default/train iajfaijww=body")
+        .expect_err("arbitrary unknown key 'iajfaijww' should be rejected");
+    assert!(
+        err.contains("unsupported mapping key") && err.contains("iajfaijww"),
+        "expected 'unsupported mapping key' mentioning 'iajfaijww', got: {err}"
+    );
+}
+
+#[test]
 fn huggingface_rows_config_trust_override_propagates_to_records() {
     let temp = tempfile::tempdir().expect("failed creating tempdir");
     let shard_path = temp.path().join("part-00000.ndjson");
