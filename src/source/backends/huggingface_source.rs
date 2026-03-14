@@ -1575,12 +1575,23 @@ impl HuggingFaceRowSource {
                 let split_tag = format!("{}/", config.split);
                 let split_token = format!("-{}-", config.split);
                 let split_prefix = format!("{}-", config.split);
+                // Flat-table layout: some repositories store each table as a
+                // single file whose stem IS the logical split name rather than
+                // using a `split/shard-NNNNN.parquet` directory hierarchy.
+                // e.g. `data/stock_news.parquet` with split `stock_news`.
+                // The stem must match exactly so that `training` is not selected
+                // when the requested split is `train`.
+                let stem_match = Path::new(remote_path)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|s| s == config.split.as_str());
                 if !remote_path.contains(&split_tag)
                     && !remote_path.contains(&split_token)
                     && !Path::new(remote_path)
                         .file_name()
                         .and_then(|name| name.to_str())
                         .is_some_and(|name| name.starts_with(&split_prefix))
+                    && !stem_match
                 {
                     continue;
                 }
@@ -5127,6 +5138,72 @@ mod tests {
             &config, &siblings, &accepted, true,
         );
         assert_eq!(candidates, vec!["train/new.ndjson".to_string()]);
+    }
+
+    #[test]
+    fn collect_candidates_from_siblings_matches_flat_stem_split() {
+        // Flat repo layout: every table is a single file whose stem IS the split name.
+        // e.g. `hf://org/dataset/default/stock_news` should match only
+        // `data/stock_news.parquet` and leave `data/stock_prices.parquet` out.
+        let dir = tempdir().unwrap();
+        let mut config =
+            HuggingFaceRowsConfig::new("s", "org/ds", "default", "stock_news", dir.path());
+        config.cache_capacity = 4;
+        let accepted = HuggingFaceRowSource::normalized_shard_extensions(&config);
+        let siblings = vec![
+            "data/stock_news.parquet".to_string(),
+            "data/stock_prices.parquet".to_string(),
+            "data/daily_treasury_yield.parquet".to_string(),
+        ];
+
+        let (candidates, saw_parquet) = HuggingFaceRowSource::collect_candidates_from_siblings(
+            &config, &siblings, &accepted, true,
+        );
+
+        assert!(saw_parquet);
+        assert_eq!(candidates, vec!["data/stock_news.parquet".to_string()]);
+    }
+
+    #[test]
+    fn collect_candidates_from_siblings_stem_match_does_not_widen_normal_splits() {
+        // With a conventional split name like "train", only paths that contain
+        // "train/" or "-train-" or whose filename begins with "train-" should match —
+        // NOT a file whose stem merely starts with "train" (e.g. `training.parquet`).
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf()); // split = "train"
+        let accepted = HuggingFaceRowSource::normalized_shard_extensions(&config);
+        let siblings = vec![
+            "train/shard-00000.parquet".to_string(), // ✓ directory prefix
+            "train-00001-of-00002.parquet".to_string(), // ✓ split token
+            "train-00002-of-00002.parquet".to_string(), // ✓ split prefix
+            "training.parquet".to_string(),          // ✗ stem is not exactly "train"
+            "validation/shard-00000.parquet".to_string(), // ✗ different split
+        ];
+
+        let (candidates, _) = HuggingFaceRowSource::collect_candidates_from_siblings(
+            &config, &siblings, &accepted, true,
+        );
+
+        assert!(
+            candidates.contains(&"train/shard-00000.parquet".to_string()),
+            "directory-prefix match must be included"
+        );
+        assert!(
+            candidates.contains(&"train-00001-of-00002.parquet".to_string()),
+            "split-token match must be included"
+        );
+        assert!(
+            candidates.contains(&"train-00002-of-00002.parquet".to_string()),
+            "split-prefix match must be included"
+        );
+        assert!(
+            !candidates.contains(&"training.parquet".to_string()),
+            "stem 'training' must NOT match split 'train'"
+        );
+        assert!(
+            !candidates.contains(&"validation/shard-00000.parquet".to_string()),
+            "different-split file must not be included"
+        );
     }
 
     #[test]

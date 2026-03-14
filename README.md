@@ -233,6 +233,31 @@ Define HF sources in a text file and pass it to the demo or your own loader. The
 hf://org/dataset/config/split anchor=... positive=... context=a,b text=x,y [trust=<f32>] [source_id=<name>]
 ```
 
+**URI path components — `config` and `split`:**
+
+| Components supplied             | Behaviour                                                                            |
+| ------------------------------- | ------------------------------------------------------------------------------------ |
+| `hf://org/dataset`              | Config defaults to `default`; all splits discovered automatically.                   |
+| `hf://org/dataset/config`       | Specified config; all splits discovered automatically.                               |
+| `hf://org/dataset/config/split` | Specified config **and** split — only shards belonging to that split are downloaded. |
+
+The way `split` filters shards depends on how the repository is laid out:
+
+- **Sharded layout** (most large datasets): shards follow the convention
+  `<split>/shard-NNNNN.parquet` or `<split>-NNNNN-of-MMMMM.parquet`.
+  The split name is matched against the directory prefix, a `-split-` token,
+  or a `split-` filename prefix.
+- **Flat-table layout**: some repositories store each logical table as a
+  single top-level file whose stem is the table name — e.g.
+  `data/stock_news.parquet`.  When the split component of the URI exactly
+  matches the file stem (`stock_news`), that file and only that file is
+  selected.  The match is exact, so `train` does **not** accidentally select
+  `training.parquet`.
+- **No split specified** (omitted or empty): all parquet/ndjson files in the
+  config are downloaded.  For multi-table flat repositories this means every
+  table is ingested together, which is usually not what you want — supply the
+  explicit table name as the split component to target a single table.
+
 Rules:
 
 - Lines are whitespace-delimited; comments start with `#`.
@@ -287,6 +312,9 @@ hf://pfox/71k-English-uncleaned-wordlist/default text=text
 
 # ClassLabel column — integers auto-resolved to "neutral"/"bullish"/"bearish" via /info endpoint
 hf://TimKoornstra/financial-tweets-sentiment anchor=tweet positive=sentiment
+
+# flat-table layout — one parquet file per table; split selects a single table
+hf://defeatbeta/yahoo-finance-data/default/stock_news anchor=title positive=news
 ```
 
 HF backend persistence and lookup model:
