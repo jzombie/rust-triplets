@@ -23,7 +23,7 @@ huggingface = ["dep:serde_json", "dep:hf-hub", "dep:parquet", "dep:ureq", "dep:r
 bitcode = "0.6.9"
 cache-manager = "0.4.0"
 chrono = { version = "0.4.44", features = ["serde"] }
-clap = { version = "4.5.60", features = ["derive"] }
+clap = { version = "4.6.0", features = ["derive"] }
 hf-hub = { version = "0.5.0", optional = true, default-features = false, features = ["ureq", "rustls-tls"] }
 indexmap = "2.13.0"
 parquet = { version = "58.0.0", optional = true, features = ["json"] }
