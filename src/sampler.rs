@@ -4,6 +4,7 @@ use rand::prelude::*;
 use rand::seq::IndexedRandom;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -13,9 +14,10 @@ use crate::config::{
     ChunkingStrategy, NegativeStrategy, SamplerConfig, Selector, TextRecipe, TripletRecipe,
 };
 use crate::constants::sampler::{
-    EPOCH_SEED_OFFSET, EXHAUSTION_RETRY_LIMIT, NEG_REASON_WRONG_ARTICLE, NEG_REASON_WRONG_DATE,
-    NEG_REASON_WRONG_QA, PREFETCHER_SOURCE_ID, PREFETCHER_STOPPED_REASON, RECIPE_LABEL_TEXT,
-    RECIPE_LABEL_TRIPLETS, ROLE_LABEL_ANCHOR, ROLE_LABEL_CONTEXT, SAME_SELECTOR_PAIR_RETRY_LIMIT,
+    ANCHOR_POSITIVE_SWAP_MASK, EPOCH_SEED_OFFSET, EXHAUSTION_RETRY_LIMIT, NEG_REASON_WRONG_ARTICLE,
+    NEG_REASON_WRONG_DATE, NEG_REASON_WRONG_QA, PREFETCHER_SOURCE_ID, PREFETCHER_STOPPED_REASON,
+    RECIPE_LABEL_TEXT, RECIPE_LABEL_TRIPLETS, ROLE_LABEL_ANCHOR, ROLE_LABEL_CONTEXT,
+    SAME_SELECTOR_PAIR_RETRY_LIMIT,
 };
 use crate::data::{
     ChunkView, DataRecord, PairLabel, RecordChunk, RecordSection, SampleBatch, SamplePair,
@@ -23,7 +25,7 @@ use crate::data::{
 };
 use crate::epoch::EpochTracker;
 use crate::errors::SamplerError;
-use crate::hash::stable_hash_str;
+use crate::hash::{derive_epoch_seed, stable_hash_str};
 use crate::ingestion::IngestionManager;
 use crate::metadata::{META_FIELD_DATE, MetadataKey};
 use crate::source::DataSource;
@@ -332,7 +334,11 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         };
         let ingestion = IngestionManager::new(buffer_size, config.clone());
         let epoch_backend = Some(Arc::clone(&split_store) as Arc<dyn EpochStateStore>);
-        let epoch_tracker = EpochTracker::new(true, epoch_backend, config.seed ^ EPOCH_SEED_OFFSET);
+        let epoch_tracker = EpochTracker::new(
+            true,
+            epoch_backend,
+            derive_epoch_seed(config.seed, EPOCH_SEED_OFFSET),
+        );
         let mut sampler = Self {
             rng: DeterministicRng::new(config.seed),
             config,
@@ -373,6 +379,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         &self.text_recipes
     }
 
+    /// Current epoch-adjusted seed: mixes `source_epoch` into `config.seed` so every epoch
+    /// produces a distinct permutation across all seed-dependent operations.
+    fn epoch_seed(&self) -> u64 {
+        derive_epoch_seed(self.config.seed, self.source_epoch)
+    }
+
     fn register_source(&mut self, source: Box<dyn DataSource + 'static>) {
         let source_id = source.id().to_string();
         if !self.using_config_triplet_recipes {
@@ -395,6 +407,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         self.epoch_tracker.ensure_loaded()?;
         self.epoch_tracker.force_epoch(epoch);
         self.source_epoch = epoch;
+        self.ingestion.set_source_epoch(epoch);
+        self.ingestion.reset_stream_cursors();
         self.source_record_cursors.clear();
         self.source_cycle_idx = 0;
         for source in &self.source_order {
@@ -422,9 +436,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             // - first sampled window is spread across records/sections,
             // - subsequent calls still rotate cyclically through the pool.
             let cursor_key = format!("{}::{}", record_id, section_idx);
-            let start = (stable_hash_str(self.config.seed ^ self.source_epoch, &cursor_key)
-                as usize)
-                % pool.len();
+            let start = (stable_hash_str(self.epoch_seed(), &cursor_key) as usize) % pool.len();
             self.chunk_cursors.insert(key.clone(), start);
         }
         let cursor = self.chunk_cursors.entry(key).or_insert(0);
@@ -480,7 +492,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 .push(idx);
         }
 
-        let shuffle_seed = self.config.seed ^ self.source_epoch;
+        let shuffle_seed = self.epoch_seed();
         for indices in self.source_record_indices.values_mut() {
             indices.sort_by_key(|idx| {
                 self.records
@@ -525,7 +537,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
 
     fn shuffled_source_cycle(&self, cycle: u64) -> Vec<SourceId> {
         let mut sources = self.source_order.clone();
-        let seed = self.config.seed ^ self.source_epoch ^ cycle;
+        let seed = self.epoch_seed() ^ cycle;
         sources.sort_by_key(|source| stable_hash_str(seed, source));
         sources
     }
@@ -546,6 +558,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 }
             }
             self.source_epoch = state.source_epoch;
+            self.ingestion.set_source_epoch(state.source_epoch);
             self.rng = DeterministicRng::from_state(state.rng_state);
             self.triplet_recipe_rr_idx = state.triplet_recipe_rr_idx as usize;
             self.text_recipe_rr_idx = state.text_recipe_rr_idx as usize;
@@ -556,7 +569,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         Ok(())
     }
 
-    fn persist_source_state(&mut self) -> Result<(), SamplerError> {
+    fn persist_source_state(&mut self, save_to: Option<&Path>) -> Result<(), SamplerError> {
         if !self.source_state_loaded {
             return Ok(());
         }
@@ -573,7 +586,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             text_recipe_rr_idx: self.text_recipe_rr_idx as u64,
             source_stream_cursors: self.ingestion.snapshot_cursors(),
         };
-        self.split_store.store_sampler_state(&state)?;
+        self.split_store.save_sampler_state(&state, save_to)?;
         self.source_state_dirty = false;
         Ok(())
     }
@@ -812,7 +825,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             }
             let mut cursor = *self.source_record_cursors.get(source).unwrap_or(&0);
             let cycle = cursor / indices.len();
-            let offset_seed = self.config.seed ^ self.source_epoch ^ (cycle as u64);
+            let offset_seed = self.epoch_seed() ^ (cycle as u64);
             let offset = (stable_hash_str(offset_seed, source) as usize) % indices.len();
             let mut wrapped = false;
             let mut selected: Option<DataRecord> = None;
@@ -848,11 +861,11 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         None
     }
 
-    fn persist_state(&mut self) -> Result<(), SamplerError> {
+    fn save_sampler_state(&mut self, save_to: Option<&Path>) -> Result<(), SamplerError> {
         if self.epoch_tracker.is_enabled() {
             self.epoch_tracker.persist()?;
         }
-        self.persist_source_state()?;
+        self.persist_source_state(save_to)?;
         Ok(())
     }
 
@@ -872,6 +885,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
 
     fn advance_source_epoch(&mut self) {
         self.source_epoch = self.source_epoch.saturating_add(1);
+        self.ingestion.set_source_epoch(self.source_epoch);
         self.source_record_cursors.clear();
         self.source_cycle_idx = 0;
         for source in &self.source_order {
@@ -1196,6 +1210,24 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         self.build_triplet_with_selector_pair_policy(recipe, record, false)
     }
 
+    /// Finalize a triplet by selecting a negative and applying a deterministic 50 % coin-flip
+    /// that swaps anchor and positive.
+    ///
+    /// # Anchor/positive swap
+    ///
+    /// Before constructing the [`SampleTriplet`], the sampler tests the least-significant bit of
+    /// the next RNG word. When the bit is zero (≈ 50 % of the time) the anchor and positive
+    /// slots are exchanged so that what was originally selected as the positive becomes the
+    /// anchor, and vice-versa.
+    ///
+    /// **Why this matters:** contrastive objectives such as InfoNCE treat the two non-negative
+    /// slots asymmetrically only in so far as downstream code does. If the model can learn a
+    /// positional shortcut — for example "the anchor is always the shorter text" — it can
+    /// achieve low loss without learning the intended similarity structure. The swap eliminates
+    /// that opportunity by ensuring both orderings appear at equal frequency, forcing the model
+    /// to treat the two positive-pair slots symmetrically.
+    ///
+    /// The negative chunk is unaffected by the swap.
     fn finalize_triplet_with_negative(
         &mut self,
         recipe: &TripletRecipe,
@@ -1207,6 +1239,27 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             self.select_negative_record(record, &recipe.negative_strategy)?;
         let mut negative_chunk = self.select_chunk(&negative_record, &recipe.negative_selector)?;
         self.decorate_chunk(&negative_record, &mut negative_chunk);
+
+        // 50 % coin-flip: swap anchor and positive to prevent positional shortcuts.
+        let (anchor_chunk, positive_chunk) = if self.rng.next_u64() & ANCHOR_POSITIVE_SWAP_MASK == 0
+        {
+            (positive_chunk, anchor_chunk)
+        } else {
+            (anchor_chunk, positive_chunk)
+        };
+
+        // Reject if any two slots share identical rendered text.  This catches sources
+        // that produce multiple records with the same string content: a negative whose
+        // text matches the positive (or the anchor) would produce a trivially-invalid
+        // training example.  String equality short-circuits on the first differing byte,
+        // so the guard is effectively free when texts differ (the common case).
+        if anchor_chunk.text == positive_chunk.text
+            || negative_chunk.text == positive_chunk.text
+            || negative_chunk.text == anchor_chunk.text
+        {
+            return None;
+        }
+
         let weight = recipe.weight
             * self.triplet_chunk_weight(&anchor_chunk, &positive_chunk, &negative_chunk);
         let recipe_name = if fallback_used {
@@ -1275,6 +1328,21 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             && let Some(prefix) = spec.sample(&mut self.rng)
         {
             chunk.text = format!("{}\n{}", prefix, chunk.text);
+            // Re-estimate tokens after decoration and cap to configured window size.
+            let tokens: Vec<&str> = chunk.text.split_whitespace().collect();
+            let total_tokens = tokens.len();
+            let max_window = self.config.chunking.max_window_tokens;
+            if max_window > 0 && total_tokens > max_window {
+                let truncated = tokens
+                    .into_iter()
+                    .take(max_window)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                chunk.text = truncated;
+                chunk.tokens_estimate = max_window;
+            } else {
+                chunk.tokens_estimate = total_tokens;
+            }
         }
     }
 
@@ -1323,8 +1391,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 // section offset instead of always starting at the first matching section.
                 // This avoids systematic head-bias while preserving reproducibility.
                 let seed_key = format!("{}::{}", key.0, key.1);
-                (stable_hash_str(self.config.seed ^ self.source_epoch, &seed_key) as usize)
-                    % indices.len()
+                (stable_hash_str(self.epoch_seed(), &seed_key) as usize) % indices.len()
             });
         for offset in 0..indices.len() {
             let section_idx = indices[(start_offset + offset) % indices.len()];
@@ -1504,6 +1571,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         if !self.ingestion_cursors_loaded {
             if let Some(state) = self.split_store.load_sampler_state()? {
                 self.ingestion.load_cursors(&state.source_stream_cursors);
+                self.ingestion.set_source_epoch(state.source_epoch);
             }
             self.ingestion_cursors_loaded = true;
         }
@@ -1542,14 +1610,15 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         if !self.ingestion_cursors_loaded {
             if let Some(state) = self.split_store.load_sampler_state()? {
                 self.ingestion.load_cursors(&state.source_stream_cursors);
+                self.ingestion.set_source_epoch(state.source_epoch);
             }
             self.ingestion_cursors_loaded = true;
         }
         if self.ingestion.cache().is_empty() {
-            self.ingestion.refresh_all_with_weights(weights);
+            self.ingestion.refresh_all_with_weights(weights)?;
         } else {
             self.ingestion
-                .advance_with_weights(self.config.batch_size, weights);
+                .advance_with_weights(self.config.batch_size, weights)?;
         }
         let observed = self.ingestion.cache().ingest_count();
         if observed == self.last_observed_ingest && !self.records.is_empty() {
@@ -1576,10 +1645,11 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         if !self.ingestion_cursors_loaded {
             if let Some(state) = self.split_store.load_sampler_state()? {
                 self.ingestion.load_cursors(&state.source_stream_cursors);
+                self.ingestion.set_source_epoch(state.source_epoch);
             }
             self.ingestion_cursors_loaded = true;
         }
-        self.ingestion.force_refresh_all_with_weights(weights);
+        self.ingestion.force_refresh_all_with_weights(weights)?;
         self.last_observed_ingest = self.ingestion.cache().ingest_count();
         self.sync_records_from_cache()?;
         self.epoch_tracker.ensure_loaded()?;
@@ -2290,9 +2360,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     }
 
     /// Persist sampler and split runtime state for restart-resume.
-    pub fn persist_state(&self) -> Result<(), SamplerError> {
+    ///
+    /// When `save_to` is `Some(path)`, current persisted runtime state is also
+    /// mirrored to `path` when supported by the split-store backend.
+    pub fn save_sampler_state(&self, save_to: Option<&Path>) -> Result<(), SamplerError> {
         let mut inner = self.inner.lock().unwrap();
-        inner.persist_state()
+        inner.save_sampler_state(save_to)
     }
 }
 
@@ -2793,6 +2866,38 @@ mod tests {
     fn split_meta_parts(meta_prefix: &str) -> Vec<String> {
         let body = meta_prefix.strip_prefix("meta: ").unwrap_or(meta_prefix);
         body.split(" | ").map(|part| part.to_string()).collect()
+    }
+
+    #[test]
+    fn decorate_chunk_truncates_and_updates_tokens_estimate() {
+        let split = SplitRatios::default();
+        let store = Arc::new(DeterministicSplitStore::new(split, 42).unwrap());
+        let mut cfg = base_config();
+        // small window so truncation is obvious
+        cfg.chunking.max_window_tokens = 5;
+        let sampler = TripletSampler::new(cfg, store);
+
+        // Build a short section that would be under the window without meta prefix
+        let mut record = sample_record();
+        record.sections[0].text = "one two three".to_string();
+
+        // Add a meta prefix variant that expands the token count beyond the window
+        let mut kvp = KvpPrefixSampler::new(1.0);
+        kvp.add_variant([("long", "a b c d e f g h i")] as [(&str, &str); 1]);
+        record.meta_prefix = Some(kvp);
+
+        let mut inner = sampler.inner.lock().unwrap();
+        let mut chunks = inner.materialize_chunks(&record, 0, &record.sections[0]);
+        assert!(!chunks.is_empty());
+        let mut chunk = chunks.remove(0);
+        // initial estimate should reflect original short section
+        assert_eq!(chunk.tokens_estimate, 3);
+
+        inner.decorate_chunk(&record, &mut chunk);
+
+        let tokens_after = chunk.text.split_whitespace().count();
+        assert_eq!(tokens_after, 5);
+        assert_eq!(chunk.tokens_estimate, 5);
     }
 
     #[test]
@@ -3323,7 +3428,7 @@ mod tests {
         };
         assert_eq!(
             sampler.inner.lock().unwrap().chunk_weight(&early_chunk),
-            0.9
+            0.45
         );
     }
 
@@ -3431,7 +3536,140 @@ mod tests {
             .lock()
             .unwrap()
             .triplet_chunk_weight(&anchor, &positive, &negative);
-        assert!((avg - (1.0 + 0.5 + 0.0) / 3.0).abs() < f32::EPSILON);
+        let trust = QualityScore::default().trust;
+        let expected = trust * (1.0 + 0.5 + 0.0) / 3.0;
+        assert!((avg - expected).abs() < f32::EPSILON);
+    }
+
+    // Enforcement test: text, pair, and triplet samples must all be drawn from
+    // the same chunk windows that `materialize_chunks` would produce for the
+    // record's section.  If the chunking path is ever accidentally bypassed for
+    // one sample type, the chunk text will not appear in the precomputed pool
+    // and this test will fail.
+    #[test]
+    fn text_pair_and_triplet_chunks_all_come_from_materialize_pool() {
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let mut config = base_config();
+        config.seed = 42;
+        config.batch_size = 2;
+        config.allowed_splits = vec![SplitLabel::Train];
+        // Small window so multiple distinct windows are produced from one section,
+        // making membership assertions meaningful.
+        config.chunking = ChunkingStrategy {
+            max_window_tokens: 4,
+            overlap_tokens: vec![1],
+            summary_fallback_weight: 0.0,
+            summary_fallback_tokens: 0,
+            chunk_weight_floor: 0.0,
+        };
+        let context_text = "alpha beta gamma delta epsilon zeta eta theta";
+        config.recipes = vec![TripletRecipe {
+            name: "parity_triplet".into(),
+            anchor: Selector::Role(SectionRole::Context),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 1.0,
+            instruction: None,
+        }];
+        config.text_recipes = vec![TextRecipe {
+            name: "parity_text".into(),
+            selector: Selector::Role(SectionRole::Context),
+            weight: 1.0,
+            instruction: None,
+        }];
+
+        let make_record = |id: &str| DataRecord {
+            id: id.into(),
+            source: "unit".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            quality: QualityScore { trust: 1.0 },
+            taxonomy: vec![],
+            sections: vec![RecordSection {
+                role: SectionRole::Context,
+                heading: None,
+                text: context_text.into(),
+                sentences: vec![context_text.into()],
+            }],
+            meta_prefix: None,
+        };
+        let records = vec![make_record("parity_a"), make_record("parity_b")];
+
+        // Build the expected pool by calling materialize_chunks directly on the
+        // shared section text.  Both records have identical section text, so one
+        // pool covers all possible chunk texts.
+        let pool_store = Arc::new(DeterministicSplitStore::new(split, 1).unwrap());
+        let pool_sampler = TripletSampler::new(config.clone(), pool_store);
+        let expected_pool: HashSet<String> = pool_sampler
+            .inner
+            .lock()
+            .unwrap()
+            .materialize_chunks(&records[0], 0, &records[0].sections[0])
+            .into_iter()
+            .map(|c| c.text)
+            .collect();
+        assert!(!expected_pool.is_empty(), "pool must not be empty");
+
+        let store = Arc::new(DeterministicSplitStore::new(split, 77).unwrap());
+        let sampler = TripletSampler::new(config, store);
+        sampler.register_source(Box::new(InMemorySource::new("unit", records)));
+
+        // Text batches ─ every sampled chunk must come from the pool.
+        for _ in 0..5 {
+            let batch = sampler.next_text_batch(SplitLabel::Train).unwrap();
+            for sample in &batch.samples {
+                assert!(
+                    expected_pool.contains(sample.chunk.text.as_str()),
+                    "text sample chunk {:?} not in materialize_chunks pool {:?}",
+                    sample.chunk.text,
+                    expected_pool,
+                );
+            }
+        }
+
+        // Triplet batches ─ anchor, positive, and negative must all be in the pool.
+        for _ in 0..5 {
+            let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
+            for triplet in &batch.triplets {
+                assert!(
+                    expected_pool.contains(triplet.anchor.text.as_str()),
+                    "triplet anchor {:?} not in pool",
+                    triplet.anchor.text,
+                );
+                assert!(
+                    expected_pool.contains(triplet.positive.text.as_str()),
+                    "triplet positive {:?} not in pool",
+                    triplet.positive.text,
+                );
+                assert!(
+                    expected_pool.contains(triplet.negative.text.as_str()),
+                    "triplet negative {:?} not in pool",
+                    triplet.negative.text,
+                );
+            }
+        }
+
+        // Pair batches ─ anchor and positive must be in the pool.
+        for _ in 0..5 {
+            let batch = sampler.next_pair_batch(SplitLabel::Train).unwrap();
+            for pair in &batch.pairs {
+                assert!(
+                    expected_pool.contains(pair.anchor.text.as_str()),
+                    "pair anchor {:?} not in pool",
+                    pair.anchor.text,
+                );
+                assert!(
+                    expected_pool.contains(pair.positive.text.as_str()),
+                    "pair positive {:?} not in pool",
+                    pair.positive.text,
+                );
+            }
+        }
     }
 
     #[test]
@@ -3487,8 +3725,9 @@ mod tests {
         let first = sampler.next_text_batch(SplitLabel::Train).unwrap();
         let second = sampler.next_text_batch(SplitLabel::Train).unwrap();
 
-        assert!((first.samples[0].weight - 2.0).abs() < f32::EPSILON);
-        assert!((second.samples[0].weight - 1.0).abs() < f32::EPSILON);
+        let trust = QualityScore::default().trust;
+        assert!((first.samples[0].weight - (2.0 * trust)).abs() < f32::EPSILON);
+        assert!((second.samples[0].weight - (1.0 * trust)).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -5717,37 +5956,37 @@ mod tests {
                 &find_id(SplitLabel::Train, "fallback_train_a"),
                 "2025-01-01",
                 "Train A",
-                "Body",
+                "Body train a",
             ),
             trader_record(
                 &find_id(SplitLabel::Train, "fallback_train_b"),
                 "2025-01-01",
                 "Train B",
-                "Body",
+                "Body train b",
             ),
             trader_record(
                 &find_id(SplitLabel::Validation, "fallback_val_a"),
                 "2025-01-01",
                 "Val A",
-                "Body",
+                "Body val a",
             ),
             trader_record(
                 &find_id(SplitLabel::Validation, "fallback_val_b"),
                 "2025-01-01",
                 "Val B",
-                "Body",
+                "Body val b",
             ),
             trader_record(
                 &find_id(SplitLabel::Test, "fallback_test_a"),
                 "2025-01-01",
                 "Test A",
-                "Body",
+                "Body test a",
             ),
             trader_record(
                 &find_id(SplitLabel::Test, "fallback_test_b"),
                 "2025-01-01",
                 "Test B",
-                "Body",
+                "Body test b",
             ),
         ];
 
@@ -5838,37 +6077,37 @@ mod tests {
                 &find_id(SplitLabel::Train, "triplet_split_train_a"),
                 "2025-01-01",
                 "Train A",
-                "Body",
+                "Body train a",
             ),
             trader_record(
                 &find_id(SplitLabel::Train, "triplet_split_train_b"),
                 "2025-01-02",
                 "Train B",
-                "Body",
+                "Body train b",
             ),
             trader_record(
                 &find_id(SplitLabel::Validation, "triplet_split_val_a"),
                 "2025-01-03",
                 "Val A",
-                "Body",
+                "Body val a",
             ),
             trader_record(
                 &find_id(SplitLabel::Validation, "triplet_split_val_b"),
                 "2025-01-04",
                 "Val B",
-                "Body",
+                "Body val b",
             ),
             trader_record(
                 &find_id(SplitLabel::Test, "triplet_split_test_a"),
                 "2025-01-05",
                 "Test A",
-                "Body",
+                "Body test a",
             ),
             trader_record(
                 &find_id(SplitLabel::Test, "triplet_split_test_b"),
                 "2025-01-06",
                 "Test B",
-                "Body",
+                "Body test b",
             ),
         ];
 
@@ -5935,7 +6174,7 @@ mod tests {
                     &id,
                     "2025-01-01",
                     &format!("{split_label:?} {idx}"),
-                    "body",
+                    &format!("{split_label:?} body {idx}"),
                 ));
             }
         }
@@ -6043,7 +6282,7 @@ mod tests {
                     &id,
                     "2025-01-01",
                     &format!("{split_label:?} {idx}"),
-                    "body",
+                    &format!("{split_label:?} body {idx}"),
                 ));
             }
         }
@@ -6235,16 +6474,12 @@ mod tests {
         config.text_recipes = Vec::new();
         let store = Arc::new(DeterministicSplitStore::new(split, 11).unwrap());
         let sampler = TripletSampler::new(config, store);
-        let mut rec_a = sample_record();
-        rec_a.id = "record_a".into();
-        let mut rec_b = sample_record();
-        rec_b.id = "record_b".into();
-        let mut rec_c = sample_record();
-        rec_c.id = "record_c".into();
-        sampler.register_source(Box::new(InMemorySource::new(
-            "unit",
-            vec![rec_a, rec_b, rec_c],
-        )));
+        let records = vec![
+            trader_record("src::cycle_a", "2025-01-01", "Cycle A", "Body cycle a"),
+            trader_record("src::cycle_b", "2025-01-02", "Cycle B", "Body cycle b"),
+            trader_record("src::cycle_c", "2025-01-03", "Cycle C", "Body cycle c"),
+        ];
+        sampler.register_source(Box::new(InMemorySource::new("unit", records)));
 
         let mut seen = std::collections::HashSet::new();
         for _ in 0..10 {
@@ -6533,7 +6768,7 @@ mod tests {
                 .anchor
                 .record_id
                 .clone();
-            sampler.persist_state().unwrap();
+            sampler.save_sampler_state(None).unwrap();
             anchor
         };
 
@@ -6551,7 +6786,7 @@ mod tests {
             let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
             anchors.extend(batch.triplets.iter().map(|t| t.anchor.record_id.clone()));
         }
-        sampler.persist_state().unwrap();
+        sampler.save_sampler_state(None).unwrap();
         assert!(
             anchors.contains(&first_anchor),
             "previously consumed records may reappear with streaming paging"
@@ -6614,7 +6849,7 @@ mod tests {
                 .unwrap();
             let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
             let anchor = batch.triplets[0].anchor.record_id.clone();
-            sampler.persist_state().unwrap();
+            sampler.save_sampler_state(None).unwrap();
             anchor
         };
 
@@ -6650,6 +6885,95 @@ mod tests {
             }
         }
         assert!(seen.contains("source_a::2025/03-03/restart_c.txt"));
+    }
+
+    #[test]
+    fn source_epoch_is_propagated_to_ingestion_on_resume() {
+        // Verify that when a sampler resumes from persisted state after a
+        // cache wipe (e.g. only simd-r-drive state is kept), the ingestion
+        // manager already has the correct source_epoch before the very first
+        // refresh call fires.  If source_epoch were loaded too late (only in
+        // ensure_source_state, which runs *after* the first refresh), sources
+        // that derive their permutation seed from config.seed inside refresh()
+        // would silently use epoch 0 instead of the persisted epoch.
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let temp = tempdir().unwrap();
+        let store_path = temp.path().join("epoch_propagation_store");
+        let build_config = || SamplerConfig {
+            seed: 77,
+            batch_size: 2,
+            chunking: ChunkingStrategy::default(),
+            recipes: vec![TripletRecipe {
+                name: "ep_triplet".into(),
+                anchor: Selector::Role(SectionRole::Anchor),
+                positive_selector: Selector::Role(SectionRole::Context),
+                negative_selector: Selector::Role(SectionRole::Context),
+                negative_strategy: NegativeStrategy::WrongArticle,
+                weight: 1.0,
+                instruction: None,
+            }],
+            text_recipes: Vec::new(),
+            split,
+            allowed_splits: vec![SplitLabel::Train],
+            ..SamplerConfig::default()
+        };
+        let records: Vec<DataRecord> = (0..4)
+            .map(|i| {
+                trader_record(
+                    &format!("src::ep_record_{i:02}"),
+                    "2025-06-01",
+                    &format!("Title {i}"),
+                    &format!("Body {i}"),
+                )
+            })
+            .collect();
+
+        // First run: advance enough batches to trigger at least one source_epoch
+        // increment so the persisted epoch is non-zero.
+        let persisted_epoch = {
+            let store = Arc::new(FileSplitStore::open(&store_path, split, 11).unwrap());
+            let sampler = TripletSampler::new(build_config(), Arc::clone(&store));
+            sampler.register_source(Box::new(InMemorySource::new("src", records.clone())));
+            // Drive enough batches to cycle through all records and advance epoch.
+            for _ in 0..8 {
+                let _ = sampler.next_triplet_batch(SplitLabel::Train);
+            }
+            sampler.save_sampler_state(None).unwrap();
+            let state = store.load_sampler_state().unwrap().unwrap();
+            state.source_epoch
+        };
+
+        // Epoch must have advanced — the test is meaningless if it stayed at 0.
+        assert!(
+            persisted_epoch > 0,
+            "source_epoch should have advanced; got {persisted_epoch}"
+        );
+
+        // Second run: simulate a cache wipe by NOT reloading the ingestion
+        // stream cursors, i.e. start the sampler fresh but with the same store.
+        // After the very first ingest call the ingestion manager's source_epoch
+        // must equal the persisted value before any refresh fires.
+        let store = Arc::new(FileSplitStore::open(&store_path, split, 11).unwrap());
+        let sampler = TripletSampler::new(build_config(), Arc::clone(&store));
+        sampler.register_source(Box::new(InMemorySource::new("src", records.clone())));
+        {
+            let mut inner = sampler.inner.lock().unwrap();
+            // Trigger cursor loading (the step that must set source_epoch early).
+            inner.ingest_internal(SplitLabel::Train).unwrap();
+            assert_eq!(
+                inner.ingestion.source_epoch(),
+                persisted_epoch,
+                "ingestion source_epoch must match persisted epoch after resume"
+            );
+            assert_eq!(
+                inner.source_epoch, persisted_epoch,
+                "sampler source_epoch must match persisted epoch after resume"
+            );
+        }
     }
 
     #[test]
@@ -7775,13 +8099,18 @@ mod tests {
         }];
 
         let sampler = Arc::new(TripletSampler::new(config, store));
-        let mut records = Vec::new();
-        for idx in 0..4 {
-            let mut record = sample_record();
-            record.id = format!("prefetch_{idx}");
-            record.source = "prefetch_source".to_string();
-            records.push(record);
-        }
+        let records: Vec<DataRecord> = (0..4)
+            .map(|idx| {
+                let mut record = trader_record(
+                    &format!("prefetch_{idx}"),
+                    "2025-01-01",
+                    &format!("Prefetch title {idx}"),
+                    &format!("Prefetch body {idx}"),
+                );
+                record.source = "prefetch_source".to_string();
+                record
+            })
+            .collect();
         sampler.register_source(Box::new(InMemorySource::new("prefetch_source", records)));
         sampler
     }
@@ -7842,5 +8171,298 @@ mod tests {
         assert_eq!(pair.next().unwrap().pairs.len(), 1);
         assert_eq!(text.next().unwrap().samples.len(), 1);
         assert_eq!(triplet.error_count(), 0);
+    }
+
+    #[test]
+    fn different_epochs_produce_different_record_orderings() {
+        // Behavioural guarantee: advancing the epoch must produce a measurably
+        // different sequence of anchor records, not just change an internal
+        // counter with no observable effect.
+        //
+        // How it works: rebuild_chunk_index() sorts source_record_indices by
+        // stable_hash_str(epoch_seed(), record_id), and choose_anchor_record()
+        // derives its offset from epoch_seed() ^ cycle.  Both are keyed to the
+        // current epoch, so a different epoch shuffles the records differently.
+        //
+        // With 6 records the probability that two distinct epoch seeds produce
+        // the same permutation is 1/6! ≈ 0.14%.  We fix the seed so the test
+        // is fully deterministic and will never spuriously pass.
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let store = Arc::new(DeterministicSplitStore::new(split, 55).unwrap());
+
+        let records: Vec<DataRecord> = (0..6)
+            .map(|i| {
+                trader_record(
+                    &format!("epoch_order::rec_{i:02}"),
+                    "2025-01-01",
+                    &format!("Title {i}"),
+                    &format!("Body {i} with enough context for sampling"),
+                )
+            })
+            .collect();
+
+        let config = SamplerConfig {
+            seed: 55,
+            batch_size: 1,
+            recipes: vec![TripletRecipe {
+                name: "epoch_order".into(),
+                anchor: Selector::Role(SectionRole::Anchor),
+                positive_selector: Selector::Role(SectionRole::Context),
+                negative_selector: Selector::Role(SectionRole::Context),
+                negative_strategy: NegativeStrategy::WrongArticle,
+                weight: 1.0,
+                instruction: None,
+            }],
+            text_recipes: Vec::new(),
+            allowed_splits: vec![SplitLabel::Train],
+            ..SamplerConfig::default()
+        };
+
+        let sampler = TripletSampler::new(config, store);
+        sampler.register_source(Box::new(InMemorySource::new("epoch_order", records)));
+
+        // Epoch 0: collect one anchor per batch across all 6 records.
+        let epoch0: Vec<String> = (0..6)
+            .map(|_| {
+                sampler
+                    .next_triplet_batch(SplitLabel::Train)
+                    .expect("epoch-0 batch must succeed")
+                    .triplets[0]
+                    .anchor
+                    .record_id
+                    .clone()
+            })
+            .collect();
+
+        // Advance to epoch 1 — rebuilds the shuffle with a new seed.
+        sampler.set_epoch(1).unwrap();
+
+        // Epoch 1: collect the same number of batches.
+        let epoch1: Vec<String> = (0..6)
+            .map(|_| {
+                sampler
+                    .next_triplet_batch(SplitLabel::Train)
+                    .expect("epoch-1 batch must succeed")
+                    .triplets[0]
+                    .anchor
+                    .record_id
+                    .clone()
+            })
+            .collect();
+
+        assert_ne!(
+            epoch0, epoch1,
+            "epoch 0 and epoch 1 produced identical anchor orderings — \
+             epoch seed has no effect on record selection"
+        );
+    }
+
+    #[test]
+    fn resumed_sampler_uses_persisted_epoch_seed() {
+        // Guarantee: when a sampler resumes from persisted state at epoch N it
+        // must produce a genuinely different record ordering than epoch 0 —
+        // the epoch is not just an internal counter with no observable effect.
+        //
+        // Structure:
+        //   Baseline  — fresh sampler at epoch 0 (DeterministicSplitStore);
+        //               draw n_draws records in order.
+        //   Setup     — separate sampler on a file store: draw one batch to
+        //               prime source-state loading (so the save is not a no-op),
+        //               call set_epoch(1), then save.  The persisted state now
+        //               has cursor=1 and source_epoch=1.
+        //   Resume    — brand-new sampler on the same file store; no set_epoch
+        //               call; draw n_draws records.  Epoch 1 must be loaded
+        //               automatically from the store.
+        //
+        // n_records=20 / n_draws=10 keeps all draws inside cycle-0 (cursor never
+        // reaches a multiple of n_records during the draw phase), avoiding
+        // offset-seed changes at cycle boundaries.
+        //
+        // Assertions:
+        //   (b) The full ordered sequences differ — advancing the epoch reshuffles
+        //       records; it must not replay epoch 0 in the same order.
+        //   (c) The first half of each sequence differs as a set — records that
+        //       came early in epoch 0 shift position in epoch 1, proving that
+        //       "a new epoch" is not just a different label on the same early pool.
+        let base_seed = 0xC0FFEE_u64;
+        let n_records = 20_usize;
+        let n_draws = 10_usize;
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let temp = tempdir().unwrap();
+        let store_path = temp.path().join("epoch_seed_resume_store");
+
+        let records: Vec<DataRecord> = (0..n_records)
+            .map(|i| {
+                trader_record(
+                    &format!("ep_resume::rec_{i:02}"),
+                    "2025-01-01",
+                    &format!("Title {i}"),
+                    &format!("Body {i} with enough context for sampling"),
+                )
+            })
+            .collect();
+
+        let make_config = || SamplerConfig {
+            seed: base_seed,
+            batch_size: 1,
+            recipes: vec![TripletRecipe {
+                name: "ep".into(),
+                anchor: Selector::Role(SectionRole::Anchor),
+                positive_selector: Selector::Role(SectionRole::Context),
+                negative_selector: Selector::Role(SectionRole::Context),
+                negative_strategy: NegativeStrategy::WrongArticle,
+                weight: 1.0,
+                instruction: None,
+            }],
+            text_recipes: Vec::new(),
+            allowed_splits: vec![SplitLabel::Train],
+            ..SamplerConfig::default()
+        };
+
+        // Accepts &dyn Sampler so it works with both DeterministicSplitStore
+        // and FileSplitStore without monomorphisation issues.
+        let draw_n = |sampler: &dyn Sampler, n: usize| -> Vec<String> {
+            (0..n)
+                .map(|_| {
+                    sampler
+                        .next_triplet_batch(SplitLabel::Train)
+                        .expect("batch must succeed")
+                        .triplets[0]
+                        .anchor
+                        .record_id
+                        .clone()
+                })
+                .collect()
+        };
+
+        // Baseline — epoch 0, cursor starts at 0.
+        let epoch0_sequence: Vec<String> = {
+            let store = Arc::new(DeterministicSplitStore::new(split, base_seed).unwrap());
+            let sampler = TripletSampler::new(make_config(), store);
+            sampler.register_source(Box::new(InMemorySource::new("ep_resume", records.clone())));
+            draw_n(&sampler, n_draws)
+        };
+
+        // Setup — draw one batch to mark source state as loaded (persist_source_state
+        // is a no-op when source_state_loaded=false), advance to epoch 1, then save.
+        // Saved state: cursor=1, source_epoch=1.
+        {
+            let store = Arc::new(FileSplitStore::open(&store_path, split, base_seed).unwrap());
+            let sampler = TripletSampler::new(make_config(), Arc::clone(&store));
+            sampler.register_source(Box::new(InMemorySource::new("ep_resume", records.clone())));
+            sampler
+                .next_triplet_batch(SplitLabel::Train)
+                .expect("priming batch must succeed");
+            sampler.set_epoch(1).unwrap();
+            sampler.save_sampler_state(None).unwrap();
+        }
+
+        // Resume — fresh sampler, epoch loaded from store (no set_epoch call).
+        // cursor=1 + n_draws=10 draws = cursor 1→11, all within cycle-0 (11 < 20).
+        let epoch1_sequence: Vec<String> = {
+            let store = Arc::new(FileSplitStore::open(&store_path, split, base_seed).unwrap());
+            let sampler = TripletSampler::new(make_config(), store);
+            sampler.register_source(Box::new(InMemorySource::new("ep_resume", records.clone())));
+            draw_n(&sampler, n_draws)
+        };
+
+        // (b) The full ordered sequences must differ.
+        assert_ne!(
+            epoch0_sequence, epoch1_sequence,
+            "epoch 0 and epoch 1 (resumed from store) produced identical anchor orderings — \
+             epoch advancement has no effect on record selection order"
+        );
+
+        // (c) The early records must differ as a set: records that came first in
+        //     epoch 0 must not all appear first in epoch 1 and vice versa.
+        let half = n_draws / 2;
+        let e0_first: std::collections::HashSet<&str> =
+            epoch0_sequence[..half].iter().map(String::as_str).collect();
+        let e1_first: std::collections::HashSet<&str> =
+            epoch1_sequence[..half].iter().map(String::as_str).collect();
+        assert_ne!(
+            e0_first, e1_first,
+            "the first {half} records drawn in epoch 0 and epoch 1 (resumed) are the same set — \
+             records are not actually changing position across epochs"
+        );
+    }
+
+    #[test]
+    fn triplet_rejects_negative_with_duplicate_text_content() {
+        // Three records: two share the same context body, one is unique.
+        // With WrongArticle negatives the sampler will first attempt to draw the
+        // shared-text record as a negative — that attempt must be rejected
+        // (negative.text == positive.text) and the unique record used instead.
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let mut config = base_config();
+        config.batch_size = 1;
+        config.allowed_splits = vec![SplitLabel::Train];
+        config.split = split;
+        config.recipes = vec![TripletRecipe {
+            name: "content_dedup".into(),
+            anchor: Selector::Role(SectionRole::Anchor),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 1.0,
+            instruction: None,
+        }];
+
+        let store = Arc::new(DeterministicSplitStore::new(split, 55).unwrap());
+        let sampler = TripletSampler::new(config, store);
+
+        // Two records share the same context text; one is genuinely distinct.
+        let records = vec![
+            trader_record(
+                "src::content_dup_a",
+                "2025-01-01",
+                "Title A",
+                "Shared body text",
+            ),
+            trader_record(
+                "src::content_dup_b",
+                "2025-01-02",
+                "Title B",
+                "Shared body text",
+            ),
+            trader_record(
+                "src::content_unique",
+                "2025-01-03",
+                "Title C",
+                "Completely different body",
+            ),
+        ];
+        sampler.register_source(Box::new(InMemorySource::new("tt", records)));
+
+        // Draw many batches; every triplet must have all-distinct slot texts.
+        for _ in 0..32 {
+            let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
+            for triplet in &batch.triplets {
+                assert_ne!(
+                    triplet.anchor.text, triplet.positive.text,
+                    "anchor and positive must not share text"
+                );
+                assert_ne!(
+                    triplet.negative.text, triplet.positive.text,
+                    "negative must not share text with positive"
+                );
+                assert_ne!(
+                    triplet.negative.text, triplet.anchor.text,
+                    "negative must not share text with anchor"
+                );
+            }
+        }
     }
 }

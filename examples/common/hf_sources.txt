@@ -1,15 +1,27 @@
-# Format:
-# hf://org/dataset/config/split anchor=<field> positive=<field> context=<f1,f2,...> text=<f1,f2,...>
+# triplets Hugging Face source-list format:
+# hf://org/dataset/config/split anchor=... positive=... context=a,b text=x,y [trust=0.9] [source_id=name]
+#
 # Rules:
-# - Provide at least one of: anchor=, positive=, context=, text=
-# - Use anchor/positive/context for role-based extraction
-# - Use text= for ordered text-columns mode
+# - comments start with '#'
+# - at least one of anchor= positive= context= text= is required per line
+# - accepted keys: anchor= positive= context= text= trust= source_id=
+# - context= and text= accept comma-delimited columns
+# - anchor= positive= text= coalesce: first non-empty candidate column is used
+# - trust= (optional) overrides the default trust score (0.5); value in [0.0, 1.0]
+# - source_id= (optional) overrides the auto-derived slug for this source
+# - ClassLabel columns (integer-encoded categories) are resolved to their string
+#   names automatically via the datasets-server /info endpoint at load time;
+#   no manual annotation is needed
 
 # Conversational tech
-hf://labofsahil/hackernews-vector-search-dataset/default/train anchor=title positive=text
+hf://labofsahil/hackernews-vector-search-dataset/default text=title,text
 
 # Skeleton of most embedding spaces
-hf://wikimedia/wikipedia/20231101.en/train anchor=title positive=text
+hf://wikimedia/wikipedia/20231101.en anchor=title positive=text
+
+# Financial tweet sentiment — sentiment column is ClassLabel (neutral/bullish/bearish),
+# resolved automatically from datasets-server; no labels= annotation needed
+# hf://TimKoornstra/financial-tweets-sentiment anchor=tweet positive=sentiment
 
 # Small wordlist snapshot source
-hf://pfox/71k-English-uncleaned-wordlist/default/train text=text
+# hf://pfox/71k-English-uncleaned-wordlist/default text=text

@@ -35,4 +35,12 @@ pub enum SamplerError {
     /// Sampling exhausted eligible candidates for a requested recipe/split.
     #[error("no eligible samples available for recipe '{0}'")]
     Exhausted(String),
+    /// A weight map entry references an unknown source ID or contains a negative value.
+    #[error("invalid weight for source '{source_id}': {reason}")]
+    InvalidWeight {
+        /// The source ID that triggered the error.
+        source_id: SourceId,
+        /// Human-readable explanation.
+        reason: String,
+    },
 }

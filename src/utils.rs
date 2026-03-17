@@ -1,5 +1,9 @@
 //! Text normalization helpers shared by source implementations.
 
+use chrono::{DateTime, Utc};
+use std::fs;
+use std::path::Path;
+
 use crate::data::{RecordSection, SectionRole};
 use crate::types::Sentence;
 
@@ -109,6 +113,44 @@ fn is_ticker_char(ch: char) -> bool {
     ch.is_ascii_uppercase() || ch.is_ascii_digit()
 }
 
+// ---------------------------------------------------------------------------
+// Filesystem helpers
+// ---------------------------------------------------------------------------
+
+/// True if the path has a `.txt` extension (case-insensitive).
+pub fn is_text_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("txt"))
+        .unwrap_or(false)
+}
+
+/// Best-effort file modified time.
+pub fn file_mtime(path: &Path) -> Option<DateTime<Utc>> {
+    let metadata = fs::metadata(path).ok()?;
+    let modified = metadata.modified().ok()?;
+    Some(system_time_to_utc(modified))
+}
+
+/// Best-effort (created_at, updated_at) pair for a file.
+pub fn file_times(path: &Path) -> (DateTime<Utc>, DateTime<Utc>) {
+    let metadata = fs::metadata(path).ok();
+    let updated_at = metadata
+        .as_ref()
+        .and_then(|meta| meta.modified().ok())
+        .map(system_time_to_utc)
+        .unwrap_or_else(Utc::now);
+    let created_at = metadata
+        .and_then(|meta| meta.created().ok())
+        .map(system_time_to_utc)
+        .unwrap_or(updated_at);
+    (created_at, updated_at)
+}
+
+fn system_time_to_utc(time: std::time::SystemTime) -> DateTime<Utc> {
+    DateTime::<Utc>::from(time)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,6 +198,23 @@ mod tests {
     }
 
     #[test]
+    fn file_time_helpers_handle_existing_and_missing_paths() {
+        use tempfile::tempdir;
+        let temp = tempdir().unwrap();
+        let existing = temp.path().join("exists.txt");
+        std::fs::write(&existing, "hello").unwrap();
+
+        assert!(file_mtime(&existing).is_some());
+        let (created_at, updated_at) = file_times(&existing);
+        assert!(updated_at >= created_at);
+
+        let missing = temp.path().join("missing.txt");
+        assert!(file_mtime(&missing).is_none());
+        let (missing_created, missing_updated) = file_times(&missing);
+        assert!(missing_updated >= missing_created);
+    }
+
+    #[test]
     fn sentences_treat_blank_line_as_boundary() {
         let text = "First line without punctuation\n\nSecond line with more context.";
         let result = sentences(text);
@@ -173,5 +232,15 @@ mod tests {
         let text = "Wait... really? Yes.";
         let result = sentences(text);
         assert_eq!(result, vec!["Wait...", "really?", "Yes."]);
+    }
+
+    #[test]
+    fn is_text_file_matches_txt_case_insensitively() {
+        use std::path::PathBuf;
+        assert!(is_text_file(&PathBuf::from("hello.txt")));
+        assert!(is_text_file(&PathBuf::from("hello.TXT")));
+        assert!(is_text_file(&PathBuf::from("hello.Txt")));
+        assert!(!is_text_file(&PathBuf::from("hello.md")));
+        assert!(!is_text_file(&PathBuf::from("hello")));
     }
 }

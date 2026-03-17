@@ -7,8 +7,8 @@ use crate::data::{DataRecord, QualityScore, RecordSection, SectionRole};
 use crate::errors::SamplerError;
 use crate::source::indexing::file_corpus::FileCorpusIndex;
 use crate::source::{DataSource, SourceCursor, SourceSnapshot};
-use crate::transport::fs::{file_times, is_text_file};
 use crate::types::{CategoryId, SourceId, TaxonomyValue};
+use crate::utils::{file_times, is_text_file};
 use crate::utils::{make_section, normalize_inline_whitespace};
 
 /// Builds taxonomy values from a root path and file path.

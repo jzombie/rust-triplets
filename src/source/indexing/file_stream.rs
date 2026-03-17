@@ -1,5 +1,4 @@
-use chrono::{DateTime, Utc};
-use std::fs;
+use chrono::Utc;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -8,15 +7,19 @@ use crate::errors::SamplerError;
 use crate::hash::stable_hash_path;
 use crate::source::{SourceCursor, SourceSnapshot};
 
-/// Filesystem transport that can incrementally scan files under a root.
-pub struct FileStream {
+/// Incremental filesystem scanner that builds paged source snapshots.
+///
+/// Files are visited in a stable pseudo-random order derived from path hashes to
+/// avoid lexicographic ordering biases (e.g., date-prefixed directories).
+/// Used by [`super::file_corpus::FileCorpusIndex`] for streaming-mode refresh.
+pub(crate) struct FileStream {
     root: PathBuf,
     follow_links: bool,
 }
 
 impl FileStream {
     /// Create a stream rooted at `root`.
-    pub fn new(root: impl Into<PathBuf>) -> Self {
+    pub(crate) fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
             follow_links: false,
@@ -24,13 +27,13 @@ impl FileStream {
     }
 
     /// Configure symlink traversal.
-    pub fn with_follow_symlinks(mut self, follow_links: bool) -> Self {
+    pub(crate) fn with_follow_symlinks(mut self, follow_links: bool) -> Self {
         self.follow_links = follow_links;
         self
     }
 
     /// Build a paged snapshot that advances through files using the cursor.
-    pub fn stream_incremental<F>(
+    pub(crate) fn stream_incremental<F>(
         &self,
         cursor: Option<&SourceCursor>,
         limit: Option<usize>,
@@ -96,52 +99,15 @@ impl FileStream {
     }
 }
 
-/// True if the path has a `.txt` extension (case-insensitive).
-pub fn is_text_file(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| ext.eq_ignore_ascii_case("txt"))
-        .unwrap_or(false)
-}
-
-/// Best-effort file modified time.
-pub fn file_mtime(path: &Path) -> Option<DateTime<Utc>> {
-    let metadata = fs::metadata(path).ok()?;
-    let modified = metadata.modified().ok()?;
-    Some(system_time_to_utc(modified))
-}
-
-/// Best-effort (created_at, updated_at) pair for a file.
-pub fn file_times(path: &Path) -> (DateTime<Utc>, DateTime<Utc>) {
-    let metadata = fs::metadata(path).ok();
-    let updated_at = metadata
-        .as_ref()
-        .and_then(|meta| meta.modified().ok())
-        .map(system_time_to_utc)
-        .unwrap_or_else(Utc::now);
-    let created_at = metadata
-        .and_then(|meta| meta.created().ok())
-        .map(system_time_to_utc)
-        .unwrap_or(updated_at);
-    (created_at, updated_at)
-}
-
-fn system_time_to_utc(time: std::time::SystemTime) -> DateTime<Utc> {
-    DateTime::<Utc>::from(time)
-}
-
-/// Stable hash used to pseudo-randomize file iteration order.
-///
-/// Paths are hashed to avoid lexicographic ordering biases (e.g., time-based folders).
-/// This is used by `FileStream::stream_incremental` when a direct hash-ordered
-/// traversal is desired.
-pub fn stable_path_shuffle_key(path: &Path) -> u64 {
+/// Stable hash used to pseudo-randomize file iteration order within [`FileStream`].
+fn stable_path_shuffle_key(path: &Path) -> u64 {
     stable_hash_path(0, path)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::is_text_file;
     use chrono::{TimeZone, Utc};
     use std::collections::HashSet;
     use std::fs;
@@ -254,22 +220,6 @@ mod tests {
             stable_path_shuffle_key(&a_again)
         );
         assert_ne!(stable_path_shuffle_key(&a), stable_path_shuffle_key(&b));
-    }
-
-    #[test]
-    fn file_time_helpers_handle_existing_and_missing_paths() {
-        let temp = tempdir().unwrap();
-        let existing = temp.path().join("exists.txt");
-        fs::write(&existing, "hello").unwrap();
-
-        assert!(file_mtime(&existing).is_some());
-        let (created_at, updated_at) = file_times(&existing);
-        assert!(updated_at >= created_at);
-
-        let missing = temp.path().join("missing.txt");
-        assert!(file_mtime(&missing).is_none());
-        let (missing_created, missing_updated) = file_times(&missing);
-        assert!(missing_updated >= missing_created);
     }
 
     #[test]

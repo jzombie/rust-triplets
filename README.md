@@ -2,11 +2,15 @@
 
 [![made-with-rust][rust-logo]][rust-src-page] [![crates.io][crates-badge]][crates-page] [![MIT licensed][mit-license-badge]][mit-license-page] [![Apache 2.0 licensed][apache-2.0-license-badge]][apache-2.0-license-page] [![Coverage][coveralls-badge]][coveralls-page]
 
-_Automate multi-source training data consumption and dynamically build reproducible, balanced learning batches from configurable rules as your data evolves._
+_Compose an effectively unlimited supply of training triplets from your existing corpus — rule-driven, reproducible splits and source/shard ordering, and multi-source. No hand-mining required for domain-rooted sources; hard mining integrates cleanly when you need it._
 
 **WORK IN PROGRESS. THIS API IS BEING PROTOTYPED AND MAY CHANGE WITHOUT NOTICE.**
 
 `triplets` is a reusable core of composable data sampling primitives for deterministic multi-source ML/AI training-data orchestration, with sampler primitives, split/state persistence, chunking and weighting mechanics, and source abstractions (`DataSource`, `DataRecord`) that avoid tying behavior to proprietary corpora.
+
+Because triplets are assembled from source record combinations at batch time — never precomputed — even a modestly-sized corpus can yield billions of unique training examples per source, with trillions achievable across multiple sources once recipes and chunk windows are factored in. Rather than hand-mining or exhaustively annotating every `(anchor, negative)` pair, rule-based recipes combined with a large, diverse corpus let the [Law of Large Numbers](https://en.wikipedia.org/wiki/Law_of_large_numbers) handle what manual curation cannot scale to: with sufficient source variety, the volume of correctly-structured combinations far outweighs any occasional noise, and the aggregate gradient signal reliably shapes the intended embedding space. This works most naturally when each source is rooted in a coherent domain — negatives are mined per-source by default, making the crate a natural fit for fine-tuning on domain-specific data. General-purpose training is equally supported depending on how sources and recipes are constructed, and explicit hard negative mining can be integrated when required.
+
+Each source is also independent: sources can carry their own recipe rules tailored to their data shape, so a document corpus, a QA dataset, and a structured log stream can all participate in the same training run with distinct anchor/positive/negative strategies suited to each. When `SamplerConfig.recipes` is non-empty those recipes apply uniformly across all sources; when left empty, each source contributes its own `default_triplet_recipes()`. Batch contribution defaults to equal weighting across all registered sources, but per-batch source weights let you shift that balance at call time — boosting a higher-quality source for one batch, suppressing a noisier one for the next, or tying the mix to live training-loss signals — without restarting or reconfiguring the sampler. This source-level recipe independence, combined with per-batch weighting flexibility, multiplies the practical variety of training signal even further: different domains generate structurally different triplets, each governed by rules that fit the data, all converging into the same embedding space.
 
 **Note:** This crate is intended primarily for textual (or textualized) data — records that can be represented as text (for example: documents, QA pairs, logs, or metadata-prefixed chunks) suitable for language-model training, embedding/metric-learning workflows, and related text-model pipelines.
 
@@ -34,29 +38,36 @@ In this crate, those triplets are built automatically from one or more data sour
 
 It is designed for multi-source training pipelines where each batch can mix records from several sources, while source contribution is controlled independently (for example, over/under-sampling frequency and trust/quality weighting per source) to rebalance representation and reduce source-driven bias. Because source weights can be set per batch call, they can be wired to training-time loss/metric signals and adjusted dynamically during training.
 
-> Note on "hard triplet" mining: mining hard triplets can be performed purely via metadata and recipe-driven selectors (no semantic scorer required). Negatives are chosen dynamically per anchor/positive — across record fields, chunk windows, and recipe selectors — so triplets are typically unique even without changing weights or recipes. As a result, a training run naturally sees a mixture of easy and hard negatives as sampling and configuration play out.
+> Note on "hard triplet" mining: mining hard triplets can be performed purely via metadata and recipe-driven selectors (no semantic scorer required). Negatives are chosen dynamically per anchor/positive — across record fields, chunk windows, and recipe selectors — so triplets are typically unique even without changing weights or recipes. As a result, a training run naturally sees a mixture of easy and hard negatives as sampling and configuration play out. More broadly, the scale of the combinatorial space makes exhaustive hand-mining unnecessary: with sufficient source variety, the Law of Large Numbers ensures that any individual misaligned negative is statistically outweighed by the correctly-structured majority, and the model still converges toward the intended embedding geometry.
+>
+> **A note on domain assumptions:** By default, negatives are mined *within* each source — an anchor's negative candidates are drawn from the same source that produced the anchor. This implicitly treats each source as a coherent domain (for example: a corpus of financial news, a physics paper collection, or a product-review dataset). Because of this, the crate is naturally well-suited for **fine-tuning** on domain-specific data, where in-source negatives are already meaningfully hard without a semantic scorer — a pre-trained model that already separates broad domains will find two articles from the same financial corpus far more confusable than a finance article paired with a physics paper. Whether this approach extends gracefully to general-purpose training depends entirely on how sources and recipes are constructed: if each source is itself diverse and general, the same mechanics apply. If **explicit hard negative mining** (BM25 pre-filtering, embedding-based retrieval, etc.) is required, it can be integrated straightforwardly — either by pre-ranking candidates offline and surfacing them as structured sources, or by using per-batch source reweighting to bias toward a hard-negative source at training time.
 
 ## High-level features
 
 - **Automatic deterministic splits** (train/validation/test) from record IDs + seed.
-- **Sampler-seed-driven source determinism** for built-in deterministic source ordering (file + Hugging Face).
+- **Sampler-seed-driven source determinism** for built-in deterministic source ordering (file source) and deterministic shard download order (Hugging Face). Note: HF row-level selection within a `refresh` call depends on how many shards are locally cached and is not reproducible across cache wipes — only split assignment and shard download order are stable end-to-end for HF sources.
 - **Runtime batch sampling** via `next_triplet_batch`, `next_pair_batch`, and `next_text_batch`.
 - **Recipe-driven sample construction** for triplet/pair/text generation (anchor/positive/negative selectors).
+- **Per-source independent recipe rules**: when `SamplerConfig.recipes` is left empty, each source supplies its own `default_triplet_recipes()` so sources with different data shapes — documents, QA pairs, structured logs — can each use tailored anchor/positive/negative strategies without affecting one another. A global recipe set can still be provided to override all sources uniformly. Batch contribution defaults to equal weighting across all registered sources; per-call source weights let you shift that balance at any time without reconfiguring the sampler.
+- **Combinatorial triplet supply from modest corpora**: Triplets are assembled from source record combinations at batch time — never precomputed. N records yield up to N×(N−1) raw combinations per recipe, multiplied across all configured recipes and chunk windows. Even a moderate corpus generates billions of valid, unique training examples without enumerating them; raw source availability is the only practical ceiling.
+- **Law of Large Numbers over hard mining**: Rule-based recipes across a large, diverse corpus let statistical variety replace exhaustive pair annotation. With enough source samples, the volume of correctly-structured triplets far outweighs any individual misaligned negative — the aggregate gradient signal reliably pulls similar records together and pushes dissimilar ones apart, without manually auditing every `(anchor, negative)` pair. Because negatives are mined per-source by default, each source is implicitly treated as a domain; this makes the crate a natural fit for domain-specific fine-tuning, where in-source negatives are naturally semi-hard for a pre-trained base model. General-purpose training is equally supported if sources and recipes are constructed to match that goal. When hard negative mining *is* required — BM25 pre-filters, retrieval-augmented candidate sets, or embedding-ranked pools — it integrates cleanly as a dedicated source or via per-batch reweighting.
 - **Automatic long-section recipe injection**: for sources with sections longer than `chunking.max_window_tokens`, automatically adds `auto_injected_long_section_chunk_pair_wrong_article`, which builds anchor/positive from two different context windows of the same record and uses a context section from a different record as the negative.
 - **Deterministic long-section chunking**: short text stays as one chunk; long text becomes multiple chunk candidates (sliding windows) sampled over time. Chunks are not emitted as one grouped bundle; each sampled triplet/pair/text item uses one selected chunk at a time. Defaults are `max_window_tokens=1024`, `overlap_tokens=[64]`, and `summary_fallback_tokens=512` (all configurable via `SamplerConfig.chunking`).
 - **Weight-aware sampling controls** across source weights, recipe weights, and chunk trust/quality weighting.
+- **Anti-shortcut anchor/positive swap**: at triplet finalization time the sampler performs a deterministic 50 % coin-flip and swaps the anchor and positive slots when it fires. Both orderings therefore appear at equal frequency across training, preventing a model from exploiting positional cues (for example, always treating the first slot as the shorter text). This is especially important for InfoNCE and other contrastive objectives where asymmetric slot length or style distributions would otherwise provide a free shortcut. The negative is unaffected. The behavior is seeded by the sampler RNG so it is fully reproducible and covered by existing state-persistence mechanics.
 - **Anti-shortcut metadata-prefix variation** via `KvpPrefixSampler` (variant choice, per-field presence probabilities, field-order shuffle, and prefix dropout) to reduce rigid header-pattern dependence.
 - **Per-source batch mixing controls** so multiple sources can contribute to the same batch, with independent source frequency controls (including over/under-sampling).
 - **Per-source trust controls** to weight quality/trust independently by source/taxonomy and help mitigate bias from uneven source quality.
 - **Per-batch dynamic source reweighting** so source weights can be changed across batches (for example from loss/metric feedback) while training.
-- **Resume support** via `persist_state()` and split-store persistence.
+- **Resume support** via `save_sampler_state(save_to)` and split-store persistence.
 - **Source-agnostic backends** (`DataSource` or `IndexableSource` + `IndexableAdapter`).
 - **Supply-chain style orchestration (core layer):** multi-source intake (`refresh`) with per-call parallel ingest, optional per-source weighting, staged buffering, deterministic split routing, and batch assembly into train-ready outputs.
 - **Bounded ingestion** windows instead of loading full corpora into memory.
 - **Per-call source threading**: during refresh, each source is fetched on its own short-lived thread, then merged deterministically for batch assembly.
+- **Background batch prefetching** via `BatchPrefetcher`: spawns its own dedicated background thread that drives a tight production loop — calling the batch-assembly function repeatedly and pushing results into a bounded channel queue. The training loop blocks only on `next()`, which returns the next pre-assembled batch without waiting for source I/O. Within each batch call that background thread makes, the sampler itself fans out to per-source threads for ingestion, so both layers of concurrency are active simultaneously: the prefetch thread keeps the queue warm while per-source threads fetch records in parallel.
 - **Streaming-friendly**: sources can be finite or unbounded.
 
-This crate does **not** perform semantic mining/retrieval scoring by itself; instead, it gives you deterministic, metadata-driven sampling primitives you can feed into your downstream mining/retrieval stack.
+> This crate does **not** perform semantic mining/retrieval scoring by itself; instead, it gives you deterministic, metadata-driven sampling primitives you can feed into your downstream mining/retrieval stack.
 
 ## Sources
 
@@ -73,11 +84,18 @@ Why this matters:
 - When a source has limited fresh records, replay/oversampling can happen for that source without coupling all other sources to the same behavior.
 
 Key weighting concepts:
-
+- **Default trust** (`QualityScore::default().trust`): 0.5 (used when a record/source doesn't override trust).
 - **Source weights** control how often each source contributes in a batch (`next_*_batch_with_weights`).
 - **Trust weights** (`DataRecord.quality.trust`, optional taxonomy overrides) scale sample influence by source/record quality.
 - **Recipe weights** (`TripletRecipe.weight`) control how often each recipe path is selected.
 - **Chunk weights** apply after section chunking to modulate long/short-window contribution.
+
+Source weight semantics:
+
+- **Proportional values:** Weights are treated as proportional scalars — only their ratios matter. They do *not* need to sum to `1.0`. For example, `{A: 2.0, B: 1.0}` and `{A: 0.75, B: 0.375}` are equivalent in relative contribution.
+- **Omitted sources default to 1.0:** If a source id is not present in a per-call weight map, it is treated as having weight `1.0` for that call.
+- **Invalid entries cause errors:** Passing a weight map that references an unknown source id or contains a negative weight will cause the weight-aware ingestion APIs to return an error (`SamplerError::InvalidWeight`). Callers should handle the `Result` returned by the weight-aware methods (for example, the ingestion helpers `advance_with_weights`, `refresh_all_with_weights`, and `force_refresh_all_with_weights`, and the sampler paths that propagate their errors).
+- **Zero weights are allowed:** A source weight of exactly `0.0` disables contribution from that source for the call (it is effectively skipped). If all provided weights are non-positive, the implementation falls back to equal weighting.
 
 ### Recipes
 
@@ -176,7 +194,12 @@ let _batch = sampler.next_triplet_batch(SplitLabel::Train)?;
 
 ### Integrated sources
 
-`triplets` ships with two built-in sources; if you use either, deterministic paging is always enabled (`FileSource`, `HuggingFaceRowSource`).
+`triplets` ships with two built-in sources:
+
+- **`FileSource`**: fully deterministic paging — same seed and corpus always produces the same row order.
+- **`HuggingFaceRowSource`**: deterministic shard download order (same seed + same HF manifest → same download sequence). Row-level selection within each `refresh` call is seeded by the number of locally materialized rows, so it is **not reproducible across cache wipes**. Split assignment (Train/Val/Test) remains fully deterministic and cache-independent for both sources.
+
+  Shard download failures in the background thread are logged as warnings and the sequence position is skipped for the current run — no automatic retry is performed. The skipped position becomes reachable again when the candidate list is rebuilt, which happens on disk-cap eviction (the cache manager removes a shard, the manifest is re-fetched, and the cursor skips past already-cached shards), an epoch-seed change (the permutation is rebuilt for the new seed), or source reconstruction. For small datasets that fit within the disk cap, all shards are typically on disk before the cursor exhausts, so a transient failure only delays that shard until the next reset. For large datasets without eviction, a failed shard is not revisited in the current run.
 
 - **File source (`FileSource`)**: local files and folders.
 - **Hugging Face source (`HuggingFaceRowSource`)** *(feature: `huggingface`)*: HF dataset rows.
@@ -207,33 +230,121 @@ Hugging Face source defaults use:
 Define HF sources in a text file and pass it to the demo or your own loader. The `hf://` prefix is a `triplets`-specific shorthand used only in these lists:
 
 ```text
-hf://org/dataset/config/split anchor=... positive=... context=a,b text=x,y
+hf://org/dataset/config/split anchor=... positive=... context=a,b text=x,y [trust=<f32>] [source_id=<name>]
 ```
+
+**URI path components — `config` and `split`:**
+
+| Components supplied             | Behaviour                                                                            |
+| ------------------------------- | ------------------------------------------------------------------------------------ |
+| `hf://org/dataset`              | Config defaults to `default`; all splits discovered automatically.                   |
+| `hf://org/dataset/config`       | Specified config; all splits discovered automatically.                               |
+| `hf://org/dataset/config/split` | Specified config **and** split — only shards belonging to that split are downloaded. |
+
+The way `split` filters shards depends on how the repository is laid out:
+
+- **Sharded layout** (most large datasets): shards follow the convention
+  `<split>/shard-NNNNN.parquet` or `<split>-NNNNN-of-MMMMM.parquet`.
+  The split name is matched against the directory prefix, a `-split-` token,
+  or a `split-` filename prefix.
+- **Flat-table layout**: some repositories store each logical table as a
+  single top-level file whose stem is the table name — e.g.
+  `data/stock_news.parquet`.  When the split component of the URI exactly
+  matches the file stem (`stock_news`), that file and only that file is
+  selected.  The match is exact, so `train` does **not** accidentally select
+  `training.parquet`.
+- **No split specified** (omitted or empty): all parquet/ndjson files in the
+  config are downloaded.  For multi-table flat repositories this means every
+  table is ingested together, which is usually not what you want — supply the
+  explicit table name as the split component to target a single table.
 
 Rules:
 
 - Lines are whitespace-delimited; comments start with `#`.
-- `anchor=`, `positive=`, `context=`, and `text=` are the only accepted keys.
-- At least one mapping key is required per line.
-- `context=` and `text=` accept comma-delimited column lists.
-- Rows with missing/blank required fields are skipped.
+- `anchor=`, `positive=`, `context=`, `text=`, `trust=`, and `source_id=` are the accepted keys.
+- **Any other key is an error.** Unknown or misspelled keys (for example `positve=`, `iajfaijww=`) are rejected immediately with `"unsupported mapping key '<key>'"` — the parser never silently ignores unrecognised tokens, so typos surface at load time rather than producing silently empty mappings.
+- At least one of `anchor=`, `positive=`, `context=`, or `text=` is required per line; a line with a valid URI but no mapping keys is also an error.
+- HF row extraction is strict: no auto-detect fallback is used when mappings are absent.
+
+**Two extraction modes — pick one per source line:**
+
+| Mode             | When active                               | Keys used                          |
+| ---------------- | ----------------------------------------- | ---------------------------------- |
+| **Role-based**   | `anchor=` (and/or `positive=`) is present | `anchor=`, `positive=`, `context=` |
+| **Text-columns** | `anchor=` is absent; only `text=` is set  | `text=`                            |
+
+- **Role-based mode** maps dataset columns directly onto triplet roles.  `anchor=` becomes the anchor section; `positive=` becomes the positive/context section; `context=` adds extra context sections.  Use this when your dataset already has distinct role-labelled fields (title, body, summary, etc.).
+- **Text-columns mode** is simpler: one column (or the first non-empty candidate) becomes the entire record content.  The sampler then builds anchor/positive/negative from different records or chunks of that content.  Use this for datasets that have a single text blob per row.
+
+Column-list semantics:
+
+- `context=` accepts a comma-delimited list of columns; **all** listed columns must be present and non-empty, or the row is skipped.  Each one becomes a separate context section.
+- `anchor=`, `positive=`, and `text=` accept comma-delimited **candidate** column lists.  Candidates are tried in order; the **first** non-empty value found is used.  The row is skipped only when **no** candidate yields content.  Use multiple candidates when a field is sometimes absent (for example `anchor=title,text` uses `title` when present and falls back to `text`).
+
+**Optional per-source overrides:**
+
+- `trust=<f32>` — overrides the default trust score (`0.5`) for every record produced by this source.  Must be in `[0.0, 1.0]`.  Use higher values for high-quality authoritative sources and lower values for noisier ones.
+- `source_id=<name>` — overrides the auto-derived source identifier slug for this entry.  When set, the provided name is used verbatim (no deduplication suffix is applied).  Useful for giving a stable, human-readable name to a source regardless of its dataset/config/split path.
+
+**ClassLabel auto-resolution:**
+
+HuggingFace datasets frequently encode categorical columns (such as `sentiment`, `label`, or `category`) as integers using the `ClassLabel` feature type. `HuggingFaceRowSource` automatically resolves those integers to their human-readable string names by querying the datasets-server `/info` endpoint at source construction time. No user-side annotation or manual label mapping is required in the source list.
+
+- Resolution happens once per source construction, before any rows are fetched.
+- Resolved labels are written directly into the `.simdr` row stores as strings — there is no integer-to-label lookup at batch time.
+- If the `/info` endpoint is unreachable or returns no feature metadata, the source falls back to raw integer strings (e.g. `"0"`, `"1"`, `"2"`) and continues normally.
+- **Pre-existing stores are not retroactively updated.** Rows cached before ClassLabel resolution was available retain their raw integer values. Delete the affected shard cache to trigger a fresh transcode with label resolution.
 
 Example list (see [examples/common/hf_sources.txt](examples/common/hf_sources.txt)):
 
 ```text
-# role columns
-hf://labofsahil/hackernews-vector-search-dataset/default/train anchor=title positive=text
+# role columns with default trust and auto slug
+hf://labofsahil/hackernews-vector-search-dataset/default text=title,text
 hf://wikimedia/wikipedia/20231101.en/train anchor=title positive=text
 
+# high-trust source with an explicit stable name
+hf://wikimedia/wikipedia/20231101.en/train anchor=title positive=text trust=0.9 source_id=wiki-en
+
+# lower-trust noisy dataset, custom stable id
+hf://org/noisy-web-crawl/default text=text trust=0.3 source_id=noisy-web
+
 # explicit text-column mode
-hf://pfox/71k-English-uncleaned-wordlist/default/train text=text
+hf://pfox/71k-English-uncleaned-wordlist/default text=text
+
+# ClassLabel column — integers auto-resolved to "neutral"/"bullish"/"bearish" via /info endpoint
+hf://TimKoornstra/financial-tweets-sentiment anchor=tweet positive=sentiment
+
+# flat-table layout — one parquet file per table; split selects a single table
+hf://defeatbeta/yahoo-finance-data/default/stock_news anchor=title positive=news
 ```
 
-Row formats supported by the HF backend:
+HF backend persistence and lookup model:
 
-- `.parquet`
-- `.jsonl` / `.ndjson` (one JSON object per line)
-- plain text lines (each non-empty line becomes `{ "text": "..." }`)
+- Persisted shard format is per-shard `.simdr` row stores.
+- `.parquet` is treated as transient decode input only and is removed after transcode.
+- Store keys use a single canonical key type: positional local row offset (`rowv1|<u64-le>`).
+- Reads use batch key lookups (`batch_read`) over these positional keys.
+
+Endpoint overrides:
+
+Three environment variables let you redirect the datasets-server base URLs — useful for test doubles, local mirrors, or air-gapped / on-premises deployments:
+
+| Environment variable           | Endpoint controlled                 |
+| ------------------------------ | ----------------------------------- |
+| `TRIPLETS_HF_PARQUET_ENDPOINT` | `/parquet` shard manifest           |
+| `TRIPLETS_HF_SIZE_ENDPOINT`    | `/size` total row count             |
+| `TRIPLETS_HF_INFO_ENDPOINT`    | `/info` ClassLabel feature metadata |
+
+When set, the variable value replaces the default `https://datasets-server.huggingface.co` base URL for that endpoint. All three are checked at runtime so they work in both unit tests and integration tests.
+
+#### Authentication and private datasets
+
+**Only public HuggingFace datasets are currently supported.** There is no authentication support:
+
+- The `hf-hub` client is constructed with `.with_token(None)` — the HF Hub token is explicitly disabled and `HF_TOKEN` (or any other credential source) is never consulted.
+- The three `ureq` HTTP calls to the datasets-server (`/parquet`, `/size`, `/info`) are made without an `Authorization` header.
+
+Datasets that require authentication (gated models, private repos, or organization-private datasets) will return HTTP 401/403 errors from both the datasets-server manifest endpoints and the `hf-hub` shard download path, and the source will fail to construct.
 
 ### Adding new sources
 
@@ -308,29 +419,51 @@ cargo run --example multi_source_demo -- \
 
 ### Split-store path configuration
 
-The `multi_source_demo` example persists sampler/split state by default to:
+The `multi_source_demo` example persists sampler/split state by default to a
+managed cache-group path under:
 
-- `.sampler_store/split_store.bin`
+- `.cache/triplets/multi-source-demo/split_store.bin`
 
-You can override persistence location with either:
+You can still set an explicit persistence file path:
 
-- `--split-store-path <FILE>` for an explicit file path
-- `--split-store-dir <DIR>` to keep filename `split_store.bin` in a custom directory
+- `--split-store-path <FILE>`
+
+If you need explicit load/save control, use:
+
+- `FileSplitStore::open_with_load_path(Some(load_from), save_to, ratios, seed)`
+
+This loads from `load_from` only when `save_to` does not exist yet, then writes
+to `save_to`. Passing `None` for `load_from` starts from an empty/new store.
+Parent directories for `save_to` are created recursively when missing.
+
+When using `sampler.save_sampler_state(Some(path.as_path()))`:
+
+- `path` must not already exist (the call errors rather than overwriting).
+- parent directories for `path` are created recursively when missing.
+- later `sampler.save_sampler_state(None)` calls still write to the originally opened store file.
 
 ## Usage flow
 
 Short version:
 
 - Call **`sampler.next_triplet_batch(split)`**, **`sampler.next_pair_batch(split)`**, or **`sampler.next_text_batch(split)`** to sample batches (ingestion happens automatically).
-- Call **`sampler.persist_state()`** when you want restart-resume behavior.
+- Call **`sampler.save_sampler_state(None)`** when you want restart-resume behavior.
+- Call **`sampler.save_sampler_state(Some(path.as_path()))`** when you also want to persist current state to another file.
+  - `Some(path)` requires `path` to not already exist; otherwise it returns an error instead of overwriting.
+  - After `Some(path)`, subsequent `None` calls still save to the originally opened store path.
 - Optionally call **`sampler.set_epoch(n)`** for explicit epoch control.
 
 Step-by-step:
 
 1. Build config + open the split store.
+   - Use `FileSplitStore::open(path, ratios, seed)` for a single file, or
+     `FileSplitStore::open_with_load_path(Some(load_from), save_to, ratios, seed)` for explicit load/save split.
 2. Register sources.
 3. Call one of **`sampler.next_triplet_batch(split)`**, **`sampler.next_pair_batch(split)`**, or **`sampler.next_text_batch(split)`**.
-4. Call **`sampler.persist_state()`** when you want to write persisted sampler/split state (typically at the end of an epoch or at explicit checkpoint boundaries). **Do not call this every step.** Very frequent writes can create high I/O overhead and, at very large write counts (for example, tens of millions), can also adversely affect split-store initialization time.
+4. Call **`sampler.save_sampler_state(None)`** when you want to write persisted sampler/split state (typically at the end of an epoch or at explicit checkpoint boundaries). **Do not call this every step.** Very frequent writes can create high I/O overhead and, at very large write counts (for example, tens of millions), can also adversely affect split-store initialization time.
+  - Use `sampler.save_sampler_state(Some(path.as_path()))` to additionally write to another file on demand.
+  - `path` must be a new file path; if it already exists, the call fails rather than overwriting.
+  - This on-demand write does not retarget the sampler; later `sampler.save_sampler_state(None)` calls still write to the original store file.
 5. Optionally call **`sampler.set_epoch(n)`** for explicit epoch replay/order.
 
 Operational notes:
@@ -343,7 +476,7 @@ Operational notes:
 - Refresh concurrency is per call: source refreshes run in parallel for that call, then the sampler joins all refresh threads before merging buffers (not an always-on per-source background ingest loop).
 - Prefetchers smooth latency by filling bounded queues from the existing batch APIs (`next_triplet_batch`, `next_pair_batch`, `next_text_batch`).
 - New data from streaming sources is pulled in on the next batch call.
-- `sampler.persist_state()` is manual; skipping it means no resume state after restart.
+- `sampler.save_sampler_state(None)` is manual; skipping it means no resume state after restart.
 - `sampler.set_epoch(n)` is an advanced override and is not required for normal resume behavior.
 - `IngestionManager::source_refresh_stats()` exposes per-source refresh duration/records/throughput/errors.
 - `metrics::source_skew` summarizes per-source sample imbalance for a batch.
@@ -500,7 +633,7 @@ This reflects the built-in file-corpus helpers (`FileCorpusIndex`) used by files
 - **Memory bound**: refresh/cache limits are bounded by `ingestion_max_records` with a floor at `batch_size`.
 - **`ingestion_max_records` tuning**: setting this above `batch_size` usually improves sample diversity (broader anchor/negative candidate pool) and reduces near-term repetition, but returns diminish once source availability, split boundaries, and recipe constraints dominate. For remote backends such as Hugging Face, larger initial ingestion targets can require pulling more initial shards before the first batch, so startup latency can increase depending on shard sizes and network throughput.
 - **File indexing**: deterministic path ordering + deterministic index permutation for paging.
-- **Source ordering**: round-robin by source, deterministic within-source ordering by seed/epoch.
+- **Source ordering**: round-robin by source, deterministic within-source ordering by seed/epoch (file source). For `HuggingFaceRowSource`, shard download order is deterministic by seed, but row selection within a refresh is not stable across cache wipes (see `HuggingFaceRowSource` doc).
 - **Splits**: labels are deterministic from `record_id + seed + ratios`; split APIs enforce `allowed_splits`.
 - **Coverage caveat**: if `len_hint` drifts mid-epoch in streaming backends, strict single-pass coverage is not guaranteed.
 - **Weights**: recipe/source/chunk weights affect scaling, not deterministic ordering.

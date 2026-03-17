@@ -168,8 +168,8 @@ fn maybe_huggingface_source() -> Option<Box<dyn DataSource + 'static>> {
 
     let mut hf =
         HuggingFaceRowsConfig::new(source_id, dataset, config_name, split_name, snapshot_dir);
-    hf.anchor_column = Some("text".to_string());
-    hf.positive_column = Some("text".to_string());
+    hf.anchor_columns = vec!["text".to_string()];
+    hf.positive_columns = vec!["text".to_string()];
     hf.context_columns = Vec::new();
 
     match HuggingFaceRowSource::new(hf) {
