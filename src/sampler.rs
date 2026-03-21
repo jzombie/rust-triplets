@@ -2901,6 +2901,78 @@ mod tests {
     }
 
     #[test]
+    fn kvp_prefix_is_applied_to_non_initial_windows_from_long_sections() {
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let store = Arc::new(DeterministicSplitStore::new(split, 420).unwrap());
+
+        let mut config = base_config();
+        config.seed = 7777;
+        config.batch_size = 1;
+        config.allowed_splits = vec![SplitLabel::Train];
+        config.split = split;
+        config.chunking = ChunkingStrategy {
+            max_window_tokens: 4,
+            overlap_tokens: vec![0],
+            summary_fallback_weight: 0.0,
+            summary_fallback_tokens: 0,
+            chunk_weight_floor: 0.0,
+        };
+        config.recipes = Vec::new();
+        config.text_recipes = vec![TextRecipe {
+            name: "kvp_long_text".into(),
+            selector: Selector::Role(SectionRole::Context),
+            weight: 1.0,
+            instruction: None,
+        }];
+
+        let mut record = trader_record(
+            "kvp_long",
+            "2025-01-01",
+            "T",
+            "t01 t02 t03 t04 t05 t06 t07 t08 t09 t10 t11 t12",
+        );
+        let mut prefix = KvpPrefixSampler::new(1.0);
+        prefix.add_variant([("date", "2025-01-01")]);
+        record.meta_prefix = Some(prefix);
+
+        let sampler = TripletSampler::new(config, store);
+        sampler.register_source(Box::new(InMemorySource::new("kvp_source", vec![record])));
+
+        let mut saw_non_initial_window = false;
+        for _ in 0..12 {
+            let batch = sampler.next_text_batch(SplitLabel::Train).unwrap();
+            let sample = &batch.samples[0];
+
+            assert!(
+                sample.chunk.text.starts_with("meta: "),
+                "expected KVP prefix to be present on every sampled chunk, got '{}'",
+                sample.chunk.text
+            );
+
+            if let ChunkView::Window { index, .. } = sample.chunk.view
+                && index > 0
+            {
+                saw_non_initial_window = true;
+                let expected_start = format!("t{:02}", index * 4 + 1);
+                assert!(
+                    sample.chunk.text.contains(&expected_start),
+                    "expected chunk window {index} to still carry later-window content token {expected_start}, got '{}'",
+                    sample.chunk.text
+                );
+            }
+        }
+
+        assert!(
+            saw_non_initial_window,
+            "expected at least one non-initial window sample from long section"
+        );
+    }
+
+    #[test]
     fn exhaustion_retry_limit_returns_exhausted() {
         let split = SplitRatios {
             train: 1.0,
