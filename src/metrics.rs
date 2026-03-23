@@ -93,6 +93,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn source_skew_returns_none_for_empty_counts() {
+        let counts = HashMap::new();
+        assert!(source_skew(&counts).is_none());
+    }
+
+    #[test]
     fn source_skew_reports_balance() {
         let mut counts = HashMap::new();
         counts.insert("A".to_string(), 2);
@@ -127,5 +133,23 @@ mod tests {
         assert!((skew.ratio - 2.0).abs() < 1e-6);
         assert_eq!(skew.per_source[0].source, "A");
         assert_eq!(skew.per_source[0].count, 4);
+    }
+
+    #[test]
+    fn source_skew_zero_totals_report_zero_shares_and_infinite_ratio() {
+        let mut counts = HashMap::new();
+        counts.insert("B".to_string(), 0);
+        counts.insert("A".to_string(), 0);
+
+        let skew = source_skew(&counts).expect("skew");
+        assert_eq!(skew.total, 0);
+        assert_eq!(skew.min, 0);
+        assert_eq!(skew.max, 0);
+        assert_eq!(skew.max_share, 0.0);
+        assert_eq!(skew.min_share, 0.0);
+        assert!(skew.ratio.is_infinite());
+        assert_eq!(skew.per_source[0].source, "A");
+        assert_eq!(skew.per_source[1].source, "B");
+        assert!(skew.per_source.iter().all(|entry| entry.share == 0.0));
     }
 }
