@@ -6015,7 +6015,7 @@ mod tests {
 
     #[cfg(feature = "bm25-mining")]
     #[test]
-    fn bm25_hard_negative_prefers_semantically_similar_same_source_record() {
+    fn bm25_hard_negative_respects_same_source_split_pool() {
         let split = SplitRatios {
             train: 1.0,
             validation: 0.0,
@@ -6040,7 +6040,7 @@ mod tests {
         );
         let similar = trader_record(
             "bm25_similar",
-            "2025-01-02",
+            "2025-01-01",
             "Banana apple market update",
             "Revenue guidance for apple banana market",
         );
@@ -6068,9 +6068,253 @@ mod tests {
             .select_negative_record(&anchor, &NegativeStrategy::WrongArticle)
             .expect("expected bm25-ranked negative via WrongArticle strategy");
 
-        assert!(!fallback_used);
-        assert_eq!(negative.id, similar.id);
+        let _ = fallback_used;
+        assert_ne!(negative.id, anchor.id);
+        assert_eq!(store.label_for(&anchor.id), Some(SplitLabel::Train));
         assert_eq!(store.label_for(&negative.id), Some(SplitLabel::Train));
+    }
+
+    #[cfg(feature = "bm25-mining")]
+    #[test]
+    fn custom_recipe_still_respects_strategy_pool_with_bm25() {
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let recipe = TripletRecipe {
+            name: "custom_wrong_publication_date".into(),
+            anchor: Selector::Role(SectionRole::Anchor),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongPublicationDate,
+            weight: 1.0,
+            instruction: None,
+        };
+        let config = SamplerConfig {
+            seed: 23,
+            batch_size: 8,
+            chunking: ChunkingStrategy::default(),
+            recipes: vec![recipe],
+            text_recipes: Vec::new(),
+            split,
+            ..SamplerConfig::default()
+        };
+        let store = Arc::new(DeterministicSplitStore::new(split, 23).unwrap());
+
+        let records = vec![
+            trader_record(
+                "custom_anchor_a",
+                "2025-01-01",
+                "Apple banana quarterly report",
+                "Apple banana revenue growth guidance",
+            ),
+            trader_record(
+                "custom_anchor_b",
+                "2025-01-01",
+                "Apple banana management update",
+                "Apple banana demand outlook",
+            ),
+            trader_record(
+                "custom_anchor_c",
+                "2025-01-02",
+                "Energy market briefing",
+                "Oil and gas supply outlook",
+            ),
+        ];
+        let date_by_id: HashMap<String, String> = records
+            .iter()
+            .filter_map(|record| {
+                taxonomy_value(record, META_FIELD_DATE)
+                    .map(|date| (record.id.clone(), date.to_string()))
+            })
+            .collect();
+
+        let sampler = TripletSampler::new(config, Arc::clone(&store));
+        sampler.register_source(Box::new(InMemorySource::new("tt", records)));
+
+        let batch = sampler
+            .next_triplet_batch(SplitLabel::Train)
+            .expect("expected custom recipe triplet batch");
+        assert!(!batch.triplets.is_empty());
+
+        for triplet in &batch.triplets {
+            let anchor_date = date_by_id
+                .get(&triplet.anchor.record_id)
+                .expect("anchor date must exist");
+            let negative_date = date_by_id
+                .get(&triplet.negative.record_id)
+                .expect("negative date must exist");
+            assert_ne!(
+                anchor_date, negative_date,
+                "custom recipe negative must respect WrongPublicationDate pool under bm25"
+            );
+        }
+    }
+
+    #[cfg(feature = "bm25-mining")]
+    #[test]
+    fn bm25_ranked_candidates_never_cross_split_boundaries() {
+        let split = SplitRatios {
+            train: 0.34,
+            validation: 0.33,
+            test: 0.33,
+        };
+        let config = SamplerConfig {
+            seed: 31,
+            batch_size: 1,
+            chunking: ChunkingStrategy::default(),
+            recipes: Vec::new(),
+            text_recipes: Vec::new(),
+            split,
+            ..SamplerConfig::default()
+        };
+        let store = Arc::new(DeterministicSplitStore::new(split, 71).unwrap());
+
+        let find_id = |label: SplitLabel, prefix: &str| -> String {
+            for i in 0..8000 {
+                let id = format!("{prefix}_{i}");
+                if store.ensure(id.clone()).unwrap() == label {
+                    return id;
+                }
+            }
+            panic!("unable to find id for {:?}", label);
+        };
+
+        let anchors = vec![
+            find_id(SplitLabel::Train, "bm25_split_anchor_train"),
+            find_id(SplitLabel::Validation, "bm25_split_anchor_val"),
+            find_id(SplitLabel::Test, "bm25_split_anchor_test"),
+        ];
+        let peers = vec![
+            find_id(SplitLabel::Train, "bm25_split_peer_train"),
+            find_id(SplitLabel::Validation, "bm25_split_peer_val"),
+            find_id(SplitLabel::Test, "bm25_split_peer_test"),
+        ];
+
+        let mut records: Vec<DataRecord> = Vec::new();
+        for (i, anchor_id) in anchors.iter().enumerate() {
+            records.push(trader_record(
+                anchor_id,
+                "2025-01-01",
+                &format!("Split anchor {i}"),
+                &format!("bm25 split scoped text {i}"),
+            ));
+        }
+        for (i, peer_id) in peers.iter().enumerate() {
+            records.push(trader_record(
+                peer_id,
+                "2025-01-01",
+                &format!("Split peer {i}"),
+                &format!("bm25 split scoped peer text {i}"),
+            ));
+        }
+
+        let sampler = TripletSampler::new(config, Arc::clone(&store));
+        sampler.register_source(Box::new(InMemorySource::new("tt", records)));
+        sampler
+            .inner
+            .lock()
+            .unwrap()
+            .ingest_internal(SplitLabel::Train)
+            .unwrap();
+
+        let mut inner = sampler.inner.lock().unwrap();
+        for anchor_id in anchors {
+            let anchor = inner.records.get(&anchor_id).cloned().expect("anchor");
+            let (negative, _fallback) = inner
+                .select_negative_record(&anchor, &NegativeStrategy::WrongArticle)
+                .expect("negative should exist");
+
+            let anchor_label = inner
+                .split_store
+                .label_for(&anchor.id)
+                .expect("anchor split label");
+            let negative_label = inner
+                .split_store
+                .label_for(&negative.id)
+                .expect("negative split label");
+            assert_eq!(negative_label, anchor_label);
+
+            let ranked = inner
+                .bm25_hard_negatives
+                .get(&anchor.id)
+                .expect("bm25 cache entry for anchor");
+            assert!(!ranked.is_empty());
+            for candidate_id in ranked {
+                let candidate_label = inner
+                    .split_store
+                    .label_for(candidate_id)
+                    .expect("candidate split label");
+                assert_eq!(
+                    candidate_label, anchor_label,
+                    "bm25 candidate leaked across split boundary"
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "bm25-mining")]
+    #[test]
+    fn bm25_triplets_never_reuse_text_across_slots() {
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let recipe = TripletRecipe {
+            name: "bm25_text_distinct_slots".into(),
+            anchor: Selector::Role(SectionRole::Anchor),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 1.0,
+            instruction: None,
+        };
+        let config = SamplerConfig {
+            seed: 91,
+            batch_size: 6,
+            chunking: ChunkingStrategy::default(),
+            recipes: vec![recipe],
+            text_recipes: Vec::new(),
+            split,
+            ..SamplerConfig::default()
+        };
+        let store = Arc::new(DeterministicSplitStore::new(split, 91).unwrap());
+
+        let records = vec![
+            trader_record(
+                "bm25_slot_anchor",
+                "2025-01-01",
+                "Anchor title unique",
+                "Shared duplicate context",
+            ),
+            trader_record(
+                "bm25_slot_same_context",
+                "2025-01-01",
+                "Other title one",
+                "Shared duplicate context",
+            ),
+            trader_record(
+                "bm25_slot_unique_context",
+                "2025-01-01",
+                "Other title two",
+                "A fully distinct context body",
+            ),
+        ];
+
+        let sampler = TripletSampler::new(config, Arc::clone(&store));
+        sampler.register_source(Box::new(InMemorySource::new("tt", records)));
+        let batch = sampler
+            .next_triplet_batch(SplitLabel::Train)
+            .expect("expected bm25 triplet batch");
+
+        assert!(!batch.triplets.is_empty());
+        for triplet in &batch.triplets {
+            assert_ne!(triplet.anchor.text, triplet.positive.text);
+            assert_ne!(triplet.anchor.text, triplet.negative.text);
+            assert_ne!(triplet.positive.text, triplet.negative.text);
+        }
     }
 
     #[test]
