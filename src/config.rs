@@ -86,11 +86,6 @@ pub enum NegativeStrategy {
     WrongArticle,
     /// Choose a mismatched Q/A pair.
     QuestionAnswerMismatch,
-    /// Choose a BM25-ranked hard negative from the current ingest buffer.
-    ///
-    /// Requires enabling the crate feature `bm25-mining`.
-    #[cfg(feature = "bm25-mining")]
-    Bm25HardNegative,
 }
 
 /// Top-level sampler configuration.
