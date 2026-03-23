@@ -1177,4 +1177,73 @@ mod tests {
             "epoch-1 seed mismatch"
         );
     }
+
+    #[test]
+    fn scripted_and_panic_sources_cover_default_trait_paths() {
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        let scripted = ScriptedSource::new("scripted", refreshes, vec![]);
+
+        // Empty script falls back to an empty snapshot.
+        let snapshot = scripted
+            .refresh(&SamplerConfig::default(), None, None)
+            .expect("fallback snapshot");
+        assert!(snapshot.records.is_empty());
+        assert_eq!(snapshot.cursor.revision, 0);
+
+        assert_eq!(
+            scripted
+                .reported_record_count(&SamplerConfig::default())
+                .expect("record count"),
+            0
+        );
+        assert!(scripted.default_triplet_recipes().is_empty());
+
+        let panic_source = PanicSource {
+            id: "panic_count".to_string(),
+        };
+        assert_eq!(
+            panic_source
+                .reported_record_count(&SamplerConfig::default())
+                .expect("record count"),
+            0
+        );
+    }
+
+    #[test]
+    fn seed_capturing_source_trait_defaults_are_exercised() {
+        let source = SeedCapturingSource::new("seed_defaults", Arc::new(Mutex::new(Vec::new())));
+        assert_eq!(
+            source
+                .reported_record_count(&SamplerConfig::default())
+                .expect("record count"),
+            0
+        );
+        assert!(source.default_triplet_recipes().is_empty());
+    }
+
+    #[test]
+    fn refresh_paths_handle_zero_capacity_and_no_sources() {
+        let mut manager = IngestionManager::new(0, SamplerConfig::default());
+        manager.register_source(Box::new(ScriptedSource::new(
+            "zero_capacity",
+            Arc::new(AtomicUsize::new(0)),
+            vec![Ok(SourceSnapshot {
+                records: vec![make_record("r1", "zero_capacity")],
+                cursor: SourceCursor {
+                    last_seen: Utc::now(),
+                    revision: 1,
+                },
+            })],
+        )));
+        manager.refresh_all();
+        assert!(manager.cache().is_empty());
+
+        // Weighted refresh with no sources should be a no-op.
+        let mut empty_manager = IngestionManager::new(4, SamplerConfig::default());
+        let empty_weights = HashMap::new();
+        empty_manager
+            .refresh_all_with_weights(&empty_weights)
+            .expect("no sources should not error");
+        assert!(empty_manager.cache().is_empty());
+    }
 }
