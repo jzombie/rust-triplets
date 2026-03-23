@@ -937,8 +937,14 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         &mut self,
         anchor_record: &DataRecord,
         strategy: &NegativeStrategy,
+        bm25_query_text: Option<&str>,
     ) -> Option<(DataRecord, bool)> {
         let anchor_split = self.split_store.label_for(&anchor_record.id)?;
+
+        #[cfg(feature = "bm25-mining")]
+        let bm25_query_owned = bm25_query_text
+            .map(|text| text.to_string())
+            .unwrap_or_else(|| record_bm25_text(anchor_record, self.config.chunking.max_window_tokens));
 
         let in_anchor_split = |candidate: &DataRecord| {
             self.split_store
@@ -987,6 +993,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                             anchor_record,
                             anchor_split,
                             &same_date,
+                            &bm25_query_owned,
                         );
                     }
 
@@ -1007,7 +1014,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
 
                 #[cfg(feature = "bm25-mining")]
                 {
-                    self.select_bm25_hard_negative_record(anchor_record, anchor_split, &pool)
+                    self.select_bm25_hard_negative_record(
+                        anchor_record,
+                        anchor_split,
+                        &pool,
+                        &bm25_query_owned,
+                    )
                 }
 
                 #[cfg(not(feature = "bm25-mining"))]
@@ -1059,6 +1071,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                             anchor_record,
                             anchor_split,
                             &fallback_pool,
+                            &bm25_query_owned,
                         );
                     }
 
@@ -1073,7 +1086,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
 
                 #[cfg(feature = "bm25-mining")]
                 {
-                    self.select_bm25_hard_negative_record(anchor_record, anchor_split, &pool)
+                    self.select_bm25_hard_negative_record(
+                        anchor_record,
+                        anchor_split,
+                        &pool,
+                        &bm25_query_owned,
+                    )
                 }
 
                 #[cfg(not(feature = "bm25-mining"))]
@@ -1112,6 +1130,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                             anchor_record,
                             anchor_split,
                             &fallback_pool,
+                            &bm25_query_owned,
                         );
                     }
 
@@ -1126,7 +1145,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
 
                 #[cfg(feature = "bm25-mining")]
                 {
-                    self.select_bm25_hard_negative_record(anchor_record, anchor_split, &pool)
+                    self.select_bm25_hard_negative_record(
+                        anchor_record,
+                        anchor_split,
+                        &pool,
+                        &bm25_query_owned,
+                    )
                 }
 
                 #[cfg(not(feature = "bm25-mining"))]
@@ -1145,6 +1169,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         anchor_record: &DataRecord,
         anchor_split: SplitLabel,
         pool: &[DataRecord],
+        bm25_query_text: &str,
     ) -> Option<(DataRecord, bool)> {
         if pool.is_empty() {
             return None;
@@ -1152,7 +1177,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
 
         let pool_ids: HashSet<RecordId> = pool.iter().map(|record| record.id.clone()).collect();
 
-        let candidate_ids = self.bm25_ranked_candidates(anchor_record, anchor_split);
+        let candidate_ids =
+            self.bm25_ranked_candidates(anchor_record, anchor_split, bm25_query_text);
         for candidate_id in &candidate_ids {
             if !pool_ids.contains(candidate_id) {
                 continue;
@@ -1179,6 +1205,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         &mut self,
         anchor_record: &DataRecord,
         anchor_split: SplitLabel,
+        bm25_query_text: &str,
     ) -> Vec<RecordId> {
         if let Some(cached) = self.bm25_hard_negatives.get(&anchor_record.id) {
             return cached.clone();
@@ -1191,10 +1218,9 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             return Vec::new();
         };
 
-        let query = record_bm25_text(anchor_record);
         let max_results = index.record_ids.len().min(16).max(2);
         let mut ranked = Vec::new();
-        for result in index.search_engine.search(&query, max_results) {
+        for result in index.search_engine.search(bm25_query_text, max_results) {
             let candidate_idx = result.document.id;
             let Some(candidate_id) = index.record_ids.get(candidate_idx) else {
                 continue;
@@ -1251,7 +1277,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             let corpus: Vec<String> = record_ids
                 .iter()
                 .filter_map(|record_id| self.records.get(record_id))
-                .map(record_bm25_text)
+                .map(|record| record_bm25_text(record, self.config.chunking.max_window_tokens))
                 .collect();
             if corpus.len() < 2 {
                 continue;
@@ -1463,7 +1489,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         positive_chunk: RecordChunk,
     ) -> Option<SampleTriplet> {
         let (negative_record, fallback_used) =
-            self.select_negative_record(record, &recipe.negative_strategy)?;
+            self.select_negative_record(record, &recipe.negative_strategy, Some(&anchor_chunk.text))?;
         let mut negative_chunk = self.select_chunk(&negative_record, &recipe.negative_selector)?;
         self.decorate_chunk(&negative_record, &mut negative_chunk);
 
@@ -2655,7 +2681,7 @@ fn taxonomy_value(record: &DataRecord, field: MetadataKey) -> Option<&str> {
 }
 
 #[cfg(feature = "bm25-mining")]
-fn record_bm25_text(record: &DataRecord) -> String {
+fn record_bm25_text(record: &DataRecord, max_tokens: usize) -> String {
     let mut out = String::new();
     for section in &record.sections {
         if let Some(heading) = &section.heading
@@ -2672,7 +2698,14 @@ fn record_bm25_text(record: &DataRecord) -> String {
     if out.trim().is_empty() {
         return record.id.clone();
     }
-    out
+    if max_tokens == 0 {
+        return out;
+    }
+    let tokens: Vec<&str> = out.split_whitespace().collect();
+    if tokens.len() <= max_tokens {
+        return out;
+    }
+    tokens.into_iter().take(max_tokens).collect::<Vec<_>>().join(" ")
 }
 
 fn strategy_reason(strategy: &NegativeStrategy) -> &'static str {
@@ -6027,7 +6060,7 @@ mod tests {
         for anchor_id in anchor_ids {
             let anchor = inner.records.get(&anchor_id).cloned().expect("anchor");
             let (negative, _fallback) = inner
-                .select_negative_record(&anchor, &NegativeStrategy::WrongArticle)
+                .select_negative_record(&anchor, &NegativeStrategy::WrongArticle, None)
                 .expect("negative");
             assert_ne!(negative.id, anchor.id);
             let anchor_label = inner.split_store.label_for(&anchor.id).unwrap();
@@ -6090,7 +6123,7 @@ mod tests {
 
         let mut inner = sampler.inner.lock().unwrap();
         let (negative, fallback_used) = inner
-            .select_negative_record(&anchor, &NegativeStrategy::WrongArticle)
+            .select_negative_record(&anchor, &NegativeStrategy::WrongArticle, None)
             .expect("expected bm25-ranked negative via WrongArticle strategy");
 
         assert!(!fallback_used);
@@ -6163,7 +6196,7 @@ mod tests {
         for anchor_id in anchor_ids {
             let anchor = inner.records.get(&anchor_id).cloned().expect("anchor");
             let (negative, _fallback) = inner
-                .select_negative_record(&anchor, &NegativeStrategy::WrongPublicationDate)
+                .select_negative_record(&anchor, &NegativeStrategy::WrongPublicationDate, None)
                 .expect("negative");
             assert_ne!(negative.id, anchor.id);
             let anchor_label = inner.split_store.label_for(&anchor.id).unwrap();
@@ -6245,7 +6278,7 @@ mod tests {
         for anchor_id in anchor_ids {
             let anchor = inner.records.get(&anchor_id).cloned().expect("anchor");
             let (negative, _fallback) = inner
-                .select_negative_record(&anchor, &NegativeStrategy::QuestionAnswerMismatch)
+                .select_negative_record(&anchor, &NegativeStrategy::QuestionAnswerMismatch, None)
                 .expect("negative");
             assert_ne!(negative.id, anchor.id);
             let anchor_label = inner.split_store.label_for(&anchor.id).unwrap();
@@ -6306,7 +6339,7 @@ mod tests {
             .unwrap();
 
         let mut inner = sampler.inner.lock().unwrap();
-        let selected = inner.select_negative_record(&anchor, &NegativeStrategy::WrongArticle);
+        let selected = inner.select_negative_record(&anchor, &NegativeStrategy::WrongArticle, None);
         assert!(
             selected.is_none(),
             "cross-split fallback must be disallowed when same-split candidates are unavailable"
