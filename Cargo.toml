@@ -18,9 +18,11 @@ keywords = [
 [features]
 default = []
 huggingface = ["dep:serde_json", "dep:hf-hub", "dep:parquet", "dep:ureq", "dep:rayon"]
+bm25-mining = ["dep:bm25"]
 
 [dependencies]
 bitcode = "0.6.9"
+bm25 = { version = "2.3.2", optional = true, features = ["parallelism"] }
 cache-manager = "0.4.0"
 chrono = { version = "0.4.44", features = ["serde"] }
 clap = { version = "4.6.0", features = ["derive"] }

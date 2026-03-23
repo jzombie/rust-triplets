@@ -50,7 +50,7 @@ It is designed for multi-source training pipelines where each batch can mix reco
 - **Recipe-driven sample construction** for triplet/pair/text generation (anchor/positive/negative selectors).
 - **Per-source independent recipe rules**: when `SamplerConfig.recipes` is left empty, each source supplies its own `default_triplet_recipes()` so sources with different data shapes — documents, QA pairs, structured logs — can each use tailored anchor/positive/negative strategies without affecting one another. A global recipe set can still be provided to override all sources uniformly. Batch contribution defaults to equal weighting across all registered sources; per-call source weights let you shift that balance at any time without reconfiguring the sampler.
 - **Combinatorial triplet supply from modest corpora**: Triplets are assembled from source record combinations at batch time — never precomputed. N records yield up to N×(N−1) raw combinations per recipe, multiplied across all configured recipes and chunk windows. Even a moderate corpus generates billions of valid, unique training examples without enumerating them; raw source availability is the only practical ceiling.
-- **Law of Large Numbers over hard mining**: Rule-based recipes across a large, diverse corpus let statistical variety replace exhaustive pair annotation. With enough source samples, the volume of correctly-structured triplets far outweighs any individual misaligned negative — the aggregate gradient signal reliably pulls similar records together and pushes dissimilar ones apart, without manually auditing every `(anchor, negative)` pair. Because negatives are mined per-source by default, each source is implicitly treated as a domain; this makes the crate a natural fit for domain-specific fine-tuning, where in-source negatives are naturally semi-hard for a pre-trained base model. General-purpose training is equally supported if sources and recipes are constructed to match that goal. When hard negative mining *is* required — BM25 pre-filters, retrieval-augmented candidate sets, or embedding-ranked pools — it integrates cleanly as a dedicated source or via per-batch reweighting.
+- **Law of Large Numbers over hard mining**: Rule-based recipes across a large, diverse corpus let statistical variety replace exhaustive pair annotation. With enough source samples, the volume of correctly-structured triplets far outweighs any individual misaligned negative — the aggregate gradient signal reliably pulls similar records together and pushes dissimilar ones apart, without manually auditing every `(anchor, negative)` pair. Because negatives are mined per-source by default, each source is implicitly treated as a domain; this makes the crate a natural fit for domain-specific fine-tuning, where in-source negatives are naturally semi-hard for a pre-trained base model. General-purpose training is equally supported if sources and recipes are constructed to match that goal. When explicit hard negative mining is needed, you can enable the optional `bm25-mining` feature and use `NegativeStrategy::Bm25HardNegative` to precompute in-buffer BM25 hard negatives at ingest time.
 - **Automatic long-section recipe injection**: for sources with sections longer than `chunking.max_window_tokens`, automatically adds `auto_injected_long_section_chunk_pair_wrong_article`, which builds anchor/positive from two different context windows of the same record and uses a context section from a different record as the negative.
 - **Deterministic long-section chunking**: short text stays as one chunk; long text becomes multiple chunk candidates (sliding windows) sampled over time. Chunks are not emitted as one grouped bundle; each sampled triplet/pair/text item uses one selected chunk at a time. Defaults are `max_window_tokens=1024`, `overlap_tokens=[64]`, and `summary_fallback_tokens=512` (all configurable via `SamplerConfig.chunking`).
 - **Weight-aware sampling controls** across source weights, recipe weights, and chunk trust/quality weighting.
@@ -236,7 +236,7 @@ hf://org/dataset/config/split anchor=... positive=... context=a,b text=x,y [trus
 **URI path components — `config` and `split`:**
 
 | Components supplied             | Behaviour                                                                            |
-| ------------------------------- | ------------------------------------------------------------------------------------ |
+|---------------------------------|--------------------------------------------------------------------------------------|
 | `hf://org/dataset`              | Config defaults to `default`; all splits discovered automatically.                   |
 | `hf://org/dataset/config`       | Specified config; all splits discovered automatically.                               |
 | `hf://org/dataset/config/split` | Specified config **and** split — only shards belonging to that split are downloaded. |
@@ -269,7 +269,7 @@ Rules:
 **Two extraction modes — pick one per source line:**
 
 | Mode             | When active                               | Keys used                          |
-| ---------------- | ----------------------------------------- | ---------------------------------- |
+|------------------|-------------------------------------------|------------------------------------|
 | **Role-based**   | `anchor=` (and/or `positive=`) is present | `anchor=`, `positive=`, `context=` |
 | **Text-columns** | `anchor=` is absent; only `text=` is set  | `text=`                            |
 
@@ -330,7 +330,7 @@ Endpoint overrides:
 Three environment variables let you redirect the datasets-server base URLs — useful for test doubles, local mirrors, or air-gapped / on-premises deployments:
 
 | Environment variable           | Endpoint controlled                 |
-| ------------------------------ | ----------------------------------- |
+|--------------------------------|-------------------------------------|
 | `TRIPLETS_HF_PARQUET_ENDPOINT` | `/parquet` shard manifest           |
 | `TRIPLETS_HF_SIZE_ENDPOINT`    | `/size` total row count             |
 | `TRIPLETS_HF_INFO_ENDPOINT`    | `/info` ClassLabel feature metadata |
@@ -642,6 +642,7 @@ This reflects the built-in file-corpus helpers (`FileCorpusIndex`) used by files
 - **Manual epoch control**: `sampler.set_epoch(n)` resets per-source cursors and reshuffles deterministically for that epoch.
 - **Persisted state scope**: epoch tracking is split-aware, but sampler/source cursors + RNG/round-robin state are persisted per store file.
 - **Triplet recipe behavior**: if `SamplerConfig.recipes` is non-empty, those recipes are used for all sources; otherwise each source's `default_triplet_recipes()` is used (if any).
+- **Optional BM25 hard negatives**: with feature `bm25-mining`, `NegativeStrategy::Bm25HardNegative` precomputes one BM25-ranked hard-negative candidate per record whenever the ingest snapshot is rebuilt, then uses an O(1) lookup in the sampling hot loop (with same-split enforcement and random same-split fallback).
 - **Pair batches**: derived from triplets and follow the same source/recipe selection behavior.
 - **Text recipe behavior**:
   - If `SamplerConfig.text_recipes` is non-empty, those are used directly.

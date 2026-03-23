@@ -10,6 +10,9 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+#[cfg(feature = "bm25-mining")]
+use bm25::{Document, Language, SearchEngineBuilder};
+
 use crate::config::{
     ChunkingStrategy, NegativeStrategy, SamplerConfig, Selector, TextRecipe, TripletRecipe,
 };
@@ -289,6 +292,8 @@ struct TripletSamplerInner<S: SplitStore + EpochStateStore + SamplerStateStore +
     chunk_cursors: HashMap<(RecordId, usize), usize>,
     /// Per-record, per-role cursor to rotate through role-specific sections.
     role_cursors: HashMap<(RecordId, String), usize>,
+    /// Precomputed BM25 hard-negative mapping for the current ingest snapshot.
+    bm25_hard_negatives: HashMap<RecordId, RecordId>,
     /// Chunk id to record id lookup (used by epoch tracker).
     chunk_index: HashMap<RecordId, RecordId>,
     /// Round-robin order of source ids (deterministic).
@@ -356,6 +361,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             epoch_tracker,
             chunk_cursors: HashMap::new(),
             role_cursors: HashMap::new(),
+            bm25_hard_negatives: HashMap::new(),
             chunk_index: HashMap::new(),
             source_order: Vec::new(),
             source_cycle_idx: 0,
@@ -1053,7 +1059,136 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                     .cloned()
                     .map(|record| (record, false))
             }
+            #[cfg(feature = "bm25-mining")]
+            NegativeStrategy::Bm25HardNegative => {
+                self.select_bm25_hard_negative_record(anchor_record, anchor_split)
+            }
         }
+    }
+
+    #[cfg(feature = "bm25-mining")]
+    fn select_bm25_hard_negative_record(
+        &mut self,
+        anchor_record: &DataRecord,
+        anchor_split: SplitLabel,
+    ) -> Option<(DataRecord, bool)> {
+        if let Some(candidate_id) = self.bm25_hard_negatives.get(&anchor_record.id)
+            && let Some(candidate) = self.records.get(candidate_id)
+            && candidate.id != anchor_record.id
+            && self
+                .split_store
+                .label_for(&candidate.id)
+                .map(|label| label == anchor_split)
+                .unwrap_or(false)
+        {
+            return Some((candidate.clone(), false));
+        }
+
+        self.records
+            .values()
+            .filter(|candidate| {
+                candidate.id != anchor_record.id
+                    && self
+                        .split_store
+                        .label_for(&candidate.id)
+                        .map(|label| label == anchor_split)
+                        .unwrap_or(false)
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+            .choose(&mut self.rng)
+            .cloned()
+            .map(|record| (record, true))
+    }
+
+    #[cfg(feature = "bm25-mining")]
+    fn rebuild_bm25_hard_negative_index(&mut self) {
+        self.bm25_hard_negatives.clear();
+        if self.records.len() < 2 {
+            return;
+        }
+
+        let record_ids: Vec<RecordId> = self.records.keys().cloned().collect();
+        let corpus: Vec<String> = record_ids
+            .iter()
+            .map(|record_id| {
+                let record = self
+                    .records
+                    .get(record_id)
+                    .expect("record id from index map must resolve");
+                record_bm25_text(record)
+            })
+            .collect();
+        let docs: Vec<Document<usize>> = corpus
+            .iter()
+            .enumerate()
+            .map(|(idx, contents)| Document {
+                id: idx,
+                contents: contents.clone(),
+            })
+            .collect();
+
+        let search_engine =
+            SearchEngineBuilder::<usize>::with_documents(Language::English, docs).build();
+
+        let split_by_id: HashMap<RecordId, SplitLabel> = record_ids
+            .iter()
+            .filter_map(|record_id| {
+                self.split_store
+                    .label_for(record_id)
+                    .map(|split| (record_id.clone(), split))
+            })
+            .collect();
+
+        let max_results = self.records.len().min(8).max(2);
+        for (anchor_idx, anchor_id) in record_ids.iter().enumerate() {
+            let Some(anchor_record) = self.records.get(anchor_id) else {
+                continue;
+            };
+            let Some(anchor_split) = split_by_id.get(anchor_id) else {
+                continue;
+            };
+
+            let mut same_source_candidate: Option<RecordId> = None;
+            let mut same_split_candidate: Option<RecordId> = None;
+
+            for result in search_engine.search(&corpus[anchor_idx], max_results) {
+                let candidate_idx = result.document.id;
+                let Some(candidate_id) = record_ids.get(candidate_idx) else {
+                    continue;
+                };
+                if candidate_id == anchor_id {
+                    continue;
+                }
+                let Some(candidate_record) = self.records.get(candidate_id) else {
+                    continue;
+                };
+                let Some(candidate_split) = split_by_id.get(candidate_id) else {
+                    continue;
+                };
+                if candidate_split != anchor_split {
+                    continue;
+                }
+
+                if same_split_candidate.is_none() {
+                    same_split_candidate = Some(candidate_id.clone());
+                }
+                if candidate_record.source == anchor_record.source {
+                    same_source_candidate = Some(candidate_id.clone());
+                    break;
+                }
+            }
+
+            if let Some(candidate_id) = same_source_candidate.or(same_split_candidate) {
+                self.bm25_hard_negatives
+                    .insert(anchor_id.clone(), candidate_id);
+            }
+        }
+    }
+
+    #[cfg(not(feature = "bm25-mining"))]
+    fn rebuild_bm25_hard_negative_index(&mut self) {
+        self.bm25_hard_negatives.clear();
     }
 
     /// True when the recipe is the special auto-injected long-section chunk-pair recipe.
@@ -1561,6 +1696,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         self.prune_cursor_state();
         self.rebuild_chunk_index();
         self.rebuild_source_index()?;
+        self.rebuild_bm25_hard_negative_index();
         Ok(())
     }
 
@@ -2426,11 +2562,34 @@ fn taxonomy_value(record: &DataRecord, field: MetadataKey) -> Option<&str> {
     record.taxonomy.iter().find_map(|entry| field.strip(entry))
 }
 
+#[cfg(feature = "bm25-mining")]
+fn record_bm25_text(record: &DataRecord) -> String {
+    let mut out = String::new();
+    for section in &record.sections {
+        if let Some(heading) = &section.heading
+            && !heading.trim().is_empty()
+        {
+            out.push_str(heading);
+            out.push('\n');
+        }
+        if !section.text.trim().is_empty() {
+            out.push_str(&section.text);
+            out.push('\n');
+        }
+    }
+    if out.trim().is_empty() {
+        return record.id.clone();
+    }
+    out
+}
+
 fn strategy_reason(strategy: &NegativeStrategy) -> &'static str {
     match strategy {
         NegativeStrategy::WrongPublicationDate => NEG_REASON_WRONG_DATE,
         NegativeStrategy::WrongArticle => NEG_REASON_WRONG_ARTICLE,
         NegativeStrategy::QuestionAnswerMismatch => NEG_REASON_WRONG_QA,
+        #[cfg(feature = "bm25-mining")]
+        NegativeStrategy::Bm25HardNegative => NEG_REASON_WRONG_ARTICLE,
     }
 }
 
@@ -2515,9 +2674,13 @@ mod tests {
         let reason_a = strategy_reason(&NegativeStrategy::WrongPublicationDate);
         let reason_b = strategy_reason(&NegativeStrategy::WrongArticle);
         let reason_c = strategy_reason(&NegativeStrategy::QuestionAnswerMismatch);
+        #[cfg(feature = "bm25-mining")]
+        let reason_d = strategy_reason(&NegativeStrategy::Bm25HardNegative);
         assert!(!reason_a.is_empty());
         assert!(!reason_b.is_empty());
         assert!(!reason_c.is_empty());
+        #[cfg(feature = "bm25-mining")]
+        assert!(!reason_d.is_empty());
         assert_ne!(reason_a, reason_b);
         assert_ne!(reason_b, reason_c);
 
@@ -5787,6 +5950,66 @@ mod tests {
             assert_eq!(negative_label, anchor_label);
         }
         assert_eq!(seen_splits.len(), 3);
+    }
+
+    #[cfg(feature = "bm25-mining")]
+    #[test]
+    fn bm25_hard_negative_prefers_semantically_similar_same_source_record() {
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let config = SamplerConfig {
+            seed: 13,
+            batch_size: 1,
+            chunking: ChunkingStrategy::default(),
+            recipes: Vec::new(),
+            text_recipes: Vec::new(),
+            split,
+            ..SamplerConfig::default()
+        };
+        let store = Arc::new(DeterministicSplitStore::new(split, 13).unwrap());
+
+        let anchor = trader_record(
+            "bm25_anchor",
+            "2025-01-01",
+            "Apple banana quarterly report",
+            "Apple banana revenue growth guidance",
+        );
+        let similar = trader_record(
+            "bm25_similar",
+            "2025-01-02",
+            "Banana apple market update",
+            "Revenue guidance for apple banana market",
+        );
+        let distant = trader_record(
+            "bm25_distant",
+            "2025-01-03",
+            "Quantum field dynamics",
+            "Black holes and gravitational lensing",
+        );
+
+        let sampler = TripletSampler::new(config, Arc::clone(&store));
+        sampler.register_source(Box::new(InMemorySource::new(
+            "tt",
+            vec![anchor.clone(), similar.clone(), distant],
+        )));
+        sampler
+            .inner
+            .lock()
+            .unwrap()
+            .ingest_internal(SplitLabel::Train)
+            .unwrap();
+
+        let mut inner = sampler.inner.lock().unwrap();
+        let (negative, fallback_used) = inner
+            .select_negative_record(&anchor, &NegativeStrategy::Bm25HardNegative)
+            .expect("expected bm25 hard negative");
+
+        assert!(!fallback_used);
+        assert_eq!(negative.id, similar.id);
+        assert_eq!(store.label_for(&negative.id), Some(SplitLabel::Train));
     }
 
     #[test]
