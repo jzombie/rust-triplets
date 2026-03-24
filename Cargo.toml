@@ -6,13 +6,13 @@ description = "Composable data sampling primitives for deterministic multi-sourc
 license = "MIT OR Apache-2.0"
 authors = ["Jeremy Harris <jeremy.harris@zenosmosis.com>"]
 repository = "https://github.com/jzombie/rust-triplets"
-categories = ["algorithms", "science", "text-processing"]
+categories = ["algorithms", "artificial-intelligence", "science", "text-processing"]
 keywords = [
     "machine-learning",
-    "contrastive-learning",
-    "triplet-loss",
+    "triplet-mining",
     "dataset-sampling",
     "training-data",
+    "bm25",
 ]
 
 [features]
