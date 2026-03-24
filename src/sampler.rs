@@ -15,6 +15,8 @@ use bm25::{Document, Language, SearchEngine, SearchEngineBuilder};
 use crate::config::{
     ChunkingStrategy, NegativeStrategy, SamplerConfig, Selector, TextRecipe, TripletRecipe,
 };
+#[cfg(feature = "bm25-mining")]
+use crate::constants::sampler::BM25_HARD_NEGATIVE_ROTATION_TOP_K;
 use crate::constants::sampler::{
     ANCHOR_POSITIVE_SWAP_MASK, EPOCH_SEED_OFFSET, EXHAUSTION_RETRY_LIMIT, NEG_REASON_WRONG_ARTICLE,
     NEG_REASON_WRONG_DATE, NEG_REASON_WRONG_QA, PREFETCHER_SOURCE_ID, PREFETCHER_STOPPED_REASON,
@@ -300,12 +302,12 @@ struct TripletSamplerInner<S: SplitStore + EpochStateStore + SamplerStateStore +
     /// Lazy BM25-ranked candidate cache for anchors in the current ingest snapshot.
     #[cfg(feature = "bm25-mining")]
     bm25_hard_negatives: HashMap<RecordId, Vec<RecordId>>,
-    /// Per-anchor cursor used to rotate through BM25-ranked candidates.
-    #[cfg(feature = "bm25-mining")]
-    bm25_hard_negative_cursors: HashMap<RecordId, usize>,
     /// BM25 engines built once per source/split for the current ingest snapshot.
     #[cfg(feature = "bm25-mining")]
     bm25_source_indices: HashMap<(SourceId, SplitLabel), Bm25SourceIndex>,
+    /// Per-anchor cursor for deterministic rotation through top BM25 hard negatives.
+    #[cfg(feature = "bm25-mining")]
+    bm25_negative_cursors: HashMap<(RecordId, SplitLabel), usize>,
     /// Chunk id to record id lookup (used by epoch tracker).
     chunk_index: HashMap<RecordId, RecordId>,
     /// Round-robin order of source ids (deterministic).
@@ -376,9 +378,9 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             #[cfg(feature = "bm25-mining")]
             bm25_hard_negatives: HashMap::new(),
             #[cfg(feature = "bm25-mining")]
-            bm25_hard_negative_cursors: HashMap::new(),
-            #[cfg(feature = "bm25-mining")]
             bm25_source_indices: HashMap::new(),
+            #[cfg(feature = "bm25-mining")]
+            bm25_negative_cursors: HashMap::new(),
             chunk_index: HashMap::new(),
             source_order: Vec::new(),
             source_cycle_idx: 0,
@@ -479,6 +481,9 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         self.chunk_cursors
             .retain(|(record_id, _), _| valid_ids.contains(record_id));
         self.role_cursors
+            .retain(|(record_id, _), _| valid_ids.contains(record_id));
+        #[cfg(feature = "bm25-mining")]
+        self.bm25_negative_cursors
             .retain(|(record_id, _), _| valid_ids.contains(record_id));
     }
 
@@ -1124,6 +1129,16 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             return None;
         }
 
+        // BM25 top-K rotation (deterministic, per anchor+split):
+        // 1) Build `ranked_pool` from BM25 ranking, restricted to strategy pool and split.
+        // 2) Compute `top_k = min(configured_top_k, ranked_pool.len())`.
+        // 3) Read per-(anchor_id, split) cursor, defaulting to 0.
+        // 4) Return `ranked_pool[cursor]`, then advance cursor modulo `top_k`.
+        //
+        // This yields sequences like [r1, r2, r3, r1, ...] for `top_k = 3`.
+        // Cursors are cleared whenever BM25 indices are rebuilt so a refreshed corpus
+        // restarts rotation from rank-1 for each anchor.
+
         // Restrict BM25 candidates to the strategy-selected pool for this recipe.
         let pool_ids: HashSet<RecordId> = pool.iter().map(|record| record.id.clone()).collect();
 
@@ -1148,20 +1163,18 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         }
 
         if !ranked_pool.is_empty() {
-            // Anchor-specific deterministic start offset prevents all anchors from using rank-0.
-            let start = (stable_hash_str(self.epoch_seed(), &anchor_record.id) as usize)
-                % ranked_pool.len();
-            let cursor = self
-                .bm25_hard_negative_cursors
-                .entry(anchor_record.id.clone())
-                .or_insert(0);
-            // Rotate through ranked candidates over repeated hits for the same anchor.
-            let idx = (start + *cursor) % ranked_pool.len();
-            *cursor = cursor.saturating_add(1);
-            return ranked_pool
-                .get(idx)
-                .cloned()
-                .map(|record| (record, fallback_used));
+            // Rotate only within the highest lexical matches, bounded by top_k.
+            let top_k = ranked_pool
+                .len()
+                .min(BM25_HARD_NEGATIVE_ROTATION_TOP_K.max(1));
+            let cursor_key = (anchor_record.id.clone(), anchor_split);
+            let cursor = self.bm25_negative_cursors.entry(cursor_key).or_insert(0);
+            if *cursor >= top_k {
+                *cursor = 0;
+            }
+            let selected = ranked_pool.get(*cursor).cloned();
+            *cursor = (*cursor + 1) % top_k;
+            return selected.map(|record| (record, fallback_used));
         }
 
         // Preserve strategy behavior: if BM25 yields no usable candidate inside
@@ -1227,8 +1240,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     #[cfg(feature = "bm25-mining")]
     fn rebuild_bm25_hard_negative_index(&mut self) {
         self.bm25_hard_negatives.clear();
-        self.bm25_hard_negative_cursors.clear();
         self.bm25_source_indices.clear();
+        self.bm25_negative_cursors.clear();
         if self.records.len() < 2 {
             return;
         }
@@ -2752,12 +2765,73 @@ mod tests {
 
     use super::*;
     use crate::config::{ChunkingStrategy, NegativeStrategy, Selector, TextRecipe, TripletRecipe};
-    use crate::constants::sampler_tests::{
-        FNV1A64_OFFSET, FNV1A64_PRIME, FULL_SEQUENCE_LEN, PAIR_BATCH_SEQUENCE_HASH,
-        PREFETCH_PAIR_BATCH_SEQUENCE_HASH, PREFETCH_TEXT_BATCH_SEQUENCE_HASH,
-        PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH, PRIMARY_SOURCE_ID, SECONDARY_SOURCE_ID,
-        TEXT_BATCH_SEQUENCE_HASH, TRIPLET_BATCH_SEQUENCE_HASH,
-    };
+
+    /// Primary source id used by sampler unit tests.
+    pub const PRIMARY_SOURCE_ID: &str = "source_a";
+    /// Secondary source id used by sampler unit tests.
+    pub const SECONDARY_SOURCE_ID: &str = "source_b";
+
+    /// FNV-1a 64-bit offset basis used in snapshot hashing tests.
+    pub const FNV1A64_OFFSET: u64 = 0xcbf29ce484222325;
+    /// FNV-1a 64-bit prime used in snapshot hashing tests.
+    pub const FNV1A64_PRIME: u64 = 0x100000001b3;
+
+    /// Number of batches sampled for deterministic sequence hash assertions.
+    pub const FULL_SEQUENCE_LEN: usize = 45;
+    /// Expected hash for deterministic text batch sequence.
+    pub const TEXT_BATCH_SEQUENCE_HASH: u64 = 16700524736973776041;
+    /// Expected hash for deterministic triplet batch sequence.
+    #[cfg(not(feature = "bm25-mining"))]
+    pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 14618375830351864347;
+    /// Expected hash for deterministic triplet batch sequence when bm25-mining is enabled.
+    #[cfg(feature = "bm25-mining")]
+    pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 8952398634437828807;
+    /// Expected hash for deterministic pair batch sequence.
+    #[cfg(not(feature = "bm25-mining"))]
+    pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 13133711470950174124;
+    /// Expected hash for deterministic pair batch sequence when bm25-mining is enabled.
+    #[cfg(feature = "bm25-mining")]
+    pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 6629887926185587898;
+    /// Expected hash for deterministic prefetch text batch sequence.
+    pub const PREFETCH_TEXT_BATCH_SEQUENCE_HASH: u64 = 16740235391902546413;
+    /// Expected hash for deterministic prefetch triplet batch sequence.
+    #[cfg(not(feature = "bm25-mining"))]
+    pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 11709520942485223708;
+    /// Expected hash for deterministic prefetch triplet batch sequence when bm25-mining is enabled.
+    #[cfg(feature = "bm25-mining")]
+    pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 17550930107590484936;
+    /// Expected hash for deterministic prefetch pair batch sequence.
+    #[cfg(not(feature = "bm25-mining"))]
+    pub const PREFETCH_PAIR_BATCH_SEQUENCE_HASH: u64 = 2553049861003803008;
+    /// Expected hash for deterministic prefetch pair batch sequence when bm25-mining is enabled.
+    #[cfg(feature = "bm25-mining")]
+    pub const PREFETCH_PAIR_BATCH_SEQUENCE_HASH: u64 = 4934485014530376519;
+
+    /// Expected readable wrong-article sequence without BM25 mining.
+    pub const READABLE_NON_BM25_TITLES: [&str; 8] = [
+        "Energy transition memo",
+        "Archaeology field note",
+        "Archaeology field note",
+        "Carbon market and emissions policy",
+        "Energy transition memo",
+        "Carbon market and emissions policy",
+        "Energy transition memo",
+        "Carbon policy update",
+    ];
+
+    /// Expected readable wrong-article sequence with BM25 mining enabled.
+    #[cfg(feature = "bm25-mining")]
+    pub const READABLE_BM25_TITLES: [&str; 8] = [
+        "Carbon market and emissions policy",
+        "Carbon policy update",
+        "Regulatory market digest",
+        "Carbon market and emissions policy",
+        "Carbon policy update",
+        "Regulatory market digest",
+        "Carbon market and emissions policy",
+        "Carbon policy update",
+    ];
+
     use crate::data::{ChunkView, QualityScore, RecordChunk, RecordSection};
     use crate::kvp::{KvpField, KvpPrefixSampler};
     use crate::metadata::META_FIELD_DATE;
@@ -4787,16 +4861,10 @@ mod tests {
             }
         };
 
-        let expected_non_bm25_titles = vec![
-            "Energy transition memo".to_string(),
-            "Archaeology field note".to_string(),
-            "Archaeology field note".to_string(),
-            "Carbon market and emissions policy".to_string(),
-            "Energy transition memo".to_string(),
-            "Carbon market and emissions policy".to_string(),
-            "Energy transition memo".to_string(),
-            "Carbon policy update".to_string(),
-        ];
+        let expected_non_bm25_titles: Vec<String> = READABLE_NON_BM25_TITLES
+            .iter()
+            .map(|title| (*title).to_string())
+            .collect();
 
         #[cfg(not(feature = "bm25-mining"))]
         {
@@ -4828,18 +4896,12 @@ mod tests {
 
             let negative_titles: Vec<String> =
                 negatives.iter().map(|id| display(id).to_string()).collect();
+            let expected_bm25_titles: Vec<String> = READABLE_BM25_TITLES
+                .iter()
+                .map(|title| (*title).to_string())
+                .collect();
             assert_eq!(
-                negative_titles,
-                vec![
-                    "Regulatory market digest".to_string(),
-                    "Energy transition memo".to_string(),
-                    "Marine geology report".to_string(),
-                    "Archaeology field note".to_string(),
-                    "Carbon market and emissions policy".to_string(),
-                    "Carbon policy update".to_string(),
-                    "Regulatory market digest".to_string(),
-                    "Energy transition memo".to_string(),
-                ],
+                negative_titles, expected_bm25_titles,
                 "BM25 readable sequence changed unexpectedly"
             );
             assert_ne!(

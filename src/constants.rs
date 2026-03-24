@@ -79,51 +79,19 @@ pub mod sampler {
     /// the first slot as the "short" anchor — which is especially important for InfoNCE and
     /// similar contrastive objectives.
     pub const ANCHOR_POSITIVE_SWAP_MASK: u64 = 1;
-}
-
-/// Constants used by sampler test fixtures and determinism snapshots.
-#[cfg(test)]
-pub mod sampler_tests {
-    /// Primary source id used by sampler unit tests.
-    pub const PRIMARY_SOURCE_ID: &str = "source_a";
-    /// Secondary source id used by sampler unit tests.
-    pub const SECONDARY_SOURCE_ID: &str = "source_b";
-
-    /// FNV-1a 64-bit offset basis used in snapshot hashing tests.
-    pub const FNV1A64_OFFSET: u64 = 0xcbf29ce484222325;
-    /// FNV-1a 64-bit prime used in snapshot hashing tests.
-    pub const FNV1A64_PRIME: u64 = 0x100000001b3;
-
-    /// Number of batches sampled for deterministic sequence hash assertions.
-    pub const FULL_SEQUENCE_LEN: usize = 45;
-    /// Expected hash for deterministic text batch sequence.
-    pub const TEXT_BATCH_SEQUENCE_HASH: u64 = 16700524736973776041;
-    /// Expected hash for deterministic triplet batch sequence.
-    #[cfg(not(feature = "bm25-mining"))]
-    pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 14618375830351864347;
-    /// Expected hash for deterministic triplet batch sequence when bm25-mining is enabled.
+    /// Number of highest-ranked BM25 hard negatives rotated per anchor before repeating.
+    ///
+    /// Effective selection window per draw is:
+    /// - `top_k = min(BM25_HARD_NEGATIVE_ROTATION_TOP_K, ranked_pool.len())`
+    /// - draws cycle over indices `0..top_k` in order.
+    ///
+    /// Example with `top_k = 3`:
+    /// draw sequence is rank-1, rank-2, rank-3, rank-1, rank-2, ...
+    ///
+    /// This preserves lexical hardness (always from BM25 top ranks) while preventing
+    /// collapse to the single top document on repeated draws for the same anchor.
     #[cfg(feature = "bm25-mining")]
-    pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 14961489791547415755;
-    /// Expected hash for deterministic pair batch sequence.
-    #[cfg(not(feature = "bm25-mining"))]
-    pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 13133711470950174124;
-    /// Expected hash for deterministic pair batch sequence when bm25-mining is enabled.
-    #[cfg(feature = "bm25-mining")]
-    pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 9828412194721765766;
-    /// Expected hash for deterministic prefetch text batch sequence.
-    pub const PREFETCH_TEXT_BATCH_SEQUENCE_HASH: u64 = 16740235391902546413;
-    /// Expected hash for deterministic prefetch triplet batch sequence.
-    #[cfg(not(feature = "bm25-mining"))]
-    pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 11709520942485223708;
-    /// Expected hash for deterministic prefetch triplet batch sequence when bm25-mining is enabled.
-    #[cfg(feature = "bm25-mining")]
-    pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 5349141671618144468;
-    /// Expected hash for deterministic prefetch pair batch sequence.
-    #[cfg(not(feature = "bm25-mining"))]
-    pub const PREFETCH_PAIR_BATCH_SEQUENCE_HASH: u64 = 2553049861003803008;
-    /// Expected hash for deterministic prefetch pair batch sequence when bm25-mining is enabled.
-    #[cfg(feature = "bm25-mining")]
-    pub const PREFETCH_PAIR_BATCH_SEQUENCE_HASH: u64 = 7364258547165446867;
+    pub const BM25_HARD_NEGATIVE_ROTATION_TOP_K: usize = 3;
 }
 
 /// Constants used by split-store persistence and wire encoding.
