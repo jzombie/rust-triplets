@@ -70,6 +70,33 @@ pub struct TripletRecipe {
     pub weight: f32,
     /// Optional instruction text attached to samples from this recipe.
     pub instruction: Option<Cow<'static, str>>,
+    /// Allow anchor and positive to carry identical text (SimCSE / dropout-trick mode).
+    ///
+    /// When `true`, the sampler will emit triplets even when the anchor and positive
+    /// sections resolve to the same text.  This enables the unsupervised SimCSE
+    /// training pattern: the same text string feeds both slots, and the model's
+    /// dropout layers produce two slightly different embeddings at training time.
+    ///
+    /// Negatives are still required to differ from both anchor and positive.
+    ///
+    /// Defaults to `false`; set `true` only for recipes whose anchor and positive
+    /// selectors intentionally resolve to the same content (e.g. text-only sources).
+    pub allow_same_anchor_positive: bool,
+}
+
+impl Default for TripletRecipe {
+    fn default() -> Self {
+        Self {
+            name: "".into(),
+            anchor: Selector::Random,
+            positive_selector: Selector::Random,
+            negative_selector: Selector::Random,
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 1.0,
+            instruction: None,
+            allow_same_anchor_positive: false,
+        }
+    }
 }
 
 /// Selector for choosing a section or neighboring record.

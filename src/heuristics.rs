@@ -138,6 +138,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight,
             instruction: None,
+            allow_same_anchor_positive: false,
         }
     }
 

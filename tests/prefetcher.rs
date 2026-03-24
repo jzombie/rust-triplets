@@ -57,6 +57,7 @@ fn prefetcher_yields_triplet_batches() {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }],
         ..SamplerConfig::default()
     };

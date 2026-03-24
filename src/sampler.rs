@@ -706,6 +706,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }
     }
 
@@ -1534,7 +1535,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         // text matches the positive (or the anchor) would produce a trivially-invalid
         // training example.  String equality short-circuits on the first differing byte,
         // so the guard is effectively free when texts differ (the common case).
-        if anchor_chunk.text == positive_chunk.text
+        //
+        // When `allow_same_anchor_positive` is set the anchor==positive check is skipped
+        // to support SimCSE-style training where both slots carry identical text and the
+        // model's dropout layers produce the required embedding variation at train time.
+        // The negative must still differ from both anchor and positive.
+        if (!recipe.allow_same_anchor_positive && anchor_chunk.text == positive_chunk.text)
             || negative_chunk.text == positive_chunk.text
             || negative_chunk.text == anchor_chunk.text
         {
@@ -3502,6 +3508,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
         config.text_recipes = Vec::new();
 
@@ -3555,6 +3562,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
         config.text_recipes = Vec::new();
 
@@ -3611,6 +3619,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
 
         let records = vec![
@@ -3658,6 +3667,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
 
         let records = vec![
@@ -3745,6 +3755,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
         config.text_recipes = Vec::new();
 
@@ -4207,6 +4218,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
         config.text_recipes = vec![TextRecipe {
             name: "parity_text".into(),
@@ -4502,6 +4514,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
 
         let sampler = Arc::new(TripletSampler::new(config, Arc::clone(&store)));
@@ -4936,6 +4949,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         };
         let config = SamplerConfig {
             seed: 991,
@@ -5099,6 +5113,7 @@ mod tests {
                     negative_strategy: NegativeStrategy::WrongArticle,
                     weight: 1.0,
                     instruction: None,
+                    allow_same_anchor_positive: false,
                 }],
                 text_recipes: Vec::new(),
                 split,
@@ -5250,6 +5265,7 @@ mod tests {
                 negative_strategy: NegativeStrategy::WrongArticle,
                 weight: 1.0,
                 instruction: None,
+                allow_same_anchor_positive: false,
             }],
             text_recipes: vec![TextRecipe {
                 name: "teacher_chunk".into(),
@@ -5667,6 +5683,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
         config.text_recipes = Vec::new();
 
@@ -5800,6 +5817,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
         config.text_recipes = Vec::new();
 
@@ -5879,6 +5897,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
         config.text_recipes = Vec::new();
 
@@ -6009,6 +6028,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
         config.text_recipes = Vec::new();
 
@@ -6285,6 +6305,7 @@ mod tests {
                 negative_strategy: NegativeStrategy::WrongPublicationDate,
                 weight: 1.0,
                 instruction: None,
+                allow_same_anchor_positive: false,
             }],
             text_recipes: Vec::new(),
             split,
@@ -6337,6 +6358,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
         let decorated = RecipeDecoratedSource::new(records, recipes);
         let sampler = TripletSampler::new(config, store);
@@ -6374,6 +6396,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
         let records = vec![
             trader_record(
@@ -6426,6 +6449,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
         let records = vec![
             trader_record(
@@ -6469,6 +6493,7 @@ mod tests {
                 negative_strategy: NegativeStrategy::WrongArticle,
                 weight: 1.0,
                 instruction: None,
+                allow_same_anchor_positive: false,
             }],
             text_recipes: Vec::new(),
             split,
@@ -6523,6 +6548,7 @@ mod tests {
                 negative_strategy: NegativeStrategy::QuestionAnswerMismatch,
                 weight: 1.0,
                 instruction: None,
+                allow_same_anchor_positive: false,
             }],
             text_recipes: Vec::new(),
             split,
@@ -6861,6 +6887,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongPublicationDate,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         };
         let config = SamplerConfig {
             seed: 23,
@@ -7280,6 +7307,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         };
         let config = SamplerConfig {
             seed: 91,
@@ -7686,6 +7714,7 @@ mod tests {
                 negative_strategy: NegativeStrategy::WrongPublicationDate,
                 weight: 1.0,
                 instruction: None,
+                allow_same_anchor_positive: false,
             }],
             text_recipes: Vec::new(),
             split,
@@ -7807,6 +7836,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
         config.text_recipes = Vec::new();
 
@@ -7875,6 +7905,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
         config.text_recipes = vec![TextRecipe {
             name: "split_api_text".into(),
@@ -7983,6 +8014,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
         config.text_recipes = Vec::new();
 
@@ -8065,6 +8097,7 @@ mod tests {
                 negative_strategy: NegativeStrategy::WrongArticle,
                 weight: 1.0,
                 instruction: None,
+                allow_same_anchor_positive: false,
             }],
             text_recipes: Vec::new(),
             split,
@@ -8154,6 +8187,7 @@ mod tests {
                 negative_strategy: NegativeStrategy::WrongArticle,
                 weight: 1.0,
                 instruction: None,
+                allow_same_anchor_positive: false,
             },
             TripletRecipe {
                 name: "recipe_b".into(),
@@ -8163,6 +8197,7 @@ mod tests {
                 negative_strategy: NegativeStrategy::WrongArticle,
                 weight: 1.0,
                 instruction: None,
+                allow_same_anchor_positive: false,
             },
         ];
         config.text_recipes = Vec::new();
@@ -8206,6 +8241,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
 
         let store = Arc::new(DeterministicSplitStore::new(split, 77).unwrap());
@@ -8348,6 +8384,7 @@ mod tests {
                 negative_strategy: NegativeStrategy::WrongArticle,
                 weight: 1.0,
                 instruction: None,
+                allow_same_anchor_positive: false,
             }],
             text_recipes: Vec::new(),
             split,
@@ -8412,6 +8449,7 @@ mod tests {
                     negative_strategy: NegativeStrategy::WrongArticle,
                     weight: 1.0,
                     instruction: None,
+                    allow_same_anchor_positive: false,
                 }],
                 text_recipes: Vec::new(),
                 split,
@@ -8501,6 +8539,7 @@ mod tests {
                 negative_strategy: NegativeStrategy::WrongArticle,
                 weight: 1.0,
                 instruction: None,
+                allow_same_anchor_positive: false,
             }],
             text_recipes: Vec::new(),
             split,
@@ -8605,6 +8644,7 @@ mod tests {
                 negative_strategy: NegativeStrategy::WrongArticle,
                 weight: 1.0,
                 instruction: None,
+                allow_same_anchor_positive: false,
             }],
             text_recipes: Vec::new(),
             split,
@@ -8949,6 +8989,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
 
         let now = Utc::now();
@@ -9053,6 +9094,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
 
         let now = Utc::now();
@@ -9162,6 +9204,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
 
         let now = Utc::now();
@@ -9672,6 +9715,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         };
 
         let triplet = inner.make_triplet_with_anchor(&recipe, &anchor);
@@ -9829,6 +9873,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
         config.text_recipes = vec![TextRecipe {
             name: "prefetch_text".into(),
@@ -9964,6 +10009,7 @@ mod tests {
                 negative_strategy: NegativeStrategy::WrongArticle,
                 weight: 1.0,
                 instruction: None,
+                allow_same_anchor_positive: false,
             }],
             text_recipes: Vec::new(),
             allowed_splits: vec![SplitLabel::Train],
@@ -10075,6 +10121,7 @@ mod tests {
                 negative_strategy: NegativeStrategy::WrongArticle,
                 weight: 1.0,
                 instruction: None,
+                allow_same_anchor_positive: false,
             }],
             text_recipes: Vec::new(),
             allowed_splits: vec![SplitLabel::Train],
@@ -10171,6 +10218,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
 
         let store = Arc::new(DeterministicSplitStore::new(split, 55).unwrap());
@@ -10499,6 +10547,188 @@ mod tests {
             neighbor.unwrap().id,
             train_id,
             "temporal neighbor must not cross split boundaries"
+        );
+    }
+
+    #[test]
+    fn instruction_propagates_from_recipe_to_sample_triplet() {
+        // Verify that a non-None `instruction` on a TripletRecipe flows through
+        // finalize_triplet_with_negative into every SampleTriplet it produces.
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let store = Arc::new(DeterministicSplitStore::new(split, 55).unwrap());
+        let mut config = base_config();
+        config.batch_size = 1;
+        config.allowed_splits = vec![SplitLabel::Train];
+        config.split = split;
+        config.recipes = vec![TripletRecipe {
+            name: "instr_recipe".into(),
+            anchor: Selector::Role(SectionRole::Anchor),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 1.0,
+            instruction: Some("Retrieve a relevant document.".into()),
+            allow_same_anchor_positive: false,
+        }];
+
+        let now = Utc::now();
+        let make_record = |id: &str, anchor: &str, context: &str| DataRecord {
+            id: id.into(),
+            source: "unit".into(),
+            created_at: now,
+            updated_at: now,
+            quality: QualityScore::default(),
+            taxonomy: vec![],
+            sections: vec![
+                RecordSection {
+                    role: SectionRole::Anchor,
+                    heading: None,
+                    text: anchor.into(),
+                    sentences: vec![anchor.into()],
+                },
+                RecordSection {
+                    role: SectionRole::Context,
+                    heading: None,
+                    text: context.into(),
+                    sentences: vec![context.into()],
+                },
+            ],
+            meta_prefix: None,
+        };
+
+        let records = vec![
+            make_record("r1", "anchor one unique text", "context one unique text"),
+            make_record("r2", "anchor two unique text", "context two unique text"),
+            make_record(
+                "r3",
+                "anchor three unique text",
+                "context three unique text",
+            ),
+        ];
+
+        let sampler = TripletSampler::new(config, Arc::clone(&store));
+        sampler.register_source(Box::new(InMemorySource::new("unit", records)));
+
+        let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
+        assert_eq!(batch.triplets.len(), 1);
+        assert_eq!(
+            batch.triplets[0].instruction.as_deref(),
+            Some("Retrieve a relevant document."),
+            "instruction must propagate from TripletRecipe to SampleTriplet"
+        );
+    }
+
+    #[test]
+    fn allow_same_anchor_positive_permits_identical_text_triplet() {
+        // Verify the guard in finalize_triplet_with_negative: with the flag false
+        // (default) a same-text pair is rejected; with the flag true it passes through.
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let store = Arc::new(DeterministicSplitStore::new(split, 77).unwrap());
+        let mut config = base_config();
+        config.allowed_splits = vec![SplitLabel::Train];
+        config.split = split;
+
+        let now = Utc::now();
+        // Both anchor= and context= sections carry the exact same text per record.
+        // This simulates the text-columns mode where a single text field is duplicated
+        // into both roles by row_to_record.
+        let make_record = |id: &str, text: &str| DataRecord {
+            id: id.into(),
+            source: "unit".into(),
+            created_at: now,
+            updated_at: now,
+            quality: QualityScore::default(),
+            taxonomy: vec![],
+            sections: vec![
+                RecordSection {
+                    role: SectionRole::Anchor,
+                    heading: None,
+                    text: text.into(),
+                    sentences: vec![text.into()],
+                },
+                RecordSection {
+                    role: SectionRole::Context,
+                    heading: None,
+                    text: text.into(), // identical to anchor
+                    sentences: vec![text.into()],
+                },
+            ],
+            meta_prefix: None,
+        };
+
+        let records = vec![
+            make_record("t1", "the fox jumped over the lazy dog"),
+            make_record("t2", "a quick brown cat sat on the mat"),
+            make_record("t3", "stars shine brightly in the night sky"),
+        ];
+
+        // --- flag = false: the identical anchor/positive pair must be rejected ---
+        let simcse_recipe_blocked = TripletRecipe {
+            name: "blocked_simcse".into(),
+            anchor: Selector::Role(SectionRole::Anchor),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 1.0,
+            instruction: None,
+            allow_same_anchor_positive: false,
+        };
+
+        let mut config_blocked = config.clone();
+        config_blocked.batch_size = 1;
+        config_blocked.recipes = vec![simcse_recipe_blocked];
+
+        let sampler_blocked = TripletSampler::new(config_blocked, Arc::clone(&store));
+        sampler_blocked.register_source(Box::new(InMemorySource::new("unit", records.clone())));
+        // With flag=false the sampler cannot build any valid triplet from these records
+        // (every anchor/positive pair is identical text), so the batch should error.
+        assert!(
+            sampler_blocked
+                .next_triplet_batch(SplitLabel::Train)
+                .is_err(),
+            "same-text anchor/positive must be rejected when allow_same_anchor_positive=false"
+        );
+
+        // --- flag = true: the identical anchor/positive pair must be allowed ---
+        let simcse_recipe_allowed = TripletRecipe {
+            name: "allowed_simcse".into(),
+            anchor: Selector::Role(SectionRole::Anchor),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 1.0,
+            instruction: None,
+            allow_same_anchor_positive: true,
+        };
+
+        let mut config_allowed = config.clone();
+        config_allowed.batch_size = 1;
+        config_allowed.recipes = vec![simcse_recipe_allowed];
+
+        let sampler_allowed = TripletSampler::new(config_allowed, Arc::clone(&store));
+        sampler_allowed.register_source(Box::new(InMemorySource::new("unit", records)));
+        let batch = sampler_allowed
+            .next_triplet_batch(SplitLabel::Train)
+            .expect("triplet must be produced when allow_same_anchor_positive=true");
+        assert_eq!(batch.triplets.len(), 1);
+        let triplet = &batch.triplets[0];
+        // Anchor and positive carry the same text (SimCSE pattern).
+        assert_eq!(
+            triplet.anchor.text, triplet.positive.text,
+            "anchor and positive must share identical text in SimCSE mode"
+        );
+        // Negative must differ.
+        assert_ne!(
+            triplet.negative.text, triplet.anchor.text,
+            "negative must differ from anchor even in SimCSE mode"
         );
     }
 }

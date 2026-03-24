@@ -5,8 +5,10 @@
 Compose an effectively unlimited supply of [training triplets](https://en.wikipedia.org/wiki/Triplet_loss), pairs, or plaintext samples, from your existing corpus, with optional [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) hard-negative mining.
 
 - Multiple input source mixing, rule-driven sampling recipes, using a`Rayon`-managed thread pool with optional multi-batch prebuffering for training.
+- Optional per-recipe training instructions.
 - Configurable source sampling weights, independent source cursors, source/record trust weighting, recipe weighting, and position-aware window weighting (`start_ratio`), so you can tune per-source sampling frequency and per-sample training weight.
 - Automatic & deterministic data splits.
+- Optional split-store state snapshotting: split assignments (train/validation/test) and sampler cursor state are persisted to a compact binary file. Only record IDs and lightweight metadata are stored — record text and payloads are never written to the split store, keeping snapshot files small even for large corpora. Resume a multi-epoch training run from any persisted checkpoint.
 - Automatic source chunking (ensure all data is eventually consumed regardless of context window size).
 - Anti-regime and diversity features: Anchor/positive swapping; negatives drawn from other anchors/positives; long anchor/positive sections are chunked into additional anchor/positive windows; deterministic pseudo-random ID sampling via IndexPermutation (affine/LCG-style permutation with cycle-walking); and hash-shuffled source cycling (epoch/cycle-seeded) layered over split-aware Round-Robin cursors to avoid fixed Round-Robin regimes.
 - Combine any combination of text-based streaming and static data sources.
@@ -17,7 +19,7 @@ Compose an effectively unlimited supply of [training triplets](https://en.wikipe
 
 > _The loss function and choice of ML framework is a separate concern; this crate only handles the data._
 
-Jump to the [Quick Start](#quick-start).
+Jump to the [quick start](#quick-start).
 
 View the [capabilities](#capabilities) for a deeper dive into the aforementioned list.
 
@@ -104,6 +106,8 @@ let _instruction: Option<&str> = triplet.instruction.as_deref();
 
 A **source** is any backend that yields `DataRecord`s (for example filesystem corpora, Hugging Face rows, or your own adapter). The sampler can mix multiple sources in the same run/batch.
 
+> **Terminology note:** In this crate "source" and "loader" are interchangeable concepts. The `DataSource` trait is the crate's loader abstraction — any backend that can yield `DataRecord`s is a source. Both terms appear in the docs and examples; internally the crate uses "source" throughout.
+
 Why this matters:
 
 - You define rules (selectors, strategies, weights) once, and the sampler constructs triplets from those rules at runtime.
@@ -149,8 +153,20 @@ let _recipe = TripletRecipe {
   negative_strategy: NegativeStrategy::WrongArticle,
   weight: 1.0,
   instruction: None,
+  allow_same_anchor_positive: false,
 };
 ```
+
+**`TripletRecipe` field reference:**
+
+| Field                                                | Description                                                                                                                                                                                                                                                                                                                                                                                                           |
+|------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `name`                                               | Unique identifier; appears in `SampleTriplet.recipe` and derived text sample names.                                                                                                                                                                                                                                                                                                                                   |
+| `anchor` / `positive_selector` / `negative_selector` | `Selector` rules: `Role(SectionRole::Anchor)` picks a section with that role; `Random` picks any section; etc.                                                                                                                                                                                                                                                                                                        |
+| `negative_strategy`                                  | Candidate pool for the negative slot: `WrongArticle` draws from different records; `WrongDate` draws from records with a different date (file source only).                                                                                                                                                                                                                                                           |
+| `weight`                                             | Relative sampling frequency among recipes; only the ratio between weights matters.                                                                                                                                                                                                                                                                                                                                    |
+| `instruction`                                        | Optional instruction string propagated to every `SampleTriplet.instruction` and `TextSample.instruction` produced by this recipe. Use for instruction-tuning workflows where the encoder is prompted per task (`"Retrieve a relevant document."`, `"Classify the sentiment."`, etc.). `None` means no instruction is attached and the output field is `None`.                                                         |
+| `allow_same_anchor_positive`                         | When `true`, allows triplets where anchor and positive carry identical text (SimCSE / dropout-trick training). The encoder sees the same text twice; dropout produces two slightly different embeddings at training time. The negative must still differ from both. Defaults to `false`. The HuggingFace source sets this `true` automatically in text-columns mode (when `text=` is mapped but `anchor=` is absent). |
 
 ### How recipe selection works
 
@@ -313,6 +329,8 @@ Operational notes:
 
 ### Split-store path configuration
 
+**What the split store contains:** Record IDs and their assigned split labels (train/validation/test), plus a small amount of sampler cursor state (epoch counter, round-robin index, RNG state). It does **not** store record text, embeddings, or section payloads — only the identifiers needed for deterministic re-assignment and checkpoint resume. Even for corpora with millions of records, snapshot files remain compact (a few megabytes rather than gigabytes).
+
 The `multi_source_demo` example persists sampler/split state by default to a managed cache-group path:
 
 - `.cache/triplets/multi-source-demo/split_store.bin`
@@ -412,6 +430,7 @@ config.recipes = vec![TripletRecipe {
   negative_strategy: NegativeStrategy::WrongArticle,
   weight: 1.0,
   instruction: None,
+  allow_same_anchor_positive: false,
 }];
 
 let sampler = TripletSampler::new(config, Arc::clone(&store));
@@ -677,6 +696,7 @@ Then register the source with your sampler and call `next_triplet_batch`, `next_
 - **Runtime batch sampling** via `next_triplet_batch`, `next_pair_batch`, and `next_text_batch`.
 - **Recipe-driven sample construction** for triplet/pair/text generation (anchor/positive/negative selectors).
 - **Per-source independent recipe rules**: when `SamplerConfig.recipes` is left empty, each source supplies its own `default_triplet_recipes()` so sources with different data shapes — documents, QA pairs, structured logs — can each use tailored anchor/positive/negative strategies without affecting one another. A global recipe set can still be provided to override all sources uniformly.
+- **Optional per-recipe instruction strings** (`TripletRecipe.instruction` / `TextRecipe.instruction`): an `Option<Cow<'static, str>>` that, when set, is propagated verbatim to every `SampleTriplet.instruction` and `TextSample.instruction` produced by that recipe. Use this for instruction-tuning workflows where the encoder is prompted per task (e.g. `"Retrieve a relevant document."`, `"Classify the sentiment."`). When `None`, the output field is also `None` and no instruction overhead is paid. Instructions are per-recipe, so different recipes in the same sampler can carry different instructions simultaneously.
 - **Combinatorial triplet supply from modest corpora**: triplets are assembled on demand from source record combinations at batch time, not precomputed corpus-wide. Optional prefetch/prebuffering only materializes a bounded queue of upcoming sampled batches. N records still yield up to N×(N−1) raw combinations per recipe, multiplied across configured recipes and chunk windows.
 - **Optional BM25 hard-negative mining** (`bm25-mining` feature): ranks same-split candidates inside each strategy-defined pool by BM25 score. Rule-based sampling remains the default fast path; BM25 is a ranking layer on top of existing strategy pools, not a global filter. Because negatives are mined per-source by default, each source is still treated as a domain boundary.
 - **Automatic long-section recipe injection**: for sources with sections longer than `chunking.max_window_tokens`, automatically adds `auto_injected_long_section_chunk_pair_wrong_article`, which builds anchor/positive from two different context windows of the same record and uses a context section from a different record as the negative.

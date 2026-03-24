@@ -84,6 +84,7 @@ fn build_config(batch_size: usize, split: SplitRatios) -> SamplerConfig {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }],
         text_recipes: Vec::new(),
         ..SamplerConfig::default()

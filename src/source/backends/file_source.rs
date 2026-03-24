@@ -149,6 +149,7 @@ pub fn default_title_context_triplet_recipes(include_date_aware: bool) -> Vec<Tr
             negative_strategy: NegativeStrategy::WrongPublicationDate,
             weight: 0.30,
             instruction: None,
+            allow_same_anchor_positive: false,
         });
         // Keep a smaller anchor-negative date-aware lane for harder examples
         // without overwhelming the primary summary-driven objectives.
@@ -161,6 +162,7 @@ pub fn default_title_context_triplet_recipes(include_date_aware: bool) -> Vec<Tr
             negative_strategy: NegativeStrategy::WrongPublicationDate,
             weight: 0.10,
             instruction: None,
+            allow_same_anchor_positive: false,
         });
     }
     // Rebalance summary wrong-article depending on whether date-aware lanes are
@@ -173,6 +175,7 @@ pub fn default_title_context_triplet_recipes(include_date_aware: bool) -> Vec<Tr
         negative_strategy: NegativeStrategy::WrongArticle,
         weight: if include_date_aware { 0.35 } else { 0.75 },
         instruction: None,
+        allow_same_anchor_positive: false,
     });
     // Medium-hard lane adds anchor-as-negative pressure to improve
     // discrimination among title-like anchor fields.
@@ -184,6 +187,7 @@ pub fn default_title_context_triplet_recipes(include_date_aware: bool) -> Vec<Tr
         negative_strategy: NegativeStrategy::WrongArticle,
         weight: 0.25,
         instruction: None,
+        allow_same_anchor_positive: false,
     });
     recipes
 }
@@ -401,6 +405,7 @@ mod tests {
             negative_strategy: NegativeStrategy::QuestionAnswerMismatch,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
 
         let source = FileSource::new(
@@ -484,6 +489,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
         let source = FileSource::new(
             FileSourceConfig::new("qa_defaults_override", temp.path())

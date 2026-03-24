@@ -60,6 +60,7 @@ fn assert_diversity_for_seed_and_split(seed: u64, allowed_split: SplitLabel) {
         negative_strategy: NegativeStrategy::WrongArticle,
         weight: 1.0,
         instruction: None,
+        allow_same_anchor_positive: false,
     }];
     config.text_recipes = Vec::new();
 
