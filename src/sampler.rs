@@ -298,7 +298,11 @@ struct TripletSamplerInner<S: SplitStore + EpochStateStore + SamplerStateStore +
     /// Per-record, per-role cursor to rotate through role-specific sections.
     role_cursors: HashMap<(RecordId, String), usize>,
     /// Lazy BM25-ranked candidate cache for anchors in the current ingest snapshot.
+    #[cfg(feature = "bm25-mining")]
     bm25_hard_negatives: HashMap<RecordId, Vec<RecordId>>,
+    /// Per-anchor cursor used to rotate through BM25-ranked candidates.
+    #[cfg(feature = "bm25-mining")]
+    bm25_hard_negative_cursors: HashMap<RecordId, usize>,
     /// BM25 engines built once per source/split for the current ingest snapshot.
     #[cfg(feature = "bm25-mining")]
     bm25_source_indices: HashMap<(SourceId, SplitLabel), Bm25SourceIndex>,
@@ -369,7 +373,10 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             epoch_tracker,
             chunk_cursors: HashMap::new(),
             role_cursors: HashMap::new(),
+            #[cfg(feature = "bm25-mining")]
             bm25_hard_negatives: HashMap::new(),
+            #[cfg(feature = "bm25-mining")]
+            bm25_hard_negative_cursors: HashMap::new(),
             #[cfg(feature = "bm25-mining")]
             bm25_source_indices: HashMap::new(),
             chunk_index: HashMap::new(),
@@ -1099,6 +1106,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         pool: Vec<DataRecord>,
         fallback_used: bool,
     ) -> Option<(DataRecord, bool)> {
+        // Without BM25 enabled, negatives are sampled uniformly from the strategy pool.
         pool.choose(&mut self.rng)
             .cloned()
             .map(|record| (record, fallback_used))
@@ -1116,13 +1124,17 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             return None;
         }
 
+        // Restrict BM25 candidates to the strategy-selected pool for this recipe.
         let pool_ids: HashSet<RecordId> = pool.iter().map(|record| record.id.clone()).collect();
 
+        // Read ranked candidates from the per-anchor BM25 cache/index.
         let candidate_ids = self.bm25_ranked_candidates(anchor_record, anchor_split);
+        let mut ranked_pool = Vec::new();
         for candidate_id in &candidate_ids {
             if !pool_ids.contains(candidate_id) {
                 continue;
             }
+            // Keep split isolation strict even under BM25 ranking.
             if let Some(candidate) = self.records.get(candidate_id)
                 && candidate.id != anchor_record.id
                 && self
@@ -1131,14 +1143,36 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                     .map(|label| label == anchor_split)
                     .unwrap_or(false)
             {
-                return Some((candidate.clone(), fallback_used));
+                ranked_pool.push(candidate.clone());
             }
         }
 
+        if !ranked_pool.is_empty() {
+            // Anchor-specific deterministic start offset prevents all anchors from using rank-0.
+            let start = (stable_hash_str(self.epoch_seed(), &anchor_record.id) as usize)
+                % ranked_pool.len();
+            let cursor = self
+                .bm25_hard_negative_cursors
+                .entry(anchor_record.id.clone())
+                .or_insert(0);
+            // Rotate through ranked candidates over repeated hits for the same anchor.
+            let idx = (start + *cursor) % ranked_pool.len();
+            *cursor = cursor.saturating_add(1);
+            return ranked_pool
+                .get(idx)
+                .cloned()
+                .map(|record| (record, fallback_used));
+        }
+
+        // If BM25 has no usable hit, fall back to deterministic ordering + seeded random choice.
         let mut fallback = pool.to_vec();
         fallback.sort_by(|a, b| a.id.cmp(&b.id));
+        if fallback.is_empty() {
+            return None;
+        }
+        let idx = self.rng.random_range(0..fallback.len());
         fallback
-            .first()
+            .get(idx)
             .cloned()
             .map(|record| (record, fallback_used))
     }
@@ -1191,6 +1225,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     #[cfg(feature = "bm25-mining")]
     fn rebuild_bm25_hard_negative_index(&mut self) {
         self.bm25_hard_negatives.clear();
+        self.bm25_hard_negative_cursors.clear();
         self.bm25_source_indices.clear();
         if self.records.len() < 2 {
             return;
@@ -1257,9 +1292,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     }
 
     #[cfg(not(feature = "bm25-mining"))]
-    fn rebuild_bm25_hard_negative_index(&mut self) {
-        self.bm25_hard_negatives.clear();
-    }
+    fn rebuild_bm25_hard_negative_index(&mut self) {}
 
     /// True when the recipe is the special auto-injected long-section chunk-pair recipe.
     fn is_auto_chunk_pair_recipe(recipe: &TripletRecipe) -> bool {
