@@ -6983,6 +6983,89 @@ mod tests {
 
     #[cfg(feature = "bm25-mining")]
     #[test]
+    fn bm25_ranking_ignores_kvp_meta_prefix_tags() {
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let config = SamplerConfig {
+            seed: 888,
+            batch_size: 1,
+            chunking: ChunkingStrategy::default(),
+            recipes: Vec::new(),
+            text_recipes: Vec::new(),
+            split,
+            ..SamplerConfig::default()
+        };
+        let store = Arc::new(DeterministicSplitStore::new(split, 888).unwrap());
+
+        let anchor = trader_record(
+            "kvp_anchor",
+            "2025-01-01",
+            "Anchor",
+            "carbon pricing policy emissions roadmap",
+        );
+
+        let mut kvp_bait = trader_record(
+            "kvp_bait",
+            "2025-01-01",
+            "KVP bait",
+            "ancient pottery shards trench notes",
+        );
+        let mut kvp = KvpPrefixSampler::new(1.0);
+        kvp.add_variant([(
+            "meta",
+            "carbon pricing policy emissions roadmap carbon pricing policy emissions roadmap",
+        )]);
+        kvp_bait.meta_prefix = Some(kvp);
+
+        let plain_text_best = trader_record(
+            "plain_text_best",
+            "2025-01-01",
+            "Plain text best",
+            "carbon pricing policy emissions roadmap carbon market",
+        );
+
+        // Sanity-check the BM25 text path directly: meta_prefix content must not appear.
+        let bait_text = record_bm25_text(&kvp_bait, config.chunking.max_window_tokens);
+        assert!(
+            !bait_text.contains("carbon pricing policy emissions roadmap carbon pricing"),
+            "BM25 corpus text must not include KVP meta-prefix tags"
+        );
+
+        let sampler = TripletSampler::new(config, Arc::clone(&store));
+        sampler.register_source(Box::new(InMemorySource::new(
+            "kvp_source",
+            vec![anchor, kvp_bait, plain_text_best],
+        )));
+        sampler
+            .inner
+            .lock()
+            .unwrap()
+            .ingest_internal(SplitLabel::Train)
+            .unwrap();
+
+        let mut inner = sampler.inner.lock().unwrap();
+        let anchor = inner
+            .records
+            .get("kvp_anchor")
+            .cloned()
+            .expect("anchor should exist");
+
+        let ranked = inner.bm25_ranked_candidates(&anchor, SplitLabel::Train);
+        assert!(
+            !ranked.is_empty(),
+            "expected BM25 to return ranked candidates"
+        );
+        assert_eq!(
+            ranked[0], "plain_text_best",
+            "BM25 top candidate should be driven by plain section text, not KVP meta-prefix tags"
+        );
+    }
+
+    #[cfg(feature = "bm25-mining")]
+    #[test]
     fn bm25_triplets_never_reuse_text_across_slots() {
         let split = SplitRatios {
             train: 1.0,
