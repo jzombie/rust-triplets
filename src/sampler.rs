@@ -1586,20 +1586,30 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         if let Some(spec) = record.meta_prefix.as_ref()
             && let Some(prefix) = spec.sample(&mut self.rng)
         {
-            chunk.text = format!("{}\n{}", prefix, chunk.text);
-            // Re-estimate tokens after decoration and cap to configured window size.
-            let tokens: Vec<&str> = chunk.text.split_whitespace().collect();
-            let total_tokens = tokens.len();
+            let body_tokens: Vec<&str> = chunk.text.split_whitespace().collect();
+            let prefix_tokens: Vec<&str> = prefix.split_whitespace().collect();
+            let total_tokens = prefix_tokens.len() + body_tokens.len();
             let max_window = self.config.chunking.max_window_tokens;
             if max_window > 0 && total_tokens > max_window {
-                let truncated = tokens
-                    .into_iter()
-                    .take(max_window)
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                chunk.text = truncated;
-                chunk.tokens_estimate = max_window;
+                if prefix_tokens.len() >= max_window {
+                    chunk.text = prefix_tokens.into_iter().take(max_window).collect::<Vec<_>>().join(" ");
+                    chunk.tokens_estimate = max_window;
+                } else {
+                    let remaining = max_window - prefix_tokens.len();
+                    let truncated_body = body_tokens
+                        .into_iter()
+                        .take(remaining)
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    chunk.text = if truncated_body.is_empty() {
+                        prefix
+                    } else {
+                        format!("{}\n{}", prefix, truncated_body)
+                    };
+                    chunk.tokens_estimate = max_window;
+                }
             } else {
+                chunk.text = format!("{}\n{}", prefix, chunk.text);
                 chunk.tokens_estimate = total_tokens;
             }
         }
@@ -3324,6 +3334,35 @@ mod tests {
         let tokens_after = chunk.text.split_whitespace().count();
         assert_eq!(tokens_after, 5);
         assert_eq!(chunk.tokens_estimate, 5);
+    }
+
+    #[test]
+    fn decorate_chunk_preserves_newline_after_meta_when_truncated() {
+        let split = SplitRatios::default();
+        let store = Arc::new(DeterministicSplitStore::new(split, 24).unwrap());
+        let mut cfg = base_config();
+        cfg.chunking.max_window_tokens = 4;
+        let sampler = TripletSampler::new(cfg, store);
+
+        let mut record = sample_record();
+        record.sections[0].text = "one two three".to_string();
+
+        let mut kvp = KvpPrefixSampler::new(1.0);
+        kvp.add_variant([("source", "unit")]);
+        record.meta_prefix = Some(kvp);
+
+        let mut inner = sampler.inner.lock().unwrap();
+        let mut chunks = inner.materialize_chunks(&record, 0, &record.sections[0]);
+        assert!(!chunks.is_empty());
+        let mut chunk = chunks.remove(0);
+
+        inner.decorate_chunk(&record, &mut chunk);
+
+        assert!(
+            chunk.text.starts_with("meta: source=unit\n"),
+            "meta prefix should remain on its own line after truncation"
+        );
+        assert_eq!(chunk.tokens_estimate, 4);
     }
 
     #[test]
