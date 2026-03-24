@@ -32,50 +32,50 @@ In this crate, those triplets are built automatically from one or more data sour
 
 ### What a triplet looks like
 
-Each `SampleTriplet` returned by `next_triplet_batch` has three `RecordChunk` slots — anchor, positive, negative — each carrying the rendered text and provenance metadata. This example is compile-checked so it will fail if field names or types change:
+`SampleTriplet` is an **output** type — the sampler produces it from your sources and recipes, you only consume it. The fields are compile-checked below so this will fail if anything changes:
 
 ```rust,no_run
 use triplets::{RecordChunk, SampleTriplet, QualityScore};
 use triplets::data::ChunkView;
 
-let triplet = SampleTriplet {
-  recipe: "title_context_wrong_article".to_string(),
-  anchor: RecordChunk {
-    record_id: "source_a::article_a".to_string(), // DataRecord.id
-    section_idx: 0,
-    view: ChunkView::Window { index: 0, overlap: 0, span: 512, start_ratio: 0.0 },
-    text: "Researchers report a breakthrough in solar cell efficiency.".to_string(),
-    tokens_estimate: 9,
-    quality: QualityScore::default(), // trust = 0.5 by default
-  },
-  positive: RecordChunk {
-    record_id: "source_a::article_a".to_string(), // same record, different section
-    section_idx: 1,
-    view: ChunkView::Window { index: 0, overlap: 0, span: 512, start_ratio: 0.0 },
-    text: "The team achieved 35% efficiency using perovskite layers.".to_string(),
-    tokens_estimate: 9,
-    quality: QualityScore::default(),
-  },
-  negative: RecordChunk {
-    record_id: "source_a::article_b".to_string(), // different record (WrongArticle)
-    section_idx: 0,
-    view: ChunkView::Window { index: 0, overlap: 0, span: 512, start_ratio: 0.0 },
-    text: "Local council approves new zoning guidelines for downtown.".to_string(),
-    tokens_estimate: 8,
-    quality: QualityScore::default(),
-  },
-  weight: 1.0,
-  instruction: None,
-};
-
-// Fields you access during training:
-let _: &str = &triplet.anchor.text;
-let _: &str = &triplet.positive.text;
-let _: &str = &triplet.negative.text;
-let _: &str = &triplet.recipe;           // TripletRecipe.name
-let _: f32 = triplet.weight;
-let _: &str = &triplet.anchor.record_id; // back-reference to DataRecord.id
-let _: Option<&str> = triplet.instruction.as_deref();
+// Output type example; you do not have to type this
+# let triplet = SampleTriplet {
+#   recipe: "title_context_wrong_article".to_string(),
+#   anchor: RecordChunk {
+#     record_id: "source_a::article_a".to_string(),
+#     section_idx: 0,
+#     view: ChunkView::Window { index: 0, overlap: 0, span: 512, start_ratio: 0.0 },
+#     text: "Researchers report a breakthrough in solar cell efficiency.".to_string(),
+#     tokens_estimate: 9,
+#     quality: QualityScore::default(),
+#   },
+#   positive: RecordChunk {
+#     record_id: "source_a::article_a".to_string(),
+#     section_idx: 1,
+#     view: ChunkView::Window { index: 0, overlap: 0, span: 512, start_ratio: 0.0 },
+#     text: "The team achieved 35% efficiency using perovskite layers.".to_string(),
+#     tokens_estimate: 9,
+#     quality: QualityScore::default(),
+#   },
+#   negative: RecordChunk {
+#     record_id: "source_a::article_b".to_string(),
+#     section_idx: 0,
+#     view: ChunkView::Window { index: 0, overlap: 0, span: 512, start_ratio: 0.0 },
+#     text: "Local council approves new zoning guidelines for downtown.".to_string(),
+#     tokens_estimate: 8,
+#     quality: QualityScore::default(),
+#   },
+#   weight: 1.0,
+#   instruction: None,
+# };
+// Fields you access during training — the sampler fills these in:
+let _anchor_text: &str         = &triplet.anchor.text;
+let _pos_text:    &str         = &triplet.positive.text;
+let _neg_text:    &str         = &triplet.negative.text;
+let _recipe:      &str         = &triplet.recipe;           // which TripletRecipe was used
+let _weight:      f32          = triplet.weight;
+let _record_id:   &str         = &triplet.anchor.record_id; // back-reference to DataRecord.id
+let _instruction: Option<&str> = triplet.instruction.as_deref();
 # let _ = triplet;
 ```
 
