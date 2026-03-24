@@ -4,7 +4,7 @@
 
 Compose an effectively unlimited supply of [training triplets](https://en.wikipedia.org/wiki/Triplet_loss), pairs, or plaintext samples, from your existing corpus, with optional [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) hard-negative mining.
 
-- Multiple input source mixing, rule-driven sampling recipes.
+- Multiple input source mixing, rule-driven sampling recipes, using a`Rayon`-managed thread pool with optional multi-batch prebuffering for training.
 - Configurable source sampling weights, independent source cursors, source/record trust weighting, recipe weighting, and position-aware window weighting (`start_ratio`), so you can tune per-source sampling frequency and per-sample training weight.
 - Automatic & deterministic data splits.
 - Automatic source chunking (ensure all data is eventually consumed regardless of context window size).
