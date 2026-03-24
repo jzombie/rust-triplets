@@ -30,6 +30,30 @@ impl Default for ChunkingStrategy {
 }
 
 /// Defines a triplet recipe (anchor/positive/negative selection + weighting).
+///
+/// ## Split-isolation contract
+///
+/// All three chunk slots (anchor, positive, negative) must resolve to records
+/// whose IDs hash to the same split as the request split. The sampler enforces
+/// this automatically for `Selector::Role`, `Selector::Paragraph`, and
+/// `Selector::Random` — those selectors always read from the record that was
+/// already confirmed to be in the correct split.
+///
+/// `Selector::TemporalOffset` crosses a record boundary (it picks a *different*
+/// record by proximity in time) and the split check is re-applied inside
+/// `select_temporal_neighbor`. No additional care is required on your side,
+/// but you should be aware that in pools with few same-split neighbors the
+/// selector will return `None` and fall back to skipping a slot rather than
+/// contaminating splits.
+///
+/// ## Stable IDs
+///
+/// Record IDs must be stable across runs. Split assignment is derived
+/// deterministically from the record ID and the sampler seed; changing an ID
+/// changes its split assignment, which invalidates any persisted split state.
+/// IDs should also be globally unique — if two records from different sources
+/// share the same ID, only one will be kept in the sampler, and the discarded
+/// record's split assignment silently goes with it.
 #[derive(Clone, Debug)]
 pub struct TripletRecipe {
     /// Unique name for this recipe.
@@ -56,6 +80,10 @@ pub enum Selector {
     /// Select a specific section by index.
     Paragraph(usize),
     /// Select a temporal neighbor record by offset days.
+    ///
+    /// Candidates are restricted to the same split as the requesting record;
+    /// if no same-split neighbor exists the selector returns `None` for that
+    /// slot rather than crossing split boundaries.
     TemporalOffset(i32),
     /// Select a random section.
     Random,
