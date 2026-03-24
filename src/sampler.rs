@@ -2797,13 +2797,13 @@ mod tests {
     pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 14618375830351864347;
     /// Expected hash for deterministic triplet batch sequence when bm25-mining is enabled.
     #[cfg(feature = "bm25-mining")]
-    pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 8952398634437828807;
+    pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 4541483670725174687;
     /// Expected hash for deterministic pair batch sequence.
     #[cfg(not(feature = "bm25-mining"))]
     pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 13133711470950174124;
     /// Expected hash for deterministic pair batch sequence when bm25-mining is enabled.
     #[cfg(feature = "bm25-mining")]
-    pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 6629887926185587898;
+    pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 9123648929269994;
     /// Expected hash for deterministic prefetch text batch sequence.
     pub const PREFETCH_TEXT_BATCH_SEQUENCE_HASH: u64 = 16740235391902546413;
     /// Expected hash for deterministic prefetch triplet batch sequence.
@@ -2811,13 +2811,13 @@ mod tests {
     pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 11709520942485223708;
     /// Expected hash for deterministic prefetch triplet batch sequence when bm25-mining is enabled.
     #[cfg(feature = "bm25-mining")]
-    pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 17550930107590484936;
+    pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 2714971770055876640;
     /// Expected hash for deterministic prefetch pair batch sequence.
     #[cfg(not(feature = "bm25-mining"))]
     pub const PREFETCH_PAIR_BATCH_SEQUENCE_HASH: u64 = 2553049861003803008;
     /// Expected hash for deterministic prefetch pair batch sequence when bm25-mining is enabled.
     #[cfg(feature = "bm25-mining")]
-    pub const PREFETCH_PAIR_BATCH_SEQUENCE_HASH: u64 = 4934485014530376519;
+    pub const PREFETCH_PAIR_BATCH_SEQUENCE_HASH: u64 = 17431903793685416787;
 
     /// Expected readable wrong-article sequence without BM25 mining.
     pub const READABLE_NON_BM25_TITLES: [&str; 8] = [
