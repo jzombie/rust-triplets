@@ -362,4 +362,35 @@ mod tests {
         assert!(out.contains("date=2026-02-24"));
         assert!(out.contains("source=reports"));
     }
+
+    #[test]
+    fn kvp_sampler_fractional_dropout_sometimes_suppresses_output() {
+        // Covers the `0.0 < dropout < 1.0` branch in KvpPrefixSampler::sample.
+        let mut sampler = KvpPrefixSampler::new(0.5);
+        sampler.add_variant([("k", "v")]);
+        let mut rng = StdRng::from_seed([77_u8; 32]);
+        let results: Vec<_> = (0..100).map(|_| sampler.sample(&mut rng)).collect();
+        assert!(
+            results.iter().any(|r| r.is_none()),
+            "dropout=0.5 should suppress some outputs"
+        );
+        assert!(
+            results.iter().any(|r| r.is_some()),
+            "dropout=0.5 should pass some outputs"
+        );
+    }
+
+    #[test]
+    fn meta_field_spec_new_is_callable_at_runtime() {
+        // Call MetaFieldSpec::new() in a runtime (non-const) context so the
+        // constructor body is instrumented by llvm-cov.
+        fn values(_: &()) -> Vec<KvpValue> {
+            vec!["runtime_val".to_string()]
+        }
+        let key = MetadataKey::new("runtime_key");
+        let spec = MetaFieldSpec::<()>::new(key, 1.0, values);
+        let field = spec.build(&());
+        let mut rng = StdRng::from_seed([42_u8; 32]);
+        assert!(field.render(&mut rng).is_some());
+    }
 }
