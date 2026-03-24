@@ -1080,6 +1080,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         }
     }
 
+    #[cfg(feature = "bm25-mining")]
     fn choose_negative_from_pool(
         &mut self,
         anchor_record: &DataRecord,
@@ -1087,22 +1088,20 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         pool: Vec<DataRecord>,
         fallback_used: bool,
     ) -> Option<(DataRecord, bool)> {
-        #[cfg(feature = "bm25-mining")]
-        {
-            return self.select_bm25_hard_negative_record(
-                anchor_record,
-                anchor_split,
-                &pool,
-                fallback_used,
-            );
-        }
+        self.select_bm25_hard_negative_record(anchor_record, anchor_split, &pool, fallback_used)
+    }
 
-        #[cfg(not(feature = "bm25-mining"))]
-        {
-            pool.choose(&mut self.rng)
-                .cloned()
-                .map(|record| (record, fallback_used))
-        }
+    #[cfg(not(feature = "bm25-mining"))]
+    fn choose_negative_from_pool(
+        &mut self,
+        _anchor_record: &DataRecord,
+        _anchor_split: SplitLabel,
+        pool: Vec<DataRecord>,
+        fallback_used: bool,
+    ) -> Option<(DataRecord, bool)> {
+        pool.choose(&mut self.rng)
+            .cloned()
+            .map(|record| (record, fallback_used))
     }
 
     #[cfg(feature = "bm25-mining")]
@@ -1138,7 +1137,10 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
 
         let mut fallback = pool.to_vec();
         fallback.sort_by(|a, b| a.id.cmp(&b.id));
-        fallback.first().cloned().map(|record| (record, fallback_used))
+        fallback
+            .first()
+            .cloned()
+            .map(|record| (record, fallback_used))
     }
 
     #[cfg(feature = "bm25-mining")]
@@ -1160,7 +1162,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
 
         let bm25_query_text =
             record_bm25_text(anchor_record, self.config.chunking.max_window_tokens);
-        let max_results = index.record_ids.len().min(16).max(2);
+        let max_results = index.record_ids.len().clamp(2, 16);
         let mut ranked = Vec::new();
         for result in index.search_engine.search(&bm25_query_text, max_results) {
             let candidate_idx = result.document.id;
@@ -2647,7 +2649,11 @@ fn record_bm25_text(record: &DataRecord, max_tokens: usize) -> String {
     if tokens.len() <= max_tokens {
         return out;
     }
-    tokens.into_iter().take(max_tokens).collect::<Vec<_>>().join(" ")
+    tokens
+        .into_iter()
+        .take(max_tokens)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn strategy_reason(strategy: &NegativeStrategy) -> &'static str {
@@ -6186,7 +6192,7 @@ mod tests {
             find_id(SplitLabel::Validation, "bm25_split_anchor_val"),
             find_id(SplitLabel::Test, "bm25_split_anchor_test"),
         ];
-        let peers = vec![
+        let peers = [
             find_id(SplitLabel::Train, "bm25_split_peer_train"),
             find_id(SplitLabel::Validation, "bm25_split_peer_val"),
             find_id(SplitLabel::Test, "bm25_split_peer_test"),
