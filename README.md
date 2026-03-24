@@ -68,6 +68,7 @@ use triplets::data::ChunkView;
 #   weight: 1.0,
 #   instruction: None,
 # };
+
 // Fields you access during training — the sampler fills these in:
 let _anchor_text: &str         = &triplet.anchor.text;
 let _pos_text:    &str         = &triplet.positive.text;
