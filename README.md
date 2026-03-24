@@ -2,15 +2,15 @@
 
 [![made-with-rust][rust-logo]][rust-src-page] [![crates.io][crates-badge]][crates-page] [![MIT licensed][mit-license-badge]][mit-license-page] [![Apache 2.0 licensed][apache-2.0-license-badge]][apache-2.0-license-page] [![Coverage][coveralls-badge]][coveralls-page]
 
-Compose an effectively unlimited supply of [training triplets](https://en.wikipedia.org/wiki/Triplet_loss) from your existing corpus.
+Compose an effectively unlimited supply of [training triplets](https://en.wikipedia.org/wiki/Triplet_loss) from your existing corpus, with optional [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) hard-negative mining.
 
 - Multiple input source mixing, rule-driven sampling recipes.
 - Automatic & deterministic data splits.
 - Automatic source chunking (ensure all data is eventually consumed regardless of context window size).
 - Anti-regime and diversity features: Anchor/positive swapping; negatives drawn from other anchors/positives; long anchor/positive sections are chunked into additional anchor/positive windows; deterministic pseudo-random ID sampling via IndexPermutation (affine/LCG-style permutation with cycle-walking); and hash-shuffled source cycling (epoch/cycle-seeded) layered over split-aware Round-Robin cursors to avoid fixed Round-Robin regimes.
 - Combine any combination of text-based streaming and static data sources.
-- Included adapters for HuggingFace and file-based sources. Included traits to roll your own data loaders from any source.
-- Fast, reproducible baseline sampling (great for iteration/debug), with optional [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) hard-negative mining when you want stricter lexical difficulty.
+- Included adapters for HuggingFace and file-based sources. Included traits to roll your wn data loaoders from any source.
+- Fast, reproducible baseline sampling (great for iteration/debug), with optional BM25 hard-negative mining when you want stricter lexical difficulty.
 - Low memory footprint; quick to compile; written in Rust.
 - A decent set of additional [capabilities](#capabilities).
 - [MIT][mit-license-page] and [Apache 2.0][apache-2.0-license-page] licensed.
