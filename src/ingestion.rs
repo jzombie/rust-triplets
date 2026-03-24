@@ -193,6 +193,13 @@ pub struct IngestionManager {
     sampler_config: SamplerConfig,
     /// Current source epoch used to vary per-source permutation seeds across epochs.
     source_epoch: u64,
+    /// Monotonic generation incremented whenever at least one source is refreshed.
+    source_refresh_generation: u64,
+    /// Source ids refreshed during the most recent `refresh_all_internal` call.
+    ///
+    /// This is updated even when cache ingest does not change, and is cleared when
+    /// no source refresh occurs in that cycle.
+    last_refreshed_sources: Vec<SourceId>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -219,7 +226,19 @@ impl IngestionManager {
             max_records,
             sampler_config,
             source_epoch: 0,
+            source_refresh_generation: 0,
+            last_refreshed_sources: Vec::new(),
         }
+    }
+
+    /// Return a monotonic generation for source refresh cycles.
+    pub fn source_refresh_generation(&self) -> u64 {
+        self.source_refresh_generation
+    }
+
+    /// Return source ids refreshed by the most recent refresh cycle.
+    pub fn last_refreshed_sources(&self) -> &[SourceId] {
+        &self.last_refreshed_sources
     }
 
     /// Update the current source epoch.
@@ -392,6 +411,7 @@ impl IngestionManager {
         step: Option<usize>,
         weights: Option<&HashMap<SourceId, f32>>,
     ) {
+        self.last_refreshed_sources.clear();
         let mut refresh_plan = Vec::new();
         for (idx, state) in self.sources.iter_mut().enumerate() {
             if force_refresh {
@@ -403,6 +423,11 @@ impl IngestionManager {
         }
 
         if !refresh_plan.is_empty() {
+            self.source_refresh_generation = self.source_refresh_generation.saturating_add(1);
+            self.last_refreshed_sources = refresh_plan
+                .iter()
+                .map(|(idx, _)| self.sources[*idx].source.id().to_string())
+                .collect();
             let mut results: Vec<
                 Option<(Result<SourceSnapshot, SamplerError>, std::time::Duration)>,
             > = Vec::with_capacity(self.sources.len());

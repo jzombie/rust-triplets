@@ -642,7 +642,7 @@ This reflects the built-in file-corpus helpers (`FileCorpusIndex`) used by files
 - **Manual epoch control**: `sampler.set_epoch(n)` resets per-source cursors and reshuffles deterministically for that epoch.
 - **Persisted state scope**: epoch tracking is split-aware, but sampler/source cursors + RNG/round-robin state are persisted per store file.
 - **Triplet recipe behavior**: if `SamplerConfig.recipes` is non-empty, those recipes are used for all sources; otherwise each source's `default_triplet_recipes()` is used (if any).
-- **Optional BM25 hard negatives**: with feature `bm25-mining`, per source+split BM25 indexes are rebuilt for each ingest snapshot. During sampling, BM25-ranked candidates are filtered to the strategy-selected pool, same-split constraints are enforced, and candidate selection rotates deterministically per anchor to improve diversity.
+- **Optional BM25 hard negatives**: with feature `bm25-mining`, per source+split BM25 indexes are rebuilt on source refresh cycles (not on every drain-only ingest step). During sampling, BM25-ranked candidates are filtered to the strategy-selected pool, same-split constraints are enforced, and candidate selection rotates deterministically per anchor to improve diversity.
 - **Pair batches**: derived from triplets and follow the same source/recipe selection behavior.
 - **Text recipe behavior**:
   - If `SamplerConfig.text_recipes` is non-empty, those are used directly.

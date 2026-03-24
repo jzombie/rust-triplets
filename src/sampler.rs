@@ -115,8 +115,8 @@ impl rand::RngCore for DeterministicRng {
 /// Public helper so callers (and examples) can compute the same chunk weighting the sampler uses.
 ///
 /// Definitions:
-/// - `trust` (range 0.0–1.0): comes from `RecordChunk.quality.trust`; scales the contribution of a chunk.
-/// - `start_ratio` (range 0.0–1.0): fraction of the section where the window starts; 0.0 is the first token.
+/// - `trust` (range 0.0-1.0): comes from `RecordChunk.quality.trust`; scales the contribution of a chunk.
+/// - `start_ratio` (range 0.0-1.0): fraction of the section where the window starts; 0.0 is the first token.
 /// - `base`: window chunks use `1.0 - start_ratio`; summary chunks use their configured `summary_fallback_weight`.
 /// - `chunk_weight_floor`: minimum weight applied after scaling.
 ///
@@ -1164,7 +1164,9 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 .map(|record| (record, fallback_used));
         }
 
-        // If BM25 has no usable hit, fall back to deterministic ordering + seeded random choice.
+        // Preserve strategy behavior: if BM25 yields no usable candidate inside
+        // the strategy-selected pool, fall back to deterministic sampling within
+        // that same pool.
         let mut fallback = pool.to_vec();
         fallback.sort_by(|a, b| a.id.cmp(&b.id));
         if fallback.is_empty() {
@@ -1292,6 +1294,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     }
 
     #[cfg(not(feature = "bm25-mining"))]
+    #[allow(dead_code)]
     fn rebuild_bm25_hard_negative_index(&mut self) {}
 
     /// True when the recipe is the special auto-injected long-section chunk-pair recipe.
@@ -1799,9 +1802,20 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         self.prune_cursor_state();
         self.rebuild_chunk_index();
         self.rebuild_source_index()?;
-        self.rebuild_bm25_hard_negative_index();
         Ok(())
     }
+
+    #[cfg(feature = "bm25-mining")]
+    fn rebuild_bm25_index_after_refresh_if_needed(&mut self) {
+        // BM25 rebuild is refresh-driven: rebuild only when at least one source
+        // actually refreshed during the current ingestion cycle.
+        if !self.ingestion.last_refreshed_sources().is_empty() {
+            self.rebuild_bm25_hard_negative_index();
+        }
+    }
+
+    #[cfg(not(feature = "bm25-mining"))]
+    fn rebuild_bm25_index_after_refresh_if_needed(&mut self) {}
 
     fn ingest_internal_for_split(&mut self, target_split: SplitLabel) -> Result<(), SamplerError> {
         if !self.ingestion.has_sources() {
@@ -1825,6 +1839,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         }
         self.last_observed_ingest = observed;
         self.sync_records_from_cache()?;
+        self.rebuild_bm25_index_after_refresh_if_needed();
         self.epoch_tracker.ensure_loaded()?;
         let records_by_split = self.records_by_split()?;
         self.epoch_tracker
@@ -1865,6 +1880,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         }
         self.last_observed_ingest = observed;
         self.sync_records_from_cache()?;
+        self.rebuild_bm25_index_after_refresh_if_needed();
         self.epoch_tracker.ensure_loaded()?;
         let records_by_split = self.records_by_split()?;
         self.epoch_tracker
@@ -1891,6 +1907,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         self.ingestion.force_refresh_all_with_weights(weights)?;
         self.last_observed_ingest = self.ingestion.cache().ingest_count();
         self.sync_records_from_cache()?;
+        self.rebuild_bm25_index_after_refresh_if_needed();
         self.epoch_tracker.ensure_loaded()?;
         let records_by_split = self.records_by_split()?;
         self.epoch_tracker
@@ -4614,6 +4631,284 @@ mod tests {
     }
 
     #[test]
+    fn readable_triplet_examples_by_mode() {
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let recipe = TripletRecipe {
+            name: "readable_triplet_demo".into(),
+            anchor: Selector::Role(SectionRole::Anchor),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 1.0,
+            instruction: None,
+        };
+        let config = SamplerConfig {
+            seed: 991,
+            batch_size: 1,
+            chunking: ChunkingStrategy::default(),
+            recipes: vec![recipe.clone()],
+            text_recipes: Vec::new(),
+            split,
+            ..SamplerConfig::default()
+        };
+        let store = Arc::new(DeterministicSplitStore::new(split, 991).unwrap());
+
+        let anchor = trader_record(
+            "readable_anchor",
+            "2025-01-01",
+            "Climate policy briefing",
+            "carbon pricing policy emissions reduction roadmap market design",
+        );
+        let candidates = vec![
+            trader_record(
+                "readable_topical_1",
+                "2025-01-01",
+                "Carbon market and emissions policy",
+                "carbon pricing policy emissions reduction roadmap market design",
+            ),
+            trader_record(
+                "readable_topical_2",
+                "2025-01-01",
+                "Carbon policy update",
+                "carbon pricing policy emissions reduction roadmap",
+            ),
+            trader_record(
+                "readable_mid_1",
+                "2025-01-01",
+                "Energy transition memo",
+                "emissions reduction roadmap clean energy transition planning",
+            ),
+            trader_record(
+                "readable_mid_2",
+                "2025-01-01",
+                "Regulatory market digest",
+                "policy market design regulatory framework and compliance",
+            ),
+            trader_record(
+                "readable_weak_1",
+                "2025-01-01",
+                "Archaeology field note",
+                "bronze age pottery fragments excavation trench mapping",
+            ),
+            trader_record(
+                "readable_weak_2",
+                "2025-01-01",
+                "Marine geology report",
+                "subduction zones oceanic crust tectonic shear",
+            ),
+        ];
+
+        let sampler = TripletSampler::new(config, Arc::clone(&store));
+        let mut all_records = vec![anchor.clone()];
+        all_records.extend(candidates);
+        sampler.register_source(Box::new(InMemorySource::new(
+            "readable_source",
+            all_records,
+        )));
+        sampler
+            .inner
+            .lock()
+            .unwrap()
+            .ingest_internal(SplitLabel::Train)
+            .unwrap();
+
+        let mut inner = sampler.inner.lock().unwrap();
+        let anchor = inner
+            .records
+            .get("readable_anchor")
+            .cloned()
+            .expect("anchor should be present after ingest");
+
+        let display = |id: &str| -> &'static str {
+            match id {
+                "readable_topical_1" => "Carbon market and emissions policy",
+                "readable_topical_2" => "Carbon policy update",
+                "readable_mid_2" => "Regulatory market digest",
+                "readable_mid_1" => "Energy transition memo",
+                "readable_weak_2" => "Marine geology report",
+                "readable_weak_1" => "Archaeology field note",
+                _ => "unknown",
+            }
+        };
+
+        let expected_non_bm25_titles = vec![
+            "Energy transition memo".to_string(),
+            "Archaeology field note".to_string(),
+            "Archaeology field note".to_string(),
+            "Carbon market and emissions policy".to_string(),
+            "Energy transition memo".to_string(),
+            "Carbon market and emissions policy".to_string(),
+            "Energy transition memo".to_string(),
+            "Carbon policy update".to_string(),
+        ];
+
+        #[cfg(not(feature = "bm25-mining"))]
+        {
+            let mut negatives = Vec::new();
+            for _ in 0..8 {
+                let (negative, _fallback_used) = inner
+                    .select_negative_record(&anchor, &NegativeStrategy::WrongArticle)
+                    .expect("expected readable negative sample");
+                negatives.push(negative.id);
+            }
+
+            let actual_titles: Vec<String> =
+                negatives.iter().map(|id| display(id).to_string()).collect();
+            assert_eq!(
+                actual_titles, expected_non_bm25_titles,
+                "non-BM25 readable sequence changed unexpectedly"
+            );
+        }
+
+        #[cfg(feature = "bm25-mining")]
+        {
+            let mut negatives = Vec::new();
+            for _ in 0..8 {
+                let (negative, _fallback_used) = inner
+                    .select_negative_record(&anchor, &NegativeStrategy::WrongArticle)
+                    .expect("expected BM25 negative selection");
+                negatives.push(negative.id);
+            }
+
+            let negative_titles: Vec<String> =
+                negatives.iter().map(|id| display(id).to_string()).collect();
+            assert_eq!(
+                negative_titles,
+                vec![
+                    "Regulatory market digest".to_string(),
+                    "Energy transition memo".to_string(),
+                    "Marine geology report".to_string(),
+                    "Archaeology field note".to_string(),
+                    "Carbon market and emissions policy".to_string(),
+                    "Carbon policy update".to_string(),
+                    "Regulatory market digest".to_string(),
+                    "Energy transition memo".to_string(),
+                ],
+                "BM25 readable sequence changed unexpectedly"
+            );
+            assert_ne!(
+                negative_titles, expected_non_bm25_titles,
+                "BM25 sequence should differ from non-BM25 sequence on the exact same fixture"
+            );
+        }
+    }
+
+    #[cfg(feature = "bm25-mining")]
+    #[test]
+    fn bm25_not_rng_only_when_only_anchor_text_changes() {
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+
+        let run = |anchor_body: &str| -> Vec<String> {
+            let config = SamplerConfig {
+                seed: 991,
+                batch_size: 1,
+                chunking: ChunkingStrategy::default(),
+                recipes: vec![TripletRecipe {
+                    name: "bm25_rng_proof".into(),
+                    anchor: Selector::Role(SectionRole::Anchor),
+                    positive_selector: Selector::Role(SectionRole::Context),
+                    negative_selector: Selector::Role(SectionRole::Context),
+                    negative_strategy: NegativeStrategy::WrongArticle,
+                    weight: 1.0,
+                    instruction: None,
+                }],
+                text_recipes: Vec::new(),
+                split,
+                ..SamplerConfig::default()
+            };
+            let store = Arc::new(DeterministicSplitStore::new(split, 991).unwrap());
+            let sampler = TripletSampler::new(config, Arc::clone(&store));
+
+            let anchor = trader_record("readable_anchor", "2025-01-01", "Anchor", anchor_body);
+            let candidates = vec![
+                trader_record(
+                    "readable_topical_1",
+                    "2025-01-01",
+                    "Carbon market and emissions policy",
+                    "carbon pricing policy emissions reduction roadmap market design",
+                ),
+                trader_record(
+                    "readable_topical_2",
+                    "2025-01-01",
+                    "Carbon policy update",
+                    "carbon pricing policy emissions reduction roadmap",
+                ),
+                trader_record(
+                    "readable_mid_1",
+                    "2025-01-01",
+                    "Energy transition memo",
+                    "emissions reduction roadmap clean energy transition planning",
+                ),
+                trader_record(
+                    "readable_mid_2",
+                    "2025-01-01",
+                    "Regulatory market digest",
+                    "policy market design regulatory framework and compliance",
+                ),
+                trader_record(
+                    "readable_weak_1",
+                    "2025-01-01",
+                    "Archaeology field note",
+                    "bronze age pottery fragments excavation trench mapping",
+                ),
+                trader_record(
+                    "readable_weak_2",
+                    "2025-01-01",
+                    "Marine geology report",
+                    "subduction zones oceanic crust tectonic shear",
+                ),
+            ];
+
+            let mut all_records = vec![anchor];
+            all_records.extend(candidates);
+            sampler.register_source(Box::new(InMemorySource::new(
+                "readable_source",
+                all_records,
+            )));
+            sampler
+                .inner
+                .lock()
+                .unwrap()
+                .ingest_internal(SplitLabel::Train)
+                .unwrap();
+
+            let mut inner = sampler.inner.lock().unwrap();
+            let anchor = inner
+                .records
+                .get("readable_anchor")
+                .cloned()
+                .expect("anchor should exist");
+
+            let mut negatives = Vec::new();
+            for _ in 0..8 {
+                let (negative, _fallback_used) = inner
+                    .select_negative_record(&anchor, &NegativeStrategy::WrongArticle)
+                    .expect("expected BM25 negative selection");
+                negatives.push(negative.id);
+            }
+            negatives
+        };
+
+        let policy = run("carbon pricing policy emissions reduction roadmap market design");
+        let geology = run("subduction zones oceanic crust tectonic shear");
+
+        // RNG-only selection with fixed seed/id/pool would produce the same draw
+        // sequence here. This assertion requires lexical query content to matter.
+        assert_ne!(
+            policy, geology,
+            "same seed/id/pool but different anchor text must change BM25 negatives; RNG-only selection would not"
+        );
+    }
+
+    #[test]
     fn full_sequence_hashes_match_for_prefetch_text_batches() {
         let fixture = build_split_order_sampler(91, 1);
         let prefetcher = Arc::clone(&fixture.sampler).prefetch_text_batches(SplitLabel::Train, 1);
@@ -6299,6 +6594,139 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[cfg(feature = "bm25-mining")]
+    #[test]
+    fn bm25_ranked_candidates_match_raw_bm25_engine() {
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let config = SamplerConfig {
+            seed: 991,
+            batch_size: 1,
+            chunking: ChunkingStrategy::default(),
+            recipes: Vec::new(),
+            text_recipes: Vec::new(),
+            split,
+            ..SamplerConfig::default()
+        };
+        let store = Arc::new(DeterministicSplitStore::new(split, 991).unwrap());
+
+        let records = vec![
+            trader_record(
+                "readable_anchor",
+                "2025-01-01",
+                "Climate policy briefing",
+                "carbon pricing policy emissions reduction roadmap market design",
+            ),
+            trader_record(
+                "readable_topical_1",
+                "2025-01-01",
+                "Carbon market and emissions policy",
+                "carbon pricing policy emissions reduction roadmap market design",
+            ),
+            trader_record(
+                "readable_topical_2",
+                "2025-01-01",
+                "Carbon policy update",
+                "carbon pricing policy emissions reduction roadmap",
+            ),
+            trader_record(
+                "readable_mid_1",
+                "2025-01-01",
+                "Energy transition memo",
+                "emissions reduction roadmap clean energy transition planning",
+            ),
+            trader_record(
+                "readable_mid_2",
+                "2025-01-01",
+                "Regulatory market digest",
+                "policy market design regulatory framework and compliance",
+            ),
+            trader_record(
+                "readable_weak_1",
+                "2025-01-01",
+                "Archaeology field note",
+                "bronze age pottery fragments excavation trench mapping",
+            ),
+            trader_record(
+                "readable_weak_2",
+                "2025-01-01",
+                "Marine geology report",
+                "subduction zones oceanic crust tectonic shear",
+            ),
+        ];
+
+        let sampler = TripletSampler::new(config, Arc::clone(&store));
+        sampler.register_source(Box::new(InMemorySource::new("readable_source", records)));
+        sampler
+            .inner
+            .lock()
+            .unwrap()
+            .ingest_internal(SplitLabel::Train)
+            .unwrap();
+
+        let mut inner = sampler.inner.lock().unwrap();
+        let anchor = inner
+            .records
+            .get("readable_anchor")
+            .cloned()
+            .expect("anchor should be present");
+
+        let sampler_ranked = inner.bm25_ranked_candidates(&anchor, SplitLabel::Train);
+
+        let key = ("readable_source".to_string(), SplitLabel::Train);
+        let index = inner
+            .bm25_source_indices
+            .get(&key)
+            .expect("bm25 source index should be built")
+            .record_ids
+            .clone();
+
+        let docs: Vec<bm25::Document<usize>> = index
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, id)| {
+                inner.records.get(id).map(|record| bm25::Document {
+                    id: idx,
+                    contents: record_bm25_text(record, inner.config.chunking.max_window_tokens),
+                })
+            })
+            .collect();
+        let engine =
+            bm25::SearchEngineBuilder::<usize>::with_documents(bm25::Language::English, docs)
+                .build();
+
+        let query = record_bm25_text(&anchor, inner.config.chunking.max_window_tokens);
+        let max_results = index.len().clamp(2, 16);
+        let mut raw = engine.search(&query, max_results);
+        // Match sampler tie-breaking exactly: score descending, then stable id order.
+        raw.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.document.id.cmp(&b.document.id))
+        });
+
+        let mut expected = Vec::new();
+        for result in raw {
+            let Some(id) = index.get(result.document.id) else {
+                continue;
+            };
+            if id != &anchor.id {
+                expected.push(id.clone());
+            }
+        }
+
+        // This is the direct "is it actually BM25" proof: sampler ranking must
+        // equal a separately recomputed BM25 crate ranking for the same corpus/query.
+        assert_eq!(
+            sampler_ranked, expected,
+            "sampler BM25 rank must match direct BM25 crate rank for the same corpus/query"
+        );
     }
 
     #[cfg(feature = "bm25-mining")]

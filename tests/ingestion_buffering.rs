@@ -576,3 +576,71 @@ fn test_source_skew_metrics() {
     assert!((skew.max_share - 0.5).abs() < 1e-6);
     assert!((skew.ratio - 2.0).abs() < 1e-6);
 }
+
+#[test]
+fn refreshed_sources_are_reported_per_cycle() {
+    // A has one item per refresh, B has three per refresh.
+    // After the first fill, only A empties and should be refreshed next.
+    let calls_a = Arc::new(AtomicUsize::new(0));
+    let calls_b = Arc::new(AtomicUsize::new(0));
+    let a_pages = vec![vec![create_dummy_record("A-0")]];
+    let b_pages = vec![vec![
+        create_dummy_record("B-0"),
+        create_dummy_record("B-1"),
+        create_dummy_record("B-2"),
+    ]];
+
+    let mut manager = IngestionManager::new(2, SamplerConfig::default());
+    manager.register_source(Box::new(PagedSource::new("A", a_pages, calls_a)));
+    manager.register_source(Box::new(PagedSource::new("B", b_pages, calls_b)));
+
+    manager.refresh_all();
+    let refreshed_first: HashSet<String> =
+        manager.last_refreshed_sources().iter().cloned().collect();
+    assert_eq!(
+        refreshed_first,
+        HashSet::from(["A".to_string(), "B".to_string()])
+    );
+
+    manager.refresh_all();
+    let refreshed_second: HashSet<String> =
+        manager.last_refreshed_sources().iter().cloned().collect();
+    assert_eq!(refreshed_second, HashSet::from(["A".to_string()]));
+}
+
+#[test]
+fn refreshed_sources_is_empty_when_no_source_refresh_occurs() {
+    let calls_a = Arc::new(AtomicUsize::new(0));
+    let calls_b = Arc::new(AtomicUsize::new(0));
+    let pages_a = vec![vec![
+        create_dummy_record("r0"),
+        create_dummy_record("r1"),
+        create_dummy_record("r2"),
+    ]];
+    let pages_b = vec![vec![
+        create_dummy_record("s0"),
+        create_dummy_record("s1"),
+        create_dummy_record("s2"),
+    ]];
+
+    let mut manager = IngestionManager::new(2, SamplerConfig::default());
+    manager.register_source(Box::new(PagedSource::new("left", pages_a, calls_a)));
+    manager.register_source(Box::new(PagedSource::new("right", pages_b, calls_b)));
+
+    manager.refresh_all();
+    let refreshed_first: HashSet<String> =
+        manager.last_refreshed_sources().iter().cloned().collect();
+    assert_eq!(
+        refreshed_first,
+        HashSet::from(["left".to_string(), "right".to_string()]),
+        "initial cycle should report both sources"
+    );
+
+    // Drain one record while both per-source buffers still have remaining items;
+    // this cycle should not trigger any source refresh.
+    manager.advance(1);
+    assert!(
+        manager.last_refreshed_sources().is_empty(),
+        "drain-only cycle should report no refreshed sources"
+    );
+}
