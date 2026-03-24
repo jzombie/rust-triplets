@@ -12,6 +12,7 @@ Compose an effectively unlimited supply of [training triplets](https://en.wikipe
 - Included adapters for HuggingFace and file-based inputs + traits to roll your own
 - Fast, reproducible baseline sampling (great for iteration/debug), with optional [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) hard-negative mining when you want stricter lexical difficulty.
 - Low memory footprint; quick to compile
+- [MIT][mit-license-page] and [Apache 2.0][apache-2.0-license-page] licensed
 - A decent set of [capabilities](#capabilities)
 
 > _The loss function and choice of ML framework is a separate concern; this crate only handles the data._
@@ -897,7 +898,7 @@ These are ideas, not commitments.
 
 `triplets` is primarily distributed under the terms of both the MIT license and the Apache License (Version 2.0).
 
-See [LICENSE-APACHE](./LICENSE-APACHE) and [LICENSE-MIT](./LICENSE-MIT) for details.
+See [LICENSE-APACHE][apache-2.0-license-page] and [LICENSE-MIT][mit-license-page] for details.
 
 [rust-src-page]: https://www.rust-lang.org/
 [rust-logo]: https://img.shields.io/badge/Made%20with-Rust-black
@@ -905,10 +906,10 @@ See [LICENSE-APACHE](./LICENSE-APACHE) and [LICENSE-MIT](./LICENSE-MIT) for deta
 [crates-page]: https://crates.io/crates/triplets
 [crates-badge]: https://img.shields.io/crates/v/triplets.svg
 
-[mit-license-page]: ./LICENSE-MIT
+[mit-license-page]: https://raw.githubusercontent.com/jzombie/rust-triplets/refs/heads/main/LICENSE-MIT
 [mit-license-badge]: https://img.shields.io/badge/license-MIT-blue.svg
 
-[apache-2.0-license-page]: ./LICENSE-APACHE
+[apache-2.0-license-page]: https://raw.githubusercontent.com/jzombie/rust-triplets/refs/heads/main/LICENSE-APACHE
 [apache-2.0-license-badge]: https://img.shields.io/badge/license-Apache%202.0-blue.svg
 
 [coveralls-page]: https://coveralls.io/github/jzombie/rust-triplets?branch=main
