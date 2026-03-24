@@ -474,7 +474,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     }
 
     fn prune_cursor_state(&mut self) {
-        if self.chunk_cursors.is_empty() && self.role_cursors.is_empty() {
+        #[cfg(feature = "bm25-mining")]
+        let bm25_cursors_empty = self.bm25_negative_cursors.is_empty();
+        #[cfg(not(feature = "bm25-mining"))]
+        let bm25_cursors_empty = true;
+
+        if self.chunk_cursors.is_empty() && self.role_cursors.is_empty() && bm25_cursors_empty {
             return;
         }
         let valid_ids: HashSet<RecordId> = self.records.keys().cloned().collect();
@@ -1801,6 +1806,13 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         snapshot.sort_by(|a, b| a.id.cmp(&b.id));
         self.records.clear();
         self.sources_with_long_sections.clear();
+        #[cfg(feature = "bm25-mining")]
+        {
+            // Strict mode: cursor state must never outlive a record snapshot boundary.
+            // Any cache sync defines a new in-memory record snapshot, so reset per-anchor
+            // BM25 rotation cursors unconditionally to avoid stale or drifted state.
+            self.bm25_negative_cursors.clear();
+        }
         for record in snapshot {
             if self.split_store.label_for(&record.id).is_none() {
                 self.split_store.ensure(record.id.clone())?;
@@ -7030,6 +7042,68 @@ mod tests {
             assert_ne!(triplet.anchor.text, triplet.negative.text);
             assert_ne!(triplet.positive.text, triplet.negative.text);
         }
+    }
+
+    #[cfg(feature = "bm25-mining")]
+    #[test]
+    fn bm25_cursor_pruning_runs_even_when_other_cursors_are_empty() {
+        let split = SplitRatios::default();
+        let store = Arc::new(DeterministicSplitStore::new(split, 1234).unwrap());
+        let mut inner = TripletSamplerInner::new(base_config(), store);
+
+        assert!(inner.chunk_cursors.is_empty());
+        assert!(inner.role_cursors.is_empty());
+
+        inner
+            .bm25_negative_cursors
+            .insert(("stale_anchor".to_string(), SplitLabel::Train), 7);
+        assert_eq!(inner.bm25_negative_cursors.len(), 1);
+
+        // With no records loaded, every cursor entry is stale and must be removed.
+        // This specifically guards against early-return logic that skips BM25 pruning.
+        inner.prune_cursor_state();
+
+        assert!(
+            inner.bm25_negative_cursors.is_empty(),
+            "bm25_negative_cursors should be pruned even when chunk/role cursor maps are empty"
+        );
+    }
+
+    #[cfg(feature = "bm25-mining")]
+    #[test]
+    fn bm25_cursor_state_is_cleared_on_each_record_snapshot_sync() {
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let store = Arc::new(DeterministicSplitStore::new(split, 2024).unwrap());
+        let sampler = TripletSampler::new(base_config(), Arc::clone(&store));
+        sampler.register_source(Box::new(InMemorySource::new(
+            "strict_sync_source",
+            vec![trader_record(
+                "strict_sync_anchor",
+                "2025-01-01",
+                "Anchor",
+                "body",
+            )],
+        )));
+
+        let mut inner = sampler.inner.lock().unwrap();
+        inner.ingest_internal(SplitLabel::Train).unwrap();
+
+        inner
+            .bm25_negative_cursors
+            .insert(("strict_sync_anchor".to_string(), SplitLabel::Train), 42);
+        assert_eq!(inner.bm25_negative_cursors.len(), 1);
+
+        // Strict contract: every snapshot sync clears BM25 cursor state, even if
+        // the same anchor remains present in the refreshed record pool.
+        inner.sync_records_from_cache().unwrap();
+        assert!(
+            inner.bm25_negative_cursors.is_empty(),
+            "bm25 cursor state must reset at every record snapshot boundary"
+        );
     }
 
     #[test]
