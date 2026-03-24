@@ -12,8 +12,8 @@ Compose an effectively unlimited supply of [training triplets](https://en.wikipe
 - Included adapters for HuggingFace and file-based sources. Included traits to roll your own data loaders from any source.
 - Fast, reproducible baseline sampling (great for iteration/debug), with optional [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) hard-negative mining when you want stricter lexical difficulty.
 - Low memory footprint; quick to compile.
+- A decent set of additional [capabilities](#capabilities).
 - [MIT][mit-license-page] and [Apache 2.0][apache-2.0-license-page] licensed.
-- A decent set of [capabilities](#capabilities).
 
 > _The loss function and choice of ML framework is a separate concern; this crate only handles the data._
 
