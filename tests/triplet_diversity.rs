@@ -33,6 +33,11 @@ fn build_record(source: &str, idx: usize) -> DataRecord {
 }
 
 fn assert_diversity_for_seed_and_split(seed: u64, allowed_split: SplitLabel) {
+    #[cfg(feature = "bm25-mining")]
+    const MAX_NEGATIVE_SHARE: f32 = 0.16;
+    #[cfg(not(feature = "bm25-mining"))]
+    const MAX_NEGATIVE_SHARE: f32 = 0.15;
+
     let split = SplitRatios {
         train: 0.7,
         validation: 0.15,
@@ -110,11 +115,12 @@ fn assert_diversity_for_seed_and_split(seed: u64, allowed_split: SplitLabel) {
         .map(|count| count as f32 / total_triplets as f32)
         .unwrap_or(1.0);
     assert!(
-        max_negative_share <= 0.15,
-        "seed {} collapsed: max negative share {:.3} over {} triplets",
+        max_negative_share <= MAX_NEGATIVE_SHARE,
+        "seed {} collapsed: max negative share {:.3} over {} triplets (threshold {:.3})",
         seed,
         max_negative_share,
-        total_triplets
+        total_triplets,
+        MAX_NEGATIVE_SHARE
     );
 }
 

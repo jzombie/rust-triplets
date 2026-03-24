@@ -1,7 +1,7 @@
 use chrono::Duration;
 use indexmap::IndexMap;
+use line_ending::LineEnding;
 use rand::prelude::*;
-use rand::seq::IndexedRandom;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -10,9 +10,14 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+#[cfg(feature = "bm25-mining")]
+use bm25::{Document, Language, SearchEngine, SearchEngineBuilder};
+
 use crate::config::{
     ChunkingStrategy, NegativeStrategy, SamplerConfig, Selector, TextRecipe, TripletRecipe,
 };
+#[cfg(feature = "bm25-mining")]
+use crate::constants::sampler::BM25_HARD_NEGATIVE_ROTATION_TOP_K;
 use crate::constants::sampler::{
     ANCHOR_POSITIVE_SWAP_MASK, EPOCH_SEED_OFFSET, EXHAUSTION_RETRY_LIMIT, NEG_REASON_WRONG_ARTICLE,
     NEG_REASON_WRONG_DATE, NEG_REASON_WRONG_QA, PREFETCHER_SOURCE_ID, PREFETCHER_STOPPED_REASON,
@@ -33,6 +38,12 @@ use crate::splits::{
     EpochStateStore, PersistedSamplerState, SamplerStateStore, SplitLabel, SplitStore,
 };
 use crate::types::{RecipeKey, RecordId, SourceId};
+
+#[cfg(feature = "bm25-mining")]
+struct Bm25SourceIndex {
+    record_ids: Vec<RecordId>,
+    search_engine: SearchEngine<usize>,
+}
 
 /// Auto-injected recipe name used when a source has at least one section whose
 /// token count exceeds `chunking.max_window_tokens` during normal ingest sync.
@@ -107,8 +118,8 @@ impl rand::RngCore for DeterministicRng {
 /// Public helper so callers (and examples) can compute the same chunk weighting the sampler uses.
 ///
 /// Definitions:
-/// - `trust` (range 0.0–1.0): comes from `RecordChunk.quality.trust`; scales the contribution of a chunk.
-/// - `start_ratio` (range 0.0–1.0): fraction of the section where the window starts; 0.0 is the first token.
+/// - `trust` (range 0.0-1.0): comes from `RecordChunk.quality.trust`; scales the contribution of a chunk.
+/// - `start_ratio` (range 0.0-1.0): fraction of the section where the window starts; 0.0 is the first token.
 /// - `base`: window chunks use `1.0 - start_ratio`; summary chunks use their configured `summary_fallback_weight`.
 /// - `chunk_weight_floor`: minimum weight applied after scaling.
 ///
@@ -289,6 +300,15 @@ struct TripletSamplerInner<S: SplitStore + EpochStateStore + SamplerStateStore +
     chunk_cursors: HashMap<(RecordId, usize), usize>,
     /// Per-record, per-role cursor to rotate through role-specific sections.
     role_cursors: HashMap<(RecordId, String), usize>,
+    /// Lazy BM25-ranked candidate cache for anchors in the current ingest snapshot.
+    #[cfg(feature = "bm25-mining")]
+    bm25_hard_negatives: HashMap<RecordId, Vec<RecordId>>,
+    /// BM25 engines built once per source/split for the current ingest snapshot.
+    #[cfg(feature = "bm25-mining")]
+    bm25_source_indices: HashMap<(SourceId, SplitLabel), Bm25SourceIndex>,
+    /// Per-anchor cursor for deterministic rotation through top BM25 hard negatives.
+    #[cfg(feature = "bm25-mining")]
+    bm25_negative_cursors: HashMap<(RecordId, SplitLabel), usize>,
     /// Chunk id to record id lookup (used by epoch tracker).
     chunk_index: HashMap<RecordId, RecordId>,
     /// Round-robin order of source ids (deterministic).
@@ -356,6 +376,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             epoch_tracker,
             chunk_cursors: HashMap::new(),
             role_cursors: HashMap::new(),
+            #[cfg(feature = "bm25-mining")]
+            bm25_hard_negatives: HashMap::new(),
+            #[cfg(feature = "bm25-mining")]
+            bm25_source_indices: HashMap::new(),
+            #[cfg(feature = "bm25-mining")]
+            bm25_negative_cursors: HashMap::new(),
             chunk_index: HashMap::new(),
             source_order: Vec::new(),
             source_cycle_idx: 0,
@@ -449,13 +475,21 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     }
 
     fn prune_cursor_state(&mut self) {
-        if self.chunk_cursors.is_empty() && self.role_cursors.is_empty() {
+        #[cfg(feature = "bm25-mining")]
+        let bm25_cursors_empty = self.bm25_negative_cursors.is_empty();
+        #[cfg(not(feature = "bm25-mining"))]
+        let bm25_cursors_empty = true;
+
+        if self.chunk_cursors.is_empty() && self.role_cursors.is_empty() && bm25_cursors_empty {
             return;
         }
         let valid_ids: HashSet<RecordId> = self.records.keys().cloned().collect();
         self.chunk_cursors
             .retain(|(record_id, _), _| valid_ids.contains(record_id));
         self.role_cursors
+            .retain(|(record_id, _), _| valid_ids.contains(record_id));
+        #[cfg(feature = "bm25-mining")]
+        self.bm25_negative_cursors
             .retain(|(record_id, _), _| valid_ids.contains(record_id));
     }
 
@@ -923,6 +957,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         strategy: &NegativeStrategy,
     ) -> Option<(DataRecord, bool)> {
         let anchor_split = self.split_store.label_for(&anchor_record.id)?;
+
         let in_anchor_split = |candidate: &DataRecord| {
             self.split_store
                 .label_for(&candidate.id)
@@ -964,21 +999,22 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                         .collect();
                 }
                 if !same_date.is_empty() {
-                    return same_date
-                        .choose(&mut self.rng)
-                        .cloned()
-                        .map(|record| (record, false));
+                    return self.choose_negative_from_pool(
+                        anchor_record,
+                        anchor_split,
+                        same_date,
+                        false,
+                    );
                 }
-                self.records
+                let pool = self
+                    .records
                     .values()
                     .filter(|candidate| {
                         candidate.id != anchor_record.id && in_anchor_split(candidate)
                     })
                     .cloned()
-                    .collect::<Vec<_>>()
-                    .choose(&mut self.rng)
-                    .cloned()
-                    .map(|record| (record, true))
+                    .collect::<Vec<_>>();
+                self.choose_negative_from_pool(anchor_record, anchor_split, pool, true)
             }
             NegativeStrategy::WrongPublicationDate => {
                 let anchor_date =
@@ -1007,21 +1043,24 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 if pool.is_empty() {
                     // Fallback to any other record in the same split so split boundaries
                     // remain strictly isolated.
-                    return self
+                    let fallback_pool = self
                         .records
                         .values()
                         .filter(|candidate| {
                             candidate.id != anchor_record.id && in_anchor_split(candidate)
                         })
                         .cloned()
-                        .collect::<Vec<_>>()
-                        .choose(&mut self.rng)
-                        .cloned()
-                        .map(|record| (record, true));
+                        .collect::<Vec<_>>();
+
+                    return self.choose_negative_from_pool(
+                        anchor_record,
+                        anchor_split,
+                        fallback_pool,
+                        true,
+                    );
                 }
-                pool.choose(&mut self.rng)
-                    .cloned()
-                    .map(|record| (record, false))
+
+                self.choose_negative_from_pool(anchor_record, anchor_split, pool, false)
             }
             NegativeStrategy::QuestionAnswerMismatch => {
                 let pool: Vec<DataRecord> = self
@@ -1037,24 +1076,245 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 if pool.is_empty() {
                     // Fallback to any other record in the same split so split boundaries
                     // remain strictly isolated.
-                    return self
+                    let fallback_pool = self
                         .records
                         .values()
                         .filter(|candidate| {
                             candidate.id != anchor_record.id && in_anchor_split(candidate)
                         })
                         .cloned()
-                        .collect::<Vec<_>>()
-                        .choose(&mut self.rng)
-                        .cloned()
-                        .map(|record| (record, true));
+                        .collect::<Vec<_>>();
+
+                    return self.choose_negative_from_pool(
+                        anchor_record,
+                        anchor_split,
+                        fallback_pool,
+                        true,
+                    );
                 }
-                pool.choose(&mut self.rng)
-                    .cloned()
-                    .map(|record| (record, false))
+
+                self.choose_negative_from_pool(anchor_record, anchor_split, pool, false)
             }
         }
     }
+
+    #[cfg(feature = "bm25-mining")]
+    fn choose_negative_from_pool(
+        &mut self,
+        anchor_record: &DataRecord,
+        anchor_split: SplitLabel,
+        pool: Vec<DataRecord>,
+        fallback_used: bool,
+    ) -> Option<(DataRecord, bool)> {
+        self.select_bm25_hard_negative_record(anchor_record, anchor_split, &pool, fallback_used)
+    }
+
+    #[cfg(not(feature = "bm25-mining"))]
+    fn choose_negative_from_pool(
+        &mut self,
+        _anchor_record: &DataRecord,
+        _anchor_split: SplitLabel,
+        pool: Vec<DataRecord>,
+        fallback_used: bool,
+    ) -> Option<(DataRecord, bool)> {
+        // Without BM25 enabled, negatives are sampled uniformly from the strategy pool.
+        pool.choose(&mut self.rng)
+            .cloned()
+            .map(|record| (record, fallback_used))
+    }
+
+    #[cfg(feature = "bm25-mining")]
+    fn select_bm25_hard_negative_record(
+        &mut self,
+        anchor_record: &DataRecord,
+        anchor_split: SplitLabel,
+        pool: &[DataRecord],
+        fallback_used: bool,
+    ) -> Option<(DataRecord, bool)> {
+        if pool.is_empty() {
+            return None;
+        }
+
+        // BM25 top-K rotation (deterministic, per anchor+split):
+        // 1) Build `ranked_pool` from BM25 ranking, restricted to strategy pool and split.
+        // 2) Compute `top_k = min(configured_top_k, ranked_pool.len())`.
+        // 3) Read per-(anchor_id, split) cursor, defaulting to 0.
+        // 4) Return `ranked_pool[cursor]`, then advance cursor modulo `top_k`.
+        //
+        // This yields sequences like [r1, r2, r3, r1, ...] for `top_k = 3`.
+        // Cursors are cleared whenever BM25 indices are rebuilt so a refreshed corpus
+        // restarts rotation from rank-1 for each anchor.
+
+        // Restrict BM25 candidates to the strategy-selected pool for this recipe.
+        let pool_ids: HashSet<RecordId> = pool.iter().map(|record| record.id.clone()).collect();
+
+        // Read ranked candidates from the per-anchor BM25 cache/index.
+        let candidate_ids = self.bm25_ranked_candidates(anchor_record, anchor_split);
+        let mut ranked_pool = Vec::new();
+        for candidate_id in &candidate_ids {
+            if !pool_ids.contains(candidate_id) {
+                continue;
+            }
+            // Keep split isolation strict even under BM25 ranking.
+            if let Some(candidate) = self.records.get(candidate_id)
+                && candidate.id != anchor_record.id
+                && self
+                    .split_store
+                    .label_for(&candidate.id)
+                    .map(|label| label == anchor_split)
+                    .unwrap_or(false)
+            {
+                ranked_pool.push(candidate.clone());
+            }
+        }
+
+        if !ranked_pool.is_empty() {
+            // Rotate only within the highest lexical matches, bounded by top_k.
+            let top_k = ranked_pool
+                .len()
+                .min(BM25_HARD_NEGATIVE_ROTATION_TOP_K.max(1));
+            let cursor_key = (anchor_record.id.clone(), anchor_split);
+            let cursor = self.bm25_negative_cursors.entry(cursor_key).or_insert(0);
+            if *cursor >= top_k {
+                *cursor = 0;
+            }
+            let selected = ranked_pool.get(*cursor).cloned();
+            *cursor = (*cursor + 1) % top_k;
+            return selected.map(|record| (record, fallback_used));
+        }
+
+        // Preserve strategy behavior: if BM25 yields no usable candidate inside
+        // the strategy-selected pool, fall back to deterministic sampling within
+        // that same pool.
+        let mut fallback = pool.to_vec();
+        fallback.sort_by(|a, b| a.id.cmp(&b.id));
+        if fallback.is_empty() {
+            return None;
+        }
+        let idx = self.rng.random_range(0..fallback.len());
+        fallback
+            .get(idx)
+            .cloned()
+            .map(|record| (record, fallback_used))
+    }
+
+    #[cfg(feature = "bm25-mining")]
+    fn bm25_ranked_candidates(
+        &mut self,
+        anchor_record: &DataRecord,
+        anchor_split: SplitLabel,
+    ) -> Vec<RecordId> {
+        if let Some(cached) = self.bm25_hard_negatives.get(&anchor_record.id) {
+            return cached.clone();
+        }
+
+        let key = (anchor_record.source.clone(), anchor_split);
+        let Some(index) = self.bm25_source_indices.get(&key) else {
+            self.bm25_hard_negatives
+                .insert(anchor_record.id.clone(), Vec::new());
+            return Vec::new();
+        };
+
+        let bm25_query_text =
+            record_bm25_text(anchor_record, self.config.chunking.max_window_tokens);
+        let max_results = index.record_ids.len();
+        let mut results = index.search_engine.search(&bm25_query_text, max_results);
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.document.id.cmp(&b.document.id))
+        });
+
+        let mut ranked = Vec::new();
+        for result in results {
+            let candidate_idx = result.document.id;
+            let Some(candidate_id) = index.record_ids.get(candidate_idx) else {
+                continue;
+            };
+            if candidate_id == &anchor_record.id {
+                continue;
+            }
+            ranked.push(candidate_id.clone());
+        }
+
+        self.bm25_hard_negatives
+            .insert(anchor_record.id.clone(), ranked.clone());
+        ranked
+    }
+
+    #[cfg(feature = "bm25-mining")]
+    fn rebuild_bm25_hard_negative_index(&mut self) {
+        self.bm25_hard_negatives.clear();
+        self.bm25_source_indices.clear();
+        self.bm25_negative_cursors.clear();
+        if self.records.len() < 2 {
+            return;
+        }
+
+        let record_ids: Vec<RecordId> = self.records.keys().cloned().collect();
+        let split_by_id: HashMap<RecordId, SplitLabel> = record_ids
+            .iter()
+            .filter_map(|record_id| {
+                self.split_store
+                    .label_for(record_id)
+                    .map(|split| (record_id.clone(), split))
+            })
+            .collect();
+
+        let mut records_by_source_and_split: HashMap<(SourceId, SplitLabel), Vec<RecordId>> =
+            HashMap::new();
+        for record_id in self.records.keys() {
+            let Some(record) = self.records.get(record_id) else {
+                continue;
+            };
+            let Some(split) = split_by_id.get(record_id).copied() else {
+                continue;
+            };
+            records_by_source_and_split
+                .entry((record.source.clone(), split))
+                .or_default()
+                .push(record_id.clone());
+        }
+
+        for ((source, split), record_ids) in records_by_source_and_split {
+            if record_ids.len() < 2 {
+                continue;
+            }
+
+            let corpus: Vec<String> = record_ids
+                .iter()
+                .filter_map(|record_id| self.records.get(record_id))
+                .map(|record| record_bm25_text(record, self.config.chunking.max_window_tokens))
+                .collect();
+            if corpus.len() < 2 {
+                continue;
+            }
+
+            let docs: Vec<Document<usize>> = corpus
+                .iter()
+                .enumerate()
+                .map(|(idx, contents)| Document {
+                    id: idx,
+                    contents: contents.clone(),
+                })
+                .collect();
+            let search_engine =
+                SearchEngineBuilder::<usize>::with_documents(Language::English, docs).build();
+
+            self.bm25_source_indices.insert(
+                (source, split),
+                Bm25SourceIndex {
+                    record_ids,
+                    search_engine,
+                },
+            );
+        }
+    }
+
+    #[cfg(not(feature = "bm25-mining"))]
+    #[allow(dead_code)]
+    fn rebuild_bm25_hard_negative_index(&mut self) {}
 
     /// True when the recipe is the special auto-injected long-section chunk-pair recipe.
     fn is_auto_chunk_pair_recipe(recipe: &TripletRecipe) -> bool {
@@ -1327,20 +1587,34 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         if let Some(spec) = record.meta_prefix.as_ref()
             && let Some(prefix) = spec.sample(&mut self.rng)
         {
-            chunk.text = format!("{}\n{}", prefix, chunk.text);
-            // Re-estimate tokens after decoration and cap to configured window size.
-            let tokens: Vec<&str> = chunk.text.split_whitespace().collect();
-            let total_tokens = tokens.len();
+            let body_tokens: Vec<&str> = chunk.text.split_whitespace().collect();
+            let prefix_tokens: Vec<&str> = prefix.split_whitespace().collect();
+            let total_tokens = prefix_tokens.len() + body_tokens.len();
             let max_window = self.config.chunking.max_window_tokens;
             if max_window > 0 && total_tokens > max_window {
-                let truncated = tokens
-                    .into_iter()
-                    .take(max_window)
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                chunk.text = truncated;
-                chunk.tokens_estimate = max_window;
+                if prefix_tokens.len() >= max_window {
+                    chunk.text = prefix_tokens
+                        .into_iter()
+                        .take(max_window)
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    chunk.tokens_estimate = max_window;
+                } else {
+                    let remaining = max_window - prefix_tokens.len();
+                    let truncated_body = body_tokens
+                        .into_iter()
+                        .take(remaining)
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    chunk.text = if truncated_body.is_empty() {
+                        prefix
+                    } else {
+                        format!("{}{}{}", prefix, platform_newline(), truncated_body)
+                    };
+                    chunk.tokens_estimate = max_window;
+                }
             } else {
+                chunk.text = format!("{}{}{}", prefix, platform_newline(), chunk.text);
                 chunk.tokens_estimate = total_tokens;
             }
         }
@@ -1547,6 +1821,13 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         snapshot.sort_by(|a, b| a.id.cmp(&b.id));
         self.records.clear();
         self.sources_with_long_sections.clear();
+        #[cfg(feature = "bm25-mining")]
+        {
+            // Strict mode: cursor state must never outlive a record snapshot boundary.
+            // Any cache sync defines a new in-memory record snapshot, so reset per-anchor
+            // BM25 rotation cursors unconditionally to avoid stale or drifted state.
+            self.bm25_negative_cursors.clear();
+        }
         for record in snapshot {
             if self.split_store.label_for(&record.id).is_none() {
                 self.split_store.ensure(record.id.clone())?;
@@ -1563,6 +1844,18 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         self.rebuild_source_index()?;
         Ok(())
     }
+
+    #[cfg(feature = "bm25-mining")]
+    fn rebuild_bm25_index_after_refresh_if_needed(&mut self) {
+        // BM25 rebuild is refresh-driven: rebuild only when at least one source
+        // actually refreshed during the current ingestion cycle.
+        if !self.ingestion.last_refreshed_sources().is_empty() {
+            self.rebuild_bm25_hard_negative_index();
+        }
+    }
+
+    #[cfg(not(feature = "bm25-mining"))]
+    fn rebuild_bm25_index_after_refresh_if_needed(&mut self) {}
 
     fn ingest_internal_for_split(&mut self, target_split: SplitLabel) -> Result<(), SamplerError> {
         if !self.ingestion.has_sources() {
@@ -1586,6 +1879,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         }
         self.last_observed_ingest = observed;
         self.sync_records_from_cache()?;
+        self.rebuild_bm25_index_after_refresh_if_needed();
         self.epoch_tracker.ensure_loaded()?;
         let records_by_split = self.records_by_split()?;
         self.epoch_tracker
@@ -1626,6 +1920,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         }
         self.last_observed_ingest = observed;
         self.sync_records_from_cache()?;
+        self.rebuild_bm25_index_after_refresh_if_needed();
         self.epoch_tracker.ensure_loaded()?;
         let records_by_split = self.records_by_split()?;
         self.epoch_tracker
@@ -1652,6 +1947,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         self.ingestion.force_refresh_all_with_weights(weights)?;
         self.last_observed_ingest = self.ingestion.cache().ingest_count();
         self.sync_records_from_cache()?;
+        self.rebuild_bm25_index_after_refresh_if_needed();
         self.epoch_tracker.ensure_loaded()?;
         let records_by_split = self.records_by_split()?;
         self.epoch_tracker
@@ -2426,6 +2722,42 @@ fn taxonomy_value(record: &DataRecord, field: MetadataKey) -> Option<&str> {
     record.taxonomy.iter().find_map(|entry| field.strip(entry))
 }
 
+fn platform_newline() -> &'static str {
+    LineEnding::from_current_platform().as_str()
+}
+
+#[cfg(feature = "bm25-mining")]
+fn record_bm25_text(record: &DataRecord, max_tokens: usize) -> String {
+    let mut out = String::new();
+    for section in &record.sections {
+        if let Some(heading) = &section.heading
+            && !heading.trim().is_empty()
+        {
+            out.push_str(heading);
+            out.push_str(platform_newline());
+        }
+        if !section.text.trim().is_empty() {
+            out.push_str(&section.text);
+            out.push_str(platform_newline());
+        }
+    }
+    if out.trim().is_empty() {
+        return record.id.clone();
+    }
+    if max_tokens == 0 {
+        return out;
+    }
+    let tokens: Vec<&str> = out.split_whitespace().collect();
+    if tokens.len() <= max_tokens {
+        return out;
+    }
+    tokens
+        .into_iter()
+        .take(max_tokens)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn strategy_reason(strategy: &NegativeStrategy) -> &'static str {
     match strategy {
         NegativeStrategy::WrongPublicationDate => NEG_REASON_WRONG_DATE,
@@ -2464,12 +2796,73 @@ mod tests {
 
     use super::*;
     use crate::config::{ChunkingStrategy, NegativeStrategy, Selector, TextRecipe, TripletRecipe};
-    use crate::constants::sampler_tests::{
-        FNV1A64_OFFSET, FNV1A64_PRIME, FULL_SEQUENCE_LEN, PAIR_BATCH_SEQUENCE_HASH,
-        PREFETCH_PAIR_BATCH_SEQUENCE_HASH, PREFETCH_TEXT_BATCH_SEQUENCE_HASH,
-        PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH, PRIMARY_SOURCE_ID, SECONDARY_SOURCE_ID,
-        TEXT_BATCH_SEQUENCE_HASH, TRIPLET_BATCH_SEQUENCE_HASH,
-    };
+
+    /// Primary source id used by sampler unit tests.
+    pub const PRIMARY_SOURCE_ID: &str = "source_a";
+    /// Secondary source id used by sampler unit tests.
+    pub const SECONDARY_SOURCE_ID: &str = "source_b";
+
+    /// FNV-1a 64-bit offset basis used in snapshot hashing tests.
+    pub const FNV1A64_OFFSET: u64 = 0xcbf29ce484222325;
+    /// FNV-1a 64-bit prime used in snapshot hashing tests.
+    pub const FNV1A64_PRIME: u64 = 0x100000001b3;
+
+    /// Number of batches sampled for deterministic sequence hash assertions.
+    pub const FULL_SEQUENCE_LEN: usize = 45;
+    /// Expected hash for deterministic text batch sequence.
+    pub const TEXT_BATCH_SEQUENCE_HASH: u64 = 16700524736973776041;
+    /// Expected hash for deterministic triplet batch sequence.
+    #[cfg(not(feature = "bm25-mining"))]
+    pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 14618375830351864347;
+    /// Expected hash for deterministic triplet batch sequence when bm25-mining is enabled.
+    #[cfg(feature = "bm25-mining")]
+    pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 4541483670725174687;
+    /// Expected hash for deterministic pair batch sequence.
+    #[cfg(not(feature = "bm25-mining"))]
+    pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 13133711470950174124;
+    /// Expected hash for deterministic pair batch sequence when bm25-mining is enabled.
+    #[cfg(feature = "bm25-mining")]
+    pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 9123648929269994;
+    /// Expected hash for deterministic prefetch text batch sequence.
+    pub const PREFETCH_TEXT_BATCH_SEQUENCE_HASH: u64 = 16740235391902546413;
+    /// Expected hash for deterministic prefetch triplet batch sequence.
+    #[cfg(not(feature = "bm25-mining"))]
+    pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 11709520942485223708;
+    /// Expected hash for deterministic prefetch triplet batch sequence when bm25-mining is enabled.
+    #[cfg(feature = "bm25-mining")]
+    pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 2714971770055876640;
+    /// Expected hash for deterministic prefetch pair batch sequence.
+    #[cfg(not(feature = "bm25-mining"))]
+    pub const PREFETCH_PAIR_BATCH_SEQUENCE_HASH: u64 = 2553049861003803008;
+    /// Expected hash for deterministic prefetch pair batch sequence when bm25-mining is enabled.
+    #[cfg(feature = "bm25-mining")]
+    pub const PREFETCH_PAIR_BATCH_SEQUENCE_HASH: u64 = 17431903793685416787;
+
+    /// Expected readable wrong-article sequence without BM25 mining.
+    pub const READABLE_NON_BM25_TITLES: [&str; 8] = [
+        "Energy transition memo",
+        "Archaeology field note",
+        "Archaeology field note",
+        "Carbon market and emissions policy",
+        "Energy transition memo",
+        "Carbon market and emissions policy",
+        "Energy transition memo",
+        "Carbon policy update",
+    ];
+
+    /// Expected readable wrong-article sequence with BM25 mining enabled.
+    #[cfg(feature = "bm25-mining")]
+    pub const READABLE_BM25_TITLES: [&str; 8] = [
+        "Carbon market and emissions policy",
+        "Carbon policy update",
+        "Regulatory market digest",
+        "Carbon market and emissions policy",
+        "Carbon policy update",
+        "Regulatory market digest",
+        "Carbon market and emissions policy",
+        "Carbon policy update",
+    ];
+
     use crate::data::{ChunkView, QualityScore, RecordChunk, RecordSection};
     use crate::kvp::{KvpField, KvpPrefixSampler};
     use crate::metadata::META_FIELD_DATE;
@@ -2843,6 +3236,58 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "bm25-mining")]
+    fn lexical_similarity_scores(left: &str, right: &str) -> (f32, f32) {
+        if left.is_empty() || right.is_empty() {
+            return (0.0, 0.0);
+        }
+
+        // Raw UTF-8 byte-level metrics (no token heuristics), implemented locally
+        // so default test builds do not depend on optional SIMD crates.
+        let mut left_freq = [0.0_f32; 256];
+        let mut right_freq = [0.0_f32; 256];
+        let mut left_bits = [0_u8; 32];
+        let mut right_bits = [0_u8; 32];
+
+        for byte in left.as_bytes() {
+            let idx = *byte as usize;
+            left_freq[idx] += 1.0;
+            left_bits[idx / 8] |= 1_u8 << (idx % 8);
+        }
+        for byte in right.as_bytes() {
+            let idx = *byte as usize;
+            right_freq[idx] += 1.0;
+            right_bits[idx / 8] |= 1_u8 << (idx % 8);
+        }
+
+        let dot: f32 = left_freq
+            .iter()
+            .zip(right_freq.iter())
+            .map(|(a, b)| a * b)
+            .sum();
+        let left_norm_sq: f32 = left_freq.iter().map(|v| v * v).sum();
+        let right_norm_sq: f32 = right_freq.iter().map(|v| v * v).sum();
+        let cosine_similarity = if left_norm_sq > 0.0 && right_norm_sq > 0.0 {
+            dot / (left_norm_sq.sqrt() * right_norm_sq.sqrt())
+        } else {
+            0.0
+        };
+
+        let mut intersection = 0_u32;
+        let mut union = 0_u32;
+        for i in 0..left_bits.len() {
+            intersection += (left_bits[i] & right_bits[i]).count_ones();
+            union += (left_bits[i] | right_bits[i]).count_ones();
+        }
+        let jaccard_similarity = if union > 0 {
+            intersection as f32 / union as f32
+        } else {
+            0.0
+        };
+
+        (jaccard_similarity, cosine_similarity)
+    }
+
     fn extract_date_prefix(chunk_text: &str) -> Option<String> {
         let first_line = chunk_text.lines().next()?;
         let prefix = first_line.strip_prefix("meta: ")?;
@@ -2898,6 +3343,36 @@ mod tests {
         let tokens_after = chunk.text.split_whitespace().count();
         assert_eq!(tokens_after, 5);
         assert_eq!(chunk.tokens_estimate, 5);
+    }
+
+    #[test]
+    fn decorate_chunk_preserves_newline_after_meta_when_truncated() {
+        let split = SplitRatios::default();
+        let store = Arc::new(DeterministicSplitStore::new(split, 24).unwrap());
+        let mut cfg = base_config();
+        cfg.chunking.max_window_tokens = 4;
+        let sampler = TripletSampler::new(cfg, store);
+
+        let mut record = sample_record();
+        record.sections[0].text = "one two three".to_string();
+
+        let mut kvp = KvpPrefixSampler::new(1.0);
+        kvp.add_variant([("source", "unit")]);
+        record.meta_prefix = Some(kvp);
+
+        let mut inner = sampler.inner.lock().unwrap();
+        let mut chunks = inner.materialize_chunks(&record, 0, &record.sections[0]);
+        assert!(!chunks.is_empty());
+        let mut chunk = chunks.remove(0);
+
+        inner.decorate_chunk(&record, &mut chunk);
+
+        let expected_prefix = format!("meta: source=unit{}", platform_newline());
+        assert!(
+            chunk.text.starts_with(&expected_prefix),
+            "meta prefix should remain on its own line after truncation"
+        );
+        assert_eq!(chunk.tokens_estimate, 4);
     }
 
     #[test]
@@ -4340,6 +4815,272 @@ mod tests {
             batches.push(fixture.sampler.next_pair_batch(SplitLabel::Train).unwrap());
         }
         assert_eq!(pair_snapshot_hash(&batches), PAIR_BATCH_SEQUENCE_HASH);
+    }
+
+    #[test]
+    fn readable_triplet_examples_by_mode() {
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let recipe = TripletRecipe {
+            name: "readable_triplet_demo".into(),
+            anchor: Selector::Role(SectionRole::Anchor),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 1.0,
+            instruction: None,
+        };
+        let config = SamplerConfig {
+            seed: 991,
+            batch_size: 1,
+            chunking: ChunkingStrategy::default(),
+            recipes: vec![recipe.clone()],
+            text_recipes: Vec::new(),
+            split,
+            ..SamplerConfig::default()
+        };
+        let store = Arc::new(DeterministicSplitStore::new(split, 991).unwrap());
+
+        let anchor = trader_record(
+            "readable_anchor",
+            "2025-01-01",
+            "Climate policy briefing",
+            "carbon pricing policy emissions reduction roadmap market design",
+        );
+        let candidates = vec![
+            trader_record(
+                "readable_topical_1",
+                "2025-01-01",
+                "Carbon market and emissions policy",
+                "carbon pricing policy emissions reduction roadmap market design",
+            ),
+            trader_record(
+                "readable_topical_2",
+                "2025-01-01",
+                "Carbon policy update",
+                "carbon pricing policy emissions reduction roadmap",
+            ),
+            trader_record(
+                "readable_mid_1",
+                "2025-01-01",
+                "Energy transition memo",
+                "emissions reduction roadmap clean energy transition planning",
+            ),
+            trader_record(
+                "readable_mid_2",
+                "2025-01-01",
+                "Regulatory market digest",
+                "policy market design regulatory framework and compliance",
+            ),
+            trader_record(
+                "readable_weak_1",
+                "2025-01-01",
+                "Archaeology field note",
+                "bronze age pottery fragments excavation trench mapping",
+            ),
+            trader_record(
+                "readable_weak_2",
+                "2025-01-01",
+                "Marine geology report",
+                "subduction zones oceanic crust tectonic shear",
+            ),
+        ];
+
+        let sampler = TripletSampler::new(config, Arc::clone(&store));
+        let mut all_records = vec![anchor.clone()];
+        all_records.extend(candidates);
+        sampler.register_source(Box::new(InMemorySource::new(
+            "readable_source",
+            all_records,
+        )));
+        sampler
+            .inner
+            .lock()
+            .unwrap()
+            .ingest_internal(SplitLabel::Train)
+            .unwrap();
+
+        let mut inner = sampler.inner.lock().unwrap();
+        let anchor = inner
+            .records
+            .get("readable_anchor")
+            .cloned()
+            .expect("anchor should be present after ingest");
+
+        let display = |id: &str| -> &'static str {
+            match id {
+                "readable_topical_1" => "Carbon market and emissions policy",
+                "readable_topical_2" => "Carbon policy update",
+                "readable_mid_2" => "Regulatory market digest",
+                "readable_mid_1" => "Energy transition memo",
+                "readable_weak_2" => "Marine geology report",
+                "readable_weak_1" => "Archaeology field note",
+                _ => "unknown",
+            }
+        };
+
+        let expected_non_bm25_titles: Vec<String> = READABLE_NON_BM25_TITLES
+            .iter()
+            .map(|title| (*title).to_string())
+            .collect();
+
+        #[cfg(not(feature = "bm25-mining"))]
+        {
+            let mut negatives = Vec::new();
+            for _ in 0..8 {
+                let (negative, _fallback_used) = inner
+                    .select_negative_record(&anchor, &NegativeStrategy::WrongArticle)
+                    .expect("expected readable negative sample");
+                negatives.push(negative.id);
+            }
+
+            let actual_titles: Vec<String> =
+                negatives.iter().map(|id| display(id).to_string()).collect();
+            assert_eq!(
+                actual_titles, expected_non_bm25_titles,
+                "non-BM25 readable sequence changed unexpectedly"
+            );
+        }
+
+        #[cfg(feature = "bm25-mining")]
+        {
+            let mut negatives = Vec::new();
+            for _ in 0..8 {
+                let (negative, _fallback_used) = inner
+                    .select_negative_record(&anchor, &NegativeStrategy::WrongArticle)
+                    .expect("expected BM25 negative selection");
+                negatives.push(negative.id);
+            }
+
+            let negative_titles: Vec<String> =
+                negatives.iter().map(|id| display(id).to_string()).collect();
+            let expected_bm25_titles: Vec<String> = READABLE_BM25_TITLES
+                .iter()
+                .map(|title| (*title).to_string())
+                .collect();
+            assert_eq!(
+                negative_titles, expected_bm25_titles,
+                "BM25 readable sequence changed unexpectedly"
+            );
+            assert_ne!(
+                negative_titles, expected_non_bm25_titles,
+                "BM25 sequence should differ from non-BM25 sequence on the exact same fixture"
+            );
+        }
+    }
+
+    #[cfg(feature = "bm25-mining")]
+    #[test]
+    fn bm25_not_rng_only_when_only_anchor_text_changes() {
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+
+        let run = |anchor_body: &str| -> Vec<String> {
+            let config = SamplerConfig {
+                seed: 991,
+                batch_size: 1,
+                chunking: ChunkingStrategy::default(),
+                recipes: vec![TripletRecipe {
+                    name: "bm25_rng_proof".into(),
+                    anchor: Selector::Role(SectionRole::Anchor),
+                    positive_selector: Selector::Role(SectionRole::Context),
+                    negative_selector: Selector::Role(SectionRole::Context),
+                    negative_strategy: NegativeStrategy::WrongArticle,
+                    weight: 1.0,
+                    instruction: None,
+                }],
+                text_recipes: Vec::new(),
+                split,
+                ..SamplerConfig::default()
+            };
+            let store = Arc::new(DeterministicSplitStore::new(split, 991).unwrap());
+            let sampler = TripletSampler::new(config, Arc::clone(&store));
+
+            let anchor = trader_record("readable_anchor", "2025-01-01", "Anchor", anchor_body);
+            let candidates = vec![
+                trader_record(
+                    "readable_topical_1",
+                    "2025-01-01",
+                    "Carbon market and emissions policy",
+                    "carbon pricing policy emissions reduction roadmap market design",
+                ),
+                trader_record(
+                    "readable_topical_2",
+                    "2025-01-01",
+                    "Carbon policy update",
+                    "carbon pricing policy emissions reduction roadmap",
+                ),
+                trader_record(
+                    "readable_mid_1",
+                    "2025-01-01",
+                    "Energy transition memo",
+                    "emissions reduction roadmap clean energy transition planning",
+                ),
+                trader_record(
+                    "readable_mid_2",
+                    "2025-01-01",
+                    "Regulatory market digest",
+                    "policy market design regulatory framework and compliance",
+                ),
+                trader_record(
+                    "readable_weak_1",
+                    "2025-01-01",
+                    "Archaeology field note",
+                    "bronze age pottery fragments excavation trench mapping",
+                ),
+                trader_record(
+                    "readable_weak_2",
+                    "2025-01-01",
+                    "Marine geology report",
+                    "subduction zones oceanic crust tectonic shear",
+                ),
+            ];
+
+            let mut all_records = vec![anchor];
+            all_records.extend(candidates);
+            sampler.register_source(Box::new(InMemorySource::new(
+                "readable_source",
+                all_records,
+            )));
+            sampler
+                .inner
+                .lock()
+                .unwrap()
+                .ingest_internal(SplitLabel::Train)
+                .unwrap();
+
+            let mut inner = sampler.inner.lock().unwrap();
+            let anchor = inner
+                .records
+                .get("readable_anchor")
+                .cloned()
+                .expect("anchor should exist");
+
+            let mut negatives = Vec::new();
+            for _ in 0..8 {
+                let (negative, _fallback_used) = inner
+                    .select_negative_record(&anchor, &NegativeStrategy::WrongArticle)
+                    .expect("expected BM25 negative selection");
+                negatives.push(negative.id);
+            }
+            negatives
+        };
+
+        let policy = run("carbon pricing policy emissions reduction roadmap market design");
+        let geology = run("subduction zones oceanic crust tectonic shear");
+
+        // RNG-only selection with fixed seed/id/pool would produce the same draw
+        // sequence here. This assertion requires lexical query content to matter.
+        assert_ne!(
+            policy, geology,
+            "same seed/id/pool but different anchor text must change BM25 negatives; RNG-only selection would not"
+        );
     }
 
     #[test]
@@ -5787,6 +6528,714 @@ mod tests {
             assert_eq!(negative_label, anchor_label);
         }
         assert_eq!(seen_splits.len(), 3);
+    }
+
+    #[cfg(feature = "bm25-mining")]
+    #[test]
+    fn bm25_hard_negative_respects_same_source_split_pool() {
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let config = SamplerConfig {
+            seed: 13,
+            batch_size: 1,
+            chunking: ChunkingStrategy::default(),
+            recipes: Vec::new(),
+            text_recipes: Vec::new(),
+            split,
+            ..SamplerConfig::default()
+        };
+        let store = Arc::new(DeterministicSplitStore::new(split, 13).unwrap());
+
+        let anchor = trader_record(
+            "bm25_anchor",
+            "2025-01-01",
+            "Apple banana quarterly report",
+            "Apple banana revenue growth guidance",
+        );
+        let similar = trader_record(
+            "bm25_similar",
+            "2025-01-01",
+            "Banana apple market update",
+            "Revenue guidance for apple banana market",
+        );
+        let distant = trader_record(
+            "bm25_distant",
+            "2025-01-03",
+            "Quantum field dynamics",
+            "Black holes and gravitational lensing",
+        );
+
+        let sampler = TripletSampler::new(config, Arc::clone(&store));
+        sampler.register_source(Box::new(InMemorySource::new(
+            "tt",
+            vec![anchor.clone(), similar.clone(), distant],
+        )));
+        sampler
+            .inner
+            .lock()
+            .unwrap()
+            .ingest_internal(SplitLabel::Train)
+            .unwrap();
+
+        let mut inner = sampler.inner.lock().unwrap();
+        let (negative, fallback_used) = inner
+            .select_negative_record(&anchor, &NegativeStrategy::WrongArticle)
+            .expect("expected bm25-ranked negative via WrongArticle strategy");
+
+        let _ = fallback_used;
+        assert_ne!(negative.id, anchor.id);
+        assert_eq!(store.label_for(&anchor.id), Some(SplitLabel::Train));
+        assert_eq!(store.label_for(&negative.id), Some(SplitLabel::Train));
+    }
+
+    #[cfg(feature = "bm25-mining")]
+    #[test]
+    fn bm25_negative_is_lexically_closer_than_uniform_pool_baseline() {
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let config = SamplerConfig {
+            seed: 314,
+            batch_size: 1,
+            chunking: ChunkingStrategy::default(),
+            recipes: Vec::new(),
+            text_recipes: Vec::new(),
+            split,
+            ..SamplerConfig::default()
+        };
+        let store = Arc::new(DeterministicSplitStore::new(split, 314).unwrap());
+
+        let anchor = trader_record(
+            "bm25_lex_anchor",
+            "2025-01-01",
+            "Apple banana quarterly report",
+            "apple banana revenue growth guidance demand outlook",
+        );
+        let similar = trader_record(
+            "bm25_lex_similar",
+            "2025-01-01",
+            "Banana apple market update",
+            "apple banana revenue guidance and market demand outlook",
+        );
+        let distant = trader_record(
+            "bm25_lex_distant",
+            "2025-01-01",
+            "Deep ocean geology",
+            "tectonic plates abyssal sediment marine trench volcanism",
+        );
+
+        let sampler = TripletSampler::new(config, Arc::clone(&store));
+        sampler.register_source(Box::new(InMemorySource::new(
+            "tt",
+            vec![anchor.clone(), similar, distant],
+        )));
+        sampler
+            .inner
+            .lock()
+            .unwrap()
+            .ingest_internal(SplitLabel::Train)
+            .unwrap();
+
+        let mut inner = sampler.inner.lock().unwrap();
+        // Use the ingested record so its `source` field reflects the ID assigned by
+        // IngestionManager ("tt"), which is necessary for correct BM25 index lookup
+        // and consistent pool filtering below.
+        let ingested_anchor = inner
+            .records
+            .get(&anchor.id)
+            .cloned()
+            .expect("anchor must be present in ingested records");
+        let (_selected_negative, _fallback) = inner
+            .select_negative_record(&ingested_anchor, &NegativeStrategy::WrongArticle)
+            .expect("expected bm25-ranked negative");
+
+        let anchor_text =
+            record_bm25_text(&ingested_anchor, inner.config.chunking.max_window_tokens);
+
+        // Control baseline for non-BM25 behavior: uniform random choice over the
+        // same strategy pool used by WrongArticle (same source, same split).
+        let pool: Vec<DataRecord> = inner
+            .records
+            .values()
+            .filter(|candidate| {
+                candidate.source == ingested_anchor.source
+                    && candidate.id != ingested_anchor.id
+                    && inner
+                        .split_store
+                        .label_for(&candidate.id)
+                        .map(|label| label == SplitLabel::Train)
+                        .unwrap_or(false)
+            })
+            .cloned()
+            .collect();
+        assert!(!pool.is_empty(), "control pool must not be empty");
+
+        let (mean_pool_jaccard, mean_pool_cosine) = {
+            let mut j_total = 0.0_f32;
+            let mut c_total = 0.0_f32;
+            for candidate in &pool {
+                let candidate_text =
+                    record_bm25_text(candidate, inner.config.chunking.max_window_tokens);
+                let (j_score, c_score) = lexical_similarity_scores(&anchor_text, &candidate_text);
+                j_total += j_score;
+                c_total += c_score;
+            }
+            let denom = pool.len() as f32;
+            (j_total / denom, c_total / denom)
+        };
+
+        // Assert on BM25's top-ranked candidate rather than the cursor-selected one.
+        // The cursor uses a deterministic offset derived from the epoch seed and anchor
+        // ID, so it doesn't always land on rank-0. What we're testing is that BM25's
+        // *ranking* quality is better than uniform random — i.e. rank-0 beats the pool
+        // mean — not that the rotation-offset happens to agree on any single call.
+        let ranked = inner.bm25_ranked_candidates(&ingested_anchor, SplitLabel::Train);
+        assert!(
+            !ranked.is_empty(),
+            "BM25 must produce at least one ranked candidate"
+        );
+        let top_candidate = inner
+            .records
+            .get(ranked.first().unwrap())
+            .cloned()
+            .expect("top BM25 candidate must be in records");
+        let top_text = record_bm25_text(&top_candidate, inner.config.chunking.max_window_tokens);
+        let (j_top, c_top) = lexical_similarity_scores(&anchor_text, &top_text);
+
+        assert!(
+            j_top > mean_pool_jaccard,
+            "BM25 top-ranked negative should beat non-bm25 uniform-pool Jaccard baseline (top={j_top:.4}, baseline={mean_pool_jaccard:.4})"
+        );
+        assert!(
+            c_top > mean_pool_cosine,
+            "BM25 top-ranked negative should beat non-bm25 uniform-pool cosine baseline (top={c_top:.4}, baseline={mean_pool_cosine:.4})"
+        );
+    }
+
+    #[cfg(feature = "bm25-mining")]
+    #[test]
+    fn custom_recipe_still_respects_strategy_pool_with_bm25() {
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let recipe = TripletRecipe {
+            name: "custom_wrong_publication_date".into(),
+            anchor: Selector::Role(SectionRole::Anchor),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongPublicationDate,
+            weight: 1.0,
+            instruction: None,
+        };
+        let config = SamplerConfig {
+            seed: 23,
+            batch_size: 8,
+            chunking: ChunkingStrategy::default(),
+            recipes: vec![recipe],
+            text_recipes: Vec::new(),
+            split,
+            ..SamplerConfig::default()
+        };
+        let store = Arc::new(DeterministicSplitStore::new(split, 23).unwrap());
+
+        let records = vec![
+            trader_record(
+                "custom_anchor_a",
+                "2025-01-01",
+                "Apple banana quarterly report",
+                "Apple banana revenue growth guidance",
+            ),
+            trader_record(
+                "custom_anchor_b",
+                "2025-01-01",
+                "Apple banana management update",
+                "Apple banana demand outlook",
+            ),
+            trader_record(
+                "custom_anchor_c",
+                "2025-01-02",
+                "Energy market briefing",
+                "Oil and gas supply outlook",
+            ),
+        ];
+        let date_by_id: HashMap<String, String> = records
+            .iter()
+            .filter_map(|record| {
+                taxonomy_value(record, META_FIELD_DATE)
+                    .map(|date| (record.id.clone(), date.to_string()))
+            })
+            .collect();
+
+        let sampler = TripletSampler::new(config, Arc::clone(&store));
+        sampler.register_source(Box::new(InMemorySource::new("tt", records)));
+
+        let batch = sampler
+            .next_triplet_batch(SplitLabel::Train)
+            .expect("expected custom recipe triplet batch");
+        assert!(!batch.triplets.is_empty());
+
+        for triplet in &batch.triplets {
+            let anchor_date = date_by_id
+                .get(&triplet.anchor.record_id)
+                .expect("anchor date must exist");
+            let negative_date = date_by_id
+                .get(&triplet.negative.record_id)
+                .expect("negative date must exist");
+            assert_ne!(
+                anchor_date, negative_date,
+                "custom recipe negative must respect WrongPublicationDate pool under bm25"
+            );
+        }
+    }
+
+    #[cfg(feature = "bm25-mining")]
+    #[test]
+    fn bm25_ranked_candidates_never_cross_split_boundaries() {
+        let split = SplitRatios {
+            train: 0.34,
+            validation: 0.33,
+            test: 0.33,
+        };
+        let config = SamplerConfig {
+            seed: 31,
+            batch_size: 1,
+            chunking: ChunkingStrategy::default(),
+            recipes: Vec::new(),
+            text_recipes: Vec::new(),
+            split,
+            ..SamplerConfig::default()
+        };
+        let store = Arc::new(DeterministicSplitStore::new(split, 71).unwrap());
+
+        let find_id = |label: SplitLabel, prefix: &str| -> String {
+            for i in 0..8000 {
+                let id = format!("{prefix}_{i}");
+                if store.ensure(id.clone()).unwrap() == label {
+                    return id;
+                }
+            }
+            panic!("unable to find id for {:?}", label);
+        };
+
+        let anchors = vec![
+            find_id(SplitLabel::Train, "bm25_split_anchor_train"),
+            find_id(SplitLabel::Validation, "bm25_split_anchor_val"),
+            find_id(SplitLabel::Test, "bm25_split_anchor_test"),
+        ];
+        let peers = [
+            find_id(SplitLabel::Train, "bm25_split_peer_train"),
+            find_id(SplitLabel::Validation, "bm25_split_peer_val"),
+            find_id(SplitLabel::Test, "bm25_split_peer_test"),
+        ];
+
+        let mut records: Vec<DataRecord> = Vec::new();
+        for (i, anchor_id) in anchors.iter().enumerate() {
+            records.push(trader_record(
+                anchor_id,
+                "2025-01-01",
+                &format!("Split anchor {i}"),
+                &format!("bm25 split scoped text {i}"),
+            ));
+        }
+        for (i, peer_id) in peers.iter().enumerate() {
+            records.push(trader_record(
+                peer_id,
+                "2025-01-01",
+                &format!("Split peer {i}"),
+                &format!("bm25 split scoped peer text {i}"),
+            ));
+        }
+
+        let sampler = TripletSampler::new(config, Arc::clone(&store));
+        sampler.register_source(Box::new(InMemorySource::new("tt", records)));
+        sampler
+            .inner
+            .lock()
+            .unwrap()
+            .ingest_internal(SplitLabel::Train)
+            .unwrap();
+
+        let mut inner = sampler.inner.lock().unwrap();
+        for anchor_id in anchors {
+            let anchor = inner.records.get(&anchor_id).cloned().expect("anchor");
+            let (negative, _fallback) = inner
+                .select_negative_record(&anchor, &NegativeStrategy::WrongArticle)
+                .expect("negative should exist");
+
+            let anchor_label = inner
+                .split_store
+                .label_for(&anchor.id)
+                .expect("anchor split label");
+            let negative_label = inner
+                .split_store
+                .label_for(&negative.id)
+                .expect("negative split label");
+            assert_eq!(negative_label, anchor_label);
+
+            let ranked = inner
+                .bm25_hard_negatives
+                .get(&anchor.id)
+                .expect("bm25 cache entry for anchor");
+            assert!(!ranked.is_empty());
+            for candidate_id in ranked {
+                let candidate_label = inner
+                    .split_store
+                    .label_for(candidate_id)
+                    .expect("candidate split label");
+                assert_eq!(
+                    candidate_label, anchor_label,
+                    "bm25 candidate leaked across split boundary"
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "bm25-mining")]
+    #[test]
+    fn bm25_ranked_candidates_match_raw_bm25_engine() {
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let config = SamplerConfig {
+            seed: 991,
+            batch_size: 1,
+            chunking: ChunkingStrategy::default(),
+            recipes: Vec::new(),
+            text_recipes: Vec::new(),
+            split,
+            ..SamplerConfig::default()
+        };
+        let store = Arc::new(DeterministicSplitStore::new(split, 991).unwrap());
+
+        let records = vec![
+            trader_record(
+                "readable_anchor",
+                "2025-01-01",
+                "Climate policy briefing",
+                "carbon pricing policy emissions reduction roadmap market design",
+            ),
+            trader_record(
+                "readable_topical_1",
+                "2025-01-01",
+                "Carbon market and emissions policy",
+                "carbon pricing policy emissions reduction roadmap market design",
+            ),
+            trader_record(
+                "readable_topical_2",
+                "2025-01-01",
+                "Carbon policy update",
+                "carbon pricing policy emissions reduction roadmap",
+            ),
+            trader_record(
+                "readable_mid_1",
+                "2025-01-01",
+                "Energy transition memo",
+                "emissions reduction roadmap clean energy transition planning",
+            ),
+            trader_record(
+                "readable_mid_2",
+                "2025-01-01",
+                "Regulatory market digest",
+                "policy market design regulatory framework and compliance",
+            ),
+            trader_record(
+                "readable_weak_1",
+                "2025-01-01",
+                "Archaeology field note",
+                "bronze age pottery fragments excavation trench mapping",
+            ),
+            trader_record(
+                "readable_weak_2",
+                "2025-01-01",
+                "Marine geology report",
+                "subduction zones oceanic crust tectonic shear",
+            ),
+        ];
+
+        let sampler = TripletSampler::new(config, Arc::clone(&store));
+        sampler.register_source(Box::new(InMemorySource::new("readable_source", records)));
+        sampler
+            .inner
+            .lock()
+            .unwrap()
+            .ingest_internal(SplitLabel::Train)
+            .unwrap();
+
+        let mut inner = sampler.inner.lock().unwrap();
+        let anchor = inner
+            .records
+            .get("readable_anchor")
+            .cloned()
+            .expect("anchor should be present");
+
+        let sampler_ranked = inner.bm25_ranked_candidates(&anchor, SplitLabel::Train);
+
+        let key = ("readable_source".to_string(), SplitLabel::Train);
+        let index = inner
+            .bm25_source_indices
+            .get(&key)
+            .expect("bm25 source index should be built")
+            .record_ids
+            .clone();
+
+        let docs: Vec<bm25::Document<usize>> = index
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, id)| {
+                inner.records.get(id).map(|record| bm25::Document {
+                    id: idx,
+                    contents: record_bm25_text(record, inner.config.chunking.max_window_tokens),
+                })
+            })
+            .collect();
+        let engine =
+            bm25::SearchEngineBuilder::<usize>::with_documents(bm25::Language::English, docs)
+                .build();
+
+        let query = record_bm25_text(&anchor, inner.config.chunking.max_window_tokens);
+        let max_results = index.len().clamp(2, 16);
+        let mut raw = engine.search(&query, max_results);
+        // Match sampler tie-breaking exactly: score descending, then stable id order.
+        raw.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.document.id.cmp(&b.document.id))
+        });
+
+        let mut expected = Vec::new();
+        for result in raw {
+            let Some(id) = index.get(result.document.id) else {
+                continue;
+            };
+            if id != &anchor.id {
+                expected.push(id.clone());
+            }
+        }
+
+        // This is the direct "is it actually BM25" proof: sampler ranking must
+        // equal a separately recomputed BM25 crate ranking for the same corpus/query.
+        assert_eq!(
+            sampler_ranked, expected,
+            "sampler BM25 rank must match direct BM25 crate rank for the same corpus/query"
+        );
+    }
+
+    #[cfg(feature = "bm25-mining")]
+    #[test]
+    fn bm25_ranking_ignores_kvp_meta_prefix_tags() {
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let config = SamplerConfig {
+            seed: 888,
+            batch_size: 1,
+            chunking: ChunkingStrategy::default(),
+            recipes: Vec::new(),
+            text_recipes: Vec::new(),
+            split,
+            ..SamplerConfig::default()
+        };
+        let store = Arc::new(DeterministicSplitStore::new(split, 888).unwrap());
+
+        let anchor = trader_record(
+            "kvp_anchor",
+            "2025-01-01",
+            "Anchor",
+            "carbon pricing policy emissions roadmap",
+        );
+
+        let mut kvp_bait = trader_record(
+            "kvp_bait",
+            "2025-01-01",
+            "KVP bait",
+            "ancient pottery shards trench notes",
+        );
+        let mut kvp = KvpPrefixSampler::new(1.0);
+        kvp.add_variant([(
+            "meta",
+            "carbon pricing policy emissions roadmap carbon pricing policy emissions roadmap",
+        )]);
+        kvp_bait.meta_prefix = Some(kvp);
+
+        let plain_text_best = trader_record(
+            "plain_text_best",
+            "2025-01-01",
+            "Plain text best",
+            "carbon pricing policy emissions roadmap carbon market",
+        );
+
+        // Sanity-check the BM25 text path directly: meta_prefix content must not appear.
+        let bait_text = record_bm25_text(&kvp_bait, config.chunking.max_window_tokens);
+        assert!(
+            !bait_text.contains("carbon pricing policy emissions roadmap carbon pricing"),
+            "BM25 corpus text must not include KVP meta-prefix tags"
+        );
+
+        let sampler = TripletSampler::new(config, Arc::clone(&store));
+        sampler.register_source(Box::new(InMemorySource::new(
+            "kvp_source",
+            vec![anchor, kvp_bait, plain_text_best],
+        )));
+        sampler
+            .inner
+            .lock()
+            .unwrap()
+            .ingest_internal(SplitLabel::Train)
+            .unwrap();
+
+        let mut inner = sampler.inner.lock().unwrap();
+        let anchor = inner
+            .records
+            .get("kvp_anchor")
+            .cloned()
+            .expect("anchor should exist");
+
+        let ranked = inner.bm25_ranked_candidates(&anchor, SplitLabel::Train);
+        assert!(
+            !ranked.is_empty(),
+            "expected BM25 to return ranked candidates"
+        );
+        assert_eq!(
+            ranked[0], "plain_text_best",
+            "BM25 top candidate should be driven by plain section text, not KVP meta-prefix tags"
+        );
+    }
+
+    #[cfg(feature = "bm25-mining")]
+    #[test]
+    fn bm25_triplets_never_reuse_text_across_slots() {
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let recipe = TripletRecipe {
+            name: "bm25_text_distinct_slots".into(),
+            anchor: Selector::Role(SectionRole::Anchor),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 1.0,
+            instruction: None,
+        };
+        let config = SamplerConfig {
+            seed: 91,
+            batch_size: 6,
+            chunking: ChunkingStrategy::default(),
+            recipes: vec![recipe],
+            text_recipes: Vec::new(),
+            split,
+            ..SamplerConfig::default()
+        };
+        let store = Arc::new(DeterministicSplitStore::new(split, 91).unwrap());
+
+        let records = vec![
+            trader_record(
+                "bm25_slot_anchor",
+                "2025-01-01",
+                "Anchor title unique",
+                "Shared duplicate context",
+            ),
+            trader_record(
+                "bm25_slot_same_context",
+                "2025-01-01",
+                "Other title one",
+                "Shared duplicate context",
+            ),
+            trader_record(
+                "bm25_slot_unique_context",
+                "2025-01-01",
+                "Other title two",
+                "A fully distinct context body",
+            ),
+        ];
+
+        let sampler = TripletSampler::new(config, Arc::clone(&store));
+        sampler.register_source(Box::new(InMemorySource::new("tt", records)));
+        let batch = sampler
+            .next_triplet_batch(SplitLabel::Train)
+            .expect("expected bm25 triplet batch");
+
+        assert!(!batch.triplets.is_empty());
+        for triplet in &batch.triplets {
+            assert_ne!(triplet.anchor.text, triplet.positive.text);
+            assert_ne!(triplet.anchor.text, triplet.negative.text);
+            assert_ne!(triplet.positive.text, triplet.negative.text);
+        }
+    }
+
+    #[cfg(feature = "bm25-mining")]
+    #[test]
+    fn bm25_cursor_pruning_runs_even_when_other_cursors_are_empty() {
+        let split = SplitRatios::default();
+        let store = Arc::new(DeterministicSplitStore::new(split, 1234).unwrap());
+        let mut inner = TripletSamplerInner::new(base_config(), store);
+
+        assert!(inner.chunk_cursors.is_empty());
+        assert!(inner.role_cursors.is_empty());
+
+        inner
+            .bm25_negative_cursors
+            .insert(("stale_anchor".to_string(), SplitLabel::Train), 7);
+        assert_eq!(inner.bm25_negative_cursors.len(), 1);
+
+        // With no records loaded, every cursor entry is stale and must be removed.
+        // This specifically guards against early-return logic that skips BM25 pruning.
+        inner.prune_cursor_state();
+
+        assert!(
+            inner.bm25_negative_cursors.is_empty(),
+            "bm25_negative_cursors should be pruned even when chunk/role cursor maps are empty"
+        );
+    }
+
+    #[cfg(feature = "bm25-mining")]
+    #[test]
+    fn bm25_cursor_state_is_cleared_on_each_record_snapshot_sync() {
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let store = Arc::new(DeterministicSplitStore::new(split, 2024).unwrap());
+        let sampler = TripletSampler::new(base_config(), Arc::clone(&store));
+        sampler.register_source(Box::new(InMemorySource::new(
+            "strict_sync_source",
+            vec![trader_record(
+                "strict_sync_anchor",
+                "2025-01-01",
+                "Anchor",
+                "body",
+            )],
+        )));
+
+        let mut inner = sampler.inner.lock().unwrap();
+        inner.ingest_internal(SplitLabel::Train).unwrap();
+
+        inner
+            .bm25_negative_cursors
+            .insert(("strict_sync_anchor".to_string(), SplitLabel::Train), 42);
+        assert_eq!(inner.bm25_negative_cursors.len(), 1);
+
+        // Strict contract: every snapshot sync clears BM25 cursor state, even if
+        // the same anchor remains present in the refreshed record pool.
+        inner.sync_records_from_cache().unwrap();
+        assert!(
+            inner.bm25_negative_cursors.is_empty(),
+            "bm25 cursor state must reset at every record snapshot boundary"
+        );
     }
 
     #[test]
