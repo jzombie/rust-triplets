@@ -3131,6 +3131,58 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "bm25-mining")]
+    fn lexical_similarity_scores(left: &str, right: &str) -> (f32, f32) {
+        if left.is_empty() || right.is_empty() {
+            return (0.0, 0.0);
+        }
+
+        // Raw UTF-8 byte-level metrics (no token heuristics), implemented locally
+        // so default test builds do not depend on optional SIMD crates.
+        let mut left_freq = [0.0_f32; 256];
+        let mut right_freq = [0.0_f32; 256];
+        let mut left_bits = [0_u8; 32];
+        let mut right_bits = [0_u8; 32];
+
+        for byte in left.as_bytes() {
+            let idx = *byte as usize;
+            left_freq[idx] += 1.0;
+            left_bits[idx / 8] |= 1_u8 << (idx % 8);
+        }
+        for byte in right.as_bytes() {
+            let idx = *byte as usize;
+            right_freq[idx] += 1.0;
+            right_bits[idx / 8] |= 1_u8 << (idx % 8);
+        }
+
+        let dot: f32 = left_freq
+            .iter()
+            .zip(right_freq.iter())
+            .map(|(a, b)| a * b)
+            .sum();
+        let left_norm_sq: f32 = left_freq.iter().map(|v| v * v).sum();
+        let right_norm_sq: f32 = right_freq.iter().map(|v| v * v).sum();
+        let cosine_similarity = if left_norm_sq > 0.0 && right_norm_sq > 0.0 {
+            dot / (left_norm_sq.sqrt() * right_norm_sq.sqrt())
+        } else {
+            0.0
+        };
+
+        let mut intersection = 0_u32;
+        let mut union = 0_u32;
+        for i in 0..left_bits.len() {
+            intersection += (left_bits[i] & right_bits[i]).count_ones();
+            union += (left_bits[i] | right_bits[i]).count_ones();
+        }
+        let jaccard_similarity = if union > 0 {
+            intersection as f32 / union as f32
+        } else {
+            0.0
+        };
+
+        (jaccard_similarity, cosine_similarity)
+    }
+
     fn extract_date_prefix(chunk_text: &str) -> Option<String> {
         let first_line = chunk_text.lines().next()?;
         let prefix = first_line.strip_prefix("meta: ")?;
@@ -6414,6 +6466,109 @@ mod tests {
         assert_ne!(negative.id, anchor.id);
         assert_eq!(store.label_for(&anchor.id), Some(SplitLabel::Train));
         assert_eq!(store.label_for(&negative.id), Some(SplitLabel::Train));
+    }
+
+    #[cfg(feature = "bm25-mining")]
+    #[test]
+    fn bm25_negative_is_lexically_closer_than_uniform_pool_baseline() {
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let config = SamplerConfig {
+            seed: 314,
+            batch_size: 1,
+            chunking: ChunkingStrategy::default(),
+            recipes: Vec::new(),
+            text_recipes: Vec::new(),
+            split,
+            ..SamplerConfig::default()
+        };
+        let store = Arc::new(DeterministicSplitStore::new(split, 314).unwrap());
+
+        let anchor = trader_record(
+            "bm25_lex_anchor",
+            "2025-01-01",
+            "Apple banana quarterly report",
+            "apple banana revenue growth guidance demand outlook",
+        );
+        let similar = trader_record(
+            "bm25_lex_similar",
+            "2025-01-01",
+            "Banana apple market update",
+            "apple banana revenue guidance and market demand outlook",
+        );
+        let distant = trader_record(
+            "bm25_lex_distant",
+            "2025-01-01",
+            "Deep ocean geology",
+            "tectonic plates abyssal sediment marine trench volcanism",
+        );
+
+        let sampler = TripletSampler::new(config, Arc::clone(&store));
+        sampler.register_source(Box::new(InMemorySource::new(
+            "tt",
+            vec![anchor.clone(), similar, distant],
+        )));
+        sampler
+            .inner
+            .lock()
+            .unwrap()
+            .ingest_internal(SplitLabel::Train)
+            .unwrap();
+
+        let mut inner = sampler.inner.lock().unwrap();
+        let (selected_negative, _fallback) = inner
+            .select_negative_record(&anchor, &NegativeStrategy::WrongArticle)
+            .expect("expected bm25-ranked negative");
+
+        let anchor_text = record_bm25_text(&anchor, inner.config.chunking.max_window_tokens);
+        let selected_text =
+            record_bm25_text(&selected_negative, inner.config.chunking.max_window_tokens);
+
+        // Control baseline for non-BM25 behavior: uniform random choice over the
+        // same strategy pool used by WrongArticle (same source, same split).
+        let pool: Vec<DataRecord> = inner
+            .records
+            .values()
+            .filter(|candidate| {
+                candidate.source == anchor.source
+                    && candidate.id != anchor.id
+                    && inner
+                        .split_store
+                        .label_for(&candidate.id)
+                        .map(|label| label == SplitLabel::Train)
+                        .unwrap_or(false)
+            })
+            .cloned()
+            .collect();
+        assert!(!pool.is_empty(), "control pool must not be empty");
+
+        let (mean_pool_jaccard, mean_pool_cosine) = {
+            let mut j_total = 0.0_f32;
+            let mut c_total = 0.0_f32;
+            for candidate in &pool {
+                let candidate_text =
+                    record_bm25_text(candidate, inner.config.chunking.max_window_tokens);
+                let (j_score, c_score) = lexical_similarity_scores(&anchor_text, &candidate_text);
+                j_total += j_score;
+                c_total += c_score;
+            }
+            let denom = pool.len() as f32;
+            (j_total / denom, c_total / denom)
+        };
+
+        let (j_selected, c_selected) = lexical_similarity_scores(&anchor_text, &selected_text);
+
+        assert!(
+            j_selected > mean_pool_jaccard,
+            "bm25-selected negative should beat non-bm25 uniform-pool Jaccard baseline (selected={j_selected:.4}, baseline={mean_pool_jaccard:.4})"
+        );
+        assert!(
+            c_selected > mean_pool_cosine,
+            "bm25-selected negative should beat non-bm25 uniform-pool cosine baseline (selected={c_selected:.4}, baseline={mean_pool_cosine:.4})"
+        );
     }
 
     #[cfg(feature = "bm25-mining")]
