@@ -10012,12 +10012,28 @@ mod tests {
     fn wrong_publication_date_covers_some_none_branch_with_undated_candidates() {
         // Covers the `(Some(_), None) => true` branch in the WrongPublicationDate filter:
         // anchor has a publication date; candidate has no date entry in taxonomy.
+        // All three records must be in the same split so that the date-match branches
+        // — not the split guard — are what determines eligibility.
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let store = Arc::new(DeterministicSplitStore::new(split, 42).unwrap());
+
+        let find_train_id = |prefix: &str| -> String {
+            for i in 0..10_000_u32 {
+                let id = format!("{prefix}_{i}");
+                if store.label_for(&id) == Some(SplitLabel::Train) {
+                    return id;
+                }
+            }
+            panic!("no Train id found for prefix {prefix}");
+        };
+        let anchor_id = find_train_id("wpd_sn_anchor");
+        let no_date_id = find_train_id("wpd_sn_nodate");
+        let same_date_id = find_train_id("wpd_sn_same");
+
         let config = SamplerConfig {
             seed: 42,
             batch_size: 1,
@@ -10028,15 +10044,14 @@ mod tests {
         };
 
         // Anchor with a publication date.
-        let anchor_dated = trader_record("anc_dated", "2025-01-01", "Dated anchor", "Body A");
+        let anchor_dated = trader_record(&anchor_id, "2025-01-01", "Dated anchor", "Body A");
         // Candidate with no date entry — triggers (Some(_), None) => true.
-        let mut cand_no_date =
-            trader_record("cand_no_date", "2025-01-02", "No date cand", "Body B");
+        let mut cand_no_date = trader_record(&no_date_id, "2025-01-02", "No date cand", "Body B");
         cand_no_date
             .taxonomy
             .retain(|t| META_FIELD_DATE.strip(t).is_none());
         // Candidate with the same date as anchor — excluded by (Some, Some) equal => false.
-        let cand_same = trader_record("cand_same", "2025-01-01", "Same date cand", "Body C");
+        let cand_same = trader_record(&same_date_id, "2025-01-01", "Same date cand", "Body C");
 
         let sampler = TripletSampler::new(config, store);
         sampler.register_source(Box::new(InMemorySource::new(
@@ -10051,24 +10066,40 @@ mod tests {
             .unwrap();
 
         let mut inner = sampler.inner.lock().unwrap();
-        let anchor = inner.records.get("anc_dated").cloned().expect("anchor");
+        let anchor = inner.records.get(&anchor_id).cloned().expect("anchor");
         // cand_no_date is eligible (Some, None); cand_same is excluded (same date).
         let (neg, _) = inner
             .select_negative_record(&anchor, &NegativeStrategy::WrongPublicationDate)
             .expect("should find undated candidate as negative");
-        assert_eq!(neg.id, "cand_no_date");
+        assert_eq!(neg.id, no_date_id);
     }
 
     #[test]
     fn wrong_publication_date_covers_none_some_and_none_none_branches() {
         // Covers (None, Some(_)) => true and (None, None) => false:
         // anchor has no date; candidates either have a date or also lack one.
+        // All three records must be in the same split so the date-match arms
+        // — not the split guard — determine eligibility.
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let store = Arc::new(DeterministicSplitStore::new(split, 55).unwrap());
+
+        let find_train_id = |prefix: &str| -> String {
+            for i in 0..10_000_u32 {
+                let id = format!("{prefix}_{i}");
+                if store.label_for(&id) == Some(SplitLabel::Train) {
+                    return id;
+                }
+            }
+            panic!("no Train id found for prefix {prefix}");
+        };
+        let anchor_id = find_train_id("wpd_nn_anchor");
+        let dated_id = find_train_id("wpd_nn_dated");
+        let undated_id = find_train_id("wpd_nn_undated");
+
         let config = SamplerConfig {
             seed: 55,
             batch_size: 1,
@@ -10080,15 +10111,14 @@ mod tests {
 
         // Anchor without a date (None).
         let mut anchor_no_date =
-            trader_record("anc_no_date", "2025-01-01", "No date anchor", "Body A");
+            trader_record(&anchor_id, "2025-01-01", "No date anchor", "Body A");
         anchor_no_date
             .taxonomy
             .retain(|t| META_FIELD_DATE.strip(t).is_none());
         // Candidate WITH a date — (None, Some(_)) => true, so it is eligible.
-        let cand_dated = trader_record("cand_dated", "2025-01-02", "Dated cand", "Body B");
+        let cand_dated = trader_record(&dated_id, "2025-01-02", "Dated cand", "Body B");
         // Candidate also without a date — (None, None) => false, so it is NOT eligible.
-        let mut cand_no_date =
-            trader_record("cand_no_date", "2025-01-01", "No date cand", "Body C");
+        let mut cand_no_date = trader_record(&undated_id, "2025-01-01", "No date cand", "Body C");
         cand_no_date
             .taxonomy
             .retain(|t| META_FIELD_DATE.strip(t).is_none());
@@ -10106,25 +10136,41 @@ mod tests {
             .unwrap();
 
         let mut inner = sampler.inner.lock().unwrap();
-        let anchor = inner.records.get("anc_no_date").cloned().expect("anchor");
+        let anchor = inner.records.get(&anchor_id).cloned().expect("anchor");
         // Only cand_dated is eligible: (None, Some) => true.
         // cand_no_date is excluded: (None, None) => false.
         let (neg, _) = inner
             .select_negative_record(&anchor, &NegativeStrategy::WrongPublicationDate)
             .expect("undated anchor should match dated candidate");
-        assert_eq!(neg.id, "cand_dated");
+        assert_eq!(neg.id, dated_id);
     }
 
     #[test]
     fn temporal_offset_selector_finds_nearest_chronological_neighbor() {
         // Covers select_temporal_neighbor: verifies the min-by-key distance logic
         // selects the record whose created_at is closest to anchor.created_at + offset_days.
+        // All three records must be in the same split so the split guard does not
+        // interfere with the distance-based selection being tested here.
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let store = Arc::new(DeterministicSplitStore::new(split, 77).unwrap());
+
+        let find_train_id = |prefix: &str| -> String {
+            for i in 0..10_000_u32 {
+                let id = format!("{prefix}_{i}");
+                if store.label_for(&id) == Some(SplitLabel::Train) {
+                    return id;
+                }
+            }
+            panic!("no Train id found for prefix {prefix}");
+        };
+        let base_id = find_train_id("toff_base");
+        let id_7d = find_train_id("toff_7d");
+        let id_30d = find_train_id("toff_30d");
+
         let config = SamplerConfig {
             seed: 77,
             batch_size: 1,
@@ -10135,10 +10181,10 @@ mod tests {
         };
 
         let base = Utc::now();
-        // r0: base time; r7d: exactly +7 days; r30d: +30 days.
-        let r0 = record_with_offset("rec_base", base, 0);
-        let r7d = record_with_offset("rec_7d", base, 7 * 86400);
-        let r30d = record_with_offset("rec_30d", base, 30 * 86400);
+        // base_id: base time; id_7d: exactly +7 days; id_30d: +30 days.
+        let r0 = record_with_offset(&base_id, base, 0);
+        let r7d = record_with_offset(&id_7d, base, 7 * 86400);
+        let r30d = record_with_offset(&id_30d, base, 30 * 86400);
 
         let sampler = TripletSampler::new(config, store);
         sampler.register_source(Box::new(InMemorySource::new(
@@ -10153,16 +10199,16 @@ mod tests {
             .unwrap();
 
         let inner = sampler.inner.lock().unwrap();
-        let anchor = inner.records.get("rec_base").cloned().expect("anchor");
-        // Requesting offset_days=7: target = base + 7 days. r7d is an exact match.
+        let anchor = inner.records.get(&base_id).cloned().expect("anchor");
+        // Requesting offset_days=7: target = base + 7 days. id_7d is an exact match.
         let neighbor = inner.select_temporal_neighbor(&anchor, 7);
         assert!(neighbor.is_some(), "should find a temporal neighbor");
-        assert_eq!(neighbor.unwrap().id, "rec_7d");
+        assert_eq!(neighbor.unwrap().id, id_7d);
 
-        // Requesting offset_days=1: target = base + 1 day. r7d (6 days away) beats r30d (29 days).
+        // Requesting offset_days=1: target = base + 1 day. id_7d (6 days away) beats id_30d (29 days).
         let neighbor_near = inner.select_temporal_neighbor(&anchor, 1);
         assert!(neighbor_near.is_some());
-        assert_eq!(neighbor_near.unwrap().id, "rec_7d");
+        assert_eq!(neighbor_near.unwrap().id, id_7d);
     }
 
     #[test]
@@ -10171,8 +10217,8 @@ mod tests {
         // even when they would be a closer chronological match than a same-split candidate.
         let split = SplitRatios {
             train: 0.6,
-            validation: 0.4,
-            test: 0.0,
+            validation: 0.3,
+            test: 0.1,
         };
         let store = Arc::new(DeterministicSplitStore::new(split, 13).unwrap());
 
