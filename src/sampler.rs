@@ -1198,7 +1198,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
 
         let bm25_query_text =
             record_bm25_text(anchor_record, self.config.chunking.max_window_tokens);
-        let max_results = index.record_ids.len().clamp(2, 16);
+        let max_results = index.record_ids.len();
         let mut results = index.search_engine.search(&bm25_query_text, max_results);
         results.sort_by(|a, b| {
             b.score
