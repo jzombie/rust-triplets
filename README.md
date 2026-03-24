@@ -2,8 +2,6 @@
 
 [![made-with-rust][rust-logo]][rust-src-page] [![crates.io][crates-badge]][crates-page] [![MIT licensed][mit-license-badge]][mit-license-page] [![Apache 2.0 licensed][apache-2.0-license-badge]][apache-2.0-license-page] [![Coverage][coveralls-badge]][coveralls-page]
 
-**WORK IN PROGRESS. THIS API IS BEING PROTOTYPED AND MAY CHANGE WITHOUT NOTICE.**
-
 Compose an effectively unlimited supply of [training triplets](https://en.wikipedia.org/wiki/Triplet_loss) from your existing corpus.
 
 - Multiple input source mixing, rule-driven sampling recipes.
@@ -20,6 +18,8 @@ Compose an effectively unlimited supply of [training triplets](https://en.wikipe
 > _The loss function and choice of ML framework is a separate concern; this crate only handles the data._
 
 Jump to the [Quick Start](#quick-start).
+
+**WORK IN PROGRESS. THIS API IS BEING PROTOTYPED AND MAY CHANGE WITHOUT NOTICE.**
 
 > _CI is configured to run tests/linting on macOS, Linux, and Windows._
 
