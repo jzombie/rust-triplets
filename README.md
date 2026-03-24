@@ -77,7 +77,6 @@ let _recipe:      &str         = &triplet.recipe;           // which TripletReci
 let _weight:      f32          = triplet.weight;
 let _record_id:   &str         = &triplet.anchor.record_id; // back-reference to DataRecord.id
 let _instruction: Option<&str> = triplet.instruction.as_deref();
-# let _ = triplet;
 ```
 
 ## Sources
@@ -123,7 +122,7 @@ Recipe origin can be user-defined, system-defined, or mixed in the same run.
 use std::borrow::Cow;
 use triplets::{NegativeStrategy, SectionRole, Selector, TripletRecipe};
 
-let recipe = TripletRecipe {
+let _recipe = TripletRecipe {
   name: Cow::Borrowed("title_context_wrong_article"),
   anchor: Selector::Role(SectionRole::Anchor),
   positive_selector: Selector::Role(SectionRole::Context),
@@ -132,7 +131,6 @@ let recipe = TripletRecipe {
   weight: 1.0,
   instruction: None,
 };
-# let _ = recipe;
 ```
 
 ### How recipe selection works
@@ -319,8 +317,7 @@ let sampler = Arc::new(TripletSampler::new(config, store));
 // register sources...
 
 let prefetcher = Arc::clone(&sampler).prefetch_triplet_batches(SplitLabel::Train, 4);
-let batch = prefetcher.next().unwrap();
-let _ = batch;
+let _batch = prefetcher.next().unwrap();
 ```
 
 ### Expected batch output
@@ -436,14 +433,12 @@ let mut weights_b = HashMap::new();
 weights_b.insert("source_a".to_string(), 0.2);
 weights_b.insert("source_b".to_string(), 1.0);
 
-let batch_a = sampler
+let _batch_a = sampler
   .next_triplet_batch_with_weights(SplitLabel::Train, &weights_a)
   .unwrap();
-let batch_b = sampler
+let _batch_b = sampler
   .next_triplet_batch_with_weights(SplitLabel::Train, &weights_b)
   .unwrap();
-
-let _ = (batch_a, batch_b);
 ```
 
 - **Production readiness note**: if `len_hint` drifts in streaming/append-only sources, epoch order/coverage can repeat/skip records within an epoch, even though split assignment remains deterministic.
@@ -641,8 +636,7 @@ impl IndexableSource for MySource {
   }
 }
 
-let source = IndexableAdapter::new(MySource { id: "my_source".into() });
-# let _ = source;
+let _source = IndexableAdapter::new(MySource { id: "my_source".into() });
 ```
 
 Then register the source with your sampler and call `next_triplet_batch`, `next_pair_batch`, or `next_text_batch`.
