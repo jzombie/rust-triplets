@@ -936,10 +936,16 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     ) -> Option<DataRecord> {
         let target = record.created_at + Duration::days(offset_days.into());
         let key = record.taxonomy.first().cloned();
+        let record_split = self.split_store.label_for(&record.id)?;
         self.records
             .values()
             .filter(|candidate| {
                 candidate.id != record.id
+                    && self
+                        .split_store
+                        .label_for(&candidate.id)
+                        .map(|label| label == record_split)
+                        .unwrap_or(false)
                     && (candidate.source == record.source
                         || key
                             .as_ref()
@@ -10157,5 +10163,77 @@ mod tests {
         let neighbor_near = inner.select_temporal_neighbor(&anchor, 1);
         assert!(neighbor_near.is_some());
         assert_eq!(neighbor_near.unwrap().id, "rec_7d");
+    }
+
+    #[test]
+    fn temporal_offset_selector_never_crosses_split_boundaries() {
+        // Verifies that select_temporal_neighbor excludes candidates in a different split,
+        // even when they would be a closer chronological match than a same-split candidate.
+        let split = SplitRatios {
+            train: 0.6,
+            validation: 0.4,
+            test: 0.0,
+        };
+        let store = Arc::new(DeterministicSplitStore::new(split, 13).unwrap());
+
+        // Find stable IDs that hash to the required splits under (split, seed=13).
+        let find_id_for_split = |label: SplitLabel, prefix: &str| -> String {
+            for i in 0..10_000_u32 {
+                let id = format!("{prefix}_{i}");
+                if store.label_for(&id) == Some(label) {
+                    return id;
+                }
+            }
+            panic!("could not find an id hashing to {label:?}");
+        };
+
+        let anchor_id = find_id_for_split(SplitLabel::Train, "temporal_anchor");
+        let train_id = find_id_for_split(SplitLabel::Train, "temporal_train");
+        assert_ne!(anchor_id, train_id);
+        let val_id = find_id_for_split(SplitLabel::Validation, "temporal_val");
+
+        // All records use the same source so the source filter passes for all candidates.
+        let base = Utc::now();
+        let anchor_rec = record_with_offset(&anchor_id, base, 0);
+        // Validation candidate: exactly on target (offset 1 day). Closest without split guard.
+        let val_rec = record_with_offset(&val_id, base, 86_400);
+        // Train candidate: 3 days out, farther from target but in the same split as anchor.
+        let train_rec = record_with_offset(&train_id, base, 3 * 86_400);
+
+        let config = SamplerConfig {
+            seed: 13,
+            batch_size: 1,
+            recipes: Vec::new(),
+            text_recipes: Vec::new(),
+            split,
+            ..SamplerConfig::default()
+        };
+        let sampler = TripletSampler::new(config, store);
+        sampler.register_source(Box::new(InMemorySource::new(
+            PRIMARY_SOURCE_ID,
+            vec![anchor_rec, val_rec, train_rec],
+        )));
+        sampler
+            .inner
+            .lock()
+            .unwrap()
+            .ingest_internal(SplitLabel::Train)
+            .unwrap();
+
+        let inner = sampler.inner.lock().unwrap();
+        let anchor = inner.records.get(&anchor_id).cloned().expect("anchor");
+
+        // target = base + 1 day. val_rec is an exact match but must be excluded (wrong split).
+        // train_rec is 2 days off but must be selected (only same-split candidate).
+        let neighbor = inner.select_temporal_neighbor(&anchor, 1);
+        assert!(
+            neighbor.is_some(),
+            "should find a same-split temporal neighbor"
+        );
+        assert_eq!(
+            neighbor.unwrap().id,
+            train_id,
+            "temporal neighbor must not cross split boundaries"
+        );
     }
 }
