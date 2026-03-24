@@ -2,7 +2,7 @@
 
 [![made-with-rust][rust-logo]][rust-src-page] [![crates.io][crates-badge]][crates-page] [![MIT licensed][mit-license-badge]][mit-license-page] [![Apache 2.0 licensed][apache-2.0-license-badge]][apache-2.0-license-page] [![Coverage][coveralls-badge]][coveralls-page]
 
-_Compose an effectively unlimited supply of training triplets from your existing corpus — rule-driven, reproducible splits and source/shard ordering, and multi-source. Fast, reproducible baseline sampling (great for iteration/debug), with optional BM25 hard-negative mining when you want stricter lexical difficulty._
+_Compose an effectively unlimited supply of training triplets from your existing corpus — rule-driven, reproducible splits and source/shard ordering, and multi-source. Fast, reproducible baseline sampling (great for iteration/debug), with optional [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) hard-negative mining when you want stricter lexical difficulty._
 
 **WORK IN PROGRESS. THIS API IS BEING PROTOTYPED AND MAY CHANGE WITHOUT NOTICE.**
 
