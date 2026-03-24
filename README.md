@@ -2,7 +2,7 @@
 
 [![made-with-rust][rust-logo]][rust-src-page] [![crates.io][crates-badge]][crates-page] [![MIT licensed][mit-license-badge]][mit-license-page] [![Apache 2.0 licensed][apache-2.0-license-badge]][apache-2.0-license-page] [![Coverage][coveralls-badge]][coveralls-page]
 
-_Compose an effectively unlimited supply of [training triplets](https://en.wikipedia.org/wiki/Triplet_loss) from your existing corpus — multiple input source mixing, rule-driven sampling recipes, automatic/configurable/reproducible splits, and source/shard ordering. Fast, reproducible baseline sampling (great for iteration/debug), with optional [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) hard-negative mining when you want stricter lexical difficulty. The loss function and choice of ML framework is a separate concern; this crate only handles the data._
+_Compose an effectively unlimited supply of [training triplets](https://en.wikipedia.org/wiki/Triplet_loss) from your existing corpus — multiple input source mixing, rule-driven sampling recipes, automatic / configurable / reproducible splits, and source/shard ordering. Fast, reproducible baseline sampling (great for iteration/debug), with optional [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) hard-negative mining when you want stricter lexical difficulty. The loss function and choice of ML framework is a separate concern; this crate only handles the data._
 
 **WORK IN PROGRESS. THIS API IS BEING PROTOTYPED AND MAY CHANGE WITHOUT NOTICE.**
 
