@@ -7,7 +7,7 @@ Compose an effectively unlimited supply of [training triplets](https://en.wikipe
 - Multiple input source mixing, rule-driven sampling recipes.
 - Automatic & deterministic data splits.
 - Automatic source chunking (ensure all data is eventually consumed regardless of context window size).
-- Anti-regime and diversity features: Anchor/positive swapping; negatives drawn from other anchors/positives; long anchor/positive sections are chunked into additional anchor/positive windows; deterministic pseudo-random ID sampling via IndexPermutation (affine/LCG-style permutation with cycle-walking), plus split-aware Round-Robin interleaving.
+- Anti-regime and diversity features: Anchor/positive swapping; negatives drawn from other anchors/positives; long anchor/positive sections are chunked into additional anchor/positive windows; deterministic pseudo-random ID sampling via IndexPermutation (affine/LCG-style permutation with cycle-walking); and hash-shuffled source cycling (epoch/cycle-seeded) layered over split-aware Round-Robin cursors to avoid fixed Round-Robin regimes.
 - Combine any combination of text-based streaming and static data sources.
 - Included adapters for HuggingFace and file-based sources. Included traits to roll your own data loaders from any source.
 - Fast, reproducible baseline sampling (great for iteration/debug), with optional [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) hard-negative mining when you want stricter lexical difficulty.
