@@ -1,5 +1,6 @@
 use chrono::Duration;
 use indexmap::IndexMap;
+use line_ending::LineEnding;
 use rand::prelude::*;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -1592,7 +1593,11 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             let max_window = self.config.chunking.max_window_tokens;
             if max_window > 0 && total_tokens > max_window {
                 if prefix_tokens.len() >= max_window {
-                    chunk.text = prefix_tokens.into_iter().take(max_window).collect::<Vec<_>>().join(" ");
+                    chunk.text = prefix_tokens
+                        .into_iter()
+                        .take(max_window)
+                        .collect::<Vec<_>>()
+                        .join(" ");
                     chunk.tokens_estimate = max_window;
                 } else {
                     let remaining = max_window - prefix_tokens.len();
@@ -1604,12 +1609,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                     chunk.text = if truncated_body.is_empty() {
                         prefix
                     } else {
-                        format!("{}\n{}", prefix, truncated_body)
+                        format!("{}{}{}", prefix, platform_newline(), truncated_body)
                     };
                     chunk.tokens_estimate = max_window;
                 }
             } else {
-                chunk.text = format!("{}\n{}", prefix, chunk.text);
+                chunk.text = format!("{}{}{}", prefix, platform_newline(), chunk.text);
                 chunk.tokens_estimate = total_tokens;
             }
         }
@@ -2717,6 +2722,10 @@ fn taxonomy_value(record: &DataRecord, field: MetadataKey) -> Option<&str> {
     record.taxonomy.iter().find_map(|entry| field.strip(entry))
 }
 
+fn platform_newline() -> &'static str {
+    LineEnding::from_current_platform().as_str()
+}
+
 #[cfg(feature = "bm25-mining")]
 fn record_bm25_text(record: &DataRecord, max_tokens: usize) -> String {
     let mut out = String::new();
@@ -2725,11 +2734,11 @@ fn record_bm25_text(record: &DataRecord, max_tokens: usize) -> String {
             && !heading.trim().is_empty()
         {
             out.push_str(heading);
-            out.push('\n');
+            out.push_str(platform_newline());
         }
         if !section.text.trim().is_empty() {
             out.push_str(&section.text);
-            out.push('\n');
+            out.push_str(platform_newline());
         }
     }
     if out.trim().is_empty() {
@@ -3358,8 +3367,9 @@ mod tests {
 
         inner.decorate_chunk(&record, &mut chunk);
 
+        let expected_prefix = format!("meta: source=unit{}", platform_newline());
         assert!(
-            chunk.text.starts_with("meta: source=unit\n"),
+            chunk.text.starts_with(&expected_prefix),
             "meta prefix should remain on its own line after truncation"
         );
         assert_eq!(chunk.tokens_estimate, 4);
