@@ -8,7 +8,7 @@ authors = ["Jeremy Harris <jeremy.harris@zenosmosis.com>"]
 repository = "https://github.com/jzombie/rust-triplets"
 categories = ["algorithms", "artificial-intelligence", "science", "text-processing"]
 keywords = [
-    "machine-learning",
+    "train-test-split",
     "triplet-mining",
     "dataset-sampling",
     "training-data",
