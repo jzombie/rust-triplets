@@ -2,7 +2,7 @@
 
 [![made-with-rust][rust-logo]][rust-src-page] [![crates.io][crates-badge]][crates-page] [![MIT licensed][mit-license-badge]][mit-license-page] [![Apache 2.0 licensed][apache-2.0-license-badge]][apache-2.0-license-page] [![Coverage][coveralls-badge]][coveralls-page]
 
-_Compose an effectively unlimited supply of [training triplets](https://en.wikipedia.org/wiki/Triplet_loss) from your existing corpus — rule-driven, reproducible splits and source/shard ordering, and multi-source. Fast, reproducible baseline sampling (great for iteration/debug), with optional [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) hard-negative mining when you want stricter lexical difficulty. The loss function is yours to choose; this crate handles the data._
+_Compose an effectively unlimited supply of [training triplets](https://en.wikipedia.org/wiki/Triplet_loss) from your existing corpus — multiple input source mixing, rule-driven sampling recipes, automatic/configurable/reproducible splits, and source/shard ordering. Fast, reproducible baseline sampling (great for iteration/debug), with optional [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) hard-negative mining when you want stricter lexical difficulty. The loss function and choice of ML framework is a separate concern; this crate only handles the data._
 
 **WORK IN PROGRESS. THIS API IS BEING PROTOTYPED AND MAY CHANGE WITHOUT NOTICE.**
 
@@ -178,7 +178,7 @@ Each source is independent: sources can carry their own recipe rules tailored to
 ## Features
 
 | Feature       | What it enables                                                                                                                                                                                                                                                                                                                     | Default |
-| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+|---------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|
 | `huggingface` | `HuggingFaceRowSource` — streaming download and sampling from Hugging Face dataset repositories (parquet/ndjson shards, ClassLabel resolution, disk-cap eviction). Adds `hf-hub`, `parquet`, `ureq`, `rayon`, `serde_json`.                                                                                                         | No      |
 | `bm25-mining` | BM25 hard-negative ranking within strategy-defined candidate pools. Adds a `bm25` dependency. Rule-based strategy selection always runs first to define the eligible pool; BM25 re-ranks within that pool when this feature is enabled. When absent, candidate selection within each strategy pool is uniform (no re-ranking step). | No      |
 
@@ -495,7 +495,7 @@ hf://org/dataset/config/split anchor=... positive=... context=a,b text=x,y [trus
 **URI path components — `config` and `split`:**
 
 | Components supplied             | Behaviour                                                                            |
-| ------------------------------- | ------------------------------------------------------------------------------------ |
+|---------------------------------|--------------------------------------------------------------------------------------|
 | `hf://org/dataset`              | Config defaults to `default`; all splits discovered automatically.                   |
 | `hf://org/dataset/config`       | Specified config; all splits discovered automatically.                               |
 | `hf://org/dataset/config/split` | Specified config **and** split — only shards belonging to that split are downloaded. |
@@ -528,7 +528,7 @@ Rules:
 **Two extraction modes — pick one per source line:**
 
 | Mode             | When active                               | Keys used                          |
-| ---------------- | ----------------------------------------- | ---------------------------------- |
+|------------------|-------------------------------------------|------------------------------------|
 | **Role-based**   | `anchor=` (and/or `positive=`) is present | `anchor=`, `positive=`, `context=` |
 | **Text-columns** | `anchor=` is absent; only `text=` is set  | `text=`                            |
 
@@ -589,7 +589,7 @@ Endpoint overrides:
 Three environment variables let you redirect the datasets-server base URLs — useful for test doubles, local mirrors, or air-gapped / on-premises deployments:
 
 | Environment variable           | Endpoint controlled                 |
-| ------------------------------ | ----------------------------------- |
+|--------------------------------|-------------------------------------|
 | `TRIPLETS_HF_PARQUET_ENDPOINT` | `/parquet` shard manifest           |
 | `TRIPLETS_HF_SIZE_ENDPOINT`    | `/size` total row count             |
 | `TRIPLETS_HF_INFO_ENDPOINT`    | `/info` ClassLabel feature metadata |
