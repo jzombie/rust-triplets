@@ -6,9 +6,13 @@ Compose an effectively unlimited supply of [training triplets](https://en.wikipe
 
 - Multiple input source mixing, rule-driven sampling recipes
 - Automatic & deterministic data splits
+- Automatic source chunking (ensure all data is eventually consumed regardless of context window size)
+- Anti-regime features: Anchor / positive swapping; negatives sampled from pool of other anchors / positives; deterministic pseudo-random ID sampling via IndexPermutation (affine/LCG-style permutation with cycle-walking), plus split-aware Round-Robin interleaving.
 - Combine any combination of text-based streaming and static data sources
 - Included adapters for HuggingFace and file-based inputs + traits to roll your own
 - Fast, reproducible baseline sampling (great for iteration/debug), with optional [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) hard-negative mining when you want stricter lexical difficulty.
+- Low memory footprint; quick to compile
+- A decent set of [capabilities](#capabilities)
 
 > _The loss function and choice of ML framework is a separate concern; this crate only handles the data._
 
