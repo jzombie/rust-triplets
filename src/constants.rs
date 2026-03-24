@@ -99,15 +99,31 @@ pub mod sampler_tests {
     /// Expected hash for deterministic text batch sequence.
     pub const TEXT_BATCH_SEQUENCE_HASH: u64 = 16700524736973776041;
     /// Expected hash for deterministic triplet batch sequence.
+    #[cfg(not(feature = "bm25-mining"))]
     pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 14618375830351864347;
+    /// Expected hash for deterministic triplet batch sequence when bm25-mining is enabled.
+    #[cfg(feature = "bm25-mining")]
+    pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 2861115972406486947;
     /// Expected hash for deterministic pair batch sequence.
+    #[cfg(not(feature = "bm25-mining"))]
     pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 13133711470950174124;
+    /// Expected hash for deterministic pair batch sequence when bm25-mining is enabled.
+    #[cfg(feature = "bm25-mining")]
+    pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 12391264626159245455;
     /// Expected hash for deterministic prefetch text batch sequence.
     pub const PREFETCH_TEXT_BATCH_SEQUENCE_HASH: u64 = 16740235391902546413;
     /// Expected hash for deterministic prefetch triplet batch sequence.
+    #[cfg(not(feature = "bm25-mining"))]
     pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 11709520942485223708;
+    /// Expected hash for deterministic prefetch triplet batch sequence when bm25-mining is enabled.
+    #[cfg(feature = "bm25-mining")]
+    pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 12560242861451173628;
     /// Expected hash for deterministic prefetch pair batch sequence.
+    #[cfg(not(feature = "bm25-mining"))]
     pub const PREFETCH_PAIR_BATCH_SEQUENCE_HASH: u64 = 2553049861003803008;
+    /// Expected hash for deterministic prefetch pair batch sequence when bm25-mining is enabled.
+    #[cfg(feature = "bm25-mining")]
+    pub const PREFETCH_PAIR_BATCH_SEQUENCE_HASH: u64 = 9717244760370913141;
 }
 
 /// Constants used by split-store persistence and wire encoding.
