@@ -1243,6 +1243,21 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         ranked
     }
 
+    /// Build one BM25 search engine per `(SourceId, SplitLabel)` bucket.
+    ///
+    /// Each engine indexes only the records from the corresponding source in that
+    /// split, so BM25 ranking never crosses source or split boundaries. This
+    /// scoping mirrors the `NegativeStrategy` candidate pool: BM25 re-ranks
+    /// within the in-source pool, it does not widen it.
+    ///
+    /// The index is rebuilt from scratch on every source-refresh cycle
+    /// (`last_refreshed_sources` non-empty) and is a no-op otherwise, so batches
+    /// that only drain the existing cache skip the rebuild entirely.
+    ///
+    /// BM25 is a keyword-overlap ranker and is intentionally scoped to a first-pass
+    /// lexical difficulty lift. Semantic or dense-retrieval re-ranking is expected
+    /// to be handled outside this pipeline (pre-ranked sources, encoder-based
+    /// iterative mining, etc.).
     #[cfg(feature = "bm25-mining")]
     fn rebuild_bm25_hard_negative_index(&mut self) {
         self.bm25_hard_negatives.clear();

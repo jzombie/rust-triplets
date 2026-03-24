@@ -74,7 +74,23 @@ pub struct TextRecipe {
     pub instruction: Option<Cow<'static, str>>,
 }
 
-/// Strategy for picking negatives for triplets/pairs.
+/// Strategy for picking the negative *record* in a triplet.
+///
+/// Each variant defines the candidate pool from which the negative record is drawn.
+/// By default all variants scope candidates to the same source as the anchor, so
+/// negatives are hard relative to the source domain rather than trivially
+/// cross-domain. A same-split fallback engages automatically when the in-source
+/// pool is too small (for example a source with only one record in the split).
+///
+/// When the `bm25-mining` feature is enabled, BM25 lexical re-ranking is applied
+/// on top of the strategy-filtered pool — BM25 re-orders candidates by keyword
+/// overlap with the anchor, but does not widen or replace the strategy pool.
+/// BM25 is a first-pass lexical ranker, not a semantic one; it is well-suited for
+/// lifting average negative quality without an encoder at data-generation time.
+/// Semantic or embedding-based re-ranking (iterative hard-negative mining with the
+/// trained encoder, cross-encoder scoring, dense retrieval) is out of scope for
+/// the data pipeline and can be integrated by pre-ranking negatives before
+/// ingestion or by reweighting source batches in the training loop.
 #[derive(Clone, Debug)]
 pub enum NegativeStrategy {
     /// Choose a record with a different publication date from record metadata.
@@ -83,6 +99,13 @@ pub enum NegativeStrategy {
     /// `META_FIELD_DATE`), not filesystem timestamps like mtime/ctime/atime.
     WrongPublicationDate,
     /// Choose a different record from the same source.
+    ///
+    /// Negatives are drawn from within the same source, making them hard relative
+    /// to the source domain. This is appropriate when each source represents a
+    /// coherent domain (a collection of finance articles, a physics paper set,
+    /// etc.) where same-source records are already confusable. If your sources are
+    /// not meaningful domain boundaries, the fallback path (same split, any source)
+    /// is the relevant escape hatch.
     WrongArticle,
     /// Choose a mismatched Q/A pair.
     QuestionAnswerMismatch,
