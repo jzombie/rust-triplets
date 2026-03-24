@@ -1028,6 +1028,7 @@ mod tests {
             negative_strategy: crate::config::NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }
     }
 

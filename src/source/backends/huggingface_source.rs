@@ -4310,6 +4310,25 @@ impl DataSource for HuggingFaceRowSource {
 
     /// Return mixed default triplet recipes used by Hugging Face row sources.
     fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {
+        // Text-columns mode: anchor_columns is empty and only a plain text column is
+        // mapped.  In this configuration every record's Anchor and Context sections
+        // carry identical text (the single text field is duplicated by row_to_record).
+        // Emit a single SimCSE-style recipe that deliberately allows same-text pairs:
+        // the negative comes from a different record, and the model's dropout layers
+        // provide the necessary embedding variation between the two identical slots.
+        if self.config.anchor_columns.is_empty() {
+            return vec![TripletRecipe {
+                name: "huggingface_text_simcse_wrong_article".into(),
+                anchor: Selector::Role(SectionRole::Anchor),
+                positive_selector: Selector::Role(SectionRole::Context),
+                negative_selector: Selector::Role(SectionRole::Context),
+                negative_strategy: NegativeStrategy::WrongArticle,
+                weight: 1.0,
+                instruction: None,
+                allow_same_anchor_positive: true,
+            }];
+        }
+
         vec![
             // Majority lane remains context negatives for broad coverage and
             // stable optimization across varied HF schemas.
@@ -4321,6 +4340,7 @@ impl DataSource for HuggingFaceRowSource {
                 negative_strategy: NegativeStrategy::WrongArticle,
                 weight: 0.75,
                 instruction: None,
+                allow_same_anchor_positive: false,
             },
             // Medium-hard lane adds anchor-as-negative pressure to improve
             // discrimination between title-like anchor fields.
@@ -4332,6 +4352,7 @@ impl DataSource for HuggingFaceRowSource {
                 negative_strategy: NegativeStrategy::WrongArticle,
                 weight: 0.25,
                 instruction: None,
+                allow_same_anchor_positive: false,
             },
         ]
     }
@@ -6061,9 +6082,35 @@ mod tests {
     }
 
     #[test]
-    fn default_triplet_recipes_returns_expected_shape() {
+    fn default_triplet_recipes_text_only_mode_returns_simcse_recipe() {
+        // test_config() leaves anchor_columns empty → text-only mode.
+        // A single SimCSE-style recipe with allow_same_anchor_positive must be returned.
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
+        assert!(
+            config.anchor_columns.is_empty(),
+            "test_config must be in text-only mode"
+        );
+        let source = test_source(config);
+        let recipes = source.default_triplet_recipes();
+        assert_eq!(recipes.len(), 1);
+        assert_eq!(recipes[0].name, "huggingface_text_simcse_wrong_article");
+        assert!(
+            recipes[0].allow_same_anchor_positive,
+            "SimCSE recipe must allow same anchor/positive text"
+        );
+        assert_eq!(recipes[0].weight, 1.0);
+    }
+
+    #[test]
+    fn default_triplet_recipes_role_mode_returns_two_recipes() {
+        // When anchor_columns is non-empty the source is in role-based mode and
+        // must return the two standard (anchor-context, anchor-anchor) recipes,
+        // neither of which allows same anchor/positive text.
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.anchor_columns = vec!["title".to_string()];
+        config.positive_columns = vec!["body".to_string()];
         let source = test_source(config);
         let recipes = source.default_triplet_recipes();
         assert_eq!(recipes.len(), 2);
@@ -6071,6 +6118,14 @@ mod tests {
         assert_eq!(recipes[1].name, "huggingface_anchor_anchor_wrong_article");
         assert_eq!(recipes[0].weight, 0.75);
         assert_eq!(recipes[1].weight, 0.25);
+        assert!(
+            !recipes[0].allow_same_anchor_positive,
+            "standard recipes must not allow same anchor/positive"
+        );
+        assert!(
+            !recipes[1].allow_same_anchor_positive,
+            "standard recipes must not allow same anchor/positive"
+        );
     }
 
     #[test]

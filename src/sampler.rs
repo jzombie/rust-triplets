@@ -706,6 +706,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }
     }
 
@@ -1534,7 +1535,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         // text matches the positive (or the anchor) would produce a trivially-invalid
         // training example.  String equality short-circuits on the first differing byte,
         // so the guard is effectively free when texts differ (the common case).
-        if anchor_chunk.text == positive_chunk.text
+        //
+        // When `allow_same_anchor_positive` is set the anchor==positive check is skipped
+        // to support SimCSE-style training where both slots carry identical text and the
+        // model's dropout layers produce the required embedding variation at train time.
+        // The negative must still differ from both anchor and positive.
+        if (!recipe.allow_same_anchor_positive && anchor_chunk.text == positive_chunk.text)
             || negative_chunk.text == positive_chunk.text
             || negative_chunk.text == anchor_chunk.text
         {
@@ -3502,6 +3508,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
         config.text_recipes = Vec::new();
 
@@ -3555,6 +3562,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
         config.text_recipes = Vec::new();
 
@@ -3611,6 +3619,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
 
         let records = vec![
@@ -3658,6 +3667,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
 
         let records = vec![
@@ -3745,6 +3755,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
         config.text_recipes = Vec::new();
 
@@ -4207,6 +4218,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
         config.text_recipes = vec![TextRecipe {
             name: "parity_text".into(),
@@ -4502,6 +4514,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
 
         let sampler = Arc::new(TripletSampler::new(config, Arc::clone(&store)));
@@ -4936,6 +4949,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         };
         let config = SamplerConfig {
             seed: 991,
@@ -5099,6 +5113,7 @@ mod tests {
                     negative_strategy: NegativeStrategy::WrongArticle,
                     weight: 1.0,
                     instruction: None,
+                    allow_same_anchor_positive: false,
                 }],
                 text_recipes: Vec::new(),
                 split,
@@ -5250,6 +5265,7 @@ mod tests {
                 negative_strategy: NegativeStrategy::WrongArticle,
                 weight: 1.0,
                 instruction: None,
+                allow_same_anchor_positive: false,
             }],
             text_recipes: vec![TextRecipe {
                 name: "teacher_chunk".into(),
@@ -5667,6 +5683,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
         config.text_recipes = Vec::new();
 
@@ -5800,6 +5817,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
         config.text_recipes = Vec::new();
 
@@ -5879,6 +5897,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
         config.text_recipes = Vec::new();
 
@@ -6009,6 +6028,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
         config.text_recipes = Vec::new();
 
@@ -6285,6 +6305,7 @@ mod tests {
                 negative_strategy: NegativeStrategy::WrongPublicationDate,
                 weight: 1.0,
                 instruction: None,
+                allow_same_anchor_positive: false,
             }],
             text_recipes: Vec::new(),
             split,
@@ -6337,6 +6358,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
         let decorated = RecipeDecoratedSource::new(records, recipes);
         let sampler = TripletSampler::new(config, store);
@@ -6374,6 +6396,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
         let records = vec![
             trader_record(
@@ -6426,6 +6449,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
         let records = vec![
             trader_record(
@@ -6469,6 +6493,7 @@ mod tests {
                 negative_strategy: NegativeStrategy::WrongArticle,
                 weight: 1.0,
                 instruction: None,
+                allow_same_anchor_positive: false,
             }],
             text_recipes: Vec::new(),
             split,
@@ -6523,6 +6548,7 @@ mod tests {
                 negative_strategy: NegativeStrategy::QuestionAnswerMismatch,
                 weight: 1.0,
                 instruction: None,
+                allow_same_anchor_positive: false,
             }],
             text_recipes: Vec::new(),
             split,
@@ -6861,6 +6887,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongPublicationDate,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         };
         let config = SamplerConfig {
             seed: 23,
@@ -7280,6 +7307,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         };
         let config = SamplerConfig {
             seed: 91,
@@ -7686,6 +7714,7 @@ mod tests {
                 negative_strategy: NegativeStrategy::WrongPublicationDate,
                 weight: 1.0,
                 instruction: None,
+                allow_same_anchor_positive: false,
             }],
             text_recipes: Vec::new(),
             split,
@@ -7807,6 +7836,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
         config.text_recipes = Vec::new();
 
@@ -7875,6 +7905,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
         config.text_recipes = vec![TextRecipe {
             name: "split_api_text".into(),
@@ -7983,6 +8014,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
         config.text_recipes = Vec::new();
 
@@ -8065,6 +8097,7 @@ mod tests {
                 negative_strategy: NegativeStrategy::WrongArticle,
                 weight: 1.0,
                 instruction: None,
+                allow_same_anchor_positive: false,
             }],
             text_recipes: Vec::new(),
             split,
@@ -8154,6 +8187,7 @@ mod tests {
                 negative_strategy: NegativeStrategy::WrongArticle,
                 weight: 1.0,
                 instruction: None,
+                allow_same_anchor_positive: false,
             },
             TripletRecipe {
                 name: "recipe_b".into(),
@@ -8163,6 +8197,7 @@ mod tests {
                 negative_strategy: NegativeStrategy::WrongArticle,
                 weight: 1.0,
                 instruction: None,
+                allow_same_anchor_positive: false,
             },
         ];
         config.text_recipes = Vec::new();
@@ -8206,6 +8241,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
 
         let store = Arc::new(DeterministicSplitStore::new(split, 77).unwrap());
@@ -8348,6 +8384,7 @@ mod tests {
                 negative_strategy: NegativeStrategy::WrongArticle,
                 weight: 1.0,
                 instruction: None,
+                allow_same_anchor_positive: false,
             }],
             text_recipes: Vec::new(),
             split,
@@ -8412,6 +8449,7 @@ mod tests {
                     negative_strategy: NegativeStrategy::WrongArticle,
                     weight: 1.0,
                     instruction: None,
+                    allow_same_anchor_positive: false,
                 }],
                 text_recipes: Vec::new(),
                 split,
@@ -8501,6 +8539,7 @@ mod tests {
                 negative_strategy: NegativeStrategy::WrongArticle,
                 weight: 1.0,
                 instruction: None,
+                allow_same_anchor_positive: false,
             }],
             text_recipes: Vec::new(),
             split,
@@ -8605,6 +8644,7 @@ mod tests {
                 negative_strategy: NegativeStrategy::WrongArticle,
                 weight: 1.0,
                 instruction: None,
+                allow_same_anchor_positive: false,
             }],
             text_recipes: Vec::new(),
             split,
@@ -8949,6 +8989,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
 
         let now = Utc::now();
@@ -9053,6 +9094,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
 
         let now = Utc::now();
@@ -9162,6 +9204,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
 
         let now = Utc::now();
@@ -9672,6 +9715,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         };
 
         let triplet = inner.make_triplet_with_anchor(&recipe, &anchor);
@@ -9829,6 +9873,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
         config.text_recipes = vec![TextRecipe {
             name: "prefetch_text".into(),
@@ -9964,6 +10009,7 @@ mod tests {
                 negative_strategy: NegativeStrategy::WrongArticle,
                 weight: 1.0,
                 instruction: None,
+                allow_same_anchor_positive: false,
             }],
             text_recipes: Vec::new(),
             allowed_splits: vec![SplitLabel::Train],
@@ -10075,6 +10121,7 @@ mod tests {
                 negative_strategy: NegativeStrategy::WrongArticle,
                 weight: 1.0,
                 instruction: None,
+                allow_same_anchor_positive: false,
             }],
             text_recipes: Vec::new(),
             allowed_splits: vec![SplitLabel::Train],
@@ -10171,6 +10218,7 @@ mod tests {
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
+            allow_same_anchor_positive: false,
         }];
 
         let store = Arc::new(DeterministicSplitStore::new(split, 55).unwrap());

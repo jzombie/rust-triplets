@@ -149,6 +149,7 @@ let _recipe = TripletRecipe {
   negative_strategy: NegativeStrategy::WrongArticle,
   weight: 1.0,
   instruction: None,
+  allow_same_anchor_positive: false,
 };
 ```
 
@@ -412,6 +413,7 @@ config.recipes = vec![TripletRecipe {
   negative_strategy: NegativeStrategy::WrongArticle,
   weight: 1.0,
   instruction: None,
+  allow_same_anchor_positive: false,
 }];
 
 let sampler = TripletSampler::new(config, Arc::clone(&store));
