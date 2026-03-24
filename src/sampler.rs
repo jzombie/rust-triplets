@@ -1243,6 +1243,21 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         ranked
     }
 
+    /// Build one BM25 search engine per `(SourceId, SplitLabel)` bucket.
+    ///
+    /// Each engine indexes only the records from the corresponding source in that
+    /// split, so BM25 ranking never crosses source or split boundaries. This
+    /// scoping mirrors the `NegativeStrategy` candidate pool: BM25 re-ranks
+    /// within the in-source pool, it does not widen it.
+    ///
+    /// The index is rebuilt from scratch on every source-refresh cycle
+    /// (`last_refreshed_sources` non-empty) and is a no-op otherwise, so batches
+    /// that only drain the existing cache skip the rebuild entirely.
+    ///
+    /// BM25 is a keyword-overlap ranker and is intentionally scoped to a first-pass
+    /// lexical difficulty lift. Semantic or dense-retrieval re-ranking is expected
+    /// to be handled outside this pipeline (pre-ranked sources, encoder-based
+    /// iterative mining, etc.).
     #[cfg(feature = "bm25-mining")]
     fn rebuild_bm25_hard_negative_index(&mut self) {
         self.bm25_hard_negatives.clear();
@@ -9985,5 +10000,162 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn wrong_publication_date_covers_some_none_branch_with_undated_candidates() {
+        // Covers the `(Some(_), None) => true` branch in the WrongPublicationDate filter:
+        // anchor has a publication date; candidate has no date entry in taxonomy.
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let store = Arc::new(DeterministicSplitStore::new(split, 42).unwrap());
+        let config = SamplerConfig {
+            seed: 42,
+            batch_size: 1,
+            recipes: Vec::new(),
+            text_recipes: Vec::new(),
+            split,
+            ..SamplerConfig::default()
+        };
+
+        // Anchor with a publication date.
+        let anchor_dated = trader_record("anc_dated", "2025-01-01", "Dated anchor", "Body A");
+        // Candidate with no date entry — triggers (Some(_), None) => true.
+        let mut cand_no_date =
+            trader_record("cand_no_date", "2025-01-02", "No date cand", "Body B");
+        cand_no_date
+            .taxonomy
+            .retain(|t| META_FIELD_DATE.strip(t).is_none());
+        // Candidate with the same date as anchor — excluded by (Some, Some) equal => false.
+        let cand_same = trader_record("cand_same", "2025-01-01", "Same date cand", "Body C");
+
+        let sampler = TripletSampler::new(config, store);
+        sampler.register_source(Box::new(InMemorySource::new(
+            PRIMARY_SOURCE_ID,
+            vec![anchor_dated, cand_no_date, cand_same],
+        )));
+        sampler
+            .inner
+            .lock()
+            .unwrap()
+            .ingest_internal(SplitLabel::Train)
+            .unwrap();
+
+        let mut inner = sampler.inner.lock().unwrap();
+        let anchor = inner.records.get("anc_dated").cloned().expect("anchor");
+        // cand_no_date is eligible (Some, None); cand_same is excluded (same date).
+        let (neg, _) = inner
+            .select_negative_record(&anchor, &NegativeStrategy::WrongPublicationDate)
+            .expect("should find undated candidate as negative");
+        assert_eq!(neg.id, "cand_no_date");
+    }
+
+    #[test]
+    fn wrong_publication_date_covers_none_some_and_none_none_branches() {
+        // Covers (None, Some(_)) => true and (None, None) => false:
+        // anchor has no date; candidates either have a date or also lack one.
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let store = Arc::new(DeterministicSplitStore::new(split, 55).unwrap());
+        let config = SamplerConfig {
+            seed: 55,
+            batch_size: 1,
+            recipes: Vec::new(),
+            text_recipes: Vec::new(),
+            split,
+            ..SamplerConfig::default()
+        };
+
+        // Anchor without a date (None).
+        let mut anchor_no_date =
+            trader_record("anc_no_date", "2025-01-01", "No date anchor", "Body A");
+        anchor_no_date
+            .taxonomy
+            .retain(|t| META_FIELD_DATE.strip(t).is_none());
+        // Candidate WITH a date — (None, Some(_)) => true, so it is eligible.
+        let cand_dated = trader_record("cand_dated", "2025-01-02", "Dated cand", "Body B");
+        // Candidate also without a date — (None, None) => false, so it is NOT eligible.
+        let mut cand_no_date =
+            trader_record("cand_no_date", "2025-01-01", "No date cand", "Body C");
+        cand_no_date
+            .taxonomy
+            .retain(|t| META_FIELD_DATE.strip(t).is_none());
+
+        let sampler = TripletSampler::new(config, store);
+        sampler.register_source(Box::new(InMemorySource::new(
+            PRIMARY_SOURCE_ID,
+            vec![anchor_no_date, cand_dated, cand_no_date],
+        )));
+        sampler
+            .inner
+            .lock()
+            .unwrap()
+            .ingest_internal(SplitLabel::Train)
+            .unwrap();
+
+        let mut inner = sampler.inner.lock().unwrap();
+        let anchor = inner.records.get("anc_no_date").cloned().expect("anchor");
+        // Only cand_dated is eligible: (None, Some) => true.
+        // cand_no_date is excluded: (None, None) => false.
+        let (neg, _) = inner
+            .select_negative_record(&anchor, &NegativeStrategy::WrongPublicationDate)
+            .expect("undated anchor should match dated candidate");
+        assert_eq!(neg.id, "cand_dated");
+    }
+
+    #[test]
+    fn temporal_offset_selector_finds_nearest_chronological_neighbor() {
+        // Covers select_temporal_neighbor: verifies the min-by-key distance logic
+        // selects the record whose created_at is closest to anchor.created_at + offset_days.
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let store = Arc::new(DeterministicSplitStore::new(split, 77).unwrap());
+        let config = SamplerConfig {
+            seed: 77,
+            batch_size: 1,
+            recipes: Vec::new(),
+            text_recipes: Vec::new(),
+            split,
+            ..SamplerConfig::default()
+        };
+
+        let base = Utc::now();
+        // r0: base time; r7d: exactly +7 days; r30d: +30 days.
+        let r0 = record_with_offset("rec_base", base, 0);
+        let r7d = record_with_offset("rec_7d", base, 7 * 86400);
+        let r30d = record_with_offset("rec_30d", base, 30 * 86400);
+
+        let sampler = TripletSampler::new(config, store);
+        sampler.register_source(Box::new(InMemorySource::new(
+            PRIMARY_SOURCE_ID,
+            vec![r0, r7d, r30d],
+        )));
+        sampler
+            .inner
+            .lock()
+            .unwrap()
+            .ingest_internal(SplitLabel::Train)
+            .unwrap();
+
+        let inner = sampler.inner.lock().unwrap();
+        let anchor = inner.records.get("rec_base").cloned().expect("anchor");
+        // Requesting offset_days=7: target = base + 7 days. r7d is an exact match.
+        let neighbor = inner.select_temporal_neighbor(&anchor, 7);
+        assert!(neighbor.is_some(), "should find a temporal neighbor");
+        assert_eq!(neighbor.unwrap().id, "rec_7d");
+
+        // Requesting offset_days=1: target = base + 1 day. r7d (6 days away) beats r30d (29 days).
+        let neighbor_near = inner.select_temporal_neighbor(&anchor, 1);
+        assert!(neighbor_near.is_some());
+        assert_eq!(neighbor_near.unwrap().id, "rec_7d");
     }
 }
