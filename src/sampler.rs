@@ -3399,11 +3399,17 @@ mod tests {
     #[test]
     fn kvp_prefix_is_applied_to_non_initial_windows_from_long_sections() {
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let store = Arc::new(DeterministicSplitStore::new(split, 420).unwrap());
+        let kvp_long_id = (0u32..)
+            .find_map(|i| {
+                let id = format!("kvp_long_{i}");
+                (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+            })
+            .unwrap();
 
         let mut config = base_config();
         config.seed = 7777;
@@ -3426,7 +3432,7 @@ mod tests {
         }];
 
         let mut record = trader_record(
-            "kvp_long",
+            &kvp_long_id,
             "2025-01-01",
             "T",
             "t01 t02 t03 t04 t05 t06 t07 t08 t09 t10 t11 t12",
@@ -3471,11 +3477,17 @@ mod tests {
     #[test]
     fn exhaustion_retry_limit_returns_exhausted() {
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let store = Arc::new(DeterministicSplitStore::new(split, 101).unwrap());
+        let exhaust_id = (0u32..)
+            .find_map(|i| {
+                let id = format!("exhaust_{i}");
+                (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+            })
+            .unwrap();
         let mut config = base_config();
         config.seed = 202;
         config.batch_size = 1;
@@ -3493,7 +3505,9 @@ mod tests {
         }];
         config.text_recipes = Vec::new();
 
-        let records = vec![sample_record()];
+        let mut record = sample_record();
+        record.id = exhaust_id;
+        let records = vec![record];
         let refresh_calls = Arc::new(AtomicUsize::new(0));
         let source = CountingSource::new("unit", records, Arc::clone(&refresh_calls));
         let sampler = TripletSampler::new(config, store);
@@ -3510,11 +3524,22 @@ mod tests {
     #[test]
     fn single_source_failure_does_not_fail_batch_when_other_source_has_data() {
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let store = Arc::new(DeterministicSplitStore::new(split, 909).unwrap());
+        let find_train_id = |prefix: &str| -> String {
+            (0u32..)
+                .find_map(|i| {
+                    let id = format!("{prefix}_{i}");
+                    (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                })
+                .unwrap()
+        };
+        let healthy_a = find_train_id("healthy_a");
+        let healthy_b = find_train_id("healthy_b");
+        let healthy_c = find_train_id("healthy_c");
 
         let mut config = base_config();
         config.seed = 1337;
@@ -3534,9 +3559,9 @@ mod tests {
         config.text_recipes = Vec::new();
 
         let healthy_records = vec![
-            trader_record("healthy_a", "2025-01-01", "A", "Body A"),
-            trader_record("healthy_b", "2025-01-02", "B", "Body B"),
-            trader_record("healthy_c", "2025-01-03", "C", "Body C"),
+            trader_record(&healthy_a, "2025-01-01", "A", "Body A"),
+            trader_record(&healthy_b, "2025-01-02", "B", "Body B"),
+            trader_record(&healthy_c, "2025-01-03", "C", "Body C"),
         ];
 
         let sampler = TripletSampler::new(config, store);
@@ -3556,11 +3581,21 @@ mod tests {
     #[test]
     fn triplet_batch_is_padded_to_batch_size_when_unique_pool_is_small() {
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let store = Arc::new(DeterministicSplitStore::new(split, 9001).unwrap());
+        let find_train_id = |prefix: &str| -> String {
+            (0u32..)
+                .find_map(|i| {
+                    let id = format!("{prefix}_{i}");
+                    (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                })
+                .unwrap()
+        };
+        let pad_a = find_train_id("pad_a");
+        let pad_b = find_train_id("pad_b");
 
         let mut config = base_config();
         config.seed = 101;
@@ -3579,8 +3614,8 @@ mod tests {
         }];
 
         let records = vec![
-            trader_record("pad_a", "2025-01-01", "A", "Body A"),
-            trader_record("pad_b", "2025-01-02", "B", "Body B"),
+            trader_record(&pad_a, "2025-01-01", "A", "Body A"),
+            trader_record(&pad_b, "2025-01-02", "B", "Body B"),
         ];
 
         let sampler = TripletSampler::new(config, store);
@@ -3593,11 +3628,21 @@ mod tests {
     #[test]
     fn pair_batch_is_padded_to_batch_size_when_unique_pool_is_small() {
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let store = Arc::new(DeterministicSplitStore::new(split, 9002).unwrap());
+        let find_train_id = |prefix: &str| -> String {
+            (0u32..)
+                .find_map(|i| {
+                    let id = format!("{prefix}_{i}");
+                    (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                })
+                .unwrap()
+        };
+        let pair_a = find_train_id("pair_a");
+        let pair_b = find_train_id("pair_b");
 
         let mut config = base_config();
         config.seed = 202;
@@ -3616,8 +3661,8 @@ mod tests {
         }];
 
         let records = vec![
-            trader_record("pair_a", "2025-02-01", "A", "Body A"),
-            trader_record("pair_b", "2025-02-02", "B", "Body B"),
+            trader_record(&pair_a, "2025-02-01", "A", "Body A"),
+            trader_record(&pair_b, "2025-02-02", "B", "Body B"),
         ];
 
         let sampler = TripletSampler::new(config, store);
@@ -3630,11 +3675,17 @@ mod tests {
     #[test]
     fn text_batch_is_padded_to_batch_size_when_unique_pool_is_small() {
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let store = Arc::new(DeterministicSplitStore::new(split, 9003).unwrap());
+        let text_a = (0u32..)
+            .find_map(|i| {
+                let id = format!("text_a_{i}");
+                (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+            })
+            .unwrap();
 
         let mut config = base_config();
         config.seed = 303;
@@ -3649,7 +3700,7 @@ mod tests {
             instruction: None,
         }];
 
-        let records = vec![trader_record("text_a", "2025-03-01", "A", "Body A")];
+        let records = vec![trader_record(&text_a, "2025-03-01", "A", "Body A")];
 
         let sampler = TripletSampler::new(config, store);
         sampler.register_source(Box::new(InMemorySource::new("text_source", records)));
@@ -3661,11 +3712,24 @@ mod tests {
     #[test]
     fn failed_source_is_retried_on_next_batch_call() {
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let store = Arc::new(DeterministicSplitStore::new(split, 404).unwrap());
+        let find_train_id = |prefix: &str| -> String {
+            (0u32..)
+                .find_map(|i| {
+                    let id = format!("{prefix}_{i}");
+                    (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                })
+                .unwrap()
+        };
+        let flaky_a = find_train_id("flaky_a");
+        let flaky_b = find_train_id("flaky_b");
+        let steady_a = find_train_id("steady_a");
+        let steady_b = find_train_id("steady_b");
+        let steady_c = find_train_id("steady_c");
 
         let mut config = base_config();
         config.seed = 505;
@@ -3686,13 +3750,13 @@ mod tests {
 
         let flaky_calls = Arc::new(AtomicUsize::new(0));
         let flaky_records = vec![
-            trader_record("flaky_a", "2025-02-01", "Flaky A", "Flaky body A"),
-            trader_record("flaky_b", "2025-02-02", "Flaky B", "Flaky body B"),
+            trader_record(&flaky_a, "2025-02-01", "Flaky A", "Flaky body A"),
+            trader_record(&flaky_b, "2025-02-02", "Flaky B", "Flaky body B"),
         ];
         let healthy_records = vec![
-            trader_record("steady_a", "2025-03-01", "Steady A", "Steady body A"),
-            trader_record("steady_b", "2025-03-02", "Steady B", "Steady body B"),
-            trader_record("steady_c", "2025-03-03", "Steady C", "Steady body C"),
+            trader_record(&steady_a, "2025-03-01", "Steady A", "Steady body A"),
+            trader_record(&steady_b, "2025-03-02", "Steady B", "Steady body B"),
+            trader_record(&steady_c, "2025-03-03", "Steady C", "Steady body C"),
         ];
 
         let sampler = TripletSampler::new(config, store);
@@ -4117,9 +4181,9 @@ mod tests {
     #[test]
     fn text_pair_and_triplet_chunks_all_come_from_materialize_pool() {
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let mut config = base_config();
         config.seed = 42;
@@ -4151,6 +4215,20 @@ mod tests {
             instruction: None,
         }];
 
+        // Use the same store+seed for both pool-building and main sampling so IDs
+        // only need to be found once.
+        let pool_store = Arc::new(DeterministicSplitStore::new(split, 77).unwrap());
+        let find_train_id = |prefix: &str| -> String {
+            (0u32..)
+                .find_map(|i| {
+                    let id = format!("{prefix}_{i}");
+                    (pool_store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                })
+                .unwrap()
+        };
+        let parity_a = find_train_id("parity_a");
+        let parity_b = find_train_id("parity_b");
+
         let make_record = |id: &str| DataRecord {
             id: id.into(),
             source: "unit".into(),
@@ -4166,13 +4244,12 @@ mod tests {
             }],
             meta_prefix: None,
         };
-        let records = vec![make_record("parity_a"), make_record("parity_b")];
+        let records = vec![make_record(&parity_a), make_record(&parity_b)];
 
         // Build the expected pool by calling materialize_chunks directly on the
         // shared section text.  Both records have identical section text, so one
         // pool covers all possible chunk texts.
-        let pool_store = Arc::new(DeterministicSplitStore::new(split, 1).unwrap());
-        let pool_sampler = TripletSampler::new(config.clone(), pool_store);
+        let pool_sampler = TripletSampler::new(config.clone(), Arc::clone(&pool_store));
         let expected_pool: HashSet<String> = pool_sampler
             .inner
             .lock()
@@ -4243,9 +4320,9 @@ mod tests {
     #[test]
     fn end_to_end_text_weighting_uses_chunk_offsets() {
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let mut config = base_config();
         config.seed = 9;
@@ -4266,9 +4343,15 @@ mod tests {
         };
 
         let store = Arc::new(DeterministicSplitStore::new(split, 9).unwrap());
+        let weighted_id = (0u32..)
+            .find_map(|i| {
+                let id = format!("weighted_record_{i}");
+                (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+            })
+            .unwrap();
         let sampler = TripletSampler::new(config, store);
         let record = DataRecord {
-            id: "weighted_record".into(),
+            id: weighted_id,
             source: "unit".into(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -4841,9 +4924,9 @@ mod tests {
     #[test]
     fn readable_triplet_examples_by_mode() {
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let recipe = TripletRecipe {
             name: "readable_triplet_demo".into(),
@@ -4863,7 +4946,8 @@ mod tests {
             split,
             ..SamplerConfig::default()
         };
-        let store = Arc::new(DeterministicSplitStore::new(split, 991).unwrap());
+        // seed=12: all "readable_*" IDs hash to Train under train:0.7.
+        let store = Arc::new(DeterministicSplitStore::new(split, 12).unwrap());
 
         let anchor = trader_record(
             "readable_anchor",
@@ -4997,9 +5081,9 @@ mod tests {
     #[test]
     fn bm25_not_rng_only_when_only_anchor_text_changes() {
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
 
         let run = |anchor_body: &str| -> Vec<String> {
@@ -5020,7 +5104,8 @@ mod tests {
                 split,
                 ..SamplerConfig::default()
             };
-            let store = Arc::new(DeterministicSplitStore::new(split, 991).unwrap());
+            // seed=12: all "readable_*" IDs hash to Train under train:0.7.
+            let store = Arc::new(DeterministicSplitStore::new(split, 12).unwrap());
             let sampler = TripletSampler::new(config, Arc::clone(&store));
 
             let anchor = trader_record("readable_anchor", "2025-01-01", "Anchor", anchor_body);
@@ -6555,9 +6640,9 @@ mod tests {
     #[test]
     fn bm25_hard_negative_respects_same_source_split_pool() {
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let config = SamplerConfig {
             seed: 13,
@@ -6569,21 +6654,32 @@ mod tests {
             ..SamplerConfig::default()
         };
         let store = Arc::new(DeterministicSplitStore::new(split, 13).unwrap());
+        let find_train_id = |prefix: &str| -> String {
+            (0u32..)
+                .find_map(|i| {
+                    let id = format!("{prefix}_{i}");
+                    (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                })
+                .unwrap()
+        };
+        let anchor_id = find_train_id("bm25_anchor");
+        let similar_id = find_train_id("bm25_similar");
+        let distant_id = find_train_id("bm25_distant");
 
         let anchor = trader_record(
-            "bm25_anchor",
+            &anchor_id,
             "2025-01-01",
             "Apple banana quarterly report",
             "Apple banana revenue growth guidance",
         );
         let similar = trader_record(
-            "bm25_similar",
+            &similar_id,
             "2025-01-01",
             "Banana apple market update",
             "Revenue guidance for apple banana market",
         );
         let distant = trader_record(
-            "bm25_distant",
+            &distant_id,
             "2025-01-03",
             "Quantum field dynamics",
             "Black holes and gravitational lensing",
@@ -6616,9 +6712,9 @@ mod tests {
     #[test]
     fn bm25_negative_is_lexically_closer_than_uniform_pool_baseline() {
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let config = SamplerConfig {
             seed: 314,
@@ -6630,21 +6726,32 @@ mod tests {
             ..SamplerConfig::default()
         };
         let store = Arc::new(DeterministicSplitStore::new(split, 314).unwrap());
+        let find_train_id = |prefix: &str| -> String {
+            (0u32..)
+                .find_map(|i| {
+                    let id = format!("{prefix}_{i}");
+                    (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                })
+                .unwrap()
+        };
+        let anchor_id = find_train_id("bm25_lex_anchor");
+        let similar_id = find_train_id("bm25_lex_similar");
+        let distant_id = find_train_id("bm25_lex_distant");
 
         let anchor = trader_record(
-            "bm25_lex_anchor",
+            &anchor_id,
             "2025-01-01",
             "Apple banana quarterly report",
             "apple banana revenue growth guidance demand outlook",
         );
         let similar = trader_record(
-            "bm25_lex_similar",
+            &similar_id,
             "2025-01-01",
             "Banana apple market update",
             "apple banana revenue guidance and market demand outlook",
         );
         let distant = trader_record(
-            "bm25_lex_distant",
+            &distant_id,
             "2025-01-01",
             "Deep ocean geology",
             "tectonic plates abyssal sediment marine trench volcanism",
@@ -6742,9 +6849,9 @@ mod tests {
     #[test]
     fn custom_recipe_still_respects_strategy_pool_with_bm25() {
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let recipe = TripletRecipe {
             name: "custom_wrong_publication_date".into(),
@@ -6765,22 +6872,33 @@ mod tests {
             ..SamplerConfig::default()
         };
         let store = Arc::new(DeterministicSplitStore::new(split, 23).unwrap());
+        let find_train_id = |prefix: &str| -> String {
+            (0u32..)
+                .find_map(|i| {
+                    let id = format!("{prefix}_{i}");
+                    (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                })
+                .unwrap()
+        };
+        let ca_id = find_train_id("custom_anchor_a");
+        let cb_id = find_train_id("custom_anchor_b");
+        let cc_id = find_train_id("custom_anchor_c");
 
         let records = vec![
             trader_record(
-                "custom_anchor_a",
+                &ca_id,
                 "2025-01-01",
                 "Apple banana quarterly report",
                 "Apple banana revenue growth guidance",
             ),
             trader_record(
-                "custom_anchor_b",
+                &cb_id,
                 "2025-01-01",
                 "Apple banana management update",
                 "Apple banana demand outlook",
             ),
             trader_record(
-                "custom_anchor_c",
+                &cc_id,
                 "2025-01-02",
                 "Energy market briefing",
                 "Oil and gas supply outlook",
@@ -6922,9 +7040,9 @@ mod tests {
     #[test]
     fn bm25_ranked_candidates_match_raw_bm25_engine() {
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let config = SamplerConfig {
             seed: 991,
@@ -6935,7 +7053,8 @@ mod tests {
             split,
             ..SamplerConfig::default()
         };
-        let store = Arc::new(DeterministicSplitStore::new(split, 991).unwrap());
+        // seed=12: all "readable_*" IDs hash to Train under train:0.7.
+        let store = Arc::new(DeterministicSplitStore::new(split, 12).unwrap());
 
         let records = vec![
             trader_record(
@@ -7055,9 +7174,9 @@ mod tests {
     #[test]
     fn bm25_ranking_ignores_kvp_meta_prefix_tags() {
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let config = SamplerConfig {
             seed: 888,
@@ -7069,16 +7188,27 @@ mod tests {
             ..SamplerConfig::default()
         };
         let store = Arc::new(DeterministicSplitStore::new(split, 888).unwrap());
+        let find_train_id = |prefix: &str| -> String {
+            (0u32..)
+                .find_map(|i| {
+                    let id = format!("{prefix}_{i}");
+                    (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                })
+                .unwrap()
+        };
+        let anchor_id = find_train_id("kvp_anchor");
+        let bait_id = find_train_id("kvp_bait");
+        let plain_id = find_train_id("plain_text_best");
 
         let anchor = trader_record(
-            "kvp_anchor",
+            &anchor_id,
             "2025-01-01",
             "Anchor",
             "carbon pricing policy emissions roadmap",
         );
 
         let mut kvp_bait = trader_record(
-            "kvp_bait",
+            &bait_id,
             "2025-01-01",
             "KVP bait",
             "ancient pottery shards trench notes",
@@ -7091,7 +7221,7 @@ mod tests {
         kvp_bait.meta_prefix = Some(kvp);
 
         let plain_text_best = trader_record(
-            "plain_text_best",
+            &plain_id,
             "2025-01-01",
             "Plain text best",
             "carbon pricing policy emissions roadmap carbon market",
@@ -7119,7 +7249,7 @@ mod tests {
         let mut inner = sampler.inner.lock().unwrap();
         let anchor = inner
             .records
-            .get("kvp_anchor")
+            .get(&anchor_id)
             .cloned()
             .expect("anchor should exist");
 
@@ -7129,7 +7259,7 @@ mod tests {
             "expected BM25 to return ranked candidates"
         );
         assert_eq!(
-            ranked[0], "plain_text_best",
+            ranked[0], plain_id,
             "BM25 top candidate should be driven by plain section text, not KVP meta-prefix tags"
         );
     }
@@ -7138,9 +7268,9 @@ mod tests {
     #[test]
     fn bm25_triplets_never_reuse_text_across_slots() {
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let recipe = TripletRecipe {
             name: "bm25_text_distinct_slots".into(),
@@ -7161,22 +7291,33 @@ mod tests {
             ..SamplerConfig::default()
         };
         let store = Arc::new(DeterministicSplitStore::new(split, 91).unwrap());
+        let find_train_id = |prefix: &str| -> String {
+            (0u32..)
+                .find_map(|i| {
+                    let id = format!("{prefix}_{i}");
+                    (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                })
+                .unwrap()
+        };
+        let slot_anchor = find_train_id("bm25_slot_anchor");
+        let slot_same = find_train_id("bm25_slot_same_context");
+        let slot_unique = find_train_id("bm25_slot_unique_context");
 
         let records = vec![
             trader_record(
-                "bm25_slot_anchor",
+                &slot_anchor,
                 "2025-01-01",
                 "Anchor title unique",
                 "Shared duplicate context",
             ),
             trader_record(
-                "bm25_slot_same_context",
+                &slot_same,
                 "2025-01-01",
                 "Other title one",
                 "Shared duplicate context",
             ),
             trader_record(
-                "bm25_slot_unique_context",
+                &slot_unique,
                 "2025-01-01",
                 "Other title two",
                 "A fully distinct context body",
@@ -7226,20 +7367,21 @@ mod tests {
     #[test]
     fn bm25_cursor_state_is_cleared_on_each_record_snapshot_sync() {
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let store = Arc::new(DeterministicSplitStore::new(split, 2024).unwrap());
+        let sync_id = (0u32..)
+            .find_map(|i| {
+                let id = format!("strict_sync_anchor_{i}");
+                (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+            })
+            .unwrap();
         let sampler = TripletSampler::new(base_config(), Arc::clone(&store));
         sampler.register_source(Box::new(InMemorySource::new(
             "strict_sync_source",
-            vec![trader_record(
-                "strict_sync_anchor",
-                "2025-01-01",
-                "Anchor",
-                "body",
-            )],
+            vec![trader_record(&sync_id, "2025-01-01", "Anchor", "body")],
         )));
 
         let mut inner = sampler.inner.lock().unwrap();
@@ -7247,7 +7389,7 @@ mod tests {
 
         inner
             .bm25_negative_cursors
-            .insert(("strict_sync_anchor".to_string(), SplitLabel::Train), 42);
+            .insert((sync_id.clone(), SplitLabel::Train), 42);
         assert_eq!(inner.bm25_negative_cursors.len(), 1);
 
         // Strict contract: every snapshot sync clears BM25 cursor state, even if
@@ -7907,9 +8049,9 @@ mod tests {
     #[test]
     fn triplet_sampling_produces_anchor_positive_and_negative() {
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let config = SamplerConfig {
             seed: 6,
@@ -7929,19 +8071,19 @@ mod tests {
             ..SamplerConfig::default()
         };
         let store = Arc::new(DeterministicSplitStore::new(split, 43).unwrap());
+        let find_train_id = |prefix: &str| -> String {
+            (0u32..)
+                .find_map(|i| {
+                    let id = format!("{prefix}_{i}");
+                    (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                })
+                .unwrap()
+        };
+        let article_a = find_train_id("article_a");
+        let article_b = find_train_id("article_b");
         let records = vec![
-            trader_record(
-                "source_a::2025/01-01/article_a.txt",
-                "2025-01-01",
-                "Alpha",
-                "Body alpha",
-            ),
-            trader_record(
-                "source_a::2025/01-02/article_b.txt",
-                "2025-01-02",
-                "Beta",
-                "Body beta",
-            ),
+            trader_record(&article_a, "2025-01-01", "Alpha", "Body alpha"),
+            trader_record(&article_b, "2025-01-02", "Beta", "Body beta"),
         ];
         let sampler = TripletSampler::new(config, store);
         sampler.register_source(Box::new(InMemorySource::new("tt", records)));
@@ -7962,9 +8104,9 @@ mod tests {
     #[test]
     fn refresh_limit_caps_records_per_source() {
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let mut config = base_config();
         config.split = split;
@@ -7972,8 +8114,18 @@ mod tests {
         config.ingestion_max_records = 3;
         let store = Arc::new(DeterministicSplitStore::new(split, 37).unwrap());
         let base = Utc::now() - Duration::seconds(60);
-        let records: Vec<DataRecord> = (0..10)
-            .map(|idx| record_with_offset(&format!("record_{idx}"), base, idx as i64))
+        // Generate enough record IDs that at least 3 hash to Train; take the first 10.
+        let ids: Vec<String> = (0u32..)
+            .filter_map(|i| {
+                let id = format!("record_{i}");
+                (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+            })
+            .take(10)
+            .collect();
+        let records: Vec<DataRecord> = ids
+            .iter()
+            .enumerate()
+            .map(|(idx, id)| record_with_offset(id, base, idx as i64))
             .collect();
         let sampler = TripletSampler::new(config, store);
         sampler.register_source(Box::new(InMemorySource::new("unit", records)));
@@ -8038,9 +8190,9 @@ mod tests {
     #[test]
     fn triplet_batch_dedupes_identical_triplets() {
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let mut config = base_config();
         config.batch_size = 1;
@@ -8057,21 +8209,21 @@ mod tests {
         }];
 
         let store = Arc::new(DeterministicSplitStore::new(split, 77).unwrap());
+        let find_train_id = |prefix: &str| -> String {
+            (0u32..)
+                .find_map(|i| {
+                    let id = format!("{prefix}_{i}");
+                    (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                })
+                .unwrap()
+        };
+        let dedupe_a = find_train_id("dedupe_a");
+        let dedupe_b = find_train_id("dedupe_b");
         let sampler = TripletSampler::new(config, store);
 
         let records = vec![
-            trader_record(
-                "source_a::2025/01-01/dedupe_a.txt",
-                "2025-01-01",
-                "Dedupe A",
-                "Body A",
-            ),
-            trader_record(
-                "source_a::2025/01-02/dedupe_b.txt",
-                "2025-01-02",
-                "Dedupe B",
-                "Body B",
-            ),
+            trader_record(&dedupe_a, "2025-01-01", "Dedupe A", "Body A"),
+            trader_record(&dedupe_b, "2025-01-02", "Dedupe B", "Body B"),
         ];
         sampler.register_source(Box::new(InMemorySource::new("tt", records)));
 
@@ -8090,9 +8242,9 @@ mod tests {
     #[test]
     fn text_batch_dedupes_identical_chunks() {
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let mut config = base_config();
         config.batch_size = 1;
@@ -8106,21 +8258,21 @@ mod tests {
         }];
 
         let store = Arc::new(DeterministicSplitStore::new(split, 91).unwrap());
+        let find_train_id = |prefix: &str| -> String {
+            (0u32..)
+                .find_map(|i| {
+                    let id = format!("{prefix}_{i}");
+                    (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                })
+                .unwrap()
+        };
+        let dedupe_a = find_train_id("text_dedupe_a");
+        let dedupe_b = find_train_id("text_dedupe_b");
         let sampler = TripletSampler::new(config, store);
 
         let records = vec![
-            trader_record(
-                "source_a::2025/01-01/dedupe_a.txt",
-                "2025-01-01",
-                "Dedupe A",
-                "Body A",
-            ),
-            trader_record(
-                "source_a::2025/01-02/dedupe_b.txt",
-                "2025-01-02",
-                "Dedupe B",
-                "Body B",
-            ),
+            trader_record(&dedupe_a, "2025-01-01", "Dedupe A", "Body A"),
+            trader_record(&dedupe_b, "2025-01-02", "Dedupe B", "Body B"),
         ];
         sampler.register_source(Box::new(InMemorySource::new("tt", records)));
 
@@ -8180,9 +8332,9 @@ mod tests {
     #[test]
     fn epoch_sampling_visits_each_record_before_repeat() {
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let mut config = SamplerConfig {
             seed: 101,
@@ -8203,25 +8355,21 @@ mod tests {
         };
         config.allowed_splits = vec![SplitLabel::Train];
         let store = Arc::new(DeterministicSplitStore::new(split, 59).unwrap());
+        let find_train_id = |prefix: &str| -> String {
+            (0u32..)
+                .find_map(|i| {
+                    let id = format!("{prefix}_{i}");
+                    (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                })
+                .unwrap()
+        };
+        let epoch_a = find_train_id("epoch_a");
+        let epoch_b = find_train_id("epoch_b");
+        let epoch_c = find_train_id("epoch_c");
         let records = vec![
-            trader_record(
-                "source_a::2025/01-01/epoch_a.txt",
-                "2025-01-01",
-                "Epoch Alpha",
-                "Body alpha",
-            ),
-            trader_record(
-                "source_a::2025/01-02/epoch_b.txt",
-                "2025-01-02",
-                "Epoch Beta",
-                "Body beta",
-            ),
-            trader_record(
-                "source_a::2025/01-03/epoch_c.txt",
-                "2025-01-03",
-                "Epoch Gamma",
-                "Body gamma",
-            ),
+            trader_record(&epoch_a, "2025-01-01", "Epoch Alpha", "Body alpha"),
+            trader_record(&epoch_b, "2025-01-02", "Epoch Beta", "Body beta"),
+            trader_record(&epoch_c, "2025-01-03", "Epoch Gamma", "Body gamma"),
         ];
         let sampler = TripletSampler::new(config, store);
         sampler.register_source(Box::new(InMemorySource::new("tt", records)));
@@ -8245,9 +8393,9 @@ mod tests {
     #[test]
     fn epoch_sampling_persists_between_runs() {
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let temp = tempdir().unwrap();
         let store_path = temp.path().join("epoch_store");
@@ -8272,25 +8420,22 @@ mod tests {
             cfg.allowed_splits = vec![SplitLabel::Train];
             cfg
         };
+        let probe_store = DeterministicSplitStore::new(split, 73).unwrap();
+        let find_train_id = |prefix: &str| -> String {
+            (0u32..)
+                .find_map(|i| {
+                    let id = format!("{prefix}_{i}");
+                    (probe_store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                })
+                .unwrap()
+        };
+        let persist_a = find_train_id("persist_a");
+        let persist_b = find_train_id("persist_b");
+        let persist_c = find_train_id("persist_c");
         let dataset = vec![
-            trader_record(
-                "source_a::2025/02-01/persist_a.txt",
-                "2025-02-01",
-                "Persist A",
-                "Body a",
-            ),
-            trader_record(
-                "source_a::2025/02-02/persist_b.txt",
-                "2025-02-02",
-                "Persist B",
-                "Body b",
-            ),
-            trader_record(
-                "source_a::2025/02-03/persist_c.txt",
-                "2025-02-03",
-                "Persist C",
-                "Body c",
-            ),
+            trader_record(&persist_a, "2025-02-01", "Persist A", "Body a"),
+            trader_record(&persist_b, "2025-02-02", "Persist B", "Body b"),
+            trader_record(&persist_c, "2025-02-03", "Persist C", "Body c"),
         ];
 
         let first_anchor = {
@@ -8338,9 +8483,9 @@ mod tests {
     #[test]
     fn epoch_sampling_handles_new_records_after_restart() {
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let temp = tempdir().unwrap();
         let store_path = temp.path().join("epoch_store_new_records");
@@ -8363,19 +8508,22 @@ mod tests {
         };
         base_config.allowed_splits = vec![SplitLabel::Train];
 
+        let probe_store = DeterministicSplitStore::new(split, 111).unwrap();
+        let find_train_id = |prefix: &str| -> String {
+            (0u32..)
+                .find_map(|i| {
+                    let id = format!("{prefix}_{i}");
+                    (probe_store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                })
+                .unwrap()
+        };
+        let restart_a = find_train_id("restart_a");
+        let restart_b = find_train_id("restart_b");
+        let restart_c = find_train_id("restart_c");
+
         let initial_records = vec![
-            trader_record(
-                "source_a::2025/03-01/restart_a.txt",
-                "2025-03-01",
-                "Restart Alpha",
-                "Body alpha",
-            ),
-            trader_record(
-                "source_a::2025/03-02/restart_b.txt",
-                "2025-03-02",
-                "Restart Beta",
-                "Body beta",
-            ),
+            trader_record(&restart_a, "2025-03-01", "Restart Alpha", "Body alpha"),
+            trader_record(&restart_b, "2025-03-02", "Restart Beta", "Body beta"),
         ];
 
         // Prime the store and consume one record.
@@ -8398,7 +8546,7 @@ mod tests {
         // Restart with an extra record added.
         let mut expanded_records = initial_records.clone();
         expanded_records.push(trader_record(
-            "source_a::2025/03-03/restart_c.txt",
+            &restart_c,
             "2025-03-03",
             "Restart Gamma",
             "Body gamma",
@@ -8426,7 +8574,7 @@ mod tests {
                 }
             }
         }
-        assert!(seen.contains("source_a::2025/03-03/restart_c.txt"));
+        assert!(seen.contains(&restart_c));
     }
 
     #[test]
@@ -8439,9 +8587,9 @@ mod tests {
         // that derive their permutation seed from config.seed inside refresh()
         // would silently use epoch 0 instead of the persisted epoch.
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let temp = tempdir().unwrap();
         let store_path = temp.path().join("epoch_propagation_store");
@@ -8520,11 +8668,12 @@ mod tests {
 
     #[test]
     fn oversampling_advances_cursors_on_large_records() {
-        // Setup: Force all records into TRAIN split to avoid split-cycling confusion.
+        // All records (long_record, short_A, short_B, short_C) hash to Train
+        // with seed=123 and train:0.7 ratios.
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let mut config = base_config();
         config.batch_size = 3;
@@ -8638,9 +8787,9 @@ mod tests {
     #[test]
     fn text_sampling_balances_sources_without_epoch_tracker() {
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let mut config = base_config();
         config.batch_size = 2;
@@ -8654,14 +8803,24 @@ mod tests {
         }];
 
         let store = Arc::new(DeterministicSplitStore::new(split, 73).unwrap());
+        let find_train_id = |prefix: &str| -> String {
+            (0u32..)
+                .find_map(|i| {
+                    let id = format!("{prefix}_{i}");
+                    (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                })
+                .unwrap()
+        };
+        let factual_id = find_train_id("factual_record");
+        let opinion_id = find_train_id("opinionated_record");
         let sampler = TripletSampler::new(config, store);
 
         let mut factual = sample_record();
-        factual.id = "factual_record".into();
+        factual.id = factual_id.clone();
         factual.source = "qa_factual".into();
 
         let mut opinion = sample_record();
-        opinion.id = "opinionated_record".into();
+        opinion.id = opinion_id.clone();
         opinion.source = "qa_opinionated".into();
 
         sampler.register_source(Box::new(InMemorySource::new(
@@ -8685,10 +8844,12 @@ mod tests {
         let mut ids: Vec<_> = batch
             .samples
             .iter()
-            .map(|sample| sample.chunk.record_id.as_str())
+            .map(|sample| sample.chunk.record_id.clone())
             .collect();
         ids.sort();
-        assert_eq!(ids, vec!["factual_record", "opinionated_record"]);
+        let mut expected = vec![factual_id.clone(), opinion_id.clone()];
+        expected.sort();
+        assert_eq!(ids, expected);
     }
 
     #[test]
@@ -8764,9 +8925,9 @@ mod tests {
     #[test]
     fn adds_dynamic_chunk_pair_recipe_for_long_section_sources() {
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let mut config = base_config();
         config.batch_size = 1;
@@ -8868,9 +9029,9 @@ mod tests {
     #[test]
     fn does_not_add_dynamic_chunk_pair_recipe_when_all_sections_fit_window() {
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let mut config = base_config();
         config.batch_size = 1;
@@ -8897,9 +9058,21 @@ mod tests {
         let now = Utc::now();
         // All context sections are short and should not be classified as
         // chunk-window eligible for dynamic augmentation.
+        let store = Arc::new(DeterministicSplitStore::new(split, 118).unwrap());
+        // short2 is Test with seed=118 and train:0.7; use find_id for both.
+        let find_train_id = |prefix: &str| -> String {
+            (0u32..)
+                .find_map(|i| {
+                    let id = format!("{prefix}_{i}");
+                    (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                })
+                .unwrap()
+        };
+        let short1_id = find_train_id("short1");
+        let short2_id = find_train_id("short2");
         let records = vec![
             DataRecord {
-                id: "short1".into(),
+                id: short1_id,
                 source: "ignored_by_ingestion".into(),
                 created_at: now,
                 updated_at: now,
@@ -8922,7 +9095,7 @@ mod tests {
                 meta_prefix: None,
             },
             DataRecord {
-                id: "short2".into(),
+                id: short2_id,
                 source: "ignored_by_ingestion".into(),
                 created_at: now,
                 updated_at: now,
@@ -8945,8 +9118,6 @@ mod tests {
                 meta_prefix: None,
             },
         ];
-
-        let store = Arc::new(DeterministicSplitStore::new(split, 118).unwrap());
         let sampler = TripletSampler::new(config, store);
         sampler.register_source(Box::new(RecipeSource::new(records, recipes)));
         sampler
@@ -8970,9 +9141,9 @@ mod tests {
     #[test]
     fn adds_dynamic_chunk_pair_recipe_even_with_global_config_recipes() {
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let mut config = base_config();
         config.batch_size = 1;
@@ -9072,9 +9243,9 @@ mod tests {
     #[test]
     fn auto_injected_recipe_uses_distinct_context_chunks_for_anchor_and_positive() {
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let mut config = base_config();
         config.batch_size = 1;
@@ -9089,12 +9260,23 @@ mod tests {
         };
 
         let now = Utc::now();
-        // `long_anchor` is the only record with multiple context windows.
-        // `other_for_negative` exists only to satisfy WrongArticle negative selection.
+        // The multi-window record is the anchor; the single-window record exists
+        // only to satisfy WrongArticle negative selection.
         // This makes the expected anchor/positive chunk texts deterministic.
+        let store = Arc::new(DeterministicSplitStore::new(split, 119).unwrap());
+        let find_train_id = |prefix: &str| -> String {
+            (0u32..)
+                .find_map(|i| {
+                    let id = format!("{prefix}_{i}");
+                    (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                })
+                .unwrap()
+        };
+        let long_anchor_id = find_train_id("long_anchor");
+        let other_neg_id = find_train_id("other_for_negative");
         let records = vec![
             DataRecord {
-                id: "long_anchor".into(),
+                id: long_anchor_id.clone(),
                 source: "ignored_by_ingestion".into(),
                 created_at: now,
                 updated_at: now,
@@ -9109,7 +9291,7 @@ mod tests {
                 meta_prefix: None,
             },
             DataRecord {
-                id: "other_for_negative".into(),
+                id: other_neg_id,
                 source: "ignored_by_ingestion".into(),
                 created_at: now,
                 updated_at: now,
@@ -9125,7 +9307,6 @@ mod tests {
             },
         ];
 
-        let store = Arc::new(DeterministicSplitStore::new(split, 119).unwrap());
         let sampler = TripletSampler::new(config, store);
         // Empty default recipes means the auto-injected recipe is the only
         // recipe available for this source when long sections are detected.
@@ -9141,7 +9322,7 @@ mod tests {
             AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME
         );
         // Anchor/positive should be different windows from the same record.
-        assert_eq!(triplet.anchor.record_id, "long_anchor");
+        assert_eq!(triplet.anchor.record_id, long_anchor_id);
         assert_eq!(triplet.anchor.record_id, triplet.positive.record_id);
         assert_ne!(chunk_key(&triplet.anchor), chunk_key(&triplet.positive));
 
@@ -9170,9 +9351,9 @@ mod tests {
     #[test]
     fn auto_injected_recipe_never_uses_identical_anchor_and_positive_chunks() {
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let mut config = base_config();
         config.batch_size = 1;
@@ -9187,9 +9368,20 @@ mod tests {
         };
 
         let now = Utc::now();
+        let store = Arc::new(DeterministicSplitStore::new(split, 120).unwrap());
+        let find_train_id = |prefix: &str| -> String {
+            (0u32..)
+                .find_map(|i| {
+                    let id = format!("{prefix}_{i}");
+                    (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                })
+                .unwrap()
+        };
+        let long1_id = find_train_id("long1");
+        let long2_id = find_train_id("long2");
         let records = vec![
             DataRecord {
-                id: "long1".into(),
+                id: long1_id,
                 source: "ignored_by_ingestion".into(),
                 created_at: now,
                 updated_at: now,
@@ -9204,7 +9396,7 @@ mod tests {
                 meta_prefix: None,
             },
             DataRecord {
-                id: "long2".into(),
+                id: long2_id,
                 source: "ignored_by_ingestion".into(),
                 created_at: now,
                 updated_at: now,
@@ -9251,9 +9443,9 @@ mod tests {
     #[test]
     fn auto_injected_recipe_uses_window_chunks_for_anchor_and_positive() {
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let mut config = base_config();
         config.batch_size = 1;
@@ -9420,9 +9612,9 @@ mod tests {
     #[test]
     fn same_selector_triplet_returns_none_when_only_one_chunk_exists() {
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let mut config = base_config();
         config.chunking = ChunkingStrategy {
@@ -9489,9 +9681,9 @@ mod tests {
     #[test]
     fn sampler_allows_concurrent_batch_requests() {
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let store = Arc::new(DeterministicSplitStore::new(split, 9).unwrap());
         let mut config = base_config();
@@ -9507,12 +9699,17 @@ mod tests {
             instruction: None,
         }];
 
-        let records = vec![
-            sample_record(),
-            sample_record(),
-            sample_record(),
-            sample_record(),
-        ];
+        let records: Vec<DataRecord> = (0u32..)
+            .filter_map(|i| {
+                let id = format!("concurrent_{i}");
+                (store.label_for(&id) == Some(SplitLabel::Train)).then(|| {
+                    let mut r = sample_record();
+                    r.id = id;
+                    r
+                })
+            })
+            .take(4)
+            .collect();
         let sampler = Arc::new(TripletSampler::new(config, store));
         sampler.register_source(Box::new(InMemorySource::new("unit", records)));
 
@@ -9614,9 +9811,9 @@ mod tests {
 
     fn sampler_for_prefetch_tests() -> Arc<TripletSampler<DeterministicSplitStore>> {
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let store = Arc::new(DeterministicSplitStore::new(split, 501).unwrap());
         let mut config = base_config();
@@ -9640,18 +9837,22 @@ mod tests {
             instruction: None,
         }];
 
-        let sampler = Arc::new(TripletSampler::new(config, store));
-        let records: Vec<DataRecord> = (0..4)
-            .map(|idx| {
-                let mut record = trader_record(
-                    &format!("prefetch_{idx}"),
-                    "2025-01-01",
-                    &format!("Prefetch title {idx}"),
-                    &format!("Prefetch body {idx}"),
-                );
-                record.source = "prefetch_source".to_string();
-                record
+        let sampler = Arc::new(TripletSampler::new(config, store.clone()));
+        let records: Vec<DataRecord> = (0u32..)
+            .filter_map(|i| {
+                let id = format!("prefetch_{i}");
+                (store.label_for(&id) == Some(SplitLabel::Train)).then(|| {
+                    let mut record = trader_record(
+                        &id,
+                        "2025-01-01",
+                        &format!("Prefetch title {i}"),
+                        &format!("Prefetch body {i}"),
+                    );
+                    record.source = "prefetch_source".to_string();
+                    record
+                })
             })
+            .take(4)
             .collect();
         sampler.register_source(Box::new(InMemorySource::new("prefetch_source", records)));
         sampler
@@ -9726,17 +9927,20 @@ mod tests {
         // derives its offset from epoch_seed() ^ cycle.  Both are keyed to the
         // current epoch, so a different epoch shuffles the records differently.
         //
-        // With 6 records the probability that two distinct epoch seeds produce
-        // the same permutation is 1/6! ≈ 0.14%.  We fix the seed so the test
-        // is fully deterministic and will never spuriously pass.
+        // With the seed=55, 4 of 6 format IDs hash to Train with train:0.7.
+        // The probability that two distinct epoch seeds produce the same
+        // permutation of 4 records is 1/4! ≈ 4.2%, but fixed seeds make this
+        // deterministic.
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let store = Arc::new(DeterministicSplitStore::new(split, 55).unwrap());
 
-        let records: Vec<DataRecord> = (0..6)
+        // Filter to only records that hash to Train to ensure they are ingested.
+        let n_records = 6;
+        let records: Vec<DataRecord> = (0..n_records)
             .map(|i| {
                 trader_record(
                     &format!("epoch_order::rec_{i:02}"),
@@ -9745,7 +9949,9 @@ mod tests {
                     &format!("Body {i} with enough context for sampling"),
                 )
             })
+            .filter(|r| store.label_for(&r.id) == Some(SplitLabel::Train))
             .collect();
+        let n_train = records.len();
 
         let config = SamplerConfig {
             seed: 55,
@@ -9767,8 +9973,8 @@ mod tests {
         let sampler = TripletSampler::new(config, store);
         sampler.register_source(Box::new(InMemorySource::new("epoch_order", records)));
 
-        // Epoch 0: collect one anchor per batch across all 6 records.
-        let epoch0: Vec<String> = (0..6)
+        // Epoch 0: collect one anchor per batch across all Train records.
+        let epoch0: Vec<String> = (0..n_train)
             .map(|_| {
                 sampler
                     .next_triplet_batch(SplitLabel::Train)
@@ -9784,7 +9990,7 @@ mod tests {
         sampler.set_epoch(1).unwrap();
 
         // Epoch 1: collect the same number of batches.
-        let epoch1: Vec<String> = (0..6)
+        let epoch1: Vec<String> = (0..n_train)
             .map(|_| {
                 sampler
                     .next_triplet_batch(SplitLabel::Train)
@@ -9832,15 +10038,17 @@ mod tests {
         //       "a new epoch" is not just a different label on the same early pool.
         let base_seed = 0xC0FFEE_u64;
         let n_records = 20_usize;
-        let n_draws = 10_usize;
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let temp = tempdir().unwrap();
         let store_path = temp.path().join("epoch_seed_resume_store");
 
+        // Filter to only Train-hashing records; with seed=0xC0FFEE and train:0.7,
+        // 14 of the 20 format IDs hash to Train.
+        let probe_store = DeterministicSplitStore::new(split, base_seed).unwrap();
         let records: Vec<DataRecord> = (0..n_records)
             .map(|i| {
                 trader_record(
@@ -9850,7 +10058,11 @@ mod tests {
                     &format!("Body {i} with enough context for sampling"),
                 )
             })
+            .filter(|r| probe_store.label_for(&r.id) == Some(SplitLabel::Train))
             .collect();
+        let n_train = records.len();
+        // n_draws must be ≤ n_train to stay within cycle-0.
+        let n_draws = n_train / 2;
 
         let make_config = || SamplerConfig {
             seed: base_seed,
@@ -9908,7 +10120,6 @@ mod tests {
         }
 
         // Resume — fresh sampler, epoch loaded from store (no set_epoch call).
-        // cursor=1 + n_draws=10 draws = cursor 1→11, all within cycle-0 (11 < 20).
         let epoch1_sequence: Vec<String> = {
             let store = Arc::new(FileSplitStore::open(&store_path, split, base_seed).unwrap());
             let sampler = TripletSampler::new(make_config(), store);
@@ -9944,9 +10155,9 @@ mod tests {
         // shared-text record as a negative — that attempt must be rejected
         // (negative.text == positive.text) and the unique record used instead.
         let split = SplitRatios {
-            train: 1.0,
-            validation: 0.0,
-            test: 0.0,
+            train: 0.7,
+            validation: 0.2,
+            test: 0.1,
         };
         let mut config = base_config();
         config.batch_size = 1;
@@ -9963,6 +10174,14 @@ mod tests {
         }];
 
         let store = Arc::new(DeterministicSplitStore::new(split, 55).unwrap());
+        // src::content_dup_a and src::content_dup_b are Train with seed=55 and train:0.7.
+        // src::content_unique is Validation, so use find_id for it.
+        let unique_id = (0u32..)
+            .find_map(|i| {
+                let id = format!("content_unique_{i}");
+                (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+            })
+            .unwrap();
         let sampler = TripletSampler::new(config, store);
 
         // Two records share the same context text; one is genuinely distinct.
@@ -9980,7 +10199,7 @@ mod tests {
                 "Shared body text",
             ),
             trader_record(
-                "src::content_unique",
+                &unique_id,
                 "2025-01-03",
                 "Title C",
                 "Completely different body",
