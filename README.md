@@ -2,7 +2,7 @@
 
 [![made-with-rust][rust-logo]][rust-src-page] [![crates.io][crates-badge]][crates-page] [![MIT licensed][mit-license-badge]][mit-license-page] [![Apache 2.0 licensed][apache-2.0-license-badge]][apache-2.0-license-page] [![Coverage][coveralls-badge]][coveralls-page]
 
-_Compose an effectively unlimited supply of training triplets from your existing corpus — rule-driven, reproducible splits and source/shard ordering, and multi-source. Fast, reproducible baseline sampling (great for iteration/debug), with optional [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) hard-negative mining when you want stricter lexical difficulty._
+_Compose an effectively unlimited supply of [training triplets](https://en.wikipedia.org/wiki/Triplet_loss) from your existing corpus — rule-driven, reproducible splits and source/shard ordering, and multi-source. Fast, reproducible baseline sampling (great for iteration/debug), with optional [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) hard-negative mining when you want stricter lexical difficulty. The loss function is yours to choose; this crate handles the data._
 
 **WORK IN PROGRESS. THIS API IS BEING PROTOTYPED AND MAY CHANGE WITHOUT NOTICE.**
 
@@ -26,9 +26,11 @@ In metric learning, a triplet is a training example composed of:
  Triplet: (Anchor, Positive, Negative)
 ```
 
-Training on many `(anchor, positive, negative)` groups helps a model learn useful embedding space structure (similar items closer together, dissimilar items farther apart).
+Training on many `(anchor, positive, negative)` groups helps a model learn useful embedding space structure — see [triplet loss](https://en.wikipedia.org/wiki/Triplet_loss) for the learning objective.
 
-In this crate, those triplets are built automatically from one or more data sources using metadata-driven, user-defined recipes/selectors for anchor/positive/negative section choice.
+> _This crate is responsible for constructing those triplets from your data; the loss function, optimizer, and training loop are outside its scope and remain yours to choose._
+
+In this crate, triplets are built automatically from one or more data sources using metadata-driven, user-defined recipes/selectors for anchor/positive/negative section choice.
 
 ### What a triplet looks like
 
