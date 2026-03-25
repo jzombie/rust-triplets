@@ -7971,3 +7971,96 @@ fn bm25_ranked_candidates_are_scoped_to_anchor_source() {
          in a different source (global search regression)"
     );
 }
+
+/// When BM25 produces no candidates (e.g. because the chunk-window query text
+/// has no term overlap with any indexed document), `select_hard_negative` must
+/// fall back to random selection, and the fallback counter must be incremented.
+///
+/// Conversely, when the query text DOES share terms with a peer document, the
+/// BM25 ranked path is taken and the fallback counter stays put.
+#[cfg(all(feature = "bm25-mining", feature = "extended-metrics"))]
+#[test]
+fn bm25_fallback_counter_increments_when_no_bm25_candidates_match() {
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+    let config = SamplerConfig {
+        seed: 42,
+        batch_size: 1,
+        chunking: ChunkingStrategy::default(),
+        recipes: Vec::new(),
+        text_recipes: Vec::new(),
+        split,
+        ..SamplerConfig::default()
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 77).unwrap());
+
+    // Use two records whose bodies share clear terms so BM25 can rank them.
+    // We will call `select_negative_record` once with a query containing
+    // completely novel tokens (triggering fallback) and once with a query
+    // that shares terms with the peer (taking the BM25 ranked path).
+    let anchor_id = "bm25_fallback_anchor";
+    let peer_id = "bm25_fallback_peer";
+
+    let records = vec![
+        trader_record(
+            anchor_id,
+            "2025-06-01",
+            "Quarterly results",
+            "revenue profit margin guidance outlook fiscal year",
+        ),
+        trader_record(
+            peer_id,
+            "2025-06-02",
+            "Annual report",
+            "revenue profit margin guidance outlook fiscal year",
+        ),
+    ];
+
+    let sampler = TripletSampler::new(config, Arc::clone(&store));
+    sampler.register_source(Box::new(InMemorySource::new(PRIMARY_SOURCE_ID, records)));
+    sampler
+        .inner
+        .lock()
+        .unwrap()
+        .ingest_internal(SplitLabel::Train)
+        .unwrap();
+
+    let mut inner = sampler.inner.lock().unwrap();
+    let anchor = inner.records.get(anchor_id).cloned().expect("anchor");
+
+    // ── call 1: query with terms absent from all indexed documents ────────────
+    // BM25 returns no results → fallback is taken.
+    let novel_query = "xyzzy_zyxqnv_mnbvcx_qwfpgjluy_no_such_term";
+    let result = inner
+        .select_negative_record(&anchor, &NegativeStrategy::WrongArticle, Some(novel_query))
+        .expect("fallback must still return a negative");
+    assert_eq!(
+        result.0.id, peer_id,
+        "fallback must select the only available peer"
+    );
+
+    let (fallback, total) = inner.bm25_fallback_stats();
+    assert_eq!(total, 1, "selection count must be 1 after first call");
+    assert_eq!(
+        fallback, 1,
+        "fallback count must be 1 — novel query triggered BM25 fallback"
+    );
+
+    // ── call 2: query sharing terms with the peer ─────────────────────────────
+    // BM25 can rank the peer → the ranked path is taken, fallback count stays.
+    let shared_query = "revenue profit margin guidance outlook fiscal year";
+    let result2 = inner
+        .select_negative_record(&anchor, &NegativeStrategy::WrongArticle, Some(shared_query))
+        .expect("bm25 ranked path must return a negative");
+    assert_eq!(result2.0.id, peer_id);
+
+    let (fallback2, total2) = inner.bm25_fallback_stats();
+    assert_eq!(total2, 2, "selection count must be 2 after second call");
+    assert_eq!(
+        fallback2, 1,
+        "fallback count must remain 1 — shared-term query took the BM25 ranked path"
+    );
+}

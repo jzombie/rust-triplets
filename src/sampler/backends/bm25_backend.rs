@@ -60,6 +60,13 @@ pub struct Bm25Backend {
     /// `config.chunking.max_window_tokens` and is refreshed on every
     /// `on_records_refreshed` call.
     max_window_tokens: usize,
+    /// Total calls to `select_hard_negative` (non-empty pool).
+    #[cfg(feature = "extended-metrics")]
+    bm25_selection_count: u64,
+    /// Calls where BM25 yielded no candidates intersecting the pool and
+    /// the random fallback path was taken.
+    #[cfg(feature = "extended-metrics")]
+    bm25_fallback_count: u64,
 }
 
 impl Bm25Backend {
@@ -69,6 +76,10 @@ impl Bm25Backend {
             source_indexes: HashMap::new(),
             negative_cursors: HashMap::new(),
             max_window_tokens: 0,
+            #[cfg(feature = "extended-metrics")]
+            bm25_selection_count: 0,
+            #[cfg(feature = "extended-metrics")]
+            bm25_fallback_count: 0,
         }
     }
 
@@ -87,6 +98,11 @@ impl Bm25Backend {
     ) -> Option<(DataRecord, bool)> {
         if pool.is_empty() {
             return None;
+        }
+
+        #[cfg(feature = "extended-metrics")]
+        {
+            self.bm25_selection_count += 1;
         }
 
         // BM25 top-K rotation.
@@ -130,6 +146,10 @@ impl Bm25Backend {
 
         // BM25 yielded nothing in the pool — fall back to deterministic random
         // sampling within `pool`.
+        #[cfg(feature = "extended-metrics")]
+        {
+            self.bm25_fallback_count += 1;
+        }
         let mut fallback = pool.to_vec();
         fallback.sort_by(|a, b| a.id.cmp(&b.id));
         if fallback.is_empty() {
@@ -161,10 +181,10 @@ impl Bm25Backend {
         anchor_query_text: Option<&str>,
     ) -> Vec<RecordId> {
         // When using full-article text, serve from cache if available.
-        if anchor_query_text.is_none() {
-            if let Some(cached) = self.hard_negatives.get(&anchor.id) {
-                return cached.clone();
-            }
+        if anchor_query_text.is_none()
+            && let Some(cached) = self.hard_negatives.get(&anchor.id)
+        {
+            return cached.clone();
         }
 
         let Some(index) = self.source_indexes.get(anchor.source.as_str()) else {
@@ -190,7 +210,7 @@ impl Bm25Backend {
         // full scans per anchor.
         let results = index
             .search_engine
-            .search(&bm25_query_text, index.meta.len());
+            .search(bm25_query_text, index.meta.len());
         let mut all_scored: Vec<(f32, RecordId)> = results
             .into_iter()
             .filter_map(|result| {
@@ -352,6 +372,11 @@ impl NegativeBackend for Bm25Backend {
 
     fn cursors_empty(&self) -> bool {
         self.negative_cursors.is_empty()
+    }
+
+    #[cfg(all(feature = "bm25-mining", feature = "extended-metrics"))]
+    fn bm25_fallback_stats(&self) -> (u64, u64) {
+        (self.bm25_fallback_count, self.bm25_selection_count)
     }
 
     #[cfg(test)]

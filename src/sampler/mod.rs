@@ -2292,6 +2292,16 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             .expect("bm25_backend_mut: negative_backend is Bm25Backend when bm25-mining feature is active")
     }
 
+    // ── extended-metrics helpers ───────────────────────────────────────────────
+
+    /// Return cumulative `(fallback_count, selection_count)` from the BM25
+    /// backend since it was created.  Only available when both `bm25-mining`
+    /// and `extended-metrics` features are active.
+    #[cfg(all(feature = "bm25-mining", feature = "extended-metrics"))]
+    fn bm25_fallback_stats(&self) -> (u64, u64) {
+        self.negative_backend.bm25_fallback_stats()
+    }
+
     /// Look up `anchor`'s split label and return BM25-ranked candidate IDs.
     ///
     /// Mirrors the old `bm25_ranked_candidates` method that tests called on
@@ -2506,6 +2516,19 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     pub fn save_sampler_state(&self, save_to: Option<&Path>) -> Result<(), SamplerError> {
         let mut inner = self.inner.lock().unwrap();
         inner.save_sampler_state(save_to)
+    }
+
+    /// Return cumulative `(fallback_count, selection_count)` from the BM25
+    /// backend since it was created.  Only available when both `bm25-mining`
+    /// and `extended-metrics` features are active.
+    ///
+    /// `selection_count` counts calls where the pool was non-empty.
+    /// `fallback_count` counts the subset where BM25 produced no candidates
+    /// intersecting the pool and random selection was used instead.
+    #[cfg(all(feature = "bm25-mining", feature = "extended-metrics"))]
+    pub fn bm25_fallback_stats(&self) -> (u64, u64) {
+        let inner = self.inner.lock().unwrap();
+        inner.bm25_fallback_stats()
     }
 }
 

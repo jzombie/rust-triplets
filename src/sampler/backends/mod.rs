@@ -83,6 +83,15 @@ pub(super) trait NegativeBackend: Send {
     /// `valid_ids` set when nothing needs pruning.
     fn cursors_empty(&self) -> bool;
 
+    /// Return cumulative `(fallback_count, selection_count)` for BM25
+    /// hard-negative selection since the backend was created.
+    ///
+    /// `selection_count` counts non-empty-pool invocations; `fallback_count`
+    /// counts the subset where BM25 produced no candidates and random
+    /// selection was used instead.  Non-BM25 backends always return `(0, 0)`.
+    #[cfg(all(feature = "bm25-mining", feature = "extended-metrics"))]
+    fn bm25_fallback_stats(&self) -> (u64, u64);
+
     /// Expose as [`std::any::Any`] for test-only downcasting.
     ///
     /// Each concrete backend must implement this as `fn as_any_mut(&mut self)

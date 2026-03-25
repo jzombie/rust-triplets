@@ -57,6 +57,13 @@ impl NegativeBackend for DefaultBackend {
         true
     }
 
+    // Note: Even though the bm25 backend uses a different trait impl, this method
+    // must still be defined on the default for it to be compiled.
+    #[cfg(all(feature = "bm25-mining", feature = "extended-metrics"))]
+    fn bm25_fallback_stats(&self) -> (u64, u64) {
+        (0, 0)
+    }
+
     #[cfg(test)]
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self

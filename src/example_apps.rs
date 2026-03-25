@@ -693,6 +693,15 @@ where
             println!();
             print_metric_summary(&source_metrics);
         }
+
+        #[cfg(all(feature = "extended-metrics", feature = "bm25-mining"))]
+        {
+            let (fallback, total) = sampler.bm25_fallback_stats();
+            if total > 0 {
+                let pct = fallback as f64 / total as f64 * 100.0;
+                println!("bm25 fallback rate : {}/{} ({:.1}%)", fallback, total, pct);
+            }
+        }
     } else {
         match sampler.next_triplet_batch(selected_split) {
             Ok(triplet_batch) => {
