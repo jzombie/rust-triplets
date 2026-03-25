@@ -718,6 +718,23 @@ fn print_triplet_batch(
         print_chunk_block("ANCHOR", &triplet.anchor, strategy, split_store);
         print_chunk_block("POSITIVE", &triplet.positive, strategy, split_store);
         print_chunk_block("NEGATIVE", &triplet.negative, strategy, split_store);
+        #[cfg(feature = "extended-metrics")]
+        {
+            use crate::metrics::lexical_similarity_scores;
+            let (pos_j, pos_c) =
+                lexical_similarity_scores(&triplet.anchor.text, &triplet.positive.text);
+            let (neg_j, neg_c) =
+                lexical_similarity_scores(&triplet.anchor.text, &triplet.negative.text);
+            println!("--- extended metrics ---");
+            println!(
+                "jaccard anchor↔positive: {:.4}  cosine anchor↔positive: {:.4}",
+                pos_j, pos_c
+            );
+            println!(
+                "jaccard anchor↔negative: {:.4}  cosine anchor↔negative: {:.4}",
+                neg_j, neg_c
+            );
+        }
     }
     print_source_summary(
         "triplet anchors",

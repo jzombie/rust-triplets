@@ -212,10 +212,11 @@ Each source is independent: sources can carry their own recipe rules tailored to
 
 ## Features
 
-| Feature       | What it enables                                                                                                                                                                                                                                                                                                                     | Default |
-|---------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|
-| `huggingface` | `HuggingFaceRowSource` — streaming download and sampling from Hugging Face dataset repositories (parquet/ndjson shards, ClassLabel resolution, disk-cap eviction). Adds `hf-hub`, `parquet`, `ureq`, `rayon`, `serde_json`.                                                                                                         | No      |
-| `bm25-mining` | BM25 hard-negative ranking within strategy-defined candidate pools. Adds a `bm25` dependency. Rule-based strategy selection always runs first to define the eligible pool; BM25 re-ranks within that pool when this feature is enabled. When absent, candidate selection within each strategy pool is uniform (no re-ranking step). | No      |
+| Feature            | What it enables                                                                                                                                                                                                                                                                                                                                                            | Default |
+|--------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|
+| `huggingface`      | `HuggingFaceRowSource` — streaming download and sampling from Hugging Face dataset repositories (parquet/ndjson shards, ClassLabel resolution, disk-cap eviction). Adds `hf-hub`, `parquet`, `ureq`, `rayon`, `serde_json`.                                                                                                                                                | No      |
+| `bm25-mining`      | BM25 hard-negative ranking within strategy-defined candidate pools. Adds a `bm25` dependency. Rule-based strategy selection always runs first to define the eligible pool; BM25 re-ranks within that pool when this feature is enabled. When absent, candidate selection within each strategy pool is uniform (no re-ranking step).                                        | No      |
+| `extended-metrics` | Enables additional per-triplet similarity diagnostics in the `multi_source_demo` output. Currently prints the Jaccard similarity (word-token overlap) between the anchor and each of the positive and negative chunks for every triplet in a batch. Adds no dependencies. Intended for manual inspection and debugging of sampling quality, not for use in training loops. | No      |
 
 ```toml
 [dependencies]
@@ -229,6 +230,9 @@ Neither feature is on by default; enable them independently or together.
 ```bash
 # sample triplet batches from the example dataset
 cargo run --example multi_source_demo
+
+# sample with extended per-triplet similarity metrics (Jaccard anchor↔positive and anchor↔negative)
+cargo run --features extended-metrics --example multi_source_demo
 
 # inspect CLI flags
 cargo run --example multi_source_demo -- --help

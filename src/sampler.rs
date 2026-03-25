@@ -3263,58 +3263,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "bm25-mining")]
-    fn lexical_similarity_scores(left: &str, right: &str) -> (f32, f32) {
-        if left.is_empty() || right.is_empty() {
-            return (0.0, 0.0);
-        }
-
-        // Raw UTF-8 byte-level metrics (no token heuristics), implemented locally
-        // so default test builds do not depend on optional SIMD crates.
-        let mut left_freq = [0.0_f32; 256];
-        let mut right_freq = [0.0_f32; 256];
-        let mut left_bits = [0_u8; 32];
-        let mut right_bits = [0_u8; 32];
-
-        for byte in left.as_bytes() {
-            let idx = *byte as usize;
-            left_freq[idx] += 1.0;
-            left_bits[idx / 8] |= 1_u8 << (idx % 8);
-        }
-        for byte in right.as_bytes() {
-            let idx = *byte as usize;
-            right_freq[idx] += 1.0;
-            right_bits[idx / 8] |= 1_u8 << (idx % 8);
-        }
-
-        let dot: f32 = left_freq
-            .iter()
-            .zip(right_freq.iter())
-            .map(|(a, b)| a * b)
-            .sum();
-        let left_norm_sq: f32 = left_freq.iter().map(|v| v * v).sum();
-        let right_norm_sq: f32 = right_freq.iter().map(|v| v * v).sum();
-        let cosine_similarity = if left_norm_sq > 0.0 && right_norm_sq > 0.0 {
-            dot / (left_norm_sq.sqrt() * right_norm_sq.sqrt())
-        } else {
-            0.0
-        };
-
-        let mut intersection = 0_u32;
-        let mut union = 0_u32;
-        for i in 0..left_bits.len() {
-            intersection += (left_bits[i] & right_bits[i]).count_ones();
-            union += (left_bits[i] | right_bits[i]).count_ones();
-        }
-        let jaccard_similarity = if union > 0 {
-            intersection as f32 / union as f32
-        } else {
-            0.0
-        };
-
-        (jaccard_similarity, cosine_similarity)
-    }
-
     fn extract_date_prefix(chunk_text: &str) -> Option<String> {
         let first_line = chunk_text.lines().next()?;
         let prefix = first_line.strip_prefix("meta: ")?;
@@ -6835,7 +6783,8 @@ mod tests {
             for candidate in &pool {
                 let candidate_text =
                     record_bm25_text(candidate, inner.config.chunking.max_window_tokens);
-                let (j_score, c_score) = lexical_similarity_scores(&anchor_text, &candidate_text);
+                let (j_score, c_score) =
+                    crate::metrics::lexical_similarity_scores(&anchor_text, &candidate_text);
                 j_total += j_score;
                 c_total += c_score;
             }
@@ -6859,7 +6808,7 @@ mod tests {
             .cloned()
             .expect("top BM25 candidate must be in records");
         let top_text = record_bm25_text(&top_candidate, inner.config.chunking.max_window_tokens);
-        let (j_top, c_top) = lexical_similarity_scores(&anchor_text, &top_text);
+        let (j_top, c_top) = crate::metrics::lexical_similarity_scores(&anchor_text, &top_text);
 
         assert!(
             j_top > mean_pool_jaccard,

@@ -152,4 +152,99 @@ mod tests {
         assert_eq!(skew.per_source[1].source, "B");
         assert!(skew.per_source.iter().all(|entry| entry.share == 0.0));
     }
+
+    #[cfg(any(feature = "bm25-mining", feature = "extended-metrics"))]
+    #[test]
+    fn lexical_similarity_identical_strings_score_one() {
+        let (j, c) = lexical_similarity_scores("hello world", "hello world");
+        assert!((j - 1.0).abs() < 1e-6, "jaccard={j}");
+        assert!((c - 1.0).abs() < 1e-6, "cosine={c}");
+    }
+
+    #[cfg(any(feature = "bm25-mining", feature = "extended-metrics"))]
+    #[test]
+    fn lexical_similarity_empty_inputs_score_zero() {
+        assert_eq!(lexical_similarity_scores("", "hello"), (0.0, 0.0));
+        assert_eq!(lexical_similarity_scores("hello", ""), (0.0, 0.0));
+        assert_eq!(lexical_similarity_scores("", ""), (0.0, 0.0));
+    }
+
+    #[cfg(any(feature = "bm25-mining", feature = "extended-metrics"))]
+    #[test]
+    fn lexical_similarity_scores_are_in_unit_range() {
+        let cases = [
+            ("foo bar baz", "qux quux"),
+            ("abc", "abc def"),
+            ("the quick brown fox", "jumped over the lazy dog"),
+        ];
+        for (a, b) in cases {
+            let (j, c) = lexical_similarity_scores(a, b);
+            assert!(
+                (0.0..=1.0).contains(&j),
+                "jaccard={j} out of range for ({a:?}, {b:?})"
+            );
+            assert!(
+                (0.0..=1.0).contains(&c),
+                "cosine={c} out of range for ({a:?}, {b:?})"
+            );
+        }
+    }
+}
+
+/// Compute byte-level Jaccard and cosine similarity scores between two strings.
+///
+/// Uses raw UTF-8 byte occurrence frequencies (no tokenisation), so it is fast
+/// and dependency-free. Returns `(jaccard, cosine)` each in `[0.0, 1.0]`;
+/// both are `0.0` when either input is empty.
+///
+/// Used by BM25 ranking tests to verify top-ranked candidates beat the
+/// uniform-pool baseline, and by the `extended-metrics` demo output.
+#[cfg(any(feature = "bm25-mining", feature = "extended-metrics"))]
+pub(crate) fn lexical_similarity_scores(left: &str, right: &str) -> (f32, f32) {
+    if left.is_empty() || right.is_empty() {
+        return (0.0, 0.0);
+    }
+
+    let mut left_freq = [0.0_f32; 256];
+    let mut right_freq = [0.0_f32; 256];
+    let mut left_bits = [0_u8; 32];
+    let mut right_bits = [0_u8; 32];
+
+    for byte in left.as_bytes() {
+        let idx = *byte as usize;
+        left_freq[idx] += 1.0;
+        left_bits[idx / 8] |= 1_u8 << (idx % 8);
+    }
+    for byte in right.as_bytes() {
+        let idx = *byte as usize;
+        right_freq[idx] += 1.0;
+        right_bits[idx / 8] |= 1_u8 << (idx % 8);
+    }
+
+    let dot: f32 = left_freq
+        .iter()
+        .zip(right_freq.iter())
+        .map(|(a, b)| a * b)
+        .sum();
+    let left_norm_sq: f32 = left_freq.iter().map(|v| v * v).sum();
+    let right_norm_sq: f32 = right_freq.iter().map(|v| v * v).sum();
+    let cosine = if left_norm_sq > 0.0 && right_norm_sq > 0.0 {
+        dot / (left_norm_sq.sqrt() * right_norm_sq.sqrt())
+    } else {
+        0.0
+    };
+
+    let mut intersection = 0_u32;
+    let mut union = 0_u32;
+    for i in 0..left_bits.len() {
+        intersection += (left_bits[i] & right_bits[i]).count_ones();
+        union += (left_bits[i] | right_bits[i]).count_ones();
+    }
+    let jaccard = if union > 0 {
+        intersection as f32 / union as f32
+    } else {
+        0.0
+    };
+
+    (jaccard, cosine)
 }

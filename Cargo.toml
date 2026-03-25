@@ -19,6 +19,7 @@ keywords = [
 default = []
 huggingface = ["dep:serde_json", "dep:hf-hub", "dep:parquet", "dep:ureq", "dep:rayon"]
 bm25-mining = ["dep:bm25"]
+extended-metrics = []
 
 [dependencies]
 bitcode = "0.6.9"
