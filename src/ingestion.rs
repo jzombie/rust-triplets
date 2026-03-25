@@ -319,6 +319,20 @@ impl IngestionManager {
             .collect()
     }
 
+    /// Return a flat snapshot of every record currently in all per-source
+    /// buffers (i.e. every record fetched since the last refresh, not just
+    /// the LRU-capped shared cache window).
+    ///
+    /// Records are cloned in source order; the `source` field is guaranteed
+    /// to be set (it is normalised in `refresh_all_internal`).
+    #[cfg(feature = "bm25-mining")]
+    pub fn buffer_snapshot(&self) -> Vec<DataRecord> {
+        self.sources
+            .iter()
+            .flat_map(|s| s.buffer.iter().cloned())
+            .collect()
+    }
+
     /// Access the shared record cache.
     pub fn cache(&self) -> RecordCache {
         self.cache.clone()

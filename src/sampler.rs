@@ -40,8 +40,30 @@ use crate::splits::{
 use crate::types::{RecipeKey, RecordId, SourceId};
 
 #[cfg(feature = "bm25-mining")]
-struct Bm25SourceIndex {
-    record_ids: Vec<RecordId>,
+/// Metadata stored alongside each indexed document in the global BM25 index.
+#[cfg(feature = "bm25-mining")]
+struct Bm25RecordMeta {
+    record_id: RecordId,
+    source: SourceId,
+    /// Cached split label (None when the record has not yet been split-assigned).
+    split: Option<SplitLabel>,
+    /// Raw publication-date string from taxonomy, if present.
+    date: Option<String>,
+    /// Full record, stored so BM25-selected candidates can be returned even
+    /// when they have been evicted from the LRU shared cache.
+    record: DataRecord,
+}
+
+/// Single global BM25 search engine built over all per-source buffer records.
+///
+/// Replaces the old per-`(SourceId, SplitLabel)` index map so BM25 ranking
+/// sees the full `ingestion_max_records` pool for each source rather than
+/// the LRU-diluted window that results from sharing a global cache across N
+/// sources.
+#[cfg(feature = "bm25-mining")]
+struct Bm25GlobalIndex {
+    /// Metadata for document at each sequential index position.
+    meta: Vec<Bm25RecordMeta>,
     search_engine: SearchEngine<usize>,
 }
 
@@ -303,9 +325,9 @@ struct TripletSamplerInner<S: SplitStore + EpochStateStore + SamplerStateStore +
     /// Lazy BM25-ranked candidate cache for anchors in the current ingest snapshot.
     #[cfg(feature = "bm25-mining")]
     bm25_hard_negatives: HashMap<RecordId, Vec<RecordId>>,
-    /// BM25 engines built once per source/split for the current ingest snapshot.
+    /// Global BM25 engine built over the full per-source buffer on each refresh cycle.
     #[cfg(feature = "bm25-mining")]
-    bm25_source_indices: HashMap<(SourceId, SplitLabel), Bm25SourceIndex>,
+    bm25_global_index: Option<Bm25GlobalIndex>,
     /// Per-anchor cursor for deterministic rotation through top BM25 hard negatives.
     #[cfg(feature = "bm25-mining")]
     bm25_negative_cursors: HashMap<(RecordId, SplitLabel), usize>,
@@ -379,7 +401,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             #[cfg(feature = "bm25-mining")]
             bm25_hard_negatives: HashMap::new(),
             #[cfg(feature = "bm25-mining")]
-            bm25_source_indices: HashMap::new(),
+            bm25_global_index: None,
             #[cfg(feature = "bm25-mining")]
             bm25_negative_cursors: HashMap::new(),
             chunk_index: HashMap::new(),
@@ -1011,6 +1033,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                         anchor_split,
                         same_date,
                         false,
+                        strategy,
                     );
                 }
                 let pool = self
@@ -1021,7 +1044,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                     })
                     .cloned()
                     .collect::<Vec<_>>();
-                self.choose_negative_from_pool(anchor_record, anchor_split, pool, true)
+                self.choose_negative_from_pool(anchor_record, anchor_split, pool, true, strategy)
             }
             NegativeStrategy::WrongPublicationDate => {
                 let anchor_date =
@@ -1064,10 +1087,11 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                         anchor_split,
                         fallback_pool,
                         true,
+                        strategy,
                     );
                 }
 
-                self.choose_negative_from_pool(anchor_record, anchor_split, pool, false)
+                self.choose_negative_from_pool(anchor_record, anchor_split, pool, false, strategy)
             }
             NegativeStrategy::QuestionAnswerMismatch => {
                 let pool: Vec<DataRecord> = self
@@ -1097,10 +1121,11 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                         anchor_split,
                         fallback_pool,
                         true,
+                        strategy,
                     );
                 }
 
-                self.choose_negative_from_pool(anchor_record, anchor_split, pool, false)
+                self.choose_negative_from_pool(anchor_record, anchor_split, pool, false, strategy)
             }
         }
     }
@@ -1112,8 +1137,15 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         anchor_split: SplitLabel,
         pool: Vec<DataRecord>,
         fallback_used: bool,
+        strategy: &NegativeStrategy,
     ) -> Option<(DataRecord, bool)> {
-        self.select_bm25_hard_negative_record(anchor_record, anchor_split, &pool, fallback_used)
+        self.select_bm25_hard_negative_record(
+            anchor_record,
+            anchor_split,
+            &pool,
+            fallback_used,
+            strategy,
+        )
     }
 
     #[cfg(not(feature = "bm25-mining"))]
@@ -1123,6 +1155,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         _anchor_split: SplitLabel,
         pool: Vec<DataRecord>,
         fallback_used: bool,
+        _strategy: &NegativeStrategy,
     ) -> Option<(DataRecord, bool)> {
         // Without BM25 enabled, negatives are sampled uniformly from the strategy pool.
         pool.choose(&mut self.rng)
@@ -1137,41 +1170,72 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         anchor_split: SplitLabel,
         pool: &[DataRecord],
         fallback_used: bool,
+        strategy: &NegativeStrategy,
     ) -> Option<(DataRecord, bool)> {
         if pool.is_empty() {
             return None;
         }
 
         // BM25 top-K rotation (deterministic, per anchor+split):
-        // 1) Build `ranked_pool` from BM25 ranking, restricted to strategy pool and split.
+        // 1) Walk the globally ranked list, post-filtering by strategy metadata predicates.
+        //    This sees the full per-source buffer pool, not just the LRU-capped window.
         // 2) Compute `top_k = min(configured_top_k, ranked_pool.len())`.
         // 3) Read per-(anchor_id, split) cursor, defaulting to 0.
         // 4) Return `ranked_pool[cursor]`, then advance cursor modulo `top_k`.
         //
-        // This yields sequences like [r1, r2, r3, r1, ...] for `top_k = 3`.
-        // Cursors are cleared whenever BM25 indices are rebuilt so a refreshed corpus
+        // Cursors are cleared whenever the index is rebuilt so a refreshed corpus
         // restarts rotation from rank-1 for each anchor.
 
-        // Restrict BM25 candidates to the strategy-selected pool for this recipe.
-        let pool_ids: HashSet<RecordId> = pool.iter().map(|record| record.id.clone()).collect();
+        let anchor_date = taxonomy_value(anchor_record, META_FIELD_DATE).map(|d| d.to_string());
 
-        // Read ranked candidates from the per-anchor BM25 cache/index.
-        let candidate_ids = self.bm25_ranked_candidates(anchor_record, anchor_split);
-        let mut ranked_pool = Vec::new();
-        for candidate_id in &candidate_ids {
-            if !pool_ids.contains(candidate_id) {
-                continue;
-            }
-            // Keep split isolation strict even under BM25 ranking.
-            if let Some(candidate) = self.records.get(candidate_id)
-                && candidate.id != anchor_record.id
-                && self
-                    .split_store
-                    .label_for(&candidate.id)
-                    .map(|label| label == anchor_split)
-                    .unwrap_or(false)
-            {
-                ranked_pool.push(candidate.clone());
+        // Read globally ranked candidate ids from the per-anchor BM25 cache.
+        let candidate_ids = self.bm25_ranked_candidates(anchor_record);
+
+        // Build a lookup from record_id -> &Bm25RecordMeta for the global index.
+        // We do this inline so we hold no borrow on self after the lookup.
+        let mut ranked_pool: Vec<DataRecord> = Vec::new();
+        if let Some(index) = self.bm25_global_index.as_ref() {
+            // Build a fast id→meta map for this query.
+            let meta_map: HashMap<&RecordId, &Bm25RecordMeta> =
+                index.meta.iter().map(|m| (&m.record_id, m)).collect();
+
+            for candidate_id in &candidate_ids {
+                let Some(m) = meta_map.get(candidate_id) else {
+                    continue;
+                };
+                if m.record_id == anchor_record.id {
+                    continue;
+                }
+                // Strict split isolation.
+                if m.split != Some(anchor_split) {
+                    continue;
+                }
+                // Apply same-source constraint that all strategies require.
+                if m.source != anchor_record.source {
+                    if !fallback_used {
+                        continue;
+                    }
+                }
+                // Strategy-specific date predicate.
+                let passes = match strategy {
+                    NegativeStrategy::WrongPublicationDate => {
+                        match (anchor_date.as_deref(), m.date.as_deref()) {
+                            (Some(a), Some(b)) => a != b,
+                            (Some(_), None) => true,
+                            (None, Some(_)) => true,
+                            (None, None) => false,
+                        }
+                    }
+                    // WrongArticle: same date preferred, but any same-source record is valid.
+                    // QuestionAnswerMismatch: no date constraint.
+                    NegativeStrategy::WrongArticle | NegativeStrategy::QuestionAnswerMismatch => {
+                        true
+                    }
+                };
+                if !passes {
+                    continue;
+                }
+                ranked_pool.push(m.record.clone());
             }
         }
 
@@ -1190,9 +1254,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             return selected.map(|record| (record, fallback_used));
         }
 
-        // Preserve strategy behavior: if BM25 yields no usable candidate inside
-        // the strategy-selected pool, fall back to deterministic sampling within
-        // that same pool.
+        // BM25 yielded nothing matching the strategy constraints — fall back to
+        // deterministic random sampling within the strategy-built pool (LRU-based).
         let mut fallback = pool.to_vec();
         fallback.sort_by(|a, b| a.id.cmp(&b.id));
         if fallback.is_empty() {
@@ -1206,25 +1269,25 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     }
 
     #[cfg(feature = "bm25-mining")]
-    fn bm25_ranked_candidates(
-        &mut self,
-        anchor_record: &DataRecord,
-        anchor_split: SplitLabel,
-    ) -> Vec<RecordId> {
+    fn bm25_ranked_candidates(&mut self, anchor_record: &DataRecord) -> Vec<RecordId> {
         if let Some(cached) = self.bm25_hard_negatives.get(&anchor_record.id) {
             return cached.clone();
         }
 
-        let key = (anchor_record.source.clone(), anchor_split);
-        let Some(index) = self.bm25_source_indices.get(&key) else {
+        let Some(index) = self.bm25_global_index.as_ref() else {
             self.bm25_hard_negatives
                 .insert(anchor_record.id.clone(), Vec::new());
             return Vec::new();
         };
 
+        // Split membership is determined once here so candidates are restricted
+        // to the same split as the anchor, matching the split-isolation invariant
+        // upheld everywhere else in the sampler.
+        let anchor_split = self.split_store.label_for(&anchor_record.id);
+
         let bm25_query_text =
             record_bm25_text(anchor_record, self.config.chunking.max_window_tokens);
-        let max_results = index.record_ids.len();
+        let max_results = index.meta.len();
         let mut results = index.search_engine.search(&bm25_query_text, max_results);
         results.sort_by(|a, b| {
             b.score
@@ -1236,13 +1299,17 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         let mut ranked = Vec::new();
         for result in results {
             let candidate_idx = result.document.id;
-            let Some(candidate_id) = index.record_ids.get(candidate_idx) else {
+            let Some(m) = index.meta.get(candidate_idx) else {
                 continue;
             };
-            if candidate_id == &anchor_record.id {
+            if m.record_id == anchor_record.id {
                 continue;
             }
-            ranked.push(candidate_id.clone());
+            // Only keep candidates assigned to the same split.
+            if m.split != anchor_split {
+                continue;
+            }
+            ranked.push(m.record_id.clone());
         }
 
         self.bm25_hard_negatives
@@ -1250,88 +1317,73 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         ranked
     }
 
-    /// Build one BM25 search engine per `(SourceId, SplitLabel)` bucket.
+    /// Build a single global BM25 search engine over every record that exists
+    /// in all per-source buffers, carrying per-document metadata for post-rank
+    /// filtering.
     ///
-    /// Each engine indexes only the records from the corresponding source in that
-    /// split, so BM25 ranking never crosses source or split boundaries. This
-    /// scoping mirrors the `NegativeStrategy` candidate pool: BM25 re-ranks
-    /// within the in-source pool, it does not widen it.
+    /// This replaces the old per-`(SourceId, SplitLabel)` index map.  The old
+    /// design partitioned the shared LRU cache by source, which meant each
+    /// source's BM25 candidate pool was at most `ingestion_max_records / N_sources`.
+    /// By indexing the full per-source buffers instead, each source's BM25 pool
+    /// is `ingestion_max_records` records regardless of how many sources are active.
     ///
-    /// The index is rebuilt from scratch on every source-refresh cycle
-    /// (`last_refreshed_sources` non-empty) and is a no-op otherwise, so batches
-    /// that only drain the existing cache skip the rebuild entirely.
+    /// Strategy constraints (same source, same split, date match) are applied as
+    /// post-rank predicates inside `bm25_ranked_candidates_filtered` rather than
+    /// as pre-partitioning keys, so one query against the global engine serves all
+    /// strategies without re-building separate engines.
     ///
-    /// BM25 is a keyword-overlap ranker and is intentionally scoped to a first-pass
-    /// lexical difficulty lift. Semantic or dense-retrieval re-ranking is expected
-    /// to be handled outside this pipeline (pre-ranked sources, encoder-based
-    /// iterative mining, etc.).
+    /// The index is rebuilt from scratch on every source-refresh cycle and is a
+    /// no-op otherwise.
     #[cfg(feature = "bm25-mining")]
     fn rebuild_bm25_hard_negative_index(&mut self) {
         self.bm25_hard_negatives.clear();
-        self.bm25_source_indices.clear();
+        self.bm25_global_index = None;
         self.bm25_negative_cursors.clear();
-        if self.records.len() < 2 {
+
+        // Build from the full per-source buffers, not the LRU-capped shared cache.
+        let buffer = self.ingestion.buffer_snapshot();
+
+        // Also include records already in the LRU cache that may have been
+        // displaced from the buffer by the round-robin drain but are still live.
+        // Keyed by record id so duplicates (same record in both) are deduplicated.
+        let mut all_records: IndexMap<RecordId, DataRecord> = IndexMap::new();
+        for record in self.records.values() {
+            all_records.insert(record.id.clone(), record.clone());
+        }
+        for record in buffer {
+            all_records.entry(record.id.clone()).or_insert(record);
+        }
+
+        if all_records.len() < 2 {
             return;
         }
 
-        let record_ids: Vec<RecordId> = self.records.keys().cloned().collect();
-        let split_by_id: HashMap<RecordId, SplitLabel> = record_ids
-            .iter()
-            .filter_map(|record_id| {
-                self.split_store
-                    .label_for(record_id)
-                    .map(|split| (record_id.clone(), split))
-            })
-            .collect();
+        let max_tokens = self.config.chunking.max_window_tokens;
+        let mut meta: Vec<Bm25RecordMeta> = Vec::with_capacity(all_records.len());
+        let mut docs: Vec<Document<usize>> = Vec::with_capacity(all_records.len());
 
-        let mut records_by_source_and_split: HashMap<(SourceId, SplitLabel), Vec<RecordId>> =
-            HashMap::new();
-        for record_id in self.records.keys() {
-            let Some(record) = self.records.get(record_id) else {
-                continue;
-            };
-            let Some(split) = split_by_id.get(record_id).copied() else {
-                continue;
-            };
-            records_by_source_and_split
-                .entry((record.source.clone(), split))
-                .or_default()
-                .push(record_id.clone());
+        for (idx, record) in all_records.values().enumerate() {
+            let split = self.split_store.label_for(&record.id);
+            let date = taxonomy_value(record, META_FIELD_DATE).map(|s| s.to_string());
+            meta.push(Bm25RecordMeta {
+                record_id: record.id.clone(),
+                source: record.source.clone(),
+                split,
+                date,
+                record: record.clone(),
+            });
+            docs.push(Document {
+                id: idx,
+                contents: record_bm25_text(record, max_tokens),
+            });
         }
 
-        for ((source, split), record_ids) in records_by_source_and_split {
-            if record_ids.len() < 2 {
-                continue;
-            }
-
-            let corpus: Vec<String> = record_ids
-                .iter()
-                .filter_map(|record_id| self.records.get(record_id))
-                .map(|record| record_bm25_text(record, self.config.chunking.max_window_tokens))
-                .collect();
-            if corpus.len() < 2 {
-                continue;
-            }
-
-            let docs: Vec<Document<usize>> = corpus
-                .iter()
-                .enumerate()
-                .map(|(idx, contents)| Document {
-                    id: idx,
-                    contents: contents.clone(),
-                })
-                .collect();
-            let search_engine =
-                SearchEngineBuilder::<usize>::with_documents(Language::English, docs).build();
-
-            self.bm25_source_indices.insert(
-                (source, split),
-                Bm25SourceIndex {
-                    record_ids,
-                    search_engine,
-                },
-            );
-        }
+        let search_engine =
+            SearchEngineBuilder::<usize>::with_documents(Language::English, docs).build();
+        self.bm25_global_index = Some(Bm25GlobalIndex {
+            meta,
+            search_engine,
+        });
     }
 
     #[cfg(not(feature = "bm25-mining"))]
@@ -2843,13 +2895,13 @@ mod tests {
     pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 14618375830351864347;
     /// Expected hash for deterministic triplet batch sequence when bm25-mining is enabled.
     #[cfg(feature = "bm25-mining")]
-    pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 4541483670725174687;
+    pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 2899940383738632067;
     /// Expected hash for deterministic pair batch sequence.
     #[cfg(not(feature = "bm25-mining"))]
     pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 13133711470950174124;
     /// Expected hash for deterministic pair batch sequence when bm25-mining is enabled.
     #[cfg(feature = "bm25-mining")]
-    pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 9123648929269994;
+    pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 13803509890260831319;
     /// Expected hash for deterministic prefetch text batch sequence.
     pub const PREFETCH_TEXT_BATCH_SEQUENCE_HASH: u64 = 16740235391902546413;
     /// Expected hash for deterministic prefetch triplet batch sequence.
@@ -2857,13 +2909,13 @@ mod tests {
     pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 11709520942485223708;
     /// Expected hash for deterministic prefetch triplet batch sequence when bm25-mining is enabled.
     #[cfg(feature = "bm25-mining")]
-    pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 2714971770055876640;
+    pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 12173583950076990836;
     /// Expected hash for deterministic prefetch pair batch sequence.
     #[cfg(not(feature = "bm25-mining"))]
     pub const PREFETCH_PAIR_BATCH_SEQUENCE_HASH: u64 = 2553049861003803008;
     /// Expected hash for deterministic prefetch pair batch sequence when bm25-mining is enabled.
     #[cfg(feature = "bm25-mining")]
-    pub const PREFETCH_PAIR_BATCH_SEQUENCE_HASH: u64 = 17431903793685416787;
+    pub const PREFETCH_PAIR_BATCH_SEQUENCE_HASH: u64 = 8421775137573104141;
 
     /// Expected readable wrong-article sequence without BM25 mining.
     pub const READABLE_NON_BM25_TITLES: [&str; 8] = [
@@ -6797,7 +6849,7 @@ mod tests {
         // ID, so it doesn't always land on rank-0. What we're testing is that BM25's
         // *ranking* quality is better than uniform random — i.e. rank-0 beats the pool
         // mean — not that the rotation-offset happens to agree on any single call.
-        let ranked = inner.bm25_ranked_candidates(&ingested_anchor, SplitLabel::Train);
+        let ranked = inner.bm25_ranked_candidates(&ingested_anchor);
         assert!(
             !ranked.is_empty(),
             "BM25 must produce at least one ranked candidate"
@@ -7093,24 +7145,20 @@ mod tests {
             .cloned()
             .expect("anchor should be present");
 
-        let sampler_ranked = inner.bm25_ranked_candidates(&anchor, SplitLabel::Train);
+        let sampler_ranked = inner.bm25_ranked_candidates(&anchor);
 
-        let key = ("readable_source".to_string(), SplitLabel::Train);
-        let index = inner
-            .bm25_source_indices
-            .get(&key)
-            .expect("bm25 source index should be built")
-            .record_ids
-            .clone();
+        let gi = inner
+            .bm25_global_index
+            .as_ref()
+            .expect("bm25 global index should be built");
+        let meta = &gi.meta;
 
-        let docs: Vec<bm25::Document<usize>> = index
+        let docs: Vec<bm25::Document<usize>> = meta
             .iter()
             .enumerate()
-            .filter_map(|(idx, id)| {
-                inner.records.get(id).map(|record| bm25::Document {
-                    id: idx,
-                    contents: record_bm25_text(record, inner.config.chunking.max_window_tokens),
-                })
+            .map(|(idx, m)| bm25::Document {
+                id: idx,
+                contents: record_bm25_text(&m.record, inner.config.chunking.max_window_tokens),
             })
             .collect();
         let engine =
@@ -7118,7 +7166,7 @@ mod tests {
                 .build();
 
         let query = record_bm25_text(&anchor, inner.config.chunking.max_window_tokens);
-        let max_results = index.len().clamp(2, 16);
+        let max_results = meta.len();
         let mut raw = engine.search(&query, max_results);
         // Match sampler tie-breaking exactly: score descending, then stable id order.
         raw.sort_by(|a, b| {
@@ -7128,13 +7176,13 @@ mod tests {
                 .then_with(|| a.document.id.cmp(&b.document.id))
         });
 
-        let mut expected = Vec::new();
+        let mut expected: Vec<RecordId> = Vec::new();
         for result in raw {
-            let Some(id) = index.get(result.document.id) else {
+            let Some(m) = meta.get(result.document.id) else {
                 continue;
             };
-            if id != &anchor.id {
-                expected.push(id.clone());
+            if m.record_id != anchor.id {
+                expected.push(m.record_id.clone());
             }
         }
 
@@ -7229,7 +7277,7 @@ mod tests {
             .cloned()
             .expect("anchor should exist");
 
-        let ranked = inner.bm25_ranked_candidates(&anchor, SplitLabel::Train);
+        let ranked = inner.bm25_ranked_candidates(&anchor);
         assert!(
             !ranked.is_empty(),
             "expected BM25 to return ranked candidates"

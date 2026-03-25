@@ -11,6 +11,45 @@ use triplets::{
 };
 
 fn build_record(source: &str, idx: usize) -> DataRecord {
+    // Rotate through domain-specific vocabulary so BM25 can meaningfully
+    // differentiate records.  Without distinct keywords the BM25 scores are
+    // all equal (only shared stop-words remain), tie-breaking degenerates to
+    // document-id order, and the diversity assertion is not meaningful.
+    const TOPICS: &[(&str, &str)] = &[
+        (
+            "aquifer hydrology groundwater recharge",
+            "hydrology groundwater recharge aquifer basin",
+        ),
+        (
+            "magnetosphere solar wind aurora borealis",
+            "aurora borealis magnetosphere solar wind",
+        ),
+        (
+            "phenotype genotype heredity chromosome",
+            "chromosome heredity genotype phenotype allele",
+        ),
+        (
+            "catalysis enzyme substrate inhibitor",
+            "enzyme inhibitor substrate catalytic reaction",
+        ),
+        (
+            "lattice crystal symmetry diffraction",
+            "crystal diffraction symmetry lattice planes",
+        ),
+        (
+            "macroeconomics inflation fiscal policy",
+            "fiscal policy inflation macroeconomic demand",
+        ),
+        (
+            "thermodynamics entropy enthalpy heat",
+            "enthalpy heat entropy thermodynamic state",
+        ),
+        (
+            "rhetoric discourse argumentation logic",
+            "argumentation discourse rhetoric logical form",
+        ),
+    ];
+    let (heading_keywords, body_keywords) = TOPICS[idx % TOPICS.len()];
     let created_at =
         Utc.with_ymd_and_hms(2025, 1, 1, 12, 0, 0).unwrap() + Duration::days(idx as i64);
     DataRecord {
@@ -21,11 +60,15 @@ fn build_record(source: &str, idx: usize) -> DataRecord {
         quality: QualityScore { trust: 1.0 },
         taxonomy: vec![source.to_string()],
         sections: vec![
-            make_section(SectionRole::Anchor, None, &format!("title {idx}")),
+            make_section(
+                SectionRole::Anchor,
+                None,
+                &format!("{heading_keywords} item {idx}"),
+            ),
             make_section(
                 SectionRole::Context,
                 None,
-                &format!("body content for record {idx}"),
+                &format!("{body_keywords} entry {idx}"),
             ),
         ],
         meta_prefix: None,
