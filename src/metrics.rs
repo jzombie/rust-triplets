@@ -88,6 +88,64 @@ pub fn source_skew(counts: &HashMap<SourceId, usize>) -> Option<SourceSkew> {
     })
 }
 
+/// Compute byte-level Jaccard and cosine similarity scores between two strings.
+///
+/// Uses raw UTF-8 byte occurrence frequencies (no tokenisation), so it is fast
+/// and dependency-free. Returns `(jaccard, cosine)` each in `[0.0, 1.0]`;
+/// both are `0.0` when either input is empty.
+///
+/// Used by BM25 ranking tests to verify top-ranked candidates beat the
+/// uniform-pool baseline, and by the `extended-metrics` demo output.
+#[cfg(any(feature = "bm25-mining", feature = "extended-metrics"))]
+pub(crate) fn lexical_similarity_scores(left: &str, right: &str) -> (f32, f32) {
+    if left.is_empty() || right.is_empty() {
+        return (0.0, 0.0);
+    }
+
+    let mut left_freq = [0.0_f32; 256];
+    let mut right_freq = [0.0_f32; 256];
+    let mut left_bits = [0_u8; 32];
+    let mut right_bits = [0_u8; 32];
+
+    for byte in left.as_bytes() {
+        let idx = *byte as usize;
+        left_freq[idx] += 1.0;
+        left_bits[idx / 8] |= 1_u8 << (idx % 8);
+    }
+    for byte in right.as_bytes() {
+        let idx = *byte as usize;
+        right_freq[idx] += 1.0;
+        right_bits[idx / 8] |= 1_u8 << (idx % 8);
+    }
+
+    let dot: f32 = left_freq
+        .iter()
+        .zip(right_freq.iter())
+        .map(|(a, b)| a * b)
+        .sum();
+    let left_norm_sq: f32 = left_freq.iter().map(|v| v * v).sum();
+    let right_norm_sq: f32 = right_freq.iter().map(|v| v * v).sum();
+    let cosine = if left_norm_sq > 0.0 && right_norm_sq > 0.0 {
+        dot / (left_norm_sq.sqrt() * right_norm_sq.sqrt())
+    } else {
+        0.0
+    };
+
+    let mut intersection = 0_u32;
+    let mut union = 0_u32;
+    for i in 0..left_bits.len() {
+        intersection += (left_bits[i] & right_bits[i]).count_ones();
+        union += (left_bits[i] | right_bits[i]).count_ones();
+    }
+    let jaccard = if union > 0 {
+        intersection as f32 / union as f32
+    } else {
+        0.0
+    };
+
+    (jaccard, cosine)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,62 +247,4 @@ mod tests {
             );
         }
     }
-}
-
-/// Compute byte-level Jaccard and cosine similarity scores between two strings.
-///
-/// Uses raw UTF-8 byte occurrence frequencies (no tokenisation), so it is fast
-/// and dependency-free. Returns `(jaccard, cosine)` each in `[0.0, 1.0]`;
-/// both are `0.0` when either input is empty.
-///
-/// Used by BM25 ranking tests to verify top-ranked candidates beat the
-/// uniform-pool baseline, and by the `extended-metrics` demo output.
-#[cfg(any(feature = "bm25-mining", feature = "extended-metrics"))]
-pub(crate) fn lexical_similarity_scores(left: &str, right: &str) -> (f32, f32) {
-    if left.is_empty() || right.is_empty() {
-        return (0.0, 0.0);
-    }
-
-    let mut left_freq = [0.0_f32; 256];
-    let mut right_freq = [0.0_f32; 256];
-    let mut left_bits = [0_u8; 32];
-    let mut right_bits = [0_u8; 32];
-
-    for byte in left.as_bytes() {
-        let idx = *byte as usize;
-        left_freq[idx] += 1.0;
-        left_bits[idx / 8] |= 1_u8 << (idx % 8);
-    }
-    for byte in right.as_bytes() {
-        let idx = *byte as usize;
-        right_freq[idx] += 1.0;
-        right_bits[idx / 8] |= 1_u8 << (idx % 8);
-    }
-
-    let dot: f32 = left_freq
-        .iter()
-        .zip(right_freq.iter())
-        .map(|(a, b)| a * b)
-        .sum();
-    let left_norm_sq: f32 = left_freq.iter().map(|v| v * v).sum();
-    let right_norm_sq: f32 = right_freq.iter().map(|v| v * v).sum();
-    let cosine = if left_norm_sq > 0.0 && right_norm_sq > 0.0 {
-        dot / (left_norm_sq.sqrt() * right_norm_sq.sqrt())
-    } else {
-        0.0
-    };
-
-    let mut intersection = 0_u32;
-    let mut union = 0_u32;
-    for i in 0..left_bits.len() {
-        intersection += (left_bits[i] & right_bits[i]).count_ones();
-        union += (left_bits[i] | right_bits[i]).count_ones();
-    }
-    let jaccard = if union > 0 {
-        intersection as f32 / union as f32
-    } else {
-        0.0
-    };
-
-    (jaccard, cosine)
 }

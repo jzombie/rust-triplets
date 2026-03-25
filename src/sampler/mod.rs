@@ -1,8 +1,4 @@
-#[cfg(feature = "bm25-mining")]
-mod bm25;
-
-#[cfg(feature = "bm25-mining")]
-use ::bm25::SearchEngine;
+mod backends;
 
 use chrono::Duration;
 use indexmap::IndexMap;
@@ -39,29 +35,6 @@ use crate::splits::{
     EpochStateStore, PersistedSamplerState, SamplerStateStore, SplitLabel, SplitStore,
 };
 use crate::types::{RecipeKey, RecordId, SourceId};
-
-/// Metadata stored alongside each indexed document in the global BM25 index.
-#[cfg(feature = "bm25-mining")]
-struct Bm25RecordMeta {
-    record_id: RecordId,
-    /// Cached split label (None when the record has not yet been split-assigned).
-    split: Option<SplitLabel>,
-    // NOTE: no `record` field here — records are looked up at selection time from
-    // `TripletSamplerInner.records`, so each DataRecord is stored exactly once.
-}
-
-/// Single global BM25 search engine built over all per-source cache records.
-///
-/// Replaces the old per-`(SourceId, SplitLabel)` index map so BM25 ranking
-/// sees the full `ingestion_max_records` pool for each source rather than
-/// the LRU-diluted window that results from sharing a global cache across N
-/// sources.
-#[cfg(feature = "bm25-mining")]
-struct Bm25GlobalIndex {
-    /// Metadata for document at each sequential index position.
-    meta: Vec<Bm25RecordMeta>,
-    search_engine: SearchEngine<usize>,
-}
 
 /// Auto-injected recipe name used when a source has at least one section whose
 /// token count exceeds `chunking.max_window_tokens` during normal ingest sync.
@@ -318,15 +291,8 @@ struct TripletSamplerInner<S: SplitStore + EpochStateStore + SamplerStateStore +
     chunk_cursors: HashMap<(RecordId, usize), usize>,
     /// Per-record, per-role cursor to rotate through role-specific sections.
     role_cursors: HashMap<(RecordId, String), usize>,
-    /// Lazy BM25-ranked candidate cache for anchors in the current ingest snapshot.
-    #[cfg(feature = "bm25-mining")]
-    bm25_hard_negatives: HashMap<RecordId, Vec<RecordId>>,
-    /// Global BM25 engine built over the full per-source buffer on each refresh cycle.
-    #[cfg(feature = "bm25-mining")]
-    bm25_global_index: Option<Bm25GlobalIndex>,
-    /// Per-anchor cursor for deterministic rotation through top BM25 hard negatives.
-    #[cfg(feature = "bm25-mining")]
-    bm25_negative_cursors: HashMap<(RecordId, SplitLabel), usize>,
+    /// Pluggable negative-selection backend (uniform-random or BM25).
+    negative_backend: Box<dyn backends::NegativeBackend>,
     /// Chunk id to record id lookup (used by epoch tracker).
     chunk_index: HashMap<RecordId, RecordId>,
     /// Round-robin order of source ids (deterministic).
@@ -394,12 +360,16 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             epoch_tracker,
             chunk_cursors: HashMap::new(),
             role_cursors: HashMap::new(),
-            #[cfg(feature = "bm25-mining")]
-            bm25_hard_negatives: HashMap::new(),
-            #[cfg(feature = "bm25-mining")]
-            bm25_global_index: None,
-            #[cfg(feature = "bm25-mining")]
-            bm25_negative_cursors: HashMap::new(),
+            negative_backend: {
+                #[cfg(feature = "bm25-mining")]
+                {
+                    Box::new(backends::Bm25Backend::new())
+                }
+                #[cfg(not(feature = "bm25-mining"))]
+                {
+                    Box::new(backends::DefaultBackend)
+                }
+            },
             chunk_index: HashMap::new(),
             source_order: Vec::new(),
             source_cycle_idx: 0,
@@ -493,12 +463,10 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     }
 
     fn prune_cursor_state(&mut self) {
-        #[cfg(feature = "bm25-mining")]
-        let bm25_cursors_empty = self.bm25_negative_cursors.is_empty();
-        #[cfg(not(feature = "bm25-mining"))]
-        let bm25_cursors_empty = true;
-
-        if self.chunk_cursors.is_empty() && self.role_cursors.is_empty() && bm25_cursors_empty {
+        if self.chunk_cursors.is_empty()
+            && self.role_cursors.is_empty()
+            && self.negative_backend.cursors_empty()
+        {
             return;
         }
         let valid_ids: HashSet<RecordId> = self.records.keys().cloned().collect();
@@ -506,9 +474,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             .retain(|(record_id, _), _| valid_ids.contains(record_id));
         self.role_cursors
             .retain(|(record_id, _), _| valid_ids.contains(record_id));
-        #[cfg(feature = "bm25-mining")]
-        self.bm25_negative_cursors
-            .retain(|(record_id, _), _| valid_ids.contains(record_id));
+        self.negative_backend.prune_cursors(&valid_ids);
     }
 
     fn rebuild_chunk_index(&mut self) {
@@ -1024,11 +990,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                         .collect();
                 }
                 if !same_date.is_empty() {
-                    return self.choose_negative_from_pool(
+                    return self.negative_backend.choose_negative(
                         anchor_record,
                         anchor_split,
                         same_date,
                         false,
+                        &mut self.rng,
                     );
                 }
                 let pool = self
@@ -1039,7 +1006,13 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                     })
                     .cloned()
                     .collect::<Vec<_>>();
-                self.choose_negative_from_pool(anchor_record, anchor_split, pool, true)
+                self.negative_backend.choose_negative(
+                    anchor_record,
+                    anchor_split,
+                    pool,
+                    true,
+                    &mut self.rng,
+                )
             }
             NegativeStrategy::WrongPublicationDate => {
                 let anchor_date =
@@ -1077,15 +1050,22 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                         .cloned()
                         .collect::<Vec<_>>();
 
-                    return self.choose_negative_from_pool(
+                    return self.negative_backend.choose_negative(
                         anchor_record,
                         anchor_split,
                         fallback_pool,
                         true,
+                        &mut self.rng,
                     );
                 }
 
-                self.choose_negative_from_pool(anchor_record, anchor_split, pool, false)
+                self.negative_backend.choose_negative(
+                    anchor_record,
+                    anchor_split,
+                    pool,
+                    false,
+                    &mut self.rng,
+                )
             }
             NegativeStrategy::QuestionAnswerMismatch => {
                 let pool: Vec<DataRecord> = self
@@ -1110,43 +1090,25 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                         .cloned()
                         .collect::<Vec<_>>();
 
-                    return self.choose_negative_from_pool(
+                    return self.negative_backend.choose_negative(
                         anchor_record,
                         anchor_split,
                         fallback_pool,
                         true,
+                        &mut self.rng,
                     );
                 }
 
-                self.choose_negative_from_pool(anchor_record, anchor_split, pool, false)
+                self.negative_backend.choose_negative(
+                    anchor_record,
+                    anchor_split,
+                    pool,
+                    false,
+                    &mut self.rng,
+                )
             }
         }
     }
-
-    #[cfg(not(feature = "bm25-mining"))]
-    fn choose_negative_from_pool(
-        &mut self,
-        _anchor_record: &DataRecord,
-        _anchor_split: SplitLabel,
-        pool: Vec<DataRecord>,
-        fallback_used: bool,
-    ) -> Option<(DataRecord, bool)> {
-        // The strategy IS enforced — it was applied upstream in `select_negative_record`,
-        // which constructs `pool` by applying all strategy-specific predicates (same source,
-        // split isolation, date exclusion, etc.) before calling here.  This function simply
-        // samples uniformly from the pre-filtered pool.
-        //
-        // `_anchor_record` and `_anchor_split` exist only to match the
-        // `#[cfg(feature = "bm25-mining")]` variant's signature so both compile-time paths
-        // share identical call sites in `select_negative_record`.
-        pool.choose(&mut self.rng)
-            .cloned()
-            .map(|record| (record, fallback_used))
-    }
-
-    #[cfg(not(feature = "bm25-mining"))]
-    #[allow(dead_code)]
-    fn rebuild_bm25_hard_negative_index(&mut self) {}
 
     /// True when the recipe is the special auto-injected long-section chunk-pair recipe.
     fn is_auto_chunk_pair_recipe(recipe: &TripletRecipe) -> bool {
@@ -1658,13 +1620,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         snapshot.sort_by(|a, b| a.id.cmp(&b.id));
         self.records.clear();
         self.sources_with_long_sections.clear();
-        #[cfg(feature = "bm25-mining")]
-        {
-            // Strict mode: cursor state must never outlive a record snapshot boundary.
-            // Any cache sync defines a new in-memory record snapshot, so reset per-anchor
-            // BM25 rotation cursors unconditionally to avoid stale or drifted state.
-            self.bm25_negative_cursors.clear();
-        }
+        // Cursor state must never outlive a record snapshot boundary.
+        self.negative_backend.on_sync_start();
         for record in snapshot {
             if self.split_store.label_for(&record.id).is_none() {
                 self.split_store.ensure(record.id.clone())?;
@@ -1681,9 +1638,6 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         self.rebuild_source_index()?;
         Ok(())
     }
-
-    #[cfg(not(feature = "bm25-mining"))]
-    fn rebuild_bm25_index_after_refresh_if_needed(&mut self) {}
 
     fn ingest_internal_for_split(&mut self, target_split: SplitLabel) -> Result<(), SamplerError> {
         if !self.ingestion.has_sources() {
@@ -1707,7 +1661,14 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         }
         self.last_observed_ingest = observed;
         self.sync_records_from_cache()?;
-        self.rebuild_bm25_index_after_refresh_if_needed();
+        let sources_refreshed = !self.ingestion.last_refreshed_sources().is_empty();
+        let max_window_tokens = self.config.chunking.max_window_tokens;
+        self.negative_backend.on_records_refreshed(
+            &self.records,
+            max_window_tokens,
+            &|id| self.split_store.label_for(id),
+            sources_refreshed,
+        );
         // Epoch tracking and source-state management must run every batch regardless
         // of whether the record pool changed — reconcile advances the sampling cursor.
         self.epoch_tracker.ensure_loaded()?;
@@ -1750,7 +1711,14 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         }
         self.last_observed_ingest = observed;
         self.sync_records_from_cache()?;
-        self.rebuild_bm25_index_after_refresh_if_needed();
+        let sources_refreshed = !self.ingestion.last_refreshed_sources().is_empty();
+        let max_window_tokens = self.config.chunking.max_window_tokens;
+        self.negative_backend.on_records_refreshed(
+            &self.records,
+            max_window_tokens,
+            &|id| self.split_store.label_for(id),
+            sources_refreshed,
+        );
         self.epoch_tracker.ensure_loaded()?;
         let records_by_split = self.records_by_split()?;
         self.epoch_tracker
@@ -1777,7 +1745,14 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         self.ingestion.force_refresh_all_with_weights(weights)?;
         self.last_observed_ingest = self.ingestion.total_ingest_count();
         self.sync_records_from_cache()?;
-        self.rebuild_bm25_index_after_refresh_if_needed();
+        let sources_refreshed = !self.ingestion.last_refreshed_sources().is_empty();
+        let max_window_tokens = self.config.chunking.max_window_tokens;
+        self.negative_backend.on_records_refreshed(
+            &self.records,
+            max_window_tokens,
+            &|id| self.split_store.label_for(id),
+            sources_refreshed,
+        );
         self.epoch_tracker.ensure_loaded()?;
         let records_by_split = self.records_by_split()?;
         self.epoch_tracker
@@ -2295,6 +2270,38 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         }
         Err(SamplerError::Exhausted(RECIPE_LABEL_TRIPLETS.into()))
     }
+
+    // ── test-only helpers ─────────────────────────────────────────────────────
+
+    /// Return a mutable reference to the concrete [`backends::Bm25Backend`], panicking
+    /// when the feature is disabled (which won't happen — call sites are
+    /// equally gated on `#[cfg(feature = "bm25-mining")]`).
+    #[cfg(test)]
+    #[cfg(feature = "bm25-mining")]
+    fn bm25_backend_mut(&mut self) -> &mut backends::Bm25Backend {
+        self.negative_backend
+            .as_any_mut()
+            .downcast_mut::<backends::Bm25Backend>()
+            .expect("bm25_backend_mut: negative_backend is Bm25Backend when bm25-mining feature is active")
+    }
+
+    /// Look up `anchor`'s split label and return BM25-ranked candidate IDs.
+    ///
+    /// Mirrors the old `bm25_ranked_candidates` method that tests called on
+    /// `TripletSamplerInner` before BM25 state moved into `Bm25Backend`.
+    #[cfg(test)]
+    #[cfg(feature = "bm25-mining")]
+    fn bm25_ranked_candidates(&mut self, anchor: &crate::data::DataRecord) -> Vec<RecordId> {
+        let split = self
+            .split_store
+            .label_for(&anchor.id)
+            .unwrap_or(SplitLabel::Train);
+        self.negative_backend
+            .as_any_mut()
+            .downcast_mut::<backends::Bm25Backend>()
+            .expect("bm25_ranked_candidates: Bm25Backend")
+            .ranked_candidates_pub(anchor, split)
+    }
 }
 
 fn same_selector_pair_is_valid(
@@ -2554,38 +2561,6 @@ fn taxonomy_value(record: &DataRecord, field: MetadataKey) -> Option<&str> {
 
 fn platform_newline() -> &'static str {
     LineEnding::from_current_platform().as_str()
-}
-
-#[cfg(feature = "bm25-mining")]
-fn record_bm25_text(record: &DataRecord, max_tokens: usize) -> String {
-    let mut out = String::new();
-    for section in &record.sections {
-        if let Some(heading) = &section.heading
-            && !heading.trim().is_empty()
-        {
-            out.push_str(heading);
-            out.push_str(platform_newline());
-        }
-        if !section.text.trim().is_empty() {
-            out.push_str(&section.text);
-            out.push_str(platform_newline());
-        }
-    }
-    if out.trim().is_empty() {
-        return record.id.clone();
-    }
-    if max_tokens == 0 {
-        return out;
-    }
-    let tokens: Vec<&str> = out.split_whitespace().collect();
-    if tokens.len() <= max_tokens {
-        return out;
-    }
-    tokens
-        .into_iter()
-        .take(max_tokens)
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 fn strategy_reason(strategy: &NegativeStrategy) -> &'static str {

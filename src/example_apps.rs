@@ -965,7 +965,7 @@ fn print_text_recipes(recipes: &[TextRecipe]) {
 }
 
 #[cfg(feature = "extended-metrics")]
-fn metric_mean_median(vals: &mut Vec<f32>) -> (f32, f32) {
+fn metric_mean_median(vals: &mut [f32]) -> (f32, f32) {
     let mean = vals.iter().sum::<f32>() / vals.len() as f32;
     vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let median = if vals.len() % 2 == 1 {

@@ -693,6 +693,62 @@ let _source = IndexableAdapter::new(MySource { id: "my_source".into() });
 
 Then register the source with your sampler and call `next_triplet_batch`, `next_pair_batch`, or `next_text_batch`.
 
+## Negative-selection backends
+
+The sampler's negative-mining step is delegated to a pluggable backend that implements the `NegativeBackend` trait (`src/sampler/backends/`). The active backend is selected at compile time via Cargo features; no runtime configuration is needed.
+
+### How backends fit into the pipeline
+
+Strategy filtering (source isolation, split isolation, date predicates) runs first and produces a candidate pool. The backend then **selects or ranks within that pool only** — it never sees candidates that violate strategy constraints.
+
+### Built-in backends
+
+| Backend          | Enabled when                              | Behaviour                                                                                                                                                                                                                                                                    |
+|------------------|-------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `DefaultBackend` | `bm25-mining` feature is absent (default) | Uniform-random selection from the pre-filtered pool, using the sampler's top-level RNG. Zero heap overhead beyond the pool itself.                                                                                                                                           |
+| `Bm25Backend`    | `bm25-mining` feature is active           | Rebuilds a BM25 index over the full record pool after each source-refresh cycle and re-ranks the strategy-filtered pool by lexical overlap with the anchor. Candidate selection rotates deterministically per anchor to avoid always returning the single hardest candidate. |
+
+### `NegativeBackend` trait
+
+```rust,ignore
+pub(super) trait NegativeBackend: Send {
+    /// Select a negative from the strategy-filtered `pool` for `anchor`.
+    fn choose_negative(
+        &mut self,
+        anchor: &DataRecord,
+        anchor_split: SplitLabel,
+        pool: Vec<DataRecord>,
+        fallback_used: bool,
+        rng: &mut dyn rand::RngCore,
+    ) -> Option<(DataRecord, bool)>;
+
+    fn on_sync_start(&mut self);
+    fn on_records_refreshed(
+        &mut self,
+        records: &IndexMap<RecordId, DataRecord>,
+        max_window_tokens: usize,
+        split_fn: &dyn Fn(&RecordId) -> Option<SplitLabel>,
+        sources_refreshed: bool,
+    );
+    fn prune_cursors(&mut self, valid_ids: &HashSet<RecordId>);
+    fn cursors_empty(&self) -> bool;
+}
+```
+
+### Adding a custom backend
+
+1. Create `src/sampler/backends/my_backend.rs` and implement `NegativeBackend`.
+2. In `src/sampler/backends/mod.rs`, gate the module declaration and re-export behind your feature flag:
+   ```rust,ignore
+   #[cfg(feature = "my-feature")]
+   pub(super) mod my_backend;
+   #[cfg(feature = "my-feature")]
+   pub(super) use self::my_backend::MyBackend;
+   ```
+3. In `TripletSamplerInner::new`, swap the constructor to produce a `Box<dyn NegativeBackend>` containing your type.
+
+The sampler core only calls `NegativeBackend` methods — all backend-specific state (BM25 indices, cursor maps, etc.) stays fully encapsulated in the concrete type.
+
 ## Capabilities
 
 - **Automatic deterministic splits** (train/validation/test) from record IDs + seed.
