@@ -283,6 +283,8 @@ struct TripletSamplerInner<S: SplitStore + EpochStateStore + SamplerStateStore +
     using_config_triplet_recipes: bool,
     /// True if text recipes came from config (no derivation).
     using_config_text_recipes: bool,
+    /// Last observed ingestion counter for cache updates.
+    last_observed_ingest: u64,
     /// Epoch tracker for split-aware deterministic sampling.
     epoch_tracker: EpochTracker,
     /// Per-record, per-section chunk cursor to rotate through chunk windows.
@@ -354,6 +356,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             source_text_recipes: HashMap::new(),
             using_config_triplet_recipes,
             using_config_text_recipes,
+            last_observed_ingest: 0,
             epoch_tracker,
             chunk_cursors: HashMap::new(),
             role_cursors: HashMap::new(),
@@ -1647,22 +1650,18 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             }
             self.ingestion_cursors_loaded = true;
         }
-        let sources_refreshed = if self.ingestion.all_caches_empty() {
-            self.ingestion.refresh_all()
+        if self.ingestion.all_caches_empty() {
+            self.ingestion.refresh_all();
         } else {
-            self.ingestion.advance(self.config.batch_size)
-        };
-        if !sources_refreshed && !self.records.is_empty() {
-            // Pool is stable between source refetches; skip the expensive sync.
-            // Epoch/source-state management still runs so the sampling cursor advances.
-            self.epoch_tracker.ensure_loaded()?;
-            let records_by_split = self.records_by_split()?;
-            self.epoch_tracker
-                .reconcile(target_split, &records_by_split);
-            self.ensure_source_state()?;
+            self.ingestion.advance(self.config.batch_size);
+        }
+        let observed = self.ingestion.total_ingest_count();
+        if observed == self.last_observed_ingest && !self.records.is_empty() {
             return Ok(());
         }
+        self.last_observed_ingest = observed;
         self.sync_records_from_cache()?;
+        let sources_refreshed = !self.ingestion.last_refreshed_sources().is_empty();
         let max_window_tokens = self.config.chunking.max_window_tokens;
         self.negative_backend.on_records_refreshed(
             &self.records,
@@ -1700,21 +1699,19 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             }
             self.ingestion_cursors_loaded = true;
         }
-        let sources_refreshed = if self.ingestion.all_caches_empty() {
-            self.ingestion.refresh_all_with_weights(weights)?
+        if self.ingestion.all_caches_empty() {
+            self.ingestion.refresh_all_with_weights(weights)?;
         } else {
             self.ingestion
-                .advance_with_weights(self.config.batch_size, weights)?
-        };
-        if !sources_refreshed && !self.records.is_empty() {
-            self.epoch_tracker.ensure_loaded()?;
-            let records_by_split = self.records_by_split()?;
-            self.epoch_tracker
-                .reconcile(target_split, &records_by_split);
-            self.ensure_source_state()?;
+                .advance_with_weights(self.config.batch_size, weights)?;
+        }
+        let observed = self.ingestion.total_ingest_count();
+        if observed == self.last_observed_ingest && !self.records.is_empty() {
             return Ok(());
         }
+        self.last_observed_ingest = observed;
         self.sync_records_from_cache()?;
+        let sources_refreshed = !self.ingestion.last_refreshed_sources().is_empty();
         let max_window_tokens = self.config.chunking.max_window_tokens;
         self.negative_backend.on_records_refreshed(
             &self.records,
@@ -1745,8 +1742,10 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             }
             self.ingestion_cursors_loaded = true;
         }
-        let sources_refreshed = self.ingestion.force_refresh_all_with_weights(weights)?;
+        self.ingestion.force_refresh_all_with_weights(weights)?;
+        self.last_observed_ingest = self.ingestion.total_ingest_count();
         self.sync_records_from_cache()?;
+        let sources_refreshed = !self.ingestion.last_refreshed_sources().is_empty();
         let max_window_tokens = self.config.chunking.max_window_tokens;
         self.negative_backend.on_records_refreshed(
             &self.records,
