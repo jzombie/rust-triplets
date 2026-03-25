@@ -33,8 +33,6 @@ const DEFAULT_SOURCE_LIST: &str = r#"# triplets Hugging Face source-list format:
 # Single words (probably *never* use because BGE was never optimized for this)
 # hf://pfox/71k-English-uncleaned-wordlist/default text=text
 
-# TODO: Add different types of transcriptions
-
 # Anchor basic relationships
 # hf://roneneldan/TinyStories/default text=text
 

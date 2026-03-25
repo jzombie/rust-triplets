@@ -2,6 +2,8 @@
 
 [![made-with-rust][rust-logo]][rust-src-page] [![crates.io][crates-badge]][crates-page] [![MIT licensed][mit-license-badge]][mit-license-page] [![Apache 2.0 licensed][apache-2.0-license-badge]][apache-2.0-license-page] [![Coverage][coveralls-badge]][coveralls-page]
 
+**WORK IN PROGRESS. THIS API IS BEING PROTOTYPED AND MAY CHANGE WITHOUT NOTICE.**
+
 Compose an effectively unlimited supply of [training triplets](https://en.wikipedia.org/wiki/Triplet_loss), pairs, or plaintext samples, from your existing corpus, with optional [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) hard-negative mining.
 
 - Multiple input source mixing, rule-driven sampling recipes, using a`Rayon`-managed thread pool with optional multi-batch prebuffering for training.
@@ -22,8 +24,6 @@ Compose an effectively unlimited supply of [training triplets](https://en.wikipe
 Jump to the [quick start](#quick-start).
 
 View the [capabilities](#capabilities) for a deeper dive into the aforementioned list.
-
-**WORK IN PROGRESS. THIS API IS BEING PROTOTYPED AND MAY CHANGE WITHOUT NOTICE.**
 
 > _CI is configured to run tests/linting on macOS, Linux, and Windows._
 
@@ -192,7 +192,7 @@ let _recipe = TripletRecipe {
 
 `triplets` is a reusable core of composable data sampling primitives for deterministic multi-source ML/AI training-data orchestration, with sampler primitives, split/state persistence, chunking and weighting mechanics, and source abstractions (`DataSource`, `DataRecord`) that avoid tying behavior to proprietary corpora.
 
-Because triplets are assembled from source record combinations at batch time — never precomputed — even a modestly-sized corpus can yield billions of unique training examples per source, with trillions achievable across multiple sources once recipes and chunk windows are factored in. Rather than exhaustively annotating every `(anchor, negative)` pair, rule-based recipes provide broad coverage and deterministic behavior while keeping generation scalable. This works most naturally when each source is rooted in a coherent domain — negatives are mined per-source by default, making the crate a natural fit for fine-tuning on domain-specific data. General-purpose training is equally supported depending on how sources and recipes are constructed, and optional BM25 hard-negative mining can be enabled when required.
+Because triplets are assembled from source record combinations at batch time — not precomputed corpus-wide (though optional prebuffering does pre-assemble a bounded ahead-of-time queue) — even a modestly-sized corpus can yield billions of unique training examples per source, with trillions achievable across multiple sources once recipes and chunk windows are factored in. Rather than exhaustively annotating every `(anchor, negative)` pair, rule-based recipes provide broad coverage and deterministic behavior while keeping generation scalable. This works most naturally when each source is rooted in a coherent domain — negatives are mined per-source by default, making the crate a natural fit for fine-tuning on domain-specific data. General-purpose training is equally supported depending on how sources and recipes are constructed, and optional BM25 hard-negative mining can be enabled when required.
 
 Each source is independent: sources can carry their own recipe rules tailored to their data shape, so a document corpus, a QA dataset, and a structured log stream can all participate in the same training run with distinct anchor/positive/negative strategies suited to each. When `SamplerConfig.recipes` is non-empty those recipes apply uniformly across all sources; when left empty, each source contributes its own `default_triplet_recipes()`. Batch contribution defaults to equal weighting across all registered sources, but per-batch source weights let you shift that balance at call time — boosting a higher-quality source for one batch, suppressing a noisier one for the next, or tying the mix to live training-loss signals — without restarting or reconfiguring the sampler.
 
@@ -212,10 +212,11 @@ Each source is independent: sources can carry their own recipe rules tailored to
 
 ## Features
 
-| Feature       | What it enables                                                                                                                                                                                                                                                                                                                     | Default |
-|---------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|
-| `huggingface` | `HuggingFaceRowSource` — streaming download and sampling from Hugging Face dataset repositories (parquet/ndjson shards, ClassLabel resolution, disk-cap eviction). Adds `hf-hub`, `parquet`, `ureq`, `rayon`, `serde_json`.                                                                                                         | No      |
-| `bm25-mining` | BM25 hard-negative ranking within strategy-defined candidate pools. Adds a `bm25` dependency. Rule-based strategy selection always runs first to define the eligible pool; BM25 re-ranks within that pool when this feature is enabled. When absent, candidate selection within each strategy pool is uniform (no re-ranking step). | No      |
+| Feature            | What it enables                                                                                                                                                                                                                                                                                                                                                            | Default |
+|--------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|
+| `huggingface`      | `HuggingFaceRowSource` — streaming download and sampling from Hugging Face dataset repositories (parquet/ndjson shards, ClassLabel resolution, disk-cap eviction). Adds `hf-hub`, `parquet`, `ureq`, `rayon`, `serde_json`.                                                                                                                                                | No      |
+| `bm25-mining`      | BM25 hard-negative ranking within strategy-defined candidate pools. Adds a `bm25` dependency. Rule-based strategy selection always runs first to define the eligible pool; BM25 re-ranks within that pool when this feature is enabled. When absent, candidate selection within each strategy pool is uniform (no re-ranking step).                                        | No      |
+| `extended-metrics` | Enables additional per-triplet similarity diagnostics in the `multi_source_demo` output. Currently prints the Jaccard similarity (word-token overlap) between the anchor and each of the positive and negative chunks for every triplet in a batch. Adds no dependencies. Intended for manual inspection and debugging of sampling quality, not for use in training loops. | No      |
 
 ```toml
 [dependencies]
@@ -229,6 +230,9 @@ Neither feature is on by default; enable them independently or together.
 ```bash
 # sample triplet batches from the example dataset
 cargo run --example multi_source_demo
+
+# sample with extended per-triplet similarity metrics (Jaccard anchor↔positive and anchor↔negative)
+cargo run --features extended-metrics --example multi_source_demo
 
 # inspect CLI flags
 cargo run --example multi_source_demo -- --help
@@ -689,6 +693,62 @@ let _source = IndexableAdapter::new(MySource { id: "my_source".into() });
 
 Then register the source with your sampler and call `next_triplet_batch`, `next_pair_batch`, or `next_text_batch`.
 
+## Negative-selection backends
+
+The sampler's negative-mining step is delegated to a pluggable backend that implements the `NegativeBackend` trait (`src/sampler/backends/`). The active backend is selected at compile time via Cargo features; no runtime configuration is needed.
+
+### How backends fit into the pipeline
+
+Strategy filtering (source isolation, split isolation, date predicates) runs first and produces a candidate pool. The backend then **selects or ranks within that pool only** — it never sees candidates that violate strategy constraints.
+
+### Built-in backends
+
+| Backend          | Enabled when                              | Behaviour                                                                                                                                                                                                                                                                    |
+|------------------|-------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `DefaultBackend` | `bm25-mining` feature is absent (default) | Uniform-random selection from the pre-filtered pool, using the sampler's top-level RNG. Zero heap overhead beyond the pool itself.                                                                                                                                           |
+| `Bm25Backend`    | `bm25-mining` feature is active           | Rebuilds a BM25 index over the full record pool after each source-refresh cycle and re-ranks the strategy-filtered pool by lexical overlap with the anchor. Candidate selection rotates deterministically per anchor to avoid always returning the single hardest candidate. |
+
+### `NegativeBackend` trait
+
+```rust,ignore
+pub(super) trait NegativeBackend: Send {
+    /// Select a negative from the strategy-filtered `pool` for `anchor`.
+    fn choose_negative(
+        &mut self,
+        anchor: &DataRecord,
+        anchor_split: SplitLabel,
+        pool: Vec<DataRecord>,
+        fallback_used: bool,
+        rng: &mut dyn rand::RngCore,
+    ) -> Option<(DataRecord, bool)>;
+
+    fn on_sync_start(&mut self);
+    fn on_records_refreshed(
+        &mut self,
+        records: &IndexMap<RecordId, DataRecord>,
+        max_window_tokens: usize,
+        split_fn: &dyn Fn(&RecordId) -> Option<SplitLabel>,
+        sources_refreshed: bool,
+    );
+    fn prune_cursors(&mut self, valid_ids: &HashSet<RecordId>);
+    fn cursors_empty(&self) -> bool;
+}
+```
+
+### Adding a custom backend
+
+1. Create `src/sampler/backends/my_backend.rs` and implement `NegativeBackend`.
+2. In `src/sampler/backends/mod.rs`, gate the module declaration and re-export behind your feature flag:
+   ```rust,ignore
+   #[cfg(feature = "my-feature")]
+   pub(super) mod my_backend;
+   #[cfg(feature = "my-feature")]
+   pub(super) use self::my_backend::MyBackend;
+   ```
+3. In `TripletSamplerInner::new`, swap the constructor to produce a `Box<dyn NegativeBackend>` containing your type.
+
+The sampler core only calls `NegativeBackend` methods — all backend-specific state (BM25 indices, cursor maps, etc.) stays fully encapsulated in the concrete type.
+
 ## Capabilities
 
 - **Automatic deterministic splits** (train/validation/test) from record IDs + seed.
@@ -721,6 +781,7 @@ This reflects the built-in file-corpus helpers (`FileCorpusIndex`) used by files
 
 - **Ingestion**: `next_triplet_batch(split)`, `next_pair_batch(split)`, and `next_text_batch(split)` trigger refresh; per-source buffers refill when empty (or on force refresh).
 - **Memory bound**: refresh/cache limits are bounded by `ingestion_max_records` with a floor at `batch_size`.
+- **Per-source cache**: each registered source keeps its own independent LRU window of `ingestion_max_records` records. The total in-memory record pool across N sources is therefore N × `ingestion_max_records`. This means every source always has the full candidate budget available — candidate availability does not shrink as more sources are added, as it would with a single shared pool divided N ways.
 - **`ingestion_max_records` tuning**: setting this above `batch_size` usually improves sample diversity (broader anchor/negative candidate pool) and reduces near-term repetition, but returns diminish once source availability, split boundaries, and recipe constraints dominate. For remote backends such as Hugging Face, larger initial ingestion targets can require pulling more initial shards before the first batch, so startup latency can increase depending on shard sizes and network throughput.
 - **File indexing**: deterministic path ordering + deterministic index permutation for paging.
 - **Source ordering**: round-robin by source, deterministic within-source ordering by seed/epoch (file source). For `HuggingFaceRowSource`, shard download order is deterministic by seed, but row selection within a refresh is not stable across cache wipes (see `HuggingFaceRowSource` doc).
@@ -732,7 +793,7 @@ This reflects the built-in file-corpus helpers (`FileCorpusIndex`) used by files
 - **Manual epoch control**: `sampler.set_epoch(n)` resets per-source cursors and reshuffles deterministically for that epoch.
 - **Persisted state scope**: epoch tracking is split-aware, but sampler/source cursors + RNG/round-robin state are persisted per store file.
 - **Triplet recipe behavior**: if `SamplerConfig.recipes` is non-empty, those recipes are used for all sources; otherwise each source's `default_triplet_recipes()` is used (if any).
-- **Optional BM25 hard negatives**: with feature `bm25-mining`, per source+split BM25 indexes are rebuilt on source refresh cycles (not on every drain-only ingest step). During sampling, BM25-ranked candidates are filtered to the strategy-selected pool, same-split constraints are enforced, and candidate selection rotates deterministically per anchor to improve diversity. BM25 shifts the pool toward lexically harder negatives; it does not replace the diversity-first baseline — the output mix remains varied (hard, medium, and soft), not exclusively hardest-first. BM25 is a keyword-overlap ranker and is well-suited as an inexpensive first pass for negative hardness; for semantic re-ranking (dense retrieval, cross-encoder scoring, iterative mining with the trained encoder), those are out of scope for the data pipeline and integrate via pre-ranked source construction or by reweighting source batches in the training loop.
+- **Optional BM25 hard negatives**: with feature `bm25-mining`, a single global BM25 index is rebuilt on the main thread after each source refresh cycle (not on every drain-only ingest step; source I/O fetches run in parallel threads but the index build always happens on the caller's thread after those fetches join). The index covers the entire N × `ingestion_max_records` record pool — every candidate in every per-source cache contributes, with no cap on index size. Records are stored once in the primary record map; the BM25 index holds only lightweight per-record metadata (`record_id`, `source`, `split`, `date`) and tokenized text for ranking — no `DataRecord` copies. During sampling, BM25-ranked candidates are filtered to the strategy-selected pool, same-split constraints are enforced, and candidate selection rotates deterministically per anchor to improve diversity. BM25 shifts the pool toward lexically harder negatives; it does not replace the diversity-first baseline — the output mix remains varied (hard, medium, and soft), not exclusively hardest-first. BM25 is a keyword-overlap ranker and is well-suited as an inexpensive first pass for negative hardness; for semantic re-ranking (dense retrieval, cross-encoder scoring, iterative mining with the trained encoder), those are out of scope for the data pipeline and integrate via pre-ranked source construction or by reweighting source batches in the training loop.
 - **Pair batches**: derived from triplets and follow the same source/recipe selection behavior.
 - **Text recipe behavior**:
   - If `SamplerConfig.text_recipes` is non-empty, those are used directly.

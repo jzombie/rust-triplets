@@ -33,6 +33,7 @@ impl MetadataKey {
     }
 }
 
+// TODO: This could be more extensible for non-U.S formats; it's a bit too hardcoded
 /// Build common date string variants for metadata prefixes.
 pub fn build_date_meta_values(date: &NaiveDate) -> Vec<crate::types::MetaValue> {
     let mut vals = vec![

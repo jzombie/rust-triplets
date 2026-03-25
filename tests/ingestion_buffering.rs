@@ -188,7 +188,7 @@ fn test_ingestion_interleaving_no_data_loss() {
     // Should output 4 total. E.g. A0, B0, A1, B1.
     // Remaining in buffer: A2, A3, B2, B3.
     manager.refresh_all();
-    let batch1 = manager.cache().snapshot();
+    let batch1 = manager.all_records_snapshot();
     let ids1: Vec<RecordId> = batch1.iter().map(|r| r.id.clone()).collect();
 
     assert_eq!(batch1.len(), 4, "Batch 1 should have 4 records");
@@ -197,7 +197,7 @@ fn test_ingestion_interleaving_no_data_loss() {
     // Buffers are present, so NO new fetch should happen.
     // Should drain buffers: A2, B2, A3, B3.
     manager.refresh_all();
-    let batch2 = manager.cache().snapshot();
+    let batch2 = manager.all_records_snapshot();
     let ids2: Vec<RecordId> = batch2.iter().map(|r| r.id.clone()).collect();
 
     assert_eq!(batch2.len(), 4, "Batch 2 should have 4 records");
@@ -218,7 +218,7 @@ fn test_ingestion_interleaving_no_data_loss() {
     // Buffers empty. Must fetch new data.
     // Should fetch A(4-7), B(4-7).
     manager.refresh_all();
-    let batch3 = manager.cache().snapshot();
+    let batch3 = manager.all_records_snapshot();
     let ids3: Vec<RecordId> = batch3.iter().map(|r| r.id.clone()).collect();
 
     assert!(
@@ -247,14 +247,14 @@ fn test_uneven_sources() {
 
     // Round 1: Fetch A(0,1), B(0,1). Batch: A0, B0. Buffer: A1, B1.
     manager.refresh_all();
-    let b1 = manager.cache().snapshot();
+    let b1 = manager.all_records_snapshot();
     assert_eq!(b1.len(), 2);
     assert_eq!(b1[0].id, "A-0");
     assert_eq!(b1[1].id, "B-0");
 
     // Round 2: Drain buffers. Batch: A1, B1. Buffer: empty.
     manager.refresh_all();
-    let b2 = manager.cache().snapshot();
+    let b2 = manager.all_records_snapshot();
     assert_eq!(b2.len(), 2);
     assert_eq!(b2[0].id, "A-1");
     assert_eq!(b2[1].id, "B-1");
@@ -263,13 +263,13 @@ fn test_uneven_sources() {
     // Batch fills with A2, B2.
     // Buffer A empty. Buffer B has B3.
     manager.refresh_all();
-    let b3 = manager.cache().snapshot();
+    let b3 = manager.all_records_snapshot();
     assert_eq!(b3.len(), 2);
     assert!(b3.iter().any(|r| r.id == "A-2"));
 
     // Round 4: Verify looping behavior creates valid batches
     manager.refresh_all();
-    let b4 = manager.cache().snapshot();
+    let b4 = manager.all_records_snapshot();
     // Should have B3 (drained from buffer) and A0 (wrapped).
     assert_eq!(b4.len(), 2);
     let ids4: Vec<RecordId> = b4.iter().map(|r| r.id.clone()).collect();
@@ -364,7 +364,7 @@ fn test_weighted_refresh_all_prefers_weighted_sources() {
     weights.insert("B".to_string(), 1.0);
 
     manager.refresh_all_with_weights(&weights).unwrap();
-    let batch = manager.cache().snapshot();
+    let batch = manager.all_records_snapshot();
     let count_a = batch.iter().filter(|r| r.source == "A").count();
     let count_b = batch.iter().filter(|r| r.source == "B").count();
 
@@ -390,7 +390,7 @@ fn test_weighted_refresh_all_skips_zero_weight_sources() {
     weights.insert("B".to_string(), 0.0);
 
     manager.refresh_all_with_weights(&weights).unwrap();
-    let batch = manager.cache().snapshot();
+    let batch = manager.all_records_snapshot();
     assert_eq!(batch.len(), 6);
     let count_a = batch.iter().filter(|r| r.source == "A").count();
     let count_b = batch.iter().filter(|r| r.source == "B").count();
@@ -424,7 +424,7 @@ fn test_weighted_refresh_all_zero_weight_does_not_reduce_batch() {
     weights.insert("C".to_string(), 1.0);
 
     manager.refresh_all_with_weights(&weights).unwrap();
-    let batch = manager.cache().snapshot();
+    let batch = manager.all_records_snapshot();
     assert_eq!(batch.len(), 9);
     let count_b = batch.iter().filter(|r| r.source == "B").count();
     assert_eq!(count_b, 0);
@@ -541,7 +541,7 @@ fn advance_on_empty_buffer_fills_to_max_records_not_step() {
         "first advance must trigger exactly one source refresh"
     );
     assert_eq!(
-        manager.cache().len(),
+        manager.all_records_len(),
         step,
         "cache should contain `step` records after first advance"
     );
@@ -555,7 +555,7 @@ fn advance_on_empty_buffer_fills_to_max_records_not_step() {
             "advance #{i} must not trigger a new source refresh (buffer still has records)"
         );
         assert_eq!(
-            manager.cache().len(),
+            manager.all_records_len(),
             step * i,
             "cache should accumulate records across advances"
         );
