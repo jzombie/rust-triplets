@@ -1234,9 +1234,18 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             &recipe.positive_selector,
             enforce_window_pair,
         )?;
+        let anchor_raw_text = anchor_chunk.text.clone();
         self.decorate_chunk(record, &mut anchor_chunk);
         self.decorate_chunk(record, &mut positive_chunk);
-        self.finalize_triplet_with_negative(recipe, record, anchor_chunk, positive_chunk)
+        // Snapshot the raw anchor text for BM25 querying before decoration
+        // added the metadata prefix — prefix tokens are absent from the index.
+        self.finalize_triplet_with_negative(
+            recipe,
+            record,
+            anchor_chunk,
+            positive_chunk,
+            &anchor_raw_text,
+        )
     }
 
     /// Execute the special auto-injected long-section chunk-pair recipe.
@@ -1258,9 +1267,16 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         }
         let (mut anchor_chunk, mut positive_chunk) =
             self.select_distinct_window_pair_for_auto_recipe(recipe, record)?;
+        let anchor_raw_text = anchor_chunk.text.clone();
         self.decorate_chunk(record, &mut anchor_chunk);
         self.decorate_chunk(record, &mut positive_chunk);
-        self.finalize_triplet_with_negative(recipe, record, anchor_chunk, positive_chunk)
+        self.finalize_triplet_with_negative(
+            recipe,
+            record,
+            anchor_chunk,
+            positive_chunk,
+            &anchor_raw_text,
+        )
     }
 
     fn make_standard_triplet_with_anchor(
@@ -1295,12 +1311,10 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         record: &DataRecord,
         anchor_chunk: RecordChunk,
         positive_chunk: RecordChunk,
+        anchor_raw_text: &str,
     ) -> Option<SampleTriplet> {
-        let (negative_record, fallback_used) = self.select_negative_record(
-            record,
-            &recipe.negative_strategy,
-            Some(anchor_chunk.text.as_str()),
-        )?;
+        let (negative_record, fallback_used) =
+            self.select_negative_record(record, &recipe.negative_strategy, Some(anchor_raw_text))?;
         let mut negative_chunk = self.select_chunk(&negative_record, &recipe.negative_selector)?;
         self.decorate_chunk(&negative_record, &mut negative_chunk);
 

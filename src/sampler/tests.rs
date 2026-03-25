@@ -8064,3 +8064,113 @@ fn bm25_fallback_counter_increments_when_no_bm25_candidates_match() {
         "fallback count must remain 1 — shared-term query took the BM25 ranked path"
     );
 }
+
+/// Regression test: BM25 must use the raw (pre-decoration) anchor chunk text as
+/// its query, not the metadata-decorated text.
+///
+/// Setup:
+///   - Anchor record has a `meta_prefix` that injects the unique token
+///     `zork_unique_prefix_token` with probability 1.0.
+///   - Its raw body contains the unique token `quux_unique_content_token`.
+///   - `content_peer`: body contains `quux_unique_content_token` — matches raw text.
+///   - `prefix_peer`:  body contains `zork_unique_prefix_token` — matches only
+///     the decoration.
+///
+/// With the correct behaviour (raw query), `select_negative_record` receives
+/// `Some("quux_unique_content_token")` and BM25 ranks `content_peer` above
+/// `prefix_peer`.  With the former broken behaviour (decorated query) the
+/// opposite would happen.
+#[cfg(feature = "bm25-mining")]
+#[test]
+fn bm25_query_uses_raw_chunk_text_not_decorated_text() {
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+    let config = SamplerConfig {
+        seed: 99,
+        batch_size: 1,
+        chunking: ChunkingStrategy::default(),
+        recipes: Vec::new(),
+        text_recipes: Vec::new(),
+        split,
+        ..SamplerConfig::default()
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 7).unwrap());
+
+    // Unique sentinel tokens — chosen to not appear anywhere else.
+    let raw_token = "quux_unique_content_token";
+    let prefix_token = "zork_unique_prefix_token";
+
+    // Anchor: body has the raw token; its meta_prefix injects the prefix token.
+    let mut anchor = trader_record("bm25_raw_query_anchor", "2025-01-01", "Anchor", raw_token);
+    let mut kvp = KvpPrefixSampler::new(1.0);
+    kvp.add_variant([("decoration", prefix_token)]);
+    anchor.meta_prefix = Some(kvp);
+
+    // content_peer: body shares the raw token — should rank first under raw query.
+    let content_peer = trader_record(
+        "bm25_raw_query_content_peer",
+        "2025-01-02",
+        "Content peer",
+        raw_token,
+    );
+
+    // prefix_peer: body shares only the prefix token — should rank first only if
+    // the decorated text were mistakenly used as the query.
+    let prefix_peer = trader_record(
+        "bm25_raw_query_prefix_peer",
+        "2025-01-03",
+        "Prefix peer",
+        prefix_token,
+    );
+
+    let sampler = TripletSampler::new(config, Arc::clone(&store));
+    sampler.register_source(Box::new(InMemorySource::new(
+        PRIMARY_SOURCE_ID,
+        vec![anchor.clone(), content_peer.clone(), prefix_peer.clone()],
+    )));
+    sampler
+        .inner
+        .lock()
+        .unwrap()
+        .ingest_internal(SplitLabel::Train)
+        .unwrap();
+
+    let mut inner = sampler.inner.lock().unwrap();
+    let anchor_rec = inner.records.get("bm25_raw_query_anchor").cloned().unwrap();
+
+    // Call with the raw body text (no prefix) — correct behaviour.
+    let (selected_raw, _) = inner
+        .select_negative_record(
+            &anchor_rec,
+            &NegativeStrategy::WrongArticle,
+            Some(raw_token),
+        )
+        .expect("should select a negative with raw query");
+
+    assert_eq!(
+        selected_raw.id, content_peer.id,
+        "BM25 should rank content_peer first when queried with raw anchor text; \
+         got '{}' instead — possible regression: decorated text used as query",
+        selected_raw.id,
+    );
+
+    // Also confirm the symmetry: querying with the prefix token surfaces the
+    // prefix_peer, proving the two situations are distinguishable.
+    let (selected_prefix, _) = inner
+        .select_negative_record(
+            &anchor_rec,
+            &NegativeStrategy::WrongArticle,
+            Some(prefix_token),
+        )
+        .expect("should select a negative with prefix query");
+
+    assert_eq!(
+        selected_prefix.id, prefix_peer.id,
+        "BM25 should rank prefix_peer first when queried with prefix token; \
+         got '{}' — the two queries must be distinguishable for this test to be valid",
+        selected_prefix.id,
+    );
+}
