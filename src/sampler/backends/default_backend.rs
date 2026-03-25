@@ -10,7 +10,7 @@ use indexmap::IndexMap;
 
 use crate::data::DataRecord;
 use crate::splits::SplitLabel;
-use crate::types::RecordId;
+use crate::types::{RecordId, SourceId};
 
 use super::NegativeBackend;
 
@@ -46,7 +46,7 @@ impl NegativeBackend for DefaultBackend {
         _records: &IndexMap<RecordId, DataRecord>,
         _max_window_tokens: usize,
         _split_fn: &dyn Fn(&RecordId) -> Option<SplitLabel>,
-        _sources_refreshed: bool,
+        _refreshed_source_ids: &[SourceId],
     ) {
     }
 

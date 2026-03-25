@@ -15,7 +15,7 @@ use indexmap::IndexMap;
 
 use crate::data::DataRecord;
 use crate::splits::SplitLabel;
-use crate::types::RecordId;
+use crate::types::{RecordId, SourceId};
 
 #[cfg(feature = "bm25-mining")]
 pub(super) mod bm25_backend;
@@ -55,14 +55,15 @@ pub(super) trait NegativeBackend: Send {
     fn on_sync_start(&mut self);
 
     /// Called after `sync_records_from_cache` completes and new records are in
-    /// place.  `sources_refreshed` is true when at least one ingestion source
-    /// advanced during this cycle — the trigger for a full index rebuild.
+    /// place.  `refreshed_source_ids` lists the sources whose buffers refetched
+    /// during this cycle; each backend rebuilds only the state that depends on
+    /// those sources rather than performing a full global reset.
     fn on_records_refreshed(
         &mut self,
         records: &IndexMap<RecordId, DataRecord>,
         max_window_tokens: usize,
         split_fn: &dyn Fn(&RecordId) -> Option<SplitLabel>,
-        sources_refreshed: bool,
+        refreshed_source_ids: &[SourceId],
     );
 
     /// Prune internal per-record state so that only entries whose IDs appear in

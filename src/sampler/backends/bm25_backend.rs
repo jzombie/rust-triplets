@@ -16,7 +16,7 @@ use indexmap::IndexMap;
 use crate::constants::sampler::BM25_HARD_NEGATIVE_ROTATION_TOP_K;
 use crate::data::DataRecord;
 use crate::splits::SplitLabel;
-use crate::types::RecordId;
+use crate::types::{RecordId, SourceId};
 
 use super::super::platform_newline;
 use super::NegativeBackend;
@@ -30,13 +30,14 @@ struct Bm25RecordMeta {
     split: Option<SplitLabel>,
 }
 
-/// Single global BM25 search engine built over all in-memory records.
+/// Per-source BM25 search engine, containing only records from one source.
 ///
-/// Replaces the old per-`(SourceId, SplitLabel)` index map so BM25 ranking
-/// sees the full `ingestion_max_records` pool regardless of how many sources
-/// are active.
-struct Bm25GlobalIndex {
-    /// Metadata for the document at each sequential index position.
+/// One `PerSourceBm25Index` is maintained per active source so that a refresh
+/// of source A rebuilds only A's index, leaving all other sources' indexes
+/// and their associated hard-negative caches intact.
+struct PerSourceBm25Index {
+    /// Metadata for each document at its sequential position within this
+    /// source's search engine.
     meta: Vec<Bm25RecordMeta>,
     search_engine: SearchEngine<usize>,
 }
@@ -51,8 +52,8 @@ struct Bm25GlobalIndex {
 pub struct Bm25Backend {
     /// Cached BM25-ranked candidate IDs keyed by anchor record ID.
     hard_negatives: HashMap<RecordId, Vec<RecordId>>,
-    /// Global BM25 search engine built from the current record snapshot.
-    global_index: Option<Bm25GlobalIndex>,
+    /// Per-source BM25 search engines, keyed by source identifier.
+    source_indexes: HashMap<SourceId, PerSourceBm25Index>,
     /// Per-`(anchor_id, split)` cursor for deterministic top-K rotation.
     negative_cursors: HashMap<(RecordId, SplitLabel), usize>,
     /// Token limit used when building BM25 document text; mirrors
@@ -65,7 +66,7 @@ impl Bm25Backend {
     pub fn new() -> Self {
         Self {
             hard_negatives: HashMap::new(),
-            global_index: None,
+            source_indexes: HashMap::new(),
             negative_cursors: HashMap::new(),
             max_window_tokens: 0,
         }
@@ -143,9 +144,9 @@ impl Bm25Backend {
     /// Return BM25-ranked candidate record IDs for `anchor`, restricted to
     /// records assigned to `anchor_split`.
     ///
-    /// Results are cached per anchor ID for the lifetime of the current corpus
-    /// snapshot.  The cache is cleared by `on_sync_start` before each new
-    /// snapshot is loaded.
+    /// Results are cached per anchor ID.  The cache entry is invalidated in
+    /// `on_records_refreshed` when the anchor's own source refreshes, and
+    /// stale anchor entries are removed by `prune_cursors`.
     fn ranked_candidates(
         &mut self,
         anchor: &DataRecord,
@@ -155,67 +156,68 @@ impl Bm25Backend {
             return cached.clone();
         }
 
-        let Some(index) = self.global_index.as_ref() else {
+        let Some(index) = self.source_indexes.get(anchor.source.as_str()) else {
             self.hard_negatives.insert(anchor.id.clone(), Vec::new());
             return Vec::new();
         };
 
         let bm25_query_text = record_bm25_text(anchor, self.max_window_tokens);
-        let max_results = index.meta.len();
-        let mut results = index.search_engine.search(&bm25_query_text, max_results);
-        results.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
+
+        // Search only the anchor's own source index.  The negative pool passed
+        // to `choose_negative` is always scoped to `candidate.source ==
+        // anchor.source` (with a cross-source fallback handled separately), so
+        // results from other sources would be discarded during pool intersection
+        // anyway.  Restricting to the anchor's source index avoids O(N_sources)
+        // full scans per anchor.
+        let results = index
+            .search_engine
+            .search(&bm25_query_text, index.meta.len());
+        let mut all_scored: Vec<(f32, RecordId)> = results
+            .into_iter()
+            .filter_map(|result| {
+                let m = index.meta.get(result.document.id)?;
+                if m.record_id == anchor.id {
+                    return None;
+                }
+                if m.split != Some(anchor_split) {
+                    return None;
+                }
+                Some((result.score, m.record_id.clone()))
+            })
+            .collect();
+
+        all_scored.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.document.id.cmp(&b.document.id))
+                .then_with(|| a.1.cmp(&b.1))
         });
 
-        let mut ranked = Vec::new();
-        for result in results {
-            let candidate_idx = result.document.id;
-            let Some(m) = index.meta.get(candidate_idx) else {
-                continue;
-            };
-            if m.record_id == anchor.id {
-                continue;
-            }
-            // Restrict to the same split as the anchor.
-            if m.split != Some(anchor_split) {
-                continue;
-            }
-            ranked.push(m.record_id.clone());
-        }
-
+        let ranked: Vec<RecordId> = all_scored.into_iter().map(|(_, id)| id).collect();
         self.hard_negatives
             .insert(anchor.id.clone(), ranked.clone());
         ranked
     }
 
-    /// Build a fresh global BM25 index from `records`.
+    /// Build a fresh BM25 index for `source_id` from `source_records`, which
+    /// must all belong to that source.
     ///
-    /// Called by `on_records_refreshed` when at least one source advanced.
-    /// Clears all cached state first so stale entries from the previous
-    /// snapshot are never returned.
-    fn rebuild_index(
+    /// If fewer than two records are provided the source's index is removed so
+    /// that searches skip it.  All other sources' indexes are left untouched.
+    fn rebuild_source_index(
         &mut self,
-        records: &IndexMap<RecordId, DataRecord>,
-        max_window_tokens: usize,
+        source_id: &SourceId,
+        source_records: &[&DataRecord],
         split_fn: &dyn Fn(&RecordId) -> Option<SplitLabel>,
     ) {
-        self.hard_negatives.clear();
-        self.global_index = None;
-        self.negative_cursors.clear();
-        self.max_window_tokens = max_window_tokens;
-
-        let total = records.len();
-        if total < 2 {
+        if source_records.len() < 2 {
+            self.source_indexes.remove(source_id);
             return;
         }
 
-        let mut meta: Vec<Bm25RecordMeta> = Vec::with_capacity(total);
-        let mut docs: Vec<Document<usize>> = Vec::with_capacity(total);
+        let mut meta: Vec<Bm25RecordMeta> = Vec::with_capacity(source_records.len());
+        let mut docs: Vec<Document<usize>> = Vec::with_capacity(source_records.len());
 
-        for (idx, record) in records.values().enumerate() {
+        for (idx, record) in source_records.iter().enumerate() {
             let split = split_fn(&record.id);
             meta.push(Bm25RecordMeta {
                 record_id: record.id.clone(),
@@ -223,16 +225,19 @@ impl Bm25Backend {
             });
             docs.push(Document {
                 id: idx,
-                contents: record_bm25_text(record, max_window_tokens),
+                contents: record_bm25_text(record, self.max_window_tokens),
             });
         }
 
         let search_engine =
             SearchEngineBuilder::<usize>::with_documents(Language::English, docs).build();
-        self.global_index = Some(Bm25GlobalIndex {
-            meta,
-            search_engine,
-        });
+        self.source_indexes.insert(
+            source_id.clone(),
+            PerSourceBm25Index {
+                meta,
+                search_engine,
+            },
+        );
     }
 }
 
@@ -261,16 +266,57 @@ impl NegativeBackend for Bm25Backend {
         records: &IndexMap<RecordId, DataRecord>,
         max_window_tokens: usize,
         split_fn: &dyn Fn(&RecordId) -> Option<SplitLabel>,
-        sources_refreshed: bool,
+        refreshed_source_ids: &[SourceId],
     ) {
-        if sources_refreshed {
-            self.rebuild_index(records, max_window_tokens, split_fn);
+        if refreshed_source_ids.is_empty() {
+            return;
         }
+        self.max_window_tokens = max_window_tokens;
+
+        // Invalidate cached hard-negative lists only for anchors whose source
+        // was refreshed — those entries may miss newly-arrived candidates or
+        // reference candidates that are no longer ranked the same way.  Anchors
+        // from unchanged sources keep their cached lists intact.
+        let refreshed_set: HashSet<&str> =
+            refreshed_source_ids.iter().map(|s| s.as_str()).collect();
+        self.hard_negatives.retain(|anchor_id, _| {
+            records
+                .get(anchor_id)
+                .map(|r| !refreshed_set.contains(r.source.as_str()))
+                .unwrap_or(false)
+        });
+
+        // Group current records by source, then rebuild only each refreshed
+        // source's index from its current record slice.
+        let mut records_by_source: HashMap<&str, Vec<&DataRecord>> = HashMap::new();
+        for r in records.values() {
+            records_by_source
+                .entry(r.source.as_str())
+                .or_default()
+                .push(r);
+        }
+        for source_id in refreshed_source_ids {
+            let source_records = records_by_source
+                .get(source_id.as_str())
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
+            self.rebuild_source_index(source_id, source_records, split_fn);
+        }
+
+        // Remove indexes for sources that no longer have any records in the
+        // pool (e.g., a source whose stream was exhausted and evicted).
+        let active_sources: HashSet<&str> = records.values().map(|r| r.source.as_str()).collect();
+        self.source_indexes
+            .retain(|source_id, _| active_sources.contains(source_id.as_str()));
     }
 
     fn prune_cursors(&mut self, valid_ids: &HashSet<RecordId>) {
         self.negative_cursors
             .retain(|(record_id, _), _| valid_ids.contains(record_id));
+        // Also remove hard-negative cache entries for anchors that are no
+        // longer in the record pool.
+        self.hard_negatives
+            .retain(|anchor_id, _| valid_ids.contains(anchor_id));
     }
 
     fn cursors_empty(&self) -> bool {
@@ -306,13 +352,26 @@ impl Bm25Backend {
         self.hard_negatives.get(anchor_id).cloned()
     }
 
-    /// Return the record IDs of all documents in the global index, in index
-    /// order.  Returns `None` when no index has been built yet.
+    /// Return the record IDs of all documents across all per-source indexes.
+    ///
+    /// Sources are visited in sorted order; within each source records appear
+    /// in their per-source index order.  For single-source tests this matches
+    /// the previous global-index ordering exactly.  Returns `None` when no
+    /// indexes have been built yet.
     #[cfg(test)]
     pub(in crate::sampler) fn index_meta_record_ids(&self) -> Option<Vec<RecordId>> {
-        self.global_index
-            .as_ref()
-            .map(|gi| gi.meta.iter().map(|m| m.record_id.clone()).collect())
+        if self.source_indexes.is_empty() {
+            return None;
+        }
+        let mut source_keys: Vec<&SourceId> = self.source_indexes.keys().collect();
+        source_keys.sort();
+        let mut all_ids: Vec<RecordId> = Vec::new();
+        for source_id in source_keys {
+            if let Some(idx) = self.source_indexes.get(source_id) {
+                all_ids.extend(idx.meta.iter().map(|m| m.record_id.clone()));
+            }
+        }
+        Some(all_ids)
     }
 
     /// Return the number of active negative-cursor entries.

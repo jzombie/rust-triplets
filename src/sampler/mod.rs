@@ -1661,13 +1661,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         }
         self.last_observed_ingest = observed;
         self.sync_records_from_cache()?;
-        let sources_refreshed = !self.ingestion.last_refreshed_sources().is_empty();
         let max_window_tokens = self.config.chunking.max_window_tokens;
         self.negative_backend.on_records_refreshed(
             &self.records,
             max_window_tokens,
             &|id| self.split_store.label_for(id),
-            sources_refreshed,
+            self.ingestion.last_refreshed_sources(),
         );
         // Epoch tracking and source-state management must run every batch regardless
         // of whether the record pool changed — reconcile advances the sampling cursor.
@@ -1711,13 +1710,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         }
         self.last_observed_ingest = observed;
         self.sync_records_from_cache()?;
-        let sources_refreshed = !self.ingestion.last_refreshed_sources().is_empty();
         let max_window_tokens = self.config.chunking.max_window_tokens;
         self.negative_backend.on_records_refreshed(
             &self.records,
             max_window_tokens,
             &|id| self.split_store.label_for(id),
-            sources_refreshed,
+            self.ingestion.last_refreshed_sources(),
         );
         self.epoch_tracker.ensure_loaded()?;
         let records_by_split = self.records_by_split()?;
@@ -1745,13 +1743,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         self.ingestion.force_refresh_all_with_weights(weights)?;
         self.last_observed_ingest = self.ingestion.total_ingest_count();
         self.sync_records_from_cache()?;
-        let sources_refreshed = !self.ingestion.last_refreshed_sources().is_empty();
         let max_window_tokens = self.config.chunking.max_window_tokens;
         self.negative_backend.on_records_refreshed(
             &self.records,
             max_window_tokens,
             &|id| self.split_store.label_for(id),
-            sources_refreshed,
+            self.ingestion.last_refreshed_sources(),
         );
         self.epoch_tracker.ensure_loaded()?;
         let records_by_split = self.records_by_split()?;

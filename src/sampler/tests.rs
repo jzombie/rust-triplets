@@ -7854,3 +7854,120 @@ fn allow_same_anchor_positive_permits_identical_text_triplet() {
         "negative must differ from anchor even in SimCSE mode"
     );
 }
+
+/// BM25 search must be scoped to the anchor's own source index only.
+///
+/// Regression test for the bug where `ranked_candidates` iterated every
+/// per-source index, paying full search cost across all sources even though
+/// the negative pool is always same-source.  After the fix the ranked list
+/// must contain only records whose source matches the anchor's source.
+#[cfg(feature = "bm25-mining")]
+#[test]
+fn bm25_ranked_candidates_are_scoped_to_anchor_source() {
+    let split = SplitRatios {
+        train: 0.8,
+        validation: 0.1,
+        test: 0.1,
+    };
+    let config = SamplerConfig {
+        seed: 77,
+        batch_size: 1,
+        chunking: ChunkingStrategy::default(),
+        recipes: Vec::new(),
+        text_recipes: Vec::new(),
+        split,
+        ..SamplerConfig::default()
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 77).unwrap());
+
+    // Find IDs that land in Train for each prefix so split assignment is
+    // deterministic regardless of how many records we create.
+    let find_train_id = |prefix: &str| -> String {
+        (0u32..)
+            .find_map(|i| {
+                let id = format!("{prefix}_{i}");
+                (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+            })
+            .unwrap()
+    };
+
+    let anchor_id = find_train_id("scope_anchor");
+    let same_source_id = find_train_id("scope_same");
+    let other_source_id = find_train_id("scope_other");
+
+    // anchor and same_source share highly similar text — BM25 should rank
+    // same_source highly.  other_source uses identical text but lives in a
+    // different source and must never appear in the ranked results.
+    let anchor = DataRecord {
+        id: anchor_id.clone(),
+        source: "source_alpha".into(),
+        ..trader_record(
+            &anchor_id,
+            "2025-03-01",
+            "quantum computing error correction",
+            "surface codes and topological qubits for fault tolerance",
+        )
+    };
+    let same_source = DataRecord {
+        id: same_source_id.clone(),
+        source: "source_alpha".into(),
+        ..trader_record(
+            &same_source_id,
+            "2025-03-02",
+            "quantum error correction surface codes",
+            "topological qubits fault tolerance thresholds",
+        )
+    };
+    let other_source = DataRecord {
+        id: other_source_id.clone(),
+        // Lexically identical text to same_source — would score just as high
+        // if the search were global.
+        source: "source_beta".into(),
+        ..trader_record(
+            &other_source_id,
+            "2025-03-02",
+            "quantum error correction surface codes",
+            "topological qubits fault tolerance thresholds",
+        )
+    };
+
+    let sampler = TripletSampler::new(config, Arc::clone(&store));
+    sampler.register_source(Box::new(InMemorySource::new(
+        "source_alpha",
+        vec![anchor.clone(), same_source],
+    )));
+    sampler.register_source(Box::new(InMemorySource::new(
+        "source_beta",
+        vec![other_source.clone()],
+    )));
+
+    sampler
+        .inner
+        .lock()
+        .unwrap()
+        .ingest_internal(SplitLabel::Train)
+        .unwrap();
+
+    let mut inner = sampler.inner.lock().unwrap();
+    let ranked = inner.bm25_ranked_candidates(&anchor);
+
+    assert!(
+        !ranked.is_empty(),
+        "ranked candidates must not be empty — same-source record should be found"
+    );
+    for id in &ranked {
+        let record = inner.records.get(id).expect("ranked id must be in records");
+        assert_eq!(
+            record.source, "source_alpha",
+            "BM25 ranked candidate '{id}' came from source '{}' but anchor is in \
+             'source_alpha' — cross-source leak detected (regression)",
+            record.source,
+        );
+    }
+    // Confirm the other-source record is definitely not in the ranked list.
+    assert!(
+        !ranked.contains(&other_source_id),
+        "other-source record must not appear in BM25 ranked candidates for anchor \
+         in a different source (global search regression)"
+    );
+}
