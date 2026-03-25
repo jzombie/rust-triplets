@@ -946,6 +946,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         &mut self,
         anchor_record: &DataRecord,
         strategy: &NegativeStrategy,
+        anchor_query_text: Option<&str>,
     ) -> Option<(DataRecord, bool)> {
         let anchor_split = self.split_store.label_for(&anchor_record.id)?;
 
@@ -995,6 +996,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                         anchor_split,
                         same_date,
                         false,
+                        anchor_query_text,
                         &mut self.rng,
                     );
                 }
@@ -1011,6 +1013,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                     anchor_split,
                     pool,
                     true,
+                    anchor_query_text,
                     &mut self.rng,
                 )
             }
@@ -1055,6 +1058,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                         anchor_split,
                         fallback_pool,
                         true,
+                        anchor_query_text,
                         &mut self.rng,
                     );
                 }
@@ -1064,6 +1068,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                     anchor_split,
                     pool,
                     false,
+                    anchor_query_text,
                     &mut self.rng,
                 )
             }
@@ -1095,6 +1100,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                         anchor_split,
                         fallback_pool,
                         true,
+                        anchor_query_text,
                         &mut self.rng,
                     );
                 }
@@ -1104,6 +1110,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                     anchor_split,
                     pool,
                     false,
+                    anchor_query_text,
                     &mut self.rng,
                 )
             }
@@ -1289,8 +1296,11 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         anchor_chunk: RecordChunk,
         positive_chunk: RecordChunk,
     ) -> Option<SampleTriplet> {
-        let (negative_record, fallback_used) =
-            self.select_negative_record(record, &recipe.negative_strategy)?;
+        let (negative_record, fallback_used) = self.select_negative_record(
+            record,
+            &recipe.negative_strategy,
+            Some(anchor_chunk.text.as_str()),
+        )?;
         let mut negative_chunk = self.select_chunk(&negative_record, &recipe.negative_selector)?;
         self.decorate_chunk(&negative_record, &mut negative_chunk);
 

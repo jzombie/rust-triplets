@@ -31,6 +31,7 @@ impl NegativeBackend for DefaultBackend {
         _anchor_split: SplitLabel,
         pool: Vec<DataRecord>,
         fallback_used: bool,
+        _anchor_query_text: Option<&str>,
         rng: &mut dyn rand::RngCore,
     ) -> Option<(DataRecord, bool)> {
         use rand::prelude::IndexedRandom as _;

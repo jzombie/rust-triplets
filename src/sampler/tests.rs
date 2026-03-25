@@ -2176,7 +2176,7 @@ fn readable_triplet_examples_by_mode() {
         let mut negatives = Vec::new();
         for _ in 0..8 {
             let (negative, _fallback_used) = inner
-                .select_negative_record(&anchor, &NegativeStrategy::WrongArticle)
+                .select_negative_record(&anchor, &NegativeStrategy::WrongArticle, None)
                 .expect("expected readable negative sample");
             negatives.push(negative.id);
         }
@@ -2194,7 +2194,7 @@ fn readable_triplet_examples_by_mode() {
         let mut negatives = Vec::new();
         for _ in 0..8 {
             let (negative, _fallback_used) = inner
-                .select_negative_record(&anchor, &NegativeStrategy::WrongArticle)
+                .select_negative_record(&anchor, &NegativeStrategy::WrongArticle, None)
                 .expect("expected BM25 negative selection");
             negatives.push(negative.id);
         }
@@ -2311,7 +2311,7 @@ fn bm25_not_rng_only_when_only_anchor_text_changes() {
         let mut negatives = Vec::new();
         for _ in 0..8 {
             let (negative, _fallback_used) = inner
-                .select_negative_record(&anchor, &NegativeStrategy::WrongArticle)
+                .select_negative_record(&anchor, &NegativeStrategy::WrongArticle, None)
                 .expect("expected BM25 negative selection");
             negatives.push(negative.id);
         }
@@ -3773,7 +3773,7 @@ fn wrong_article_falls_back_within_same_split() {
     for anchor_id in anchor_ids {
         let anchor = inner.records.get(&anchor_id).cloned().expect("anchor");
         let (negative, _fallback) = inner
-            .select_negative_record(&anchor, &NegativeStrategy::WrongArticle)
+            .select_negative_record(&anchor, &NegativeStrategy::WrongArticle, None)
             .expect("negative");
         assert_ne!(negative.id, anchor.id);
         let anchor_label = inner.split_store.label_for(&anchor.id).unwrap();
@@ -3847,7 +3847,7 @@ fn bm25_hard_negative_respects_same_source_split_pool() {
 
     let mut inner = sampler.inner.lock().unwrap();
     let (negative, fallback_used) = inner
-        .select_negative_record(&anchor, &NegativeStrategy::WrongArticle)
+        .select_negative_record(&anchor, &NegativeStrategy::WrongArticle, None)
         .expect("expected bm25-ranked negative via WrongArticle strategy");
 
     let _ = fallback_used;
@@ -3927,7 +3927,7 @@ fn bm25_negative_is_lexically_closer_than_uniform_pool_baseline() {
         .cloned()
         .expect("anchor must be present in ingested records");
     let (_selected_negative, _fallback) = inner
-        .select_negative_record(&ingested_anchor, &NegativeStrategy::WrongArticle)
+        .select_negative_record(&ingested_anchor, &NegativeStrategy::WrongArticle, None)
         .expect("expected bm25-ranked negative");
 
     let anchor_text = record_bm25_text(&ingested_anchor, inner.config.chunking.max_window_tokens);
@@ -4154,7 +4154,7 @@ fn bm25_ranked_candidates_never_cross_split_boundaries() {
     for anchor_id in anchors {
         let anchor = inner.records.get(&anchor_id).cloned().expect("anchor");
         let (negative, _fallback) = inner
-            .select_negative_record(&anchor, &NegativeStrategy::WrongArticle)
+            .select_negative_record(&anchor, &NegativeStrategy::WrongArticle, None)
             .expect("negative should exist");
 
         let anchor_label = inner
@@ -4621,7 +4621,7 @@ fn wrong_publication_date_falls_back_within_same_split() {
     for anchor_id in anchor_ids {
         let anchor = inner.records.get(&anchor_id).cloned().expect("anchor");
         let (negative, _fallback) = inner
-            .select_negative_record(&anchor, &NegativeStrategy::WrongPublicationDate)
+            .select_negative_record(&anchor, &NegativeStrategy::WrongPublicationDate, None)
             .expect("negative");
         assert_ne!(negative.id, anchor.id);
         let anchor_label = inner.split_store.label_for(&anchor.id).unwrap();
@@ -4703,7 +4703,7 @@ fn qa_mismatch_falls_back_within_same_split() {
     for anchor_id in anchor_ids {
         let anchor = inner.records.get(&anchor_id).cloned().expect("anchor");
         let (negative, _fallback) = inner
-            .select_negative_record(&anchor, &NegativeStrategy::QuestionAnswerMismatch)
+            .select_negative_record(&anchor, &NegativeStrategy::QuestionAnswerMismatch, None)
             .expect("negative");
         assert_ne!(negative.id, anchor.id);
         let anchor_label = inner.split_store.label_for(&anchor.id).unwrap();
@@ -4764,7 +4764,7 @@ fn negative_selection_never_falls_back_across_splits() {
         .unwrap();
 
     let mut inner = sampler.inner.lock().unwrap();
-    let selected = inner.select_negative_record(&anchor, &NegativeStrategy::WrongArticle);
+    let selected = inner.select_negative_record(&anchor, &NegativeStrategy::WrongArticle, None);
     assert!(
         selected.is_none(),
         "cross-split fallback must be disallowed when same-split candidates are unavailable"
@@ -7460,7 +7460,7 @@ fn wrong_publication_date_covers_some_none_branch_with_undated_candidates() {
     let anchor = inner.records.get(&anchor_id).cloned().expect("anchor");
     // cand_no_date is eligible (Some, None); cand_same is excluded (same date).
     let (neg, _) = inner
-        .select_negative_record(&anchor, &NegativeStrategy::WrongPublicationDate)
+        .select_negative_record(&anchor, &NegativeStrategy::WrongPublicationDate, None)
         .expect("should find undated candidate as negative");
     assert_eq!(neg.id, no_date_id);
 }
@@ -7530,7 +7530,7 @@ fn wrong_publication_date_covers_none_some_and_none_none_branches() {
     // Only cand_dated is eligible: (None, Some) => true.
     // cand_no_date is excluded: (None, None) => false.
     let (neg, _) = inner
-        .select_negative_record(&anchor, &NegativeStrategy::WrongPublicationDate)
+        .select_negative_record(&anchor, &NegativeStrategy::WrongPublicationDate, None)
         .expect("undated anchor should match dated candidate");
     assert_eq!(neg.id, dated_id);
 }

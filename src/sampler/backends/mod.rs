@@ -36,6 +36,12 @@ pub(super) use self::default_backend::DefaultBackend;
 pub(super) trait NegativeBackend: Send {
     /// Select a hard-negative record from `pool` for `anchor`.
     ///
+    /// `anchor_query_text` is the rendered text of the anchor's already-selected
+    /// chunk window.  When `Some`, backends that perform lexical ranking (BM25)
+    /// use it as the query instead of re-deriving text from the full article,
+    /// producing negatives that are hard relative to the specific window rather
+    /// than the full article.  Pass `None` to fall back to full-article text.
+    ///
     /// `rng` is the sampler's top-level RNG; backends that need randomness for
     /// tie-breaking or fallback should use it rather than maintaining their own.
     /// `fallback_used` threads through from the caller and is returned unchanged
@@ -46,6 +52,7 @@ pub(super) trait NegativeBackend: Send {
         anchor_split: SplitLabel,
         pool: Vec<DataRecord>,
         fallback_used: bool,
+        anchor_query_text: Option<&str>,
         rng: &mut dyn rand::RngCore,
     ) -> Option<(DataRecord, bool)>;
 

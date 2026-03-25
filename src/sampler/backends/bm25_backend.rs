@@ -82,6 +82,7 @@ impl Bm25Backend {
         anchor_split: SplitLabel,
         pool: &[DataRecord],
         fallback_used: bool,
+        anchor_query_text: Option<&str>,
         rng: &mut dyn rand::RngCore,
     ) -> Option<(DataRecord, bool)> {
         if pool.is_empty() {
@@ -107,7 +108,7 @@ impl Bm25Backend {
         let pool_by_id: HashMap<&str, &DataRecord> =
             pool.iter().map(|r| (r.id.as_str(), r)).collect();
 
-        let candidate_ids = self.ranked_candidates(anchor, anchor_split);
+        let candidate_ids = self.ranked_candidates(anchor, anchor_split, anchor_query_text);
         let ranked_pool: Vec<DataRecord> = candidate_ids
             .iter()
             .filter_map(|id| pool_by_id.get(id.as_str()).copied().cloned())
@@ -144,24 +145,42 @@ impl Bm25Backend {
     /// Return BM25-ranked candidate record IDs for `anchor`, restricted to
     /// records assigned to `anchor_split`.
     ///
-    /// Results are cached per anchor ID.  The cache entry is invalidated in
-    /// `on_records_refreshed` when the anchor's own source refreshes, and
-    /// stale anchor entries are removed by `prune_cursors`.
+    /// When `anchor_query_text` is `Some`, it is used as the BM25 query directly
+    /// (the rendered text of the anchor's already-selected chunk window).  Results
+    /// are **not** cached in this case because different windows of the same record
+    /// produce different queries.
+    ///
+    /// When `anchor_query_text` is `None`, the query is derived from the full
+    /// article text via `record_bm25_text`, and the result is cached per anchor ID.
+    /// The cache is invalidated in `on_records_refreshed` when the anchor's own
+    /// source refreshes, and stale entries are removed by `prune_cursors`.
     fn ranked_candidates(
         &mut self,
         anchor: &DataRecord,
         anchor_split: SplitLabel,
+        anchor_query_text: Option<&str>,
     ) -> Vec<RecordId> {
-        if let Some(cached) = self.hard_negatives.get(&anchor.id) {
-            return cached.clone();
+        // When using full-article text, serve from cache if available.
+        if anchor_query_text.is_none() {
+            if let Some(cached) = self.hard_negatives.get(&anchor.id) {
+                return cached.clone();
+            }
         }
 
         let Some(index) = self.source_indexes.get(anchor.source.as_str()) else {
-            self.hard_negatives.insert(anchor.id.clone(), Vec::new());
+            if anchor_query_text.is_none() {
+                self.hard_negatives.insert(anchor.id.clone(), Vec::new());
+            }
             return Vec::new();
         };
 
-        let bm25_query_text = record_bm25_text(anchor, self.max_window_tokens);
+        let owned_text: String;
+        let bm25_query_text: &str = if let Some(text) = anchor_query_text {
+            text
+        } else {
+            owned_text = record_bm25_text(anchor, self.max_window_tokens);
+            &owned_text
+        };
 
         // Search only the anchor's own source index.  The negative pool passed
         // to `choose_negative` is always scoped to `candidate.source ==
@@ -193,8 +212,12 @@ impl Bm25Backend {
         });
 
         let ranked: Vec<RecordId> = all_scored.into_iter().map(|(_, id)| id).collect();
-        self.hard_negatives
-            .insert(anchor.id.clone(), ranked.clone());
+        // Only cache full-article results; chunk-window results are not cached
+        // because different windows of the same record produce different rankings.
+        if anchor_query_text.is_none() {
+            self.hard_negatives
+                .insert(anchor.id.clone(), ranked.clone());
+        }
         ranked
     }
 
@@ -250,9 +273,17 @@ impl NegativeBackend for Bm25Backend {
         anchor_split: SplitLabel,
         pool: Vec<DataRecord>,
         fallback_used: bool,
+        anchor_query_text: Option<&str>,
         rng: &mut dyn rand::RngCore,
     ) -> Option<(DataRecord, bool)> {
-        self.select_hard_negative(anchor, anchor_split, &pool, fallback_used, rng)
+        self.select_hard_negative(
+            anchor,
+            anchor_split,
+            &pool,
+            fallback_used,
+            anchor_query_text,
+            rng,
+        )
     }
 
     fn on_sync_start(&mut self) {
@@ -339,7 +370,7 @@ impl Bm25Backend {
         anchor: &DataRecord,
         anchor_split: SplitLabel,
     ) -> Vec<RecordId> {
-        self.ranked_candidates(anchor, anchor_split)
+        self.ranked_candidates(anchor, anchor_split, None)
     }
 
     /// Return a clone of the hard-negative candidate list for `anchor_id`, or
