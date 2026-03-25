@@ -1,8 +1,8 @@
 //! Pluggable negative-example selection backends.
 //!
 //! [`NegativeBackend`] is the only interface `mod.rs` programs against.  The
-//! two concrete implementations — [`DefaultBackend`] (always compiled) and
-//! [`Bm25Backend`] (`bm25-mining` feature only) — are fully encapsulated;
+//! two concrete implementations — `DefaultBackend` (always compiled) and
+//! `Bm25Backend` (`bm25-mining` feature only) — are fully encapsulated;
 //! their internal state is invisible to the sampler core.
 //!
 //! Adding a new backend: create `backends/my_backend.rs`, gate `pub(super) mod

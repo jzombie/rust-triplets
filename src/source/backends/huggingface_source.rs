@@ -1019,7 +1019,7 @@ impl HuggingFaceRowSource {
     }
 
     /// Total row count for the dataset split as reported by the datasets-server
-    /// `/size` endpoint, populated once during [`new`].
+    /// `/size` endpoint, populated once during [`HuggingFaceRowSource::new`].
     ///
     /// Returns `None` if the endpoint was unreachable, returned a non-200
     /// response, or changed its response format.  The source continues to
