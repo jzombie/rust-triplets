@@ -136,10 +136,17 @@ struct MultiSourceDemoCli {
     #[arg(
         long = "batch-size",
         default_value_t = 4,
-        value_parser = parse_positive_usize,
+        value_parser = parse_batch_size,
         help = "Batch size used for sampling"
     )]
     batch_size: usize,
+    #[arg(
+        long = "ingestion-max-records",
+        default_value_t = default_ingestion_max_records(),
+        value_parser = parse_ingestion_max_records,
+        help = "Per-source ingestion buffer target used while refreshing records"
+    )]
+    ingestion_max_records: usize,
     #[arg(long, help = "Optional deterministic seed override")]
     seed: Option<u64>,
     #[arg(long, value_enum, help = "Target split to sample from")]
@@ -164,7 +171,7 @@ struct MultiSourceDemoCli {
     #[arg(
         long = "batches",
         value_name = "N",
-        value_parser = parse_positive_usize,
+        value_parser = parse_batch_count,
         help = "Run N triplet batches in succession, printing a timing line per batch and (with --features extended-metrics) a per-source similarity summary at the end"
     )]
     batches: Option<usize>,
@@ -538,6 +545,7 @@ where
     let mut config = SamplerConfig::default();
     config.seed = cli.seed.unwrap_or(config.seed);
     config.batch_size = cli.batch_size;
+    config.ingestion_max_records = cli.ingestion_max_records;
     config.chunking = Default::default();
     let selected_split = cli.split.map(Into::into).unwrap_or(SplitLabel::Train);
     config.split = SplitRatios::default();
@@ -766,17 +774,33 @@ fn print_demo_config(cfg: &MultiSourceDemoConfigSnapshot) {
     println!();
 }
 
-fn parse_positive_usize(raw: &str) -> Result<usize, String> {
+fn default_ingestion_max_records() -> usize {
+    SamplerConfig::default().ingestion_max_records
+}
+
+fn parse_positive_usize_flag(raw: &str, flag: &str) -> Result<usize, String> {
     let parsed = raw.parse::<usize>().map_err(|_| {
         format!(
-            "Could not parse --batch-size value '{}' as a positive integer",
-            raw
+            "Could not parse {} value '{}' as a positive integer",
+            flag, raw
         )
     })?;
     if parsed == 0 {
-        return Err("--batch-size must be greater than zero".to_string());
+        return Err(format!("{} must be greater than zero", flag));
     }
     Ok(parsed)
+}
+
+fn parse_batch_size(raw: &str) -> Result<usize, String> {
+    parse_positive_usize_flag(raw, "--batch-size")
+}
+
+fn parse_ingestion_max_records(raw: &str) -> Result<usize, String> {
+    parse_positive_usize_flag(raw, "--ingestion-max-records")
+}
+
+fn parse_batch_count(raw: &str) -> Result<usize, String> {
+    parse_positive_usize_flag(raw, "--batches")
 }
 
 fn suggested_balancing_weight(max_baseline: u128, source_baseline: u128) -> f32 {
@@ -1356,6 +1380,49 @@ mod tests {
         }
     }
 
+    struct IngestionConfigSource {
+        expected_ingestion_max_records: usize,
+        records: Vec<DataRecord>,
+    }
+
+    impl DataSource for IngestionConfigSource {
+        fn id(&self) -> &str {
+            "ingestion_config_source"
+        }
+
+        fn refresh(
+            &self,
+            config: &SamplerConfig,
+            _cursor: Option<&SourceCursor>,
+            _limit: Option<usize>,
+        ) -> Result<SourceSnapshot, SamplerError> {
+            if config.ingestion_max_records != self.expected_ingestion_max_records {
+                return Err(SamplerError::SourceInconsistent {
+                    source_id: self.id().to_string(),
+                    details: format!(
+                        "expected ingestion_max_records {} but got {}",
+                        self.expected_ingestion_max_records, config.ingestion_max_records
+                    ),
+                });
+            }
+            Ok(SourceSnapshot {
+                records: self.records.clone(),
+                cursor: SourceCursor {
+                    last_seen: Utc::now(),
+                    revision: 0,
+                },
+            })
+        }
+
+        fn reported_record_count(&self, _config: &SamplerConfig) -> Result<u128, SamplerError> {
+            Ok(self.records.len() as u128)
+        }
+
+        fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {
+            vec![default_recipe("ingestion_config_recipe")]
+        }
+    }
+
     fn fixture_record(
         source: &str,
         id_suffix: &str,
@@ -1394,9 +1461,12 @@ mod tests {
 
     #[test]
     fn parse_helpers_validate_inputs() {
-        assert_eq!(parse_positive_usize("2").unwrap(), 2);
-        assert!(parse_positive_usize("0").is_err());
-        assert!(parse_positive_usize("abc").is_err());
+        assert_eq!(parse_batch_size("2").unwrap(), 2);
+        assert!(parse_batch_size("0").is_err());
+        assert!(parse_batch_size("abc").is_err());
+        assert_eq!(parse_ingestion_max_records("16").unwrap(), 16);
+        assert!(parse_ingestion_max_records("0").is_err());
+        assert!(parse_batch_count("0").is_err());
 
         let split = parse_split_ratios_arg("0.8,0.1,0.1").unwrap();
         assert!((split.train - 0.8).abs() < 1e-6);
@@ -1606,8 +1676,52 @@ mod tests {
         let err = parse_cli::<MultiSourceDemoCli, _>(["multi_source_demo", "--batch-size", "0"]);
         assert!(err.is_err());
 
+        let err = parse_cli::<MultiSourceDemoCli, _>([
+            "multi_source_demo",
+            "--ingestion-max-records",
+            "0",
+        ]);
+        assert!(err.is_err());
+
         let parsed = parse_cli::<MultiSourceDemoCli, _>(["multi_source_demo"]);
         assert!(parsed.is_ok());
+    }
+
+    #[test]
+    fn run_multi_source_demo_passes_ingestion_max_records_to_sources() {
+        let dir = tempdir().unwrap();
+        let split_store_path = dir.path().join("ingestion_config_split_store.bin");
+        let expected = 7;
+
+        let result = run_multi_source_demo(
+            [
+                "--pair-batch".to_string(),
+                "--ingestion-max-records".to_string(),
+                expected.to_string(),
+                "--split-store-path".to_string(),
+                split_store_path.to_string_lossy().to_string(),
+            ]
+            .into_iter(),
+            |_| Ok(()),
+            |_| {
+                vec![Box::new(IngestionConfigSource {
+                    expected_ingestion_max_records: expected,
+                    records: (1..=8)
+                        .map(|day| {
+                            fixture_record(
+                                "ingestion_config_source",
+                                &format!("r{day}"),
+                                day,
+                                &format!("Config headline {day}"),
+                                &format!("Config body {day}"),
+                            )
+                        })
+                        .collect(),
+                }) as DynSource]
+            },
+        );
+
+        assert!(result.is_ok());
     }
 
     #[test]
