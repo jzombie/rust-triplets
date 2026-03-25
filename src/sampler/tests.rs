@@ -3709,6 +3709,665 @@ fn qa_negative_pairs_mismatch() {
 }
 
 #[test]
+fn recipe_order_helpers_cover_empty_and_rotated_cases() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 59).unwrap());
+
+    let mut shuffled_inner = TripletSamplerInner::new(base_config(), Arc::clone(&store));
+    assert!(shuffled_inner.recipe_order_shuffled(0).is_empty());
+    assert!(shuffled_inner.text_recipe_order_shuffled(0).is_empty());
+
+    let mut base_inner = TripletSamplerInner::new(base_config(), Arc::clone(&store));
+    let base_triplet = base_inner.recipe_order_shuffled(4);
+    assert_eq!(base_triplet.len(), 4);
+    let mut sorted_triplet = base_triplet.clone();
+    sorted_triplet.sort_unstable();
+    assert_eq!(sorted_triplet, vec![0, 1, 2, 3]);
+
+    let mut cycled_inner = TripletSamplerInner::new(base_config(), Arc::clone(&store));
+    let cycled_triplet = cycled_inner.recipe_order_cycled(4, 5);
+    assert_eq!(
+        cycled_triplet,
+        vec![
+            base_triplet[1],
+            base_triplet[2],
+            base_triplet[3],
+            base_triplet[0]
+        ]
+    );
+
+    let mut base_text_inner = TripletSamplerInner::new(base_config(), Arc::clone(&store));
+    let base_text = base_text_inner.text_recipe_order_shuffled(4);
+    assert_eq!(base_text.len(), 4);
+    let mut sorted_text = base_text.clone();
+    sorted_text.sort_unstable();
+    assert_eq!(sorted_text, vec![0, 1, 2, 3]);
+
+    let mut cycled_text_inner = TripletSamplerInner::new(base_config(), store);
+    let cycled_text = cycled_text_inner.text_recipe_order_cycled(4, 6);
+    assert_eq!(
+        cycled_text,
+        vec![base_text[2], base_text[3], base_text[0], base_text[1]]
+    );
+}
+
+#[test]
+fn disallowed_split_returns_configuration_error() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 61).unwrap());
+    let mut config = base_config();
+    config.allowed_splits = vec![SplitLabel::Train];
+
+    let sampler = TripletSampler::new(config, store);
+    let err = sampler
+        .next_text_batch_for_split(SplitLabel::Validation)
+        .expect_err("validation split should be rejected");
+
+    match err {
+        SamplerError::Configuration(message) => {
+            assert!(message.contains("requested split Validation"));
+            assert!(message.contains("allowed_splits [Train]"));
+        }
+        other => panic!("expected configuration error, got {other:?}"),
+    }
+}
+
+#[test]
+fn selector_edge_cases_cover_internal_branches() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 67).unwrap());
+    let mut config = base_config();
+    config.chunking = ChunkingStrategy {
+        max_window_tokens: 3,
+        overlap_tokens: vec![0],
+        summary_fallback_weight: 0.0,
+        summary_fallback_tokens: 0,
+        chunk_weight_floor: 0.0,
+    };
+    let mut inner = TripletSamplerInner::new(config, Arc::clone(&store));
+
+    let now = Utc::now();
+    let record = DataRecord {
+        id: "selector_record".into(),
+        source: "unit".into(),
+        created_at: now,
+        updated_at: now,
+        quality: QualityScore::default(),
+        taxonomy: vec!["unit".into()],
+        sections: vec![
+            RecordSection {
+                role: SectionRole::Context,
+                heading: Some("Body".into()),
+                text: "one two three four five six".into(),
+                sentences: vec!["one two three four five six".into()],
+            },
+            RecordSection {
+                role: SectionRole::Context,
+                heading: Some("Empty".into()),
+                text: String::new(),
+                sentences: Vec::new(),
+            },
+        ],
+        meta_prefix: None,
+    };
+
+    assert!(
+        inner.record_has_at_least_two_window_chunks_for_selector(&record, &Selector::Paragraph(0),)
+    );
+    assert!(inner.record_has_at_least_two_window_chunks_for_selector(&record, &Selector::Random,));
+    assert!(
+        !inner
+            .record_has_at_least_two_window_chunks_for_selector(&record, &Selector::Paragraph(9),)
+    );
+    assert!(
+        !inner.record_has_at_least_two_window_chunks_for_selector(
+            &record,
+            &Selector::TemporalOffset(1),
+        )
+    );
+
+    let paragraph_chunk = inner
+        .select_chunk(&record, &Selector::Paragraph(0))
+        .expect("paragraph selector should yield a chunk");
+    assert_eq!(paragraph_chunk.text, "one two three");
+    assert!(
+        inner
+            .select_chunk(&record, &Selector::Paragraph(9))
+            .is_none()
+    );
+
+    let empty_record = DataRecord {
+        sections: Vec::new(),
+        ..record.clone()
+    };
+    assert!(
+        inner
+            .select_chunk(&empty_record, &Selector::Random)
+            .is_none()
+    );
+
+    let no_anchor_record = DataRecord {
+        sections: vec![RecordSection {
+            role: SectionRole::Anchor,
+            heading: Some("Title".into()),
+            text: "headline only".into(),
+            sentences: vec!["headline only".into()],
+        }],
+        ..record.clone()
+    };
+    assert!(
+        inner
+            .select_by_role(&no_anchor_record, &SectionRole::Context)
+            .is_none()
+    );
+
+    assert!(
+        inner
+            .materialize_chunks(&record, 1, &record.sections[1])
+            .is_empty()
+    );
+
+    let mut neighbor = record.clone();
+    neighbor.id = "selector_neighbor".into();
+    neighbor.created_at = now + Duration::days(1);
+    neighbor.updated_at = neighbor.created_at;
+    neighbor.sections = vec![RecordSection {
+        role: SectionRole::Context,
+        heading: Some("Neighbor".into()),
+        text: "neighbor chunk text".into(),
+        sentences: vec!["neighbor chunk text".into()],
+    }];
+
+    store.upsert(record.id.clone(), SplitLabel::Train).unwrap();
+    store
+        .upsert(neighbor.id.clone(), SplitLabel::Train)
+        .unwrap();
+    inner.records.insert(record.id.clone(), record.clone());
+    inner.records.insert(neighbor.id.clone(), neighbor.clone());
+
+    let temporal_chunk = inner
+        .select_chunk(&record, &Selector::TemporalOffset(1))
+        .expect("temporal selector should find neighbor chunk");
+    assert_eq!(temporal_chunk.record_id, neighbor.id);
+    assert_eq!(temporal_chunk.text, "neighbor chunk text");
+}
+
+#[test]
+fn empty_recipe_configs_error_when_sampling_without_sources() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 71).unwrap());
+    let mut config = base_config();
+    config.batch_size = 1;
+    config.recipes.clear();
+    config.text_recipes.clear();
+
+    let mut inner = TripletSamplerInner::new(config, Arc::clone(&store));
+    let record = sample_record();
+    store.upsert(record.id.clone(), SplitLabel::Train).unwrap();
+    inner.records.insert(record.id.clone(), record.clone());
+    inner
+        .chunk_index
+        .insert(record.id.clone(), record.id.clone());
+
+    let pair_err = inner
+        .next_pair_batch_inner_with_weights(SplitLabel::Train, None)
+        .expect_err("pair sampling should fail without triplet recipes");
+    match pair_err {
+        SamplerError::Configuration(message) => {
+            assert_eq!(message, "no triplet recipes available");
+        }
+        other => panic!("expected configuration error, got {other:?}"),
+    }
+
+    let text_err = inner
+        .next_text_batch_inner_with_weights(SplitLabel::Train, None)
+        .expect_err("text sampling should fail without text recipes");
+    match text_err {
+        SamplerError::Configuration(message) => {
+            assert_eq!(message, "no text recipes configured");
+        }
+        other => panic!("expected configuration error, got {other:?}"),
+    }
+
+    let triplet_err = inner
+        .next_triplet_batch_inner_with_weights(SplitLabel::Train, None)
+        .expect_err("triplet sampling should fail without triplet recipes");
+    match triplet_err {
+        SamplerError::Configuration(message) => {
+            assert_eq!(message, "no triplet recipes configured");
+        }
+        other => panic!("expected configuration error, got {other:?}"),
+    }
+}
+
+#[test]
+fn source_less_batch_builders_sample_from_primed_epoch_tracker() {
+    fn primed_inner(batch_size: usize) -> TripletSamplerInner<DeterministicSplitStore> {
+        let split = SplitRatios::default();
+        let store = Arc::new(DeterministicSplitStore::new(split, 79).unwrap());
+        let mut config = base_config();
+        config.batch_size = batch_size;
+        config.recipes = vec![TripletRecipe {
+            name: "manual_triplet".into(),
+            anchor: Selector::Role(SectionRole::Anchor),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 1.0,
+            instruction: None,
+            allow_same_anchor_positive: false,
+        }];
+        config.text_recipes = vec![TextRecipe {
+            name: "manual_text".into(),
+            selector: Selector::Role(SectionRole::Context),
+            weight: 1.0,
+            instruction: None,
+        }];
+
+        let mut inner = TripletSamplerInner::new(config, Arc::clone(&store));
+        let records = vec![
+            trader_record(
+                "manual::2025-01-01/article_a.txt",
+                "2025-01-01",
+                "Alpha",
+                "Body alpha with enough words",
+            ),
+            trader_record(
+                "manual::2025-01-01/article_b.txt",
+                "2025-01-01",
+                "Beta",
+                "Body beta with enough words",
+            ),
+        ];
+        for record in records {
+            store.upsert(record.id.clone(), SplitLabel::Train).unwrap();
+            inner
+                .chunk_index
+                .insert(record.id.clone(), record.id.clone());
+            inner.records.insert(record.id.clone(), record);
+        }
+        inner.epoch_tracker.ensure_loaded().unwrap();
+        let records_by_split = inner.records_by_split().unwrap();
+        inner
+            .epoch_tracker
+            .reconcile(SplitLabel::Train, &records_by_split);
+        inner
+    }
+
+    let mut pair_inner = primed_inner(2);
+    let pair_batch = pair_inner
+        .next_pair_batch_inner_with_weights(SplitLabel::Train, None)
+        .expect("pair batch should sample from primed epoch tracker");
+    assert_eq!(pair_batch.pairs.len(), 2);
+    assert!(
+        pair_batch
+            .pairs
+            .iter()
+            .any(|pair| pair.label == PairLabel::Positive)
+    );
+    assert!(
+        pair_batch
+            .pairs
+            .iter()
+            .any(|pair| pair.label == PairLabel::Negative)
+    );
+
+    let mut text_inner = primed_inner(2);
+    let text_batch = text_inner
+        .next_text_batch_inner_with_weights(SplitLabel::Train, None)
+        .expect("text batch should sample from primed epoch tracker");
+    assert_eq!(text_batch.samples.len(), 2);
+    assert!(
+        text_batch
+            .samples
+            .iter()
+            .all(|sample| sample.recipe == "manual_text")
+    );
+
+    let mut triplet_inner = primed_inner(2);
+    let triplet_batch = triplet_inner
+        .next_triplet_batch_inner_with_weights(SplitLabel::Train, None)
+        .expect("triplet batch should sample from primed epoch tracker");
+    assert_eq!(triplet_batch.triplets.len(), 2);
+    assert!(
+        triplet_batch
+            .triplets
+            .iter()
+            .all(|triplet| triplet.recipe == "manual_triplet")
+    );
+}
+
+#[test]
+fn source_less_batch_builders_report_last_recipe_when_sampling_exhausts() {
+    fn primed_failing_inner(
+        triplet_name: &str,
+        text_name: &str,
+    ) -> TripletSamplerInner<DeterministicSplitStore> {
+        let split = SplitRatios::default();
+        let store = Arc::new(DeterministicSplitStore::new(split, 83).unwrap());
+        let mut config = base_config();
+        config.batch_size = 1;
+        config.recipes = vec![TripletRecipe {
+            name: triplet_name.to_string().into(),
+            anchor: Selector::Role(SectionRole::Anchor),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 1.0,
+            instruction: None,
+            allow_same_anchor_positive: false,
+        }];
+        config.text_recipes = vec![TextRecipe {
+            name: text_name.to_string().into(),
+            selector: Selector::Paragraph(99),
+            weight: 1.0,
+            instruction: None,
+        }];
+
+        let mut inner = TripletSamplerInner::new(config, Arc::clone(&store));
+        let record = trader_record(
+            "manual::2025-01-01/article_only.txt",
+            "2025-01-01",
+            "Solo",
+            "Only record body",
+        );
+        store.upsert(record.id.clone(), SplitLabel::Train).unwrap();
+        inner
+            .chunk_index
+            .insert(record.id.clone(), record.id.clone());
+        inner.records.insert(record.id.clone(), record);
+        inner.epoch_tracker.ensure_loaded().unwrap();
+        let records_by_split = inner.records_by_split().unwrap();
+        inner
+            .epoch_tracker
+            .reconcile(SplitLabel::Train, &records_by_split);
+        inner
+    }
+
+    let mut pair_inner = primed_failing_inner("manual_pair_exhausted", "manual_text_exhausted");
+    let pair_err = pair_inner
+        .next_pair_batch_inner_with_weights(SplitLabel::Train, None)
+        .expect_err("pair batch should exhaust with one record and wrong-article negatives");
+    match pair_err {
+        SamplerError::Exhausted(message) => assert_eq!(message, "manual_pair_exhausted"),
+        other => panic!("expected exhausted error, got {other:?}"),
+    }
+
+    let mut text_inner = primed_failing_inner("manual_triplet_exhausted", "manual_text_exhausted");
+    let text_err = text_inner
+        .next_text_batch_inner_with_weights(SplitLabel::Train, None)
+        .expect_err("text batch should exhaust when selector never resolves a chunk");
+    match text_err {
+        SamplerError::Exhausted(message) => assert_eq!(message, "manual_text_exhausted"),
+        other => panic!("expected exhausted error, got {other:?}"),
+    }
+
+    let mut triplet_inner =
+        primed_failing_inner("manual_triplet_exhausted", "manual_text_exhausted");
+    let triplet_err = triplet_inner
+        .next_triplet_batch_inner_with_weights(SplitLabel::Train, None)
+        .expect_err("triplet batch should exhaust with one record and no negative candidate");
+    match triplet_err {
+        SamplerError::Exhausted(message) => assert_eq!(message, "manual_triplet_exhausted"),
+        other => panic!("expected exhausted error, got {other:?}"),
+    }
+}
+
+#[test]
+fn source_state_and_recipe_helpers_cover_remaining_branches() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 89).unwrap());
+    let mut inner = TripletSamplerInner::new(base_config(), Arc::clone(&store));
+    let recipe = |name: &str| TripletRecipe {
+        name: name.to_string().into(),
+        anchor: Selector::Role(SectionRole::Anchor),
+        positive_selector: Selector::Role(SectionRole::Context),
+        negative_selector: Selector::Role(SectionRole::Context),
+        negative_strategy: NegativeStrategy::WrongArticle,
+        weight: 1.0,
+        instruction: None,
+        allow_same_anchor_positive: false,
+    };
+
+    inner.persist_source_state(None).unwrap();
+    assert!(store.load_sampler_state().unwrap().is_none());
+
+    inner.source_state_loaded = true;
+    inner.source_cycle_idx = 3;
+    inner.source_record_cursors.insert("source_a".into(), 4);
+    inner.source_epoch = 5;
+    inner.triplet_recipe_rr_idx = 6;
+    inner.text_recipe_rr_idx = 7;
+    inner.persist_source_state(None).unwrap();
+    let persisted = store.load_sampler_state().unwrap().unwrap();
+    assert_eq!(persisted.source_cycle_idx, 3);
+    assert_eq!(
+        persisted.source_record_cursors,
+        vec![("source_a".into(), 4)]
+    );
+    assert_eq!(persisted.source_epoch, 5);
+    assert_eq!(persisted.triplet_recipe_rr_idx, 6);
+    assert_eq!(persisted.text_recipe_rr_idx, 7);
+    assert!(!inner.source_state_dirty);
+
+    inner.using_config_text_recipes = true;
+    inner.text_recipes = vec![TextRecipe {
+        name: "keep_me".into(),
+        selector: Selector::Random,
+        weight: 1.0,
+        instruction: None,
+    }];
+    inner.triplet_recipes.clear();
+    inner.rebuild_derived_text_recipes();
+    assert_eq!(inner.text_recipes.len(), 1);
+
+    inner.using_config_text_recipes = false;
+    inner.rebuild_derived_text_recipes();
+    assert!(inner.text_recipes.is_empty());
+
+    inner.triplet_recipes = vec![recipe("derived_recipe")];
+    inner.rebuild_derived_text_recipes();
+    assert!(!inner.text_recipes.is_empty());
+
+    let duplicate_name = inner.text_recipes[0].name.clone();
+    inner.extend_text_recipes_unique(&[
+        TextRecipe {
+            name: duplicate_name,
+            selector: Selector::Random,
+            weight: 1.0,
+            instruction: None,
+        },
+        TextRecipe {
+            name: "new_text_recipe".into(),
+            selector: Selector::Paragraph(0),
+            weight: 1.0,
+            instruction: None,
+        },
+    ]);
+    assert!(
+        inner
+            .text_recipes
+            .iter()
+            .any(|recipe| recipe.name == "new_text_recipe")
+    );
+
+    inner.using_config_triplet_recipes = true;
+    inner.triplet_recipes = vec![recipe("configured_global")];
+    assert_eq!(
+        inner.configured_triplet_recipes_for_source("unused")[0].name,
+        "configured_global"
+    );
+
+    inner.using_config_triplet_recipes = false;
+    inner
+        .source_triplet_recipes
+        .insert("source_a".into(), vec![recipe("source_specific")]);
+    assert_eq!(
+        inner.configured_triplet_recipes_for_source("source_a")[0].name,
+        "source_specific"
+    );
+
+    assert!(!TripletSamplerInner::<DeterministicSplitStore>::contains_auto_chunk_pair_recipe(&[]));
+    assert!(
+        TripletSamplerInner::<DeterministicSplitStore>::contains_auto_chunk_pair_recipe(&[
+            TripletSamplerInner::<DeterministicSplitStore>::source_chunk_pair_recipe(),
+        ])
+    );
+
+    inner.config.chunking.max_window_tokens = 0;
+    inner.sources_with_long_sections.insert("source_a".into());
+    assert!(!inner.source_supports_chunk_pair_recipe("source_a"));
+}
+
+#[test]
+fn records_by_split_and_anchor_selection_cover_edge_cases() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 97).unwrap());
+    let mut inner = TripletSamplerInner::new(base_config(), Arc::clone(&store));
+
+    let record = trader_record("source_a::record_a", "2025-01-01", "Alpha", "Body alpha");
+    inner.records.insert(record.id.clone(), record.clone());
+    inner
+        .chunk_index
+        .insert(record.id.clone(), record.id.clone());
+    inner
+        .chunk_index
+        .insert("dangling_chunk".into(), "missing_record".into());
+
+    let by_split = inner.records_by_split().unwrap();
+    assert_eq!(by_split.get(&SplitLabel::Train).map(Vec::len), Some(1));
+    assert_eq!(store.label_for(&record.id), Some(SplitLabel::Train));
+
+    assert!(
+        inner
+            .choose_anchor_record(Some("missing_source"), SplitLabel::Train)
+            .is_none()
+    );
+
+    inner
+        .source_record_indices
+        .insert("empty_source".into(), Vec::new());
+    assert!(
+        inner
+            .choose_anchor_record(Some("empty_source"), SplitLabel::Train)
+            .is_none()
+    );
+
+    let validation_record = trader_record("source_b::record_b", "2025-01-02", "Beta", "Body beta");
+    store
+        .upsert(validation_record.id.clone(), SplitLabel::Validation)
+        .unwrap();
+    inner
+        .records
+        .insert(validation_record.id.clone(), validation_record);
+    inner
+        .source_record_indices
+        .insert("source_b".into(), vec![1]);
+    inner.source_order = vec!["source_b".into()];
+    inner.source_wrapped.insert("source_b".into(), false);
+
+    assert!(
+        inner
+            .choose_anchor_record(Some("source_b"), SplitLabel::Train)
+            .is_none()
+    );
+    assert_eq!(inner.source_epoch, 1);
+    assert_eq!(inner.source_cycle_idx, 0);
+
+    // With no reconciled epoch entries for this split, source-less anchor selection
+    // must terminate immediately instead of scanning indefinitely.
+    let mut no_source_inner = TripletSamplerInner::new(base_config(), store);
+    no_source_inner.epoch_tracker.ensure_loaded().unwrap();
+    assert!(
+        no_source_inner
+            .choose_anchor_record(None, SplitLabel::Train)
+            .is_none()
+    );
+}
+
+#[test]
+fn temporal_neighbor_auto_pair_and_weighted_retry_paths_are_covered() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 101).unwrap());
+    let mut config = base_config();
+    config.batch_size = 1;
+    let mut inner = TripletSamplerInner::new(config, Arc::clone(&store));
+
+    let mut anchor = record_with_offset("anchor_record", Utc::now(), 0);
+    anchor.source = "source_a".into();
+    anchor.taxonomy = vec!["shared_taxonomy".into()];
+    let mut neighbor = record_with_offset("neighbor_record", anchor.created_at, 86_400);
+    neighbor.source = "source_b".into();
+    neighbor.taxonomy = vec!["shared_taxonomy".into()];
+    store.upsert(anchor.id.clone(), SplitLabel::Train).unwrap();
+    store
+        .upsert(neighbor.id.clone(), SplitLabel::Train)
+        .unwrap();
+    inner.records.insert(anchor.id.clone(), anchor.clone());
+    inner.records.insert(neighbor.id.clone(), neighbor.clone());
+
+    let selected = inner
+        .select_temporal_neighbor(&anchor, 1)
+        .expect("taxonomy match should allow cross-source temporal neighbor");
+    assert_eq!(selected.id, neighbor.id);
+
+    let mismatched_recipe = TripletRecipe {
+        name: "mismatched_auto".into(),
+        anchor: Selector::Role(SectionRole::Anchor),
+        positive_selector: Selector::Role(SectionRole::Context),
+        negative_selector: Selector::Role(SectionRole::Context),
+        negative_strategy: NegativeStrategy::WrongArticle,
+        weight: 1.0,
+        instruction: None,
+        allow_same_anchor_positive: false,
+    };
+    assert!(
+        inner
+            .select_distinct_window_pair_for_auto_recipe(&mismatched_recipe, &anchor)
+            .is_none()
+    );
+
+    let failing_config = SamplerConfig {
+        batch_size: 1,
+        recipes: vec![TripletRecipe {
+            name: "retry_triplet".into(),
+            anchor: Selector::Role(SectionRole::Anchor),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 1.0,
+            instruction: None,
+            allow_same_anchor_positive: false,
+        }],
+        text_recipes: vec![TextRecipe {
+            name: "retry_text".into(),
+            selector: Selector::Paragraph(99),
+            weight: 1.0,
+            instruction: None,
+        }],
+        ..base_config()
+    };
+    let retry_store = Arc::new(DeterministicSplitStore::new(split, 103).unwrap());
+    let sampler = TripletSampler::new(failing_config, retry_store);
+    let weights = HashMap::from([("missing_source".to_string(), 1.0f32)]);
+
+    let pair_err = sampler
+        .next_pair_batch_with_weights_for_split(SplitLabel::Train, &weights)
+        .expect_err("pair retry path should exhaust without records");
+    assert!(matches!(pair_err, SamplerError::Exhausted(_)));
+
+    let text_err = sampler
+        .next_text_batch_with_weights_for_split(SplitLabel::Train, &weights)
+        .expect_err("text retry path should exhaust without records");
+    assert!(matches!(text_err, SamplerError::Exhausted(_)));
+
+    let triplet_err = sampler
+        .next_triplet_batch_with_weights_for_split(SplitLabel::Train, &weights)
+        .expect_err("triplet retry path should exhaust without records");
+    assert!(matches!(triplet_err, SamplerError::Exhausted(_)));
+}
+
+#[test]
 fn wrong_article_falls_back_within_same_split() {
     let split = SplitRatios {
         train: 0.34,
