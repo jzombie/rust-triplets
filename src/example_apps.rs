@@ -713,6 +713,14 @@ where
                     print_triplet_batch(&chunking, &triplet_batch, split_store.as_ref());
                 }
                 sampler.save_sampler_state(None)?;
+                #[cfg(all(feature = "extended-metrics", feature = "bm25-mining"))]
+                {
+                    let (fallback, total) = sampler.bm25_fallback_stats();
+                    if total > 0 {
+                        let pct = fallback as f64 / total as f64 * 100.0;
+                        println!("bm25 fallback rate : {}/{} ({:.1}%)", fallback, total, pct);
+                    }
+                }
             }
             Err(SamplerError::Exhausted(name)) => {
                 eprintln!(
