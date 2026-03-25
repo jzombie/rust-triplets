@@ -1207,10 +1207,6 @@ where
             "skew: sources={} total={} min={} max={} mean={:.2} ratio={:.2}",
             skew.sources, skew.total, skew.min, skew.max, skew.mean, skew.ratio
         );
-    } else {
-        for (source, count) in &entries {
-            println!("{source}: count={count}");
-        }
     }
 }
 
@@ -1272,6 +1268,36 @@ mod tests {
 
     fn error_unit_roots(_: Vec<String>) -> Result<(), Box<dyn Error>> {
         Err("root-resolution-error".into())
+    }
+
+    struct ErrorRefreshSource {
+        id: String,
+    }
+
+    impl DataSource for ErrorRefreshSource {
+        fn id(&self) -> &str {
+            &self.id
+        }
+
+        fn refresh(
+            &self,
+            _config: &SamplerConfig,
+            _cursor: Option<&SourceCursor>,
+            _limit: Option<usize>,
+        ) -> Result<SourceSnapshot, SamplerError> {
+            Err(SamplerError::SourceUnavailable {
+                source_id: self.id.clone(),
+                reason: "simulated refresh failure".to_string(),
+            })
+        }
+
+        fn reported_record_count(&self, _config: &SamplerConfig) -> Result<u128, SamplerError> {
+            Ok(1)
+        }
+
+        fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {
+            vec![default_recipe("error_refresh_recipe")]
+        }
     }
 
     /// Minimal in-memory `DataSource` test double for example app tests.
@@ -1755,6 +1781,157 @@ mod tests {
 
         let parsed = parse_cli::<MultiSourceDemoCli, _>(["multi_source_demo"]);
         assert!(parsed.is_ok());
+    }
+
+    #[test]
+    fn run_example_apps_invalid_cli_args_return_errors() {
+        let estimate = run_estimate_capacity(
+            ["--unknown".to_string()].into_iter(),
+            ok_unit_roots,
+            empty_dyn_sources,
+        );
+        assert!(estimate.is_err());
+
+        let demo = run_multi_source_demo(
+            ["--unknown".to_string()].into_iter(),
+            ok_unit_roots,
+            empty_dyn_sources,
+        );
+        assert!(demo.is_err());
+    }
+
+    #[test]
+    fn helper_and_error_refresh_source_methods_are_exercised() {
+        assert!(ok_unit_roots(Vec::new()).is_ok());
+        assert!(error_unit_roots(Vec::new()).is_err());
+
+        let source = ErrorRefreshSource {
+            id: "error_refresh_source".to_string(),
+        };
+        assert_eq!(
+            source
+                .reported_record_count(&SamplerConfig::default())
+                .unwrap(),
+            1
+        );
+        assert_eq!(source.default_triplet_recipes().len(), 1);
+    }
+
+    #[test]
+    fn print_source_summary_handles_non_empty_ids() {
+        let ids = [
+            "source_a::r1",
+            "source_a::r2",
+            "source_b::r1",
+            "source_without_delimiter",
+        ];
+        print_source_summary("non-empty summary", ids.into_iter());
+    }
+
+    #[test]
+    fn run_multi_source_demo_refresh_failures_degrade_to_exhausted_paths() {
+        for mode in [
+            vec!["--pair-batch".to_string()],
+            vec!["--text-recipes".to_string()],
+            vec!["--batches".to_string(), "1".to_string()],
+            Vec::new(),
+        ] {
+            let dir = tempdir().unwrap();
+            let split_store_path = dir.path().join("error_modes_split_store.bin");
+            let mut args = mode;
+            args.push("--split-store-path".to_string());
+            args.push(split_store_path.to_string_lossy().to_string());
+
+            let result = run_multi_source_demo(
+                args.into_iter(),
+                |_| Ok(()),
+                |_| {
+                    vec![Box::new(ErrorRefreshSource {
+                        id: "error_refresh_source".to_string(),
+                    }) as DynSource]
+                },
+            );
+
+            assert!(result.is_ok());
+        }
+    }
+
+    #[test]
+    fn run_multi_source_demo_batches_exhausted_path_returns_ok() {
+        let dir = tempdir().unwrap();
+        let split_store_path = dir.path().join("batches_exhausted_split_store.bin");
+        let args = vec![
+            "--batches".to_string(),
+            "3".to_string(),
+            "--split-store-path".to_string(),
+            split_store_path.to_string_lossy().to_string(),
+        ];
+
+        let result = run_multi_source_demo(
+            args.into_iter(),
+            |_| Ok(()),
+            |_| {
+                vec![Box::new(FixtureSource {
+                    id: "batches_exhausted_source".into(),
+                    records: vec![fixture_record(
+                        "batches_exhausted_source",
+                        "r1",
+                        1,
+                        "Only one record",
+                        "Single record body",
+                    )],
+                    recipes: vec![default_recipe("batches_exhausted_recipe")],
+                }) as DynSource]
+            },
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn run_multi_source_demo_default_triplet_success_path_returns_ok() {
+        let dir = tempdir().unwrap();
+        let split_store_path = dir.path().join("default_triplet_success_split_store.bin");
+        let args = vec![
+            "--split-store-path".to_string(),
+            split_store_path.to_string_lossy().to_string(),
+        ];
+
+        let result = run_multi_source_demo(
+            args.into_iter(),
+            |_| Ok(()),
+            |_| {
+                vec![Box::new(FixtureSource {
+                    id: "default_triplet_success_source".into(),
+                    records: vec![
+                        fixture_record(
+                            "default_triplet_success_source",
+                            "r1",
+                            1,
+                            "Title one",
+                            "Body one",
+                        ),
+                        fixture_record(
+                            "default_triplet_success_source",
+                            "r2",
+                            2,
+                            "Title two",
+                            "Body two",
+                        ),
+                        fixture_record(
+                            "default_triplet_success_source",
+                            "r3",
+                            3,
+                            "Title three",
+                            "Body three",
+                        ),
+                    ],
+                    recipes: vec![default_recipe("default_triplet_success_recipe")],
+                }) as DynSource]
+            },
+        );
+
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -2271,7 +2448,7 @@ mod tests {
             ]
             .into_iter(),
             |_| Ok(()),
-            |_| Vec::<DynSource>::new(),
+            empty_dyn_sources,
         );
 
         let err = result.unwrap_err().to_string();
