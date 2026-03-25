@@ -633,7 +633,7 @@ where
         print_demo_config(&config_snapshot);
         println!("=== benchmark: {} triplet batches ===", batch_count);
 
-        // source_id -> Vec<(pos_jaccard, pos_cosine, neg_jaccard, neg_cosine)>
+        // source_id -> Vec<(pos_jaccard, pos_byte_cosine, neg_jaccard, neg_byte_cosine)>
         #[cfg(feature = "extended-metrics")]
         let mut source_metrics: HashMap<String, Vec<(f32, f32, f32, f32)>> = HashMap::new();
 
@@ -1093,7 +1093,7 @@ fn print_metric_summary(source_data: &HashMap<String, Vec<(f32, f32, f32, f32)>>
         n_sources,
     );
     print_metric_section(
-        "cosine  \u{2194} anchor",
+        "byte-cos \u{2194} anchor",
         &sources,
         source_data,
         1,
@@ -1147,7 +1147,7 @@ fn print_chunk_block(
     println!("section_idx  : {}", chunk.section_idx);
     println!("token_est    : {}", chunk.tokens_estimate);
     if let Some((j, c)) = anchor_sim {
-        println!("jaccard(↔a)  : {:.4}  cosine(↔a)  : {:.4}", j, c);
+        println!("jaccard(↔a)  : {:.4}  byte-cos(↔a): {:.4}", j, c);
     }
     println!("model_input (exact text sent to the model):");
     println!(
