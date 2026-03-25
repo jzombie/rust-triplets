@@ -350,13 +350,13 @@ impl IngestionManager {
     }
 
     /// Refresh all registered sources once.
-    pub fn refresh_all(&mut self) {
-        self.refresh_all_internal(false, None, None);
+    pub fn refresh_all(&mut self) -> bool {
+        self.refresh_all_internal(false, None, None)
     }
 
     /// Advance the ingestion window by ingesting `step` new records.
-    pub fn advance(&mut self, step: usize) {
-        self.refresh_all_internal(false, Some(step), None);
+    pub fn advance(&mut self, step: usize) -> bool {
+        self.refresh_all_internal(false, Some(step), None)
     }
 
     /// Advance the ingestion window by ingesting `step` new records with weights.
@@ -367,15 +367,14 @@ impl IngestionManager {
         &mut self,
         step: usize,
         weights: &HashMap<SourceId, f32>,
-    ) -> Result<(), SamplerError> {
+    ) -> Result<bool, SamplerError> {
         self.validate_weights(weights)?;
-        self.refresh_all_internal(false, Some(step), Some(weights));
-        Ok(())
+        Ok(self.refresh_all_internal(false, Some(step), Some(weights)))
     }
 
     /// Force refresh all registered sources, discarding buffered records.
-    pub fn force_refresh_all(&mut self) {
-        self.refresh_all_internal(true, None, None);
+    pub fn force_refresh_all(&mut self) -> bool {
+        self.refresh_all_internal(true, None, None)
     }
 
     /// Refresh all registered sources once with per-call source weights.
@@ -385,10 +384,9 @@ impl IngestionManager {
     pub fn refresh_all_with_weights(
         &mut self,
         weights: &HashMap<SourceId, f32>,
-    ) -> Result<(), SamplerError> {
+    ) -> Result<bool, SamplerError> {
         self.validate_weights(weights)?;
-        self.refresh_all_internal(false, None, Some(weights));
-        Ok(())
+        Ok(self.refresh_all_internal(false, None, Some(weights)))
     }
 
     /// Force refresh all registered sources with per-call source weights.
@@ -398,10 +396,9 @@ impl IngestionManager {
     pub fn force_refresh_all_with_weights(
         &mut self,
         weights: &HashMap<SourceId, f32>,
-    ) -> Result<(), SamplerError> {
+    ) -> Result<bool, SamplerError> {
         self.validate_weights(weights)?;
-        self.refresh_all_internal(true, None, Some(weights));
-        Ok(())
+        Ok(self.refresh_all_internal(true, None, Some(weights)))
     }
 
     fn validate_weights(&self, weights: &HashMap<SourceId, f32>) -> Result<(), SamplerError> {
@@ -435,7 +432,7 @@ impl IngestionManager {
         force_refresh: bool,
         step: Option<usize>,
         weights: Option<&HashMap<SourceId, f32>>,
-    ) {
+    ) -> bool {
         self.last_refreshed_sources.clear();
         let mut refresh_plan = Vec::new();
         for (idx, state) in self.sources.iter_mut().enumerate() {
@@ -571,7 +568,7 @@ impl IngestionManager {
             }
         }
         if self.max_records == 0 {
-            return;
+            return !self.last_refreshed_sources.is_empty();
         }
         let target_limit = step.unwrap_or(self.max_records);
         if let Some(weights) = weights {
@@ -602,6 +599,7 @@ impl IngestionManager {
                 }
             }
         }
+        !self.last_refreshed_sources.is_empty()
     }
 
     fn weighted_drain_into_caches(&mut self, limit: usize, weights: &HashMap<SourceId, f32>) {
