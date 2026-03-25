@@ -1033,7 +1033,6 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                         anchor_split,
                         same_date,
                         false,
-                        strategy,
                     );
                 }
                 let pool = self
@@ -1044,7 +1043,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                     })
                     .cloned()
                     .collect::<Vec<_>>();
-                self.choose_negative_from_pool(anchor_record, anchor_split, pool, true, strategy)
+                self.choose_negative_from_pool(anchor_record, anchor_split, pool, true)
             }
             NegativeStrategy::WrongPublicationDate => {
                 let anchor_date =
@@ -1087,11 +1086,10 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                         anchor_split,
                         fallback_pool,
                         true,
-                        strategy,
                     );
                 }
 
-                self.choose_negative_from_pool(anchor_record, anchor_split, pool, false, strategy)
+                self.choose_negative_from_pool(anchor_record, anchor_split, pool, false)
             }
             NegativeStrategy::QuestionAnswerMismatch => {
                 let pool: Vec<DataRecord> = self
@@ -1121,11 +1119,10 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                         anchor_split,
                         fallback_pool,
                         true,
-                        strategy,
                     );
                 }
 
-                self.choose_negative_from_pool(anchor_record, anchor_split, pool, false, strategy)
+                self.choose_negative_from_pool(anchor_record, anchor_split, pool, false)
             }
         }
     }
@@ -1137,15 +1134,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         anchor_split: SplitLabel,
         pool: Vec<DataRecord>,
         fallback_used: bool,
-        strategy: &NegativeStrategy,
     ) -> Option<(DataRecord, bool)> {
-        self.select_bm25_hard_negative_record(
-            anchor_record,
-            anchor_split,
-            &pool,
-            fallback_used,
-            strategy,
-        )
+        self.select_bm25_hard_negative_record(anchor_record, anchor_split, &pool, fallback_used)
     }
 
     #[cfg(not(feature = "bm25-mining"))]
@@ -1155,14 +1145,13 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         _anchor_split: SplitLabel,
         pool: Vec<DataRecord>,
         fallback_used: bool,
-        _strategy: &NegativeStrategy,
     ) -> Option<(DataRecord, bool)> {
         // The strategy IS enforced — it was applied upstream in `select_negative_record`,
         // which constructs `pool` by applying all strategy-specific predicates (same source,
         // split isolation, date exclusion, etc.) before calling here.  This function simply
         // samples uniformly from the pre-filtered pool.
         //
-        // `_anchor_record`, `_anchor_split`, and `_strategy` exist only to match the
+        // `_anchor_record` and `_anchor_split` exist only to match the
         // `#[cfg(feature = "bm25-mining")]` variant's signature so both compile-time paths
         // share identical call sites in `select_negative_record`.
         pool.choose(&mut self.rng)
@@ -1177,74 +1166,36 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         anchor_split: SplitLabel,
         pool: &[DataRecord],
         fallback_used: bool,
-        strategy: &NegativeStrategy,
     ) -> Option<(DataRecord, bool)> {
         if pool.is_empty() {
             return None;
         }
 
-        // BM25 top-K rotation (deterministic, per anchor+split):
-        // 1) Walk the globally ranked list, post-filtering by strategy metadata predicates.
-        //    This sees the full per-source buffer pool, not just the LRU-capped window.
+        // BM25 top-K rotation (deterministic, per anchor+split).
+        //
+        // `pool` is already strategy-filtered by the caller (`select_negative_record`):
+        // same-source, same-split, and any strategy-specific date predicates have all
+        // been applied before arriving here.  This function's only job is to re-rank
+        // the pool by BM25 lexical score and rotate through the top-K candidates.
+        //
+        // Algorithm:
+        // 1) Get globally BM25-ranked candidate IDs for the anchor (same-split only,
+        //    cached per anchor).  Intersect with `pool` IDs to restrict to the
+        //    already-filtered candidate set — no predicates need to be re-checked here.
         // 2) Compute `top_k = min(configured_top_k, ranked_pool.len())`.
         // 3) Read per-(anchor_id, split) cursor, defaulting to 0.
         // 4) Return `ranked_pool[cursor]`, then advance cursor modulo `top_k`.
         //
         // Cursors are cleared whenever the index is rebuilt so a refreshed corpus
         // restarts rotation from rank-1 for each anchor.
+        let pool_by_id: HashMap<&str, &DataRecord> =
+            pool.iter().map(|r| (r.id.as_str(), r)).collect();
 
-        let anchor_date = taxonomy_value(anchor_record, META_FIELD_DATE).map(|d| d.to_string());
-
-        // Read globally ranked candidate ids from the per-anchor BM25 cache.
         let candidate_ids = self.bm25_ranked_candidates(anchor_record);
-
-        // Walk the ranked list, applying strategy metadata predicates.
-        // Use the pre-built `id_to_meta_idx` map for O(1) per-candidate lookup
-        // instead of rebuilding a HashMap on every call.
-        let mut ranked_pool: Vec<DataRecord> = Vec::new();
-        if let Some(index) = self.bm25_global_index.as_ref() {
-            for candidate_id in &candidate_ids {
-                let Some(&idx) = index.id_to_meta_idx.get(candidate_id) else {
-                    continue;
-                };
-                let m = &index.meta[idx];
-                if m.record_id == anchor_record.id {
-                    continue;
-                }
-                // Strict split isolation.
-                if m.split != Some(anchor_split) {
-                    continue;
-                }
-                // Apply same-source constraint that all strategies require.
-                if m.source != anchor_record.source && !fallback_used {
-                    continue;
-                }
-                // Strategy-specific date predicate.
-                let passes = match strategy {
-                    NegativeStrategy::WrongPublicationDate => {
-                        match (anchor_date.as_deref(), m.date.as_deref()) {
-                            (Some(a), Some(b)) => a != b,
-                            (Some(_), None) => true,
-                            (None, Some(_)) => true,
-                            (None, None) => false,
-                        }
-                    }
-                    // WrongArticle: same date preferred, but any same-source record is valid.
-                    // QuestionAnswerMismatch: no date constraint.
-                    NegativeStrategy::WrongArticle | NegativeStrategy::QuestionAnswerMismatch => {
-                        true
-                    }
-                };
-                if !passes {
-                    continue;
-                }
-                // Every record in the BM25 index was built from `self.records`,
-                // so this lookup is always O(1) and always found.
-                if let Some(record) = self.records.get(&m.record_id).cloned() {
-                    ranked_pool.push(record);
-                }
-            }
-        }
+        let ranked_pool: Vec<DataRecord> = candidate_ids
+            .iter()
+            .filter_map(|id| pool_by_id.get(id.as_str()).copied().cloned())
+            .collect();
 
         if !ranked_pool.is_empty() {
             // Rotate only within the highest lexical matches, bounded by top_k.
@@ -1261,8 +1212,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             return selected.map(|record| (record, fallback_used));
         }
 
-        // BM25 yielded nothing matching the strategy constraints — fall back to
-        // deterministic random sampling within the strategy-built pool (LRU-based).
+        // BM25 yielded nothing in the strategy pool — fall back to deterministic
+        // random sampling within `pool`.
         let mut fallback = pool.to_vec();
         fallback.sort_by(|a, b| a.id.cmp(&b.id));
         if fallback.is_empty() {
