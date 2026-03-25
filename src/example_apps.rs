@@ -1234,7 +1234,8 @@ mod tests {
     use crate::DeterministicSplitStore;
     use crate::data::{QualityScore, RecordSection, SectionRole};
     use crate::source::{SourceCursor, SourceSnapshot};
-    use chrono::Utc;
+    use crate::utils::make_section;
+    use chrono::{TimeZone, Utc};
     use tempfile::tempdir;
 
     /// Minimal in-memory `DataSource` test double for example app tests.
@@ -1317,6 +1318,64 @@ mod tests {
 
         fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {
             Vec::new()
+        }
+    }
+
+    struct FixtureSource {
+        id: String,
+        records: Vec<DataRecord>,
+        recipes: Vec<TripletRecipe>,
+    }
+
+    impl DataSource for FixtureSource {
+        fn id(&self) -> &str {
+            &self.id
+        }
+
+        fn refresh(
+            &self,
+            _config: &SamplerConfig,
+            _cursor: Option<&SourceCursor>,
+            _limit: Option<usize>,
+        ) -> Result<SourceSnapshot, SamplerError> {
+            Ok(SourceSnapshot {
+                records: self.records.clone(),
+                cursor: SourceCursor {
+                    last_seen: Utc::now(),
+                    revision: 0,
+                },
+            })
+        }
+
+        fn reported_record_count(&self, _config: &SamplerConfig) -> Result<u128, SamplerError> {
+            Ok(self.records.len() as u128)
+        }
+
+        fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {
+            self.recipes.clone()
+        }
+    }
+
+    fn fixture_record(
+        source: &str,
+        id_suffix: &str,
+        day: u32,
+        title: &str,
+        body: &str,
+    ) -> DataRecord {
+        let now = Utc.with_ymd_and_hms(2025, 1, day, 12, 0, 0).unwrap();
+        DataRecord {
+            id: format!("{source}::{id_suffix}"),
+            source: source.to_string(),
+            created_at: now,
+            updated_at: now,
+            quality: QualityScore { trust: 1.0 },
+            taxonomy: Vec::new(),
+            sections: vec![
+                make_section(SectionRole::Anchor, Some("title"), title),
+                make_section(SectionRole::Context, Some("body"), body),
+            ],
+            meta_prefix: None,
         }
     }
 
@@ -1809,5 +1868,191 @@ mod tests {
 
             assert!(result.is_ok());
         }
+    }
+
+    #[test]
+    fn run_multi_source_demo_reset_recreates_split_store_and_samples() {
+        let dir = tempdir().unwrap();
+        let split_store_path = dir.path().join("reset_split_store.bin");
+        std::fs::write(&split_store_path, b"stale-data").unwrap();
+
+        let args = vec![
+            "--reset".to_string(),
+            "--pair-batch".to_string(),
+            "--split-store-path".to_string(),
+            split_store_path.to_string_lossy().to_string(),
+        ];
+
+        let result = run_multi_source_demo(
+            args.into_iter(),
+            |_| Ok(()),
+            |_| {
+                let recipes = vec![default_recipe("fixture_recipe")];
+                let records: Vec<DataRecord> = (1..=8)
+                    .map(|day| {
+                        fixture_record(
+                            "fixture_source",
+                            &format!("r{day}"),
+                            day,
+                            &format!("Fixture headline {day}"),
+                            &format!("Fixture body content for day {day}."),
+                        )
+                    })
+                    .collect();
+                vec![Box::new(FixtureSource {
+                    id: "fixture_source".into(),
+                    records,
+                    recipes,
+                }) as DynSource]
+            },
+        );
+
+        assert!(result.is_ok());
+        assert!(split_store_path.exists());
+        let metadata = std::fs::metadata(&split_store_path).unwrap();
+        assert!(metadata.len() > 0);
+    }
+
+    #[test]
+    fn run_multi_source_demo_batches_mode_executes_multiple_batches() {
+        let dir = tempdir().unwrap();
+        let split_store_path = dir.path().join("batches_split_store.bin");
+        let args = vec![
+            "--batches".to_string(),
+            "2".to_string(),
+            "--split-store-path".to_string(),
+            split_store_path.to_string_lossy().to_string(),
+        ];
+
+        let result = run_multi_source_demo(
+            args.into_iter(),
+            |_| Ok(()),
+            |_| {
+                let recipes = vec![default_recipe("batch_recipe")];
+                vec![Box::new(FixtureSource {
+                    id: "batch_source".into(),
+                    records: vec![
+                        fixture_record(
+                            "batch_source",
+                            "r1",
+                            3,
+                            "Inflation cools in latest report",
+                            "Core inflation moderated compared with prior quarter.",
+                        ),
+                        fixture_record(
+                            "batch_source",
+                            "r2",
+                            4,
+                            "Labor market remains resilient",
+                            "Job openings remain elevated despite slower growth.",
+                        ),
+                        fixture_record(
+                            "batch_source",
+                            "r3",
+                            5,
+                            "Manufacturing sentiment stabilizes",
+                            "Survey data suggests output expectations are improving.",
+                        ),
+                    ],
+                    recipes,
+                }) as DynSource]
+            },
+        );
+
+        assert!(result.is_ok());
+        assert!(split_store_path.exists());
+    }
+
+    #[test]
+    fn managed_demo_split_store_path_resolves_under_cache_group() {
+        let path = managed_demo_split_store_path().unwrap();
+        let path_text = path.to_string_lossy();
+        assert!(path_text.contains(MULTI_SOURCE_DEMO_GROUP));
+        assert!(path_text.ends_with(MULTI_SOURCE_DEMO_STORE_FILENAME));
+    }
+
+    #[test]
+    fn run_multi_source_demo_help_returns_ok_without_work() {
+        let result = run_multi_source_demo(
+            ["--help".to_string()].into_iter(),
+            |_| -> Result<(), Box<dyn Error>> {
+                panic!("help path should return before resolving roots")
+            },
+            |_: &()| -> Vec<DynSource> {
+                panic!("help path should return before building sources")
+            },
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn run_multi_source_demo_uses_managed_split_store_path_when_not_provided() {
+        let result = run_multi_source_demo(
+            ["--list-text-recipes".to_string()].into_iter(),
+            |_| Ok(()),
+            |_| {
+                vec![Box::new(TestSource {
+                    id: "managed_path_source".into(),
+                    count: Some(2),
+                    recipes: vec![default_recipe("managed_recipe")],
+                }) as DynSource]
+            },
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn run_multi_source_demo_reset_errors_when_target_is_directory() {
+        let dir = tempdir().unwrap();
+        let split_store_path = dir.path().join("split_store_dir");
+        std::fs::create_dir(&split_store_path).unwrap();
+
+        let result = run_multi_source_demo(
+            [
+                "--reset".to_string(),
+                "--split-store-path".to_string(),
+                split_store_path.to_string_lossy().to_string(),
+            ]
+            .into_iter(),
+            |_| Ok(()),
+            |_| Vec::<DynSource>::new(),
+        );
+
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("failed to remove split store"));
+    }
+
+    #[test]
+    fn print_summary_helpers_accept_empty_iterators() {
+        print_source_summary("empty summary", std::iter::empty::<&str>());
+        print_recipe_context_by_source("empty recipe context", std::iter::empty::<(&str, &str)>());
+    }
+
+    #[cfg(feature = "extended-metrics")]
+    #[test]
+    fn metric_mean_median_handles_even_length_inputs() {
+        let mut vals = [1.0, 4.0, 2.0, 3.0];
+        let (mean, median) = metric_mean_median(&mut vals);
+        assert!((mean - 2.5).abs() < 1e-6);
+        assert!((median - 2.5).abs() < 1e-6);
+    }
+
+    #[cfg(feature = "extended-metrics")]
+    #[test]
+    fn print_metric_summary_includes_multi_source_aggregate() {
+        let source_data = HashMap::from([
+            (
+                "source_a".to_string(),
+                vec![(0.9, 0.8, 0.2, 0.1), (0.8, 0.7, 0.3, 0.2)],
+            ),
+            (
+                "source_b".to_string(),
+                vec![(0.7, 0.6, 0.4, 0.3), (0.6, 0.5, 0.5, 0.4)],
+            ),
+        ]);
+
+        print_metric_summary(&source_data);
     }
 }
