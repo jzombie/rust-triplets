@@ -251,4 +251,20 @@ mod tests {
         assert!(matches!(temporal, Selector::TemporalOffset(-2)));
         assert!(matches!(random, Selector::Random));
     }
+
+    #[test]
+    fn triplet_recipe_default_is_expected() {
+        let recipe = TripletRecipe::default();
+        assert_eq!(recipe.name.as_ref(), "");
+        assert!(matches!(recipe.anchor, Selector::Random));
+        assert!(matches!(recipe.positive_selector, Selector::Random));
+        assert!(matches!(recipe.negative_selector, Selector::Random));
+        assert!(matches!(
+            recipe.negative_strategy,
+            NegativeStrategy::WrongArticle
+        ));
+        assert_eq!(recipe.weight, 1.0);
+        assert!(recipe.instruction.is_none());
+        assert!(!recipe.allow_same_anchor_positive);
+    }
 }

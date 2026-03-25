@@ -1262,6 +1262,18 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use tempfile::tempdir;
 
+    fn empty_dyn_sources(_: &()) -> Vec<DynSource> {
+        Vec::new()
+    }
+
+    fn ok_unit_roots(_: Vec<String>) -> Result<(), Box<dyn Error>> {
+        Ok(())
+    }
+
+    fn error_unit_roots(_: Vec<String>) -> Result<(), Box<dyn Error>> {
+        Err("root-resolution-error".into())
+    }
+
     /// Minimal in-memory `DataSource` test double for example app tests.
     struct TestSource {
         id: String,
@@ -1476,6 +1488,48 @@ mod tests {
     }
 
     #[test]
+    fn fixture_and_ingestion_sources_trait_methods_cover_paths() {
+        let records = vec![fixture_record("fixture_source", "r1", 1, "Title", "Body")];
+        let recipes = vec![default_recipe("fixture_recipe")];
+        let fixture = FixtureSource {
+            id: "fixture_source".into(),
+            records: records.clone(),
+            recipes: recipes.clone(),
+        };
+
+        let snapshot = fixture
+            .refresh(&SamplerConfig::default(), None, None)
+            .expect("fixture refresh should succeed");
+        assert_eq!(snapshot.records.len(), 1);
+        assert_eq!(
+            fixture
+                .reported_record_count(&SamplerConfig::default())
+                .unwrap(),
+            1
+        );
+        assert_eq!(fixture.default_triplet_recipes().len(), 1);
+
+        let source = IngestionConfigSource {
+            expected_ingestion_max_records: 7,
+            records,
+        };
+        let ok_cfg = SamplerConfig {
+            ingestion_max_records: 7,
+            ..SamplerConfig::default()
+        };
+        assert!(source.refresh(&ok_cfg, None, None).is_ok());
+        assert_eq!(source.reported_record_count(&ok_cfg).unwrap(), 1);
+        assert_eq!(source.default_triplet_recipes().len(), 1);
+
+        let bad_cfg = SamplerConfig {
+            ingestion_max_records: 8,
+            ..SamplerConfig::default()
+        };
+        let err = source.refresh(&bad_cfg, None, None).unwrap_err();
+        assert!(matches!(err, SamplerError::SourceInconsistent { .. }));
+    }
+
+    #[test]
     fn suggested_balancing_weight_is_longest_normalized_and_bounded() {
         assert!((suggested_balancing_weight(100, 100) - 1.0).abs() < 1e-6);
         assert!((suggested_balancing_weight(400, 100) - 0.25).abs() < 1e-6);
@@ -1545,11 +1599,19 @@ mod tests {
         let result = run_estimate_capacity(
             std::iter::empty::<String>(),
             |_| Err("root resolution failed".into()),
-            |_: &()| Vec::<DynSource>::new(),
+            empty_dyn_sources,
         );
 
         let err = result.unwrap_err().to_string();
         assert!(err.contains("root resolution failed"));
+    }
+
+    #[test]
+    fn run_estimate_capacity_allows_empty_source_list() {
+        let result =
+            run_estimate_capacity(std::iter::empty::<String>(), |_| Ok(()), empty_dyn_sources);
+
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -1647,6 +1709,14 @@ mod tests {
                 vec![default_recipe("single_record_recipe")]
             }
         }
+
+        let one = OneRecordSource;
+        assert_eq!(
+            one.reported_record_count(&SamplerConfig::default())
+                .unwrap(),
+            1
+        );
+        assert_eq!(one.default_triplet_recipes().len(), 1);
 
         for mode in ["--pair-batch", "--text-recipes", ""] {
             let dir = tempdir().unwrap();
@@ -1825,11 +1895,29 @@ mod tests {
             ]
             .into_iter(),
             |_| Err("demo root resolution failed".into()),
-            |_: &()| Vec::<DynSource>::new(),
+            empty_dyn_sources,
         );
 
         let err = result.unwrap_err().to_string();
         assert!(err.contains("demo root resolution failed"));
+    }
+
+    #[test]
+    fn run_multi_source_demo_list_text_recipes_allows_empty_sources() {
+        let dir = tempdir().unwrap();
+        let split_store_path = dir.path().join("empty_source_list_recipes.bin");
+        let result = run_multi_source_demo(
+            [
+                "--list-text-recipes".to_string(),
+                "--split-store-path".to_string(),
+                split_store_path.to_string_lossy().to_string(),
+            ]
+            .into_iter(),
+            |_| Ok(()),
+            empty_dyn_sources,
+        );
+
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -2089,13 +2177,63 @@ mod tests {
 
     #[test]
     fn run_multi_source_demo_help_returns_ok_without_work() {
+        let no_help = run_multi_source_demo(
+            std::iter::empty::<String>(),
+            error_unit_roots,
+            empty_dyn_sources,
+        );
+        assert!(
+            no_help
+                .expect_err("non-help path should attempt to resolve roots")
+                .to_string()
+                .contains("root-resolution-error")
+        );
+
         let result = run_multi_source_demo(
             ["--help".to_string()].into_iter(),
-            |_| -> Result<(), Box<dyn Error>> {
-                panic!("help path should return before resolving roots")
-            },
-            |_: &()| -> Vec<DynSource> {
-                panic!("help path should return before building sources")
+            ok_unit_roots,
+            empty_dyn_sources,
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn run_estimate_capacity_help_returns_ok_without_work() {
+        let result = run_estimate_capacity(
+            ["--help".to_string()].into_iter(),
+            ok_unit_roots,
+            empty_dyn_sources,
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn run_multi_source_demo_pair_exhausted_branch_returns_ok() {
+        let dir = tempdir().unwrap();
+        let split_store_path = dir.path().join("pair_exhausted_split_store.bin");
+        let args = vec![
+            "--pair-batch".to_string(),
+            "--split-store-path".to_string(),
+            split_store_path.to_string_lossy().to_string(),
+        ];
+
+        let result = run_multi_source_demo(
+            args.into_iter(),
+            |_| Ok(()),
+            |_| {
+                vec![Box::new(FixtureSource {
+                    id: "pair_exhausted_source".into(),
+                    records: vec![fixture_record(
+                        "pair_exhausted_source",
+                        "r1",
+                        1,
+                        "Single record title",
+                        "Single record body",
+                    )],
+                    recipes: vec![default_recipe("pair_exhausted_recipe")],
+                }) as DynSource]
             },
         );
 
@@ -2153,6 +2291,15 @@ mod tests {
         let (mean, median) = metric_mean_median(&mut vals);
         assert!((mean - 2.5).abs() < 1e-6);
         assert!((median - 2.5).abs() < 1e-6);
+    }
+
+    #[cfg(feature = "extended-metrics")]
+    #[test]
+    fn metric_mean_median_handles_odd_length_inputs() {
+        let mut vals = [3.0, 1.0, 2.0];
+        let (mean, median) = metric_mean_median(&mut vals);
+        assert!((mean - 2.0).abs() < 1e-6);
+        assert!((median - 2.0).abs() < 1e-6);
     }
 
     #[cfg(feature = "extended-metrics")]
