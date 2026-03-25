@@ -153,6 +153,11 @@ struct MultiSourceDemoCli {
         help = "Optional explicit path for persisted split/epoch state file"
     )]
     split_store_path: Option<PathBuf>,
+    #[arg(
+        long = "reset",
+        help = "Delete the persisted split/epoch state before sampling, restarting from epoch 0"
+    )]
+    reset: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -537,6 +542,15 @@ where
         })?
     };
 
+    if cli.reset && split_store_path.exists() {
+        std::fs::remove_file(&split_store_path).map_err(|err| {
+            Box::<dyn Error>::from(format!(
+                "failed to remove split store '{}': {err}",
+                split_store_path.display()
+            ))
+        })?;
+        println!("Reset: removed {}", split_store_path.display());
+    }
     println!(
         "Persisting split assignments and epoch state to {}",
         split_store_path.display()
