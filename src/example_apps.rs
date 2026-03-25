@@ -3,6 +3,7 @@ use std::error::Error;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Once;
+use std::time::Instant;
 
 use cache_manager::CacheRoot;
 use clap::{Parser, ValueEnum, error::ErrorKind};
@@ -158,6 +159,13 @@ struct MultiSourceDemoCli {
         help = "Delete the persisted split/epoch state before sampling, restarting from epoch 0"
     )]
     reset: bool,
+    #[arg(
+        long = "batches",
+        value_name = "N",
+        value_parser = parse_positive_usize,
+        help = "Run N triplet batches in succession, printing a timing line per batch and (with --features extended-metrics) a per-source similarity summary at the end"
+    )]
+    batches: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -533,6 +541,16 @@ where
     config.split = SplitRatios::default();
     config.allowed_splits = vec![selected_split];
     let chunking = config.chunking.clone();
+    let config_snapshot = MultiSourceDemoConfigSnapshot {
+        seed: config.seed,
+        batch_size: config.batch_size,
+        ingestion_max_records: config.ingestion_max_records,
+        split: selected_split,
+        split_ratios: config.split,
+        max_window_tokens: config.chunking.max_window_tokens,
+        overlap_tokens: config.chunking.overlap_tokens.clone(),
+        summary_fallback_tokens: config.chunking.summary_fallback_tokens,
+    };
 
     let split_store_path = if let Some(path) = cli.split_store_path {
         path
@@ -609,6 +627,70 @@ where
         } else {
             print_text_recipes(&recipes);
         }
+    } else if let Some(batch_count) = cli.batches {
+        print_demo_config(&config_snapshot);
+        println!("=== benchmark: {} triplet batches ===", batch_count);
+
+        // source_id -> Vec<(pos_jaccard, pos_cosine, neg_jaccard, neg_cosine)>
+        #[cfg(feature = "extended-metrics")]
+        let mut source_metrics: HashMap<String, Vec<(f32, f32, f32, f32)>> = HashMap::new();
+
+        for i in 0..batch_count {
+            let t0 = Instant::now();
+            match sampler.next_triplet_batch(selected_split) {
+                Ok(batch) => {
+                    let elapsed = t0.elapsed();
+                    let n = batch.triplets.len();
+                    println!(
+                        "batch {:>4}  triplets={:<4}  elapsed={:>8.2}ms  per_triplet={:.2}ms",
+                        i + 1,
+                        n,
+                        elapsed.as_secs_f64() * 1000.0,
+                        if n > 0 {
+                            elapsed.as_secs_f64() * 1000.0 / n as f64
+                        } else {
+                            0.0
+                        },
+                    );
+                    #[cfg(feature = "extended-metrics")]
+                    {
+                        use crate::metrics::lexical_similarity_scores;
+                        for triplet in &batch.triplets {
+                            let (pj, pc) = lexical_similarity_scores(
+                                &triplet.anchor.text,
+                                &triplet.positive.text,
+                            );
+                            let (nj, nc) = lexical_similarity_scores(
+                                &triplet.anchor.text,
+                                &triplet.negative.text,
+                            );
+                            let source = extract_source(&triplet.anchor.record_id);
+                            source_metrics
+                                .entry(source)
+                                .or_default()
+                                .push((pj, pc, nj, nc));
+                        }
+                    }
+                }
+                Err(SamplerError::Exhausted(name)) => {
+                    println!(
+                        "batch {:>4}  exhausted recipe '{}' — stopping early",
+                        i + 1,
+                        name
+                    );
+                    break;
+                }
+                Err(err) => return Err(err.into()),
+            }
+        }
+
+        sampler.save_sampler_state(None)?;
+
+        #[cfg(feature = "extended-metrics")]
+        if !source_metrics.is_empty() {
+            println!();
+            print_metric_summary(&source_metrics);
+        }
     } else {
         match sampler.next_triplet_batch(selected_split) {
             Ok(triplet_batch) => {
@@ -632,6 +714,37 @@ where
     }
 
     Ok(())
+}
+
+struct MultiSourceDemoConfigSnapshot {
+    seed: u64,
+    batch_size: usize,
+    ingestion_max_records: usize,
+    split: SplitLabel,
+    split_ratios: SplitRatios,
+    max_window_tokens: usize,
+    overlap_tokens: Vec<usize>,
+    summary_fallback_tokens: usize,
+}
+
+fn print_demo_config(cfg: &MultiSourceDemoConfigSnapshot) {
+    let overlaps: Vec<String> = cfg.overlap_tokens.iter().map(|t| t.to_string()).collect();
+    println!("=== sampler config ===");
+    println!("seed                 : {}", cfg.seed);
+    println!("batch_size           : {}", cfg.batch_size);
+    println!("ingestion_max_records: {}", cfg.ingestion_max_records);
+    println!("split                : {:?}", cfg.split);
+    println!(
+        "split_ratios         : train={:.2} val={:.2} test={:.2}",
+        cfg.split_ratios.train, cfg.split_ratios.validation, cfg.split_ratios.test
+    );
+    println!("max_window_tokens    : {}", cfg.max_window_tokens);
+    println!("overlap_tokens       : [{}]", overlaps.join(", "));
+    println!(
+        "summary_fallback     : {} tokens (0 = disabled)",
+        cfg.summary_fallback_tokens
+    );
+    println!();
 }
 
 fn parse_positive_usize(raw: &str) -> Result<usize, String> {
@@ -847,6 +960,129 @@ fn print_text_recipes(recipes: &[TextRecipe]) {
             println!("  instruction: {}", instr);
         }
     }
+}
+
+#[cfg(feature = "extended-metrics")]
+fn metric_mean_median(vals: &mut Vec<f32>) -> (f32, f32) {
+    let mean = vals.iter().sum::<f32>() / vals.len() as f32;
+    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median = if vals.len() % 2 == 1 {
+        vals[vals.len() / 2]
+    } else {
+        (vals[vals.len() / 2 - 1] + vals[vals.len() / 2]) / 2.0
+    };
+    (mean, median)
+}
+
+#[cfg(feature = "extended-metrics")]
+fn print_metric_summary(source_data: &HashMap<String, Vec<(f32, f32, f32, f32)>>) {
+    let total: usize = source_data.values().map(|v| v.len()).sum();
+    let n_sources = source_data.len();
+    println!(
+        "=== extended metrics summary ({} triplets, {} {}) ===",
+        total,
+        n_sources,
+        if n_sources == 1 { "source" } else { "sources" }
+    );
+
+    // Returns [pos, neg] as (mean, median) pairs for one metric across entries.
+    fn metric_pair(
+        entries: &[(f32, f32, f32, f32)],
+        pos_idx: usize,
+        neg_idx: usize,
+    ) -> [(f32, f32); 2] {
+        let extract = |idx: usize| -> Vec<f32> {
+            entries
+                .iter()
+                .map(|e| match idx {
+                    0 => e.0,
+                    1 => e.1,
+                    2 => e.2,
+                    _ => e.3,
+                })
+                .collect()
+        };
+        let mut pos_vals = extract(pos_idx);
+        let mut neg_vals = extract(neg_idx);
+        [
+            metric_mean_median(&mut pos_vals),
+            metric_mean_median(&mut neg_vals),
+        ]
+    }
+
+    fn print_metric_section(
+        label: &str,
+        sources: &[&String],
+        source_data: &HashMap<String, Vec<(f32, f32, f32, f32)>>,
+        pos_idx: usize,
+        neg_idx: usize,
+        total: usize,
+        n_sources: usize,
+    ) {
+        const SEP: usize = 83;
+        println!();
+        println!("[{}]", label);
+        println!(
+            "{:<24} {:>5}  {:<16} {:<16} {:<16}",
+            "source", "n", "positive", "negative", "gap (pos\u{2212}neg)"
+        );
+        println!(
+            "{:<24} {:>5}  {:<16} {:<16} {:<16}",
+            "", "", "mean / median", "mean / median", "mean / median"
+        );
+        println!("{}", "-".repeat(SEP));
+        for source in sources {
+            let entries = &source_data[*source];
+            let [pos, neg] = metric_pair(entries, pos_idx, neg_idx);
+            let gap_mean = pos.0 - neg.0;
+            let gap_med = pos.1 - neg.1;
+            println!(
+                "{:<24} {:>5}  {:.3} / {:.3}     {:.3} / {:.3}     {:+.3} / {:+.3}",
+                source,
+                entries.len(),
+                pos.0,
+                pos.1,
+                neg.0,
+                neg.1,
+                gap_mean,
+                gap_med,
+            );
+        }
+        if n_sources > 1 {
+            let all: Vec<(f32, f32, f32, f32)> = source_data.values().flatten().copied().collect();
+            let [pos, neg] = metric_pair(&all, pos_idx, neg_idx);
+            let gap_mean = pos.0 - neg.0;
+            let gap_med = pos.1 - neg.1;
+            println!("{}", "-".repeat(SEP));
+            println!(
+                "{:<24} {:>5}  {:.3} / {:.3}     {:.3} / {:.3}     {:+.3} / {:+.3}",
+                "ALL", total, pos.0, pos.1, neg.0, neg.1, gap_mean, gap_med,
+            );
+        }
+    }
+
+    let mut sources: Vec<&String> = source_data.keys().collect();
+    sources.sort();
+
+    print_metric_section(
+        "jaccard \u{2194} anchor",
+        &sources,
+        source_data,
+        0,
+        2,
+        total,
+        n_sources,
+    );
+    print_metric_section(
+        "cosine  \u{2194} anchor",
+        &sources,
+        source_data,
+        1,
+        3,
+        total,
+        n_sources,
+    );
+    println!();
 }
 
 trait ChunkDebug {
