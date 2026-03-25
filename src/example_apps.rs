@@ -1966,9 +1966,11 @@ mod tests {
     #[test]
     fn managed_demo_split_store_path_resolves_under_cache_group() {
         let path = managed_demo_split_store_path().unwrap();
-        let path_text = path.to_string_lossy();
-        assert!(path_text.contains(MULTI_SOURCE_DEMO_GROUP));
-        assert!(path_text.ends_with(MULTI_SOURCE_DEMO_STORE_FILENAME));
+        assert!(path.ends_with(MULTI_SOURCE_DEMO_STORE_FILENAME));
+        let parent = path
+            .parent()
+            .expect("managed split-store path should have a parent");
+        assert!(parent.ends_with(PathBuf::from(MULTI_SOURCE_DEMO_GROUP)));
     }
 
     #[test]
