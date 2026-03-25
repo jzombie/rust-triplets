@@ -1157,8 +1157,14 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         fallback_used: bool,
         _strategy: &NegativeStrategy,
     ) -> Option<(DataRecord, bool)> {
-        // TODO: Document this better; does regular non-BM25 use the negative strategy at all anymore??
-        // Without BM25 enabled, negatives are sampled uniformly from the strategy pool.
+        // The strategy IS enforced — it was applied upstream in `select_negative_record`,
+        // which constructs `pool` by applying all strategy-specific predicates (same source,
+        // split isolation, date exclusion, etc.) before calling here.  This function simply
+        // samples uniformly from the pre-filtered pool.
+        //
+        // `_anchor_record`, `_anchor_split`, and `_strategy` exist only to match the
+        // `#[cfg(feature = "bm25-mining")]` variant's signature so both compile-time paths
+        // share identical call sites in `select_negative_record`.
         pool.choose(&mut self.rng)
             .cloned()
             .map(|record| (record, fallback_used))
