@@ -729,26 +729,37 @@ fn print_triplet_batch(
         if let Some(instr) = &triplet.instruction {
             println!("instruction shown to model:\n{}\n", instr);
         }
-        print_chunk_block("ANCHOR", &triplet.anchor, strategy, split_store);
-        print_chunk_block("POSITIVE", &triplet.positive, strategy, split_store);
-        print_chunk_block("NEGATIVE", &triplet.negative, strategy, split_store);
         #[cfg(feature = "extended-metrics")]
-        {
+        let (pos_sim, neg_sim) = {
             use crate::metrics::lexical_similarity_scores;
-            let (pos_j, pos_c) =
-                lexical_similarity_scores(&triplet.anchor.text, &triplet.positive.text);
-            let (neg_j, neg_c) =
-                lexical_similarity_scores(&triplet.anchor.text, &triplet.negative.text);
-            println!("--- extended metrics ---");
-            println!(
-                "jaccard anchor↔positive: {:.4}  cosine anchor↔positive: {:.4}",
-                pos_j, pos_c
-            );
-            println!(
-                "jaccard anchor↔negative: {:.4}  cosine anchor↔negative: {:.4}",
-                neg_j, neg_c
-            );
-        }
+            (
+                Some(lexical_similarity_scores(
+                    &triplet.anchor.text,
+                    &triplet.positive.text,
+                )),
+                Some(lexical_similarity_scores(
+                    &triplet.anchor.text,
+                    &triplet.negative.text,
+                )),
+            )
+        };
+        #[cfg(not(feature = "extended-metrics"))]
+        let (pos_sim, neg_sim): (Option<(f32, f32)>, Option<(f32, f32)>) = (None, None);
+        print_chunk_block("ANCHOR", &triplet.anchor, strategy, split_store, None);
+        print_chunk_block(
+            "POSITIVE",
+            &triplet.positive,
+            strategy,
+            split_store,
+            pos_sim,
+        );
+        print_chunk_block(
+            "NEGATIVE",
+            &triplet.negative,
+            strategy,
+            split_store,
+            neg_sim,
+        );
     }
     print_source_summary(
         "triplet anchors",
@@ -775,7 +786,7 @@ fn print_text_batch(strategy: &ChunkingStrategy, batch: &TextBatch, split_store:
         if let Some(instr) = &sample.instruction {
             println!("instruction shown to model:\n{}\n", instr);
         }
-        print_chunk_block("TEXT", &sample.chunk, strategy, split_store);
+        print_chunk_block("TEXT", &sample.chunk, strategy, split_store, None);
     }
     print_source_summary(
         "text samples",
@@ -806,8 +817,8 @@ fn print_pair_batch(
         if let Some(reason) = &pair.reason {
             println!("reason       : {}", reason);
         }
-        print_chunk_block("ANCHOR", &pair.anchor, strategy, split_store);
-        print_chunk_block("OTHER", &pair.positive, strategy, split_store);
+        print_chunk_block("ANCHOR", &pair.anchor, strategy, split_store, None);
+        print_chunk_block("OTHER", &pair.positive, strategy, split_store, None);
     }
     print_source_summary(
         "pair anchors",
@@ -866,6 +877,7 @@ fn print_chunk_block(
     chunk: &RecordChunk,
     strategy: &ChunkingStrategy,
     split_store: &impl SplitStore,
+    anchor_sim: Option<(f32, f32)>,
 ) {
     let chunk_weight = chunk_weight(strategy, chunk);
     let split = split_store
@@ -879,6 +891,9 @@ fn print_chunk_block(
     println!("record_id    : {}", chunk.record_id);
     println!("section_idx  : {}", chunk.section_idx);
     println!("token_est    : {}", chunk.tokens_estimate);
+    if let Some((j, c)) = anchor_sim {
+        println!("jaccard(↔a)  : {:.4}  cosine(↔a)  : {:.4}", j, c);
+    }
     println!("model_input (exact text sent to the model):");
     println!(
         "<<< BEGIN MODEL TEXT >>>\n{}\n<<< END MODEL TEXT >>>\n",
