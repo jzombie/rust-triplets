@@ -185,9 +185,8 @@ impl RecordCacheInner {
     }
 }
 
-/// Coordinates on-demand source refresh and shared-cache population.
+/// Coordinates on-demand source refresh and per-source-cache population.
 pub struct IngestionManager {
-    cache: RecordCache,
     sources: Vec<SourceState>,
     max_records: usize,
     sampler_config: SamplerConfig,
@@ -221,7 +220,6 @@ impl IngestionManager {
     /// Create a new ingestion manager that ingests on demand.
     pub fn new(max_records: usize, sampler_config: SamplerConfig) -> Self {
         Self {
-            cache: RecordCache::new(max_records),
             sources: Vec::new(),
             max_records,
             sampler_config,
@@ -268,15 +266,18 @@ impl IngestionManager {
         for state in &mut self.sources {
             state.cursor = None;
             state.buffer.clear();
+            state.cache.clear();
         }
     }
 
     /// Register a source for on-demand ingestion.
     pub fn register_source(&mut self, source: Box<dyn DataSource + 'static>) {
+        let cache = RecordCache::new(self.max_records);
         self.sources.push(SourceState {
             source,
             cursor: None,
             buffer: VecDeque::new(),
+            cache,
             stats: SourceRefreshStats::default(),
         });
     }
@@ -319,23 +320,33 @@ impl IngestionManager {
             .collect()
     }
 
-    /// Return a flat snapshot of every record currently in all per-source
-    /// buffers (i.e. every record fetched since the last refresh, not just
-    /// the LRU-capped shared cache window).
+    /// Return a flat snapshot of every record currently in all per-source caches.
     ///
     /// Records are cloned in source order; the `source` field is guaranteed
     /// to be set (it is normalised in `refresh_all_internal`).
-    #[cfg(feature = "bm25-mining")]
-    pub fn buffer_snapshot(&self) -> Vec<DataRecord> {
+    pub fn all_records_snapshot(&self) -> Vec<DataRecord> {
         self.sources
             .iter()
-            .flat_map(|s| s.buffer.iter().cloned())
+            .flat_map(|s| s.cache.snapshot())
             .collect()
     }
 
-    /// Access the shared record cache.
-    pub fn cache(&self) -> RecordCache {
-        self.cache.clone()
+    /// Returns `true` when ALL per-source caches are empty.
+    pub fn all_caches_empty(&self) -> bool {
+        self.sources.iter().all(|s| s.cache.is_empty())
+    }
+
+    /// Returns the total number of records across all per-source caches.
+    pub fn all_records_len(&self) -> usize {
+        self.sources.iter().map(|s| s.cache.len()).sum()
+    }
+
+    /// Returns the sum of ingest counts across all per-source caches.
+    ///
+    /// Used as a monotonic proxy to detect whether any cache has been updated
+    /// since the last sync.
+    pub fn total_ingest_count(&self) -> u64 {
+        self.sources.iter().map(|s| s.cache.ingest_count()).sum()
     }
 
     /// Refresh all registered sources once.
@@ -551,42 +562,49 @@ impl IngestionManager {
             }
         }
 
+        // On a full refresh (step=None) clear every per-source cache so that the
+        // snapshot always reflects the newest window, matching the previous
+        // shared-cache clear semantics.
         if step.is_none() {
-            self.cache.clear();
+            for state in self.sources.iter_mut() {
+                state.cache.clear();
+            }
         }
-        let mut batch = Vec::new();
         if self.max_records == 0 {
             return;
         }
         let target_limit = step.unwrap_or(self.max_records);
         if let Some(weights) = weights {
-            self.weighted_drain_into_cache(&mut batch, target_limit, weights);
+            self.weighted_drain_into_caches(target_limit, weights);
         } else {
+            // Round-robin drain up to `target_limit` records total, routing each
+            // record into its own source's per-source cache.
+            let n = self.sources.len();
+            let mut per_source: Vec<Vec<DataRecord>> = vec![Vec::new(); n];
+            let mut total_drained = 0;
             let mut any_remaining = true;
-            while batch.len() < target_limit && any_remaining {
+            while total_drained < target_limit && any_remaining {
                 any_remaining = false;
-                for state in self.sources.iter_mut() {
-                    if batch.len() >= target_limit {
+                for (idx, state) in self.sources.iter_mut().enumerate() {
+                    if total_drained >= target_limit {
                         break;
                     }
                     if let Some(record) = state.buffer.pop_front() {
-                        batch.push(record);
+                        per_source[idx].push(record);
+                        total_drained += 1;
                         any_remaining = true;
                     }
                 }
             }
-        }
-        if !batch.is_empty() {
-            self.cache.ingest(batch);
+            for (idx, batch) in per_source.into_iter().enumerate() {
+                if !batch.is_empty() {
+                    self.sources[idx].cache.ingest(batch);
+                }
+            }
         }
     }
 
-    fn weighted_drain_into_cache(
-        &mut self,
-        batch: &mut Vec<DataRecord>,
-        limit: usize,
-        weights: &HashMap<SourceId, f32>,
-    ) {
+    fn weighted_drain_into_caches(&mut self, limit: usize, weights: &HashMap<SourceId, f32>) {
         let len = self.sources.len();
         if len == 0 {
             return;
@@ -605,7 +623,9 @@ impl IngestionManager {
         }
 
         let mut current = vec![0.0f32; len];
-        while batch.len() < limit {
+        let mut per_source: Vec<Vec<DataRecord>> = vec![Vec::new(); len];
+        let mut total = 0;
+        while total < limit {
             let mut total_weight = 0.0f32;
             for (idx, weight) in weight_values.iter().copied().enumerate().take(len) {
                 if weight <= 0.0 {
@@ -642,7 +662,14 @@ impl IngestionManager {
             };
             current[idx] -= total_weight;
             if let Some(record) = self.sources[idx].buffer.pop_front() {
-                batch.push(record);
+                per_source[idx].push(record);
+                total += 1;
+            }
+        }
+
+        for (idx, batch) in per_source.into_iter().enumerate() {
+            if !batch.is_empty() {
+                self.sources[idx].cache.ingest(batch);
             }
         }
     }
@@ -658,6 +685,8 @@ struct SourceState {
     source: Box<dyn DataSource + 'static>,
     cursor: Option<SourceCursor>,
     buffer: VecDeque<DataRecord>,
+    /// Per-source LRU record cache capped at `max_records`.
+    cache: RecordCache,
     stats: SourceRefreshStats,
 }
 
@@ -832,7 +861,7 @@ mod tests {
         manager.refresh_all();
         let updated = manager.snapshot_cursors();
         assert_eq!(updated, vec![("cursor_source".to_string(), 33)]);
-        let records = manager.cache().snapshot();
+        let records = manager.all_records_snapshot();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].source, "cursor_source");
     }
@@ -859,11 +888,11 @@ mod tests {
 
         manager.advance(1);
         assert_eq!(refreshes.load(Ordering::SeqCst), 1);
-        assert_eq!(manager.cache().len(), 1);
+        assert_eq!(manager.all_records_len(), 1);
 
         manager.advance(1);
         assert_eq!(refreshes.load(Ordering::SeqCst), 1);
-        assert_eq!(manager.cache().len(), 2);
+        assert_eq!(manager.all_records_len(), 2);
     }
 
     #[test]
@@ -896,12 +925,12 @@ mod tests {
         )));
 
         manager.advance(1);
-        assert_eq!(manager.cache().len(), 1);
+        assert_eq!(manager.all_records_len(), 1);
         assert_eq!(refreshes.load(Ordering::SeqCst), 1);
 
         manager.force_refresh_all();
         assert_eq!(refreshes.load(Ordering::SeqCst), 2);
-        let records = manager.cache().snapshot();
+        let records = manager.all_records_snapshot();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].id, "r4");
     }
@@ -937,8 +966,7 @@ mod tests {
         only_b.insert("b".to_string(), 1.0);
         manager.refresh_all_with_weights(&only_b).unwrap();
         let ids: Vec<String> = manager
-            .cache()
-            .snapshot()
+            .all_records_snapshot()
             .into_iter()
             .map(|record| record.id)
             .collect();
@@ -975,8 +1003,7 @@ mod tests {
             .refresh_all_with_weights(&all_zero)
             .unwrap();
         let ids: Vec<String> = manager_fallback
-            .cache()
-            .snapshot()
+            .all_records_snapshot()
             .into_iter()
             .map(|record| record.id)
             .collect();
@@ -1046,7 +1073,7 @@ mod tests {
         let mut weights = HashMap::new();
         weights.insert("w".to_string(), 1.0);
         manager.force_refresh_all_with_weights(&weights).unwrap();
-        assert_eq!(manager.cache().len(), 1);
+        assert_eq!(manager.all_records_len(), 1);
     }
 
     #[test]
@@ -1275,7 +1302,7 @@ mod tests {
             })],
         )));
         manager.refresh_all();
-        assert!(manager.cache().is_empty());
+        assert!(manager.all_caches_empty());
 
         // Weighted refresh with no sources should be a no-op.
         let mut empty_manager = IngestionManager::new(4, SamplerConfig::default());
@@ -1283,6 +1310,6 @@ mod tests {
         empty_manager
             .refresh_all_with_weights(&empty_weights)
             .expect("no sources should not error");
-        assert!(empty_manager.cache().is_empty());
+        assert!(empty_manager.all_caches_empty());
     }
 }

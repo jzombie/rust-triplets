@@ -39,7 +39,6 @@ use crate::splits::{
 };
 use crate::types::{RecipeKey, RecordId, SourceId};
 
-#[cfg(feature = "bm25-mining")]
 /// Metadata stored alongside each indexed document in the global BM25 index.
 #[cfg(feature = "bm25-mining")]
 struct Bm25RecordMeta {
@@ -49,12 +48,11 @@ struct Bm25RecordMeta {
     split: Option<SplitLabel>,
     /// Raw publication-date string from taxonomy, if present.
     date: Option<String>,
-    /// Full record, stored so BM25-selected candidates can be returned even
-    /// when they have been evicted from the LRU shared cache.
-    record: DataRecord,
+    // NOTE: no `record` field here — records are looked up at selection time from
+    // `TripletSamplerInner.records`, so each DataRecord is stored exactly once.
 }
 
-/// Single global BM25 search engine built over all per-source buffer records.
+/// Single global BM25 search engine built over all per-source cache records.
 ///
 /// Replaces the old per-`(SourceId, SplitLabel)` index map so BM25 ranking
 /// sees the full `ingestion_max_records` pool for each source rather than
@@ -65,6 +63,8 @@ struct Bm25GlobalIndex {
     /// Metadata for document at each sequential index position.
     meta: Vec<Bm25RecordMeta>,
     search_engine: SearchEngine<usize>,
+    /// Pre-built map from record id to index into `meta` for O(1) candidate lookup.
+    id_to_meta_idx: HashMap<RecordId, usize>,
 }
 
 /// Auto-injected recipe name used when a source has at least one section whose
@@ -1157,6 +1157,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         fallback_used: bool,
         _strategy: &NegativeStrategy,
     ) -> Option<(DataRecord, bool)> {
+        // TODO: Document this better; does regular non-BM25 use the negative strategy at all anymore??
         // Without BM25 enabled, negatives are sampled uniformly from the strategy pool.
         pool.choose(&mut self.rng)
             .cloned()
@@ -1191,18 +1192,16 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         // Read globally ranked candidate ids from the per-anchor BM25 cache.
         let candidate_ids = self.bm25_ranked_candidates(anchor_record);
 
-        // Build a lookup from record_id -> &Bm25RecordMeta for the global index.
-        // We do this inline so we hold no borrow on self after the lookup.
+        // Walk the ranked list, applying strategy metadata predicates.
+        // Use the pre-built `id_to_meta_idx` map for O(1) per-candidate lookup
+        // instead of rebuilding a HashMap on every call.
         let mut ranked_pool: Vec<DataRecord> = Vec::new();
         if let Some(index) = self.bm25_global_index.as_ref() {
-            // Build a fast id→meta map for this query.
-            let meta_map: HashMap<&RecordId, &Bm25RecordMeta> =
-                index.meta.iter().map(|m| (&m.record_id, m)).collect();
-
             for candidate_id in &candidate_ids {
-                let Some(m) = meta_map.get(candidate_id) else {
+                let Some(&idx) = index.id_to_meta_idx.get(candidate_id) else {
                     continue;
                 };
+                let m = &index.meta[idx];
                 if m.record_id == anchor_record.id {
                     continue;
                 }
@@ -1211,10 +1210,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                     continue;
                 }
                 // Apply same-source constraint that all strategies require.
-                if m.source != anchor_record.source {
-                    if !fallback_used {
-                        continue;
-                    }
+                if m.source != anchor_record.source && !fallback_used {
+                    continue;
                 }
                 // Strategy-specific date predicate.
                 let passes = match strategy {
@@ -1235,7 +1232,11 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 if !passes {
                     continue;
                 }
-                ranked_pool.push(m.record.clone());
+                // Every record in the BM25 index was built from `self.records`,
+                // so this lookup is always O(1) and always found.
+                if let Some(record) = self.records.get(&m.record_id).cloned() {
+                    ranked_pool.push(record);
+                }
             }
         }
 
@@ -1340,37 +1341,30 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         self.bm25_global_index = None;
         self.bm25_negative_cursors.clear();
 
-        // Build from the full per-source buffers, not the LRU-capped shared cache.
-        let buffer = self.ingestion.buffer_snapshot();
-
-        // Also include records already in the LRU cache that may have been
-        // displaced from the buffer by the round-robin drain but are still live.
-        // Keyed by record id so duplicates (same record in both) are deduplicated.
-        let mut all_records: IndexMap<RecordId, DataRecord> = IndexMap::new();
-        for record in self.records.values() {
-            all_records.insert(record.id.clone(), record.clone());
-        }
-        for record in buffer {
-            all_records.entry(record.id.clone()).or_insert(record);
-        }
-
-        if all_records.len() < 2 {
+        // Build the BM25 index directly from `self.records`, which is populated
+        // from all per-source caches via `sync_records_from_cache`.  Every record
+        // in the index is therefore reachable from `self.records` at selection
+        // time — no overflow copy is needed.
+        let total = self.records.len();
+        if total < 2 {
             return;
         }
 
         let max_tokens = self.config.chunking.max_window_tokens;
-        let mut meta: Vec<Bm25RecordMeta> = Vec::with_capacity(all_records.len());
-        let mut docs: Vec<Document<usize>> = Vec::with_capacity(all_records.len());
+        let mut meta: Vec<Bm25RecordMeta> = Vec::with_capacity(total);
+        let mut docs: Vec<Document<usize>> = Vec::with_capacity(total);
+        let mut id_to_meta_idx: HashMap<RecordId, usize> = HashMap::with_capacity(total);
 
-        for (idx, record) in all_records.values().enumerate() {
+        for record in self.records.values() {
             let split = self.split_store.label_for(&record.id);
             let date = taxonomy_value(record, META_FIELD_DATE).map(|s| s.to_string());
+            let idx = meta.len();
+            id_to_meta_idx.insert(record.id.clone(), idx);
             meta.push(Bm25RecordMeta {
                 record_id: record.id.clone(),
                 source: record.source.clone(),
                 split,
                 date,
-                record: record.clone(),
             });
             docs.push(Document {
                 id: idx,
@@ -1383,6 +1377,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         self.bm25_global_index = Some(Bm25GlobalIndex {
             meta,
             search_engine,
+            id_to_meta_idx,
         });
     }
 
@@ -1896,7 +1891,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     }
 
     fn sync_records_from_cache(&mut self) -> Result<(), SamplerError> {
-        let mut snapshot = self.ingestion.cache().snapshot();
+        let mut snapshot = self.ingestion.all_records_snapshot();
         snapshot.sort_by(|a, b| a.id.cmp(&b.id));
         self.records.clear();
         self.sources_with_long_sections.clear();
@@ -1947,12 +1942,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             }
             self.ingestion_cursors_loaded = true;
         }
-        if self.ingestion.cache().is_empty() {
+        if self.ingestion.all_caches_empty() {
             self.ingestion.refresh_all();
         } else {
             self.ingestion.advance(self.config.batch_size);
         }
-        let observed = self.ingestion.cache().ingest_count();
+        let observed = self.ingestion.total_ingest_count();
         if observed == self.last_observed_ingest && !self.records.is_empty() {
             return Ok(());
         }
@@ -1987,13 +1982,13 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             }
             self.ingestion_cursors_loaded = true;
         }
-        if self.ingestion.cache().is_empty() {
+        if self.ingestion.all_caches_empty() {
             self.ingestion.refresh_all_with_weights(weights)?;
         } else {
             self.ingestion
                 .advance_with_weights(self.config.batch_size, weights)?;
         }
-        let observed = self.ingestion.cache().ingest_count();
+        let observed = self.ingestion.total_ingest_count();
         if observed == self.last_observed_ingest && !self.records.is_empty() {
             return Ok(());
         }
@@ -2024,7 +2019,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             self.ingestion_cursors_loaded = true;
         }
         self.ingestion.force_refresh_all_with_weights(weights)?;
-        self.last_observed_ingest = self.ingestion.cache().ingest_count();
+        self.last_observed_ingest = self.ingestion.total_ingest_count();
         self.sync_records_from_cache()?;
         self.rebuild_bm25_index_after_refresh_if_needed();
         self.epoch_tracker.ensure_loaded()?;
@@ -2889,33 +2884,33 @@ mod tests {
     /// Number of batches sampled for deterministic sequence hash assertions.
     pub const FULL_SEQUENCE_LEN: usize = 45;
     /// Expected hash for deterministic text batch sequence.
-    pub const TEXT_BATCH_SEQUENCE_HASH: u64 = 16700524736973776041;
+    pub const TEXT_BATCH_SEQUENCE_HASH: u64 = 5827731891827072441;
     /// Expected hash for deterministic triplet batch sequence.
     #[cfg(not(feature = "bm25-mining"))]
-    pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 14618375830351864347;
+    pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 4185203987705106104;
     /// Expected hash for deterministic triplet batch sequence when bm25-mining is enabled.
     #[cfg(feature = "bm25-mining")]
-    pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 2899940383738632067;
+    pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 2471541713911738564;
     /// Expected hash for deterministic pair batch sequence.
     #[cfg(not(feature = "bm25-mining"))]
-    pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 13133711470950174124;
+    pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 1325935229386486484;
     /// Expected hash for deterministic pair batch sequence when bm25-mining is enabled.
     #[cfg(feature = "bm25-mining")]
-    pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 13803509890260831319;
+    pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 9645472812115896860;
     /// Expected hash for deterministic prefetch text batch sequence.
-    pub const PREFETCH_TEXT_BATCH_SEQUENCE_HASH: u64 = 16740235391902546413;
+    pub const PREFETCH_TEXT_BATCH_SEQUENCE_HASH: u64 = 5061724971919995465;
     /// Expected hash for deterministic prefetch triplet batch sequence.
     #[cfg(not(feature = "bm25-mining"))]
-    pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 11709520942485223708;
+    pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 9256290040294854440;
     /// Expected hash for deterministic prefetch triplet batch sequence when bm25-mining is enabled.
     #[cfg(feature = "bm25-mining")]
-    pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 12173583950076990836;
+    pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 6038679518446907700;
     /// Expected hash for deterministic prefetch pair batch sequence.
     #[cfg(not(feature = "bm25-mining"))]
-    pub const PREFETCH_PAIR_BATCH_SEQUENCE_HASH: u64 = 2553049861003803008;
+    pub const PREFETCH_PAIR_BATCH_SEQUENCE_HASH: u64 = 2535655529758418680;
     /// Expected hash for deterministic prefetch pair batch sequence when bm25-mining is enabled.
     #[cfg(feature = "bm25-mining")]
-    pub const PREFETCH_PAIR_BATCH_SEQUENCE_HASH: u64 = 8421775137573104141;
+    pub const PREFETCH_PAIR_BATCH_SEQUENCE_HASH: u64 = 6906345832975851973;
 
     /// Expected readable wrong-article sequence without BM25 mining.
     pub const READABLE_NON_BM25_TITLES: [&str; 8] = [
@@ -4672,12 +4667,12 @@ mod tests {
                 "source_c::record_02".to_string(),
                 "source_b::record_04".to_string(),
                 "source_a::record_07".to_string(),
-                "source_b::record_04".to_string(),
+                "source_b::record_00".to_string(),
                 "source_c::record_04".to_string(),
                 "source_a::record_02".to_string(),
                 "source_b::record_04".to_string(),
                 "source_c::record_02".to_string(),
-                "source_a::record_04".to_string()
+                "source_a::record_10".to_string()
             ]
         );
     }
@@ -4695,13 +4690,13 @@ mod tests {
             vec![
                 "source_b::record_04".to_string(),
                 "source_c::record_02".to_string(),
-                "source_a::record_05".to_string(),
+                "source_a::record_06".to_string(),
                 "source_c::record_04".to_string(),
                 "source_b::record_04".to_string(),
                 "source_a::record_07".to_string(),
                 "source_b::record_08".to_string(),
-                "source_a::record_06".to_string(),
-                "source_b::record_08".to_string()
+                "source_a::record_02".to_string(),
+                "source_c::record_01".to_string()
             ]
         );
     }
@@ -4727,7 +4722,7 @@ mod tests {
                 "source_a::record_08".to_string(),
                 "source_a::record_07".to_string(),
                 "source_c::record_02".to_string(),
-                "source_c::record_03".to_string()
+                "source_c::record_04".to_string()
             ]
         );
     }
@@ -4749,12 +4744,12 @@ mod tests {
                 "source_b::record_01".to_string(),
                 "source_a::record_04".to_string(),
                 "source_c::record_02".to_string(),
-                "source_c::record_03".to_string(),
+                "source_c::record_00".to_string(),
+                "source_b::record_01".to_string(),
                 "source_a::record_04".to_string(),
-                "source_a::record_11".to_string(),
-                "source_c::record_02".to_string(),
-                "source_c::record_03".to_string(),
-                "source_a::record_04".to_string()
+                "source_a::record_12".to_string(),
+                "source_b::record_01".to_string(),
+                "source_c::record_03".to_string()
             ]
         );
     }
@@ -4776,11 +4771,11 @@ mod tests {
                 "source_b::record_06".to_string(),
                 "source_a::record_02".to_string(),
                 "source_b::record_06".to_string(),
-                "source_b::record_06".to_string(),
-                "source_a::record_08".to_string(),
-                "source_a::record_06".to_string(),
-                "source_a::record_08".to_string(),
-                "source_b::record_13".to_string()
+                "source_a::record_02".to_string(),
+                "source_c::record_02".to_string(),
+                "source_b::record_10".to_string(),
+                "source_c::record_02".to_string(),
+                "source_a::record_09".to_string()
             ]
         );
     }
@@ -7156,9 +7151,17 @@ mod tests {
         let docs: Vec<bm25::Document<usize>> = meta
             .iter()
             .enumerate()
-            .map(|(idx, m)| bm25::Document {
-                id: idx,
-                contents: record_bm25_text(&m.record, inner.config.chunking.max_window_tokens),
+            .map(|(idx, m)| {
+                // All records in the BM25 index are also in self.records (built from
+                // all per-source caches), so this lookup is always O(1) and found.
+                let record = inner
+                    .records
+                    .get(&m.record_id)
+                    .expect("record must be in self.records");
+                bm25::Document {
+                    id: idx,
+                    contents: record_bm25_text(record, inner.config.chunking.max_window_tokens),
+                }
             })
             .collect();
         let engine =
