@@ -1,0 +1,26 @@
+name: Diagram Freshness Check
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  verify-diagrams:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install mmdr
+        run: cargo install --locked mermaid-rs-renderer
+
+      - name: Re-render diagrams
+        run: ./scripts/render-diagrams.sh
+
+      - name: Ensure generated SVGs are committed
+        run: |
+          git diff --exit-code -- assets/diagrams
+          test -z "$(git ls-files --others --exclude-standard -- assets/diagrams)"

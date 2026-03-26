@@ -809,6 +809,37 @@ This reflects the built-in file-corpus helpers (`FileCorpusIndex`) used by files
 - **Ingestion**: `next_triplet_batch(split)`, `next_pair_batch(split)`, and `next_text_batch(split)` trigger refresh; per-source buffers refill when empty (or on force refresh).
 - **Memory bound**: refresh/cache limits are bounded by `ingestion_max_records` with a floor at `batch_size`.
 - **Per-source cache**: each registered source keeps its own independent LRU window of `ingestion_max_records` records. The total in-memory record pool across N sources is therefore N × `ingestion_max_records`. This means every source always has the full candidate budget available — candidate availability does not shrink as more sources are added, as it would with a single shared pool divided N ways.
+
+### Cache flow diagram
+
+The sampler uses a two-stage ingest path for each source:
+
+1. Source `refresh(...)` returns a snapshot batch.
+2. Snapshot records are appended to a per-source FIFO buffer (`VecDeque`).
+3. A drain step moves up to a target number of records from source buffers into per-source LRU caches.
+4. The sampler builds a flat snapshot across all per-source caches and samples anchors/positives/negatives from that pool.
+5. If a source buffer contains updated versions of existing `record_id`s, cache entries are replaced and promoted to most-recent.
+
+![Triplets cache flow diagram](assets/diagrams/cache-flow.svg)
+
+Diagram source and rendering workflow:
+
+- Source of truth: `docs/diagrams/cache-flow.mmd`
+- Rendered artifact: `assets/diagrams/cache-flow.svg`
+- Regenerate: `./scripts/render-diagrams.sh` (requires `mmdr`, install via `cargo install --locked mermaid-rs-renderer`)
+
+Notes on reuse and duplicates:
+
+- Cache eviction is based on LRU recency and cache size, not on whether a record was recently used as an anchor.
+- Anchor reuse is expected: sampling cursors rotate and can revisit cached records across attempts and across batches.
+- In-batch dedupe happens before padding (triplets use an `(anchor_id, positive_id, negative_id)` key), but `pad_with_reuse` may intentionally duplicate already-sampled items to reach `batch_size`.
+- There is no global no-repeat guarantee across batches.
+
+Implementation sources:
+
+- `src/ingestion.rs` (`RecordCache`, `IngestionManager`, `weighted_drain_into_caches`, `all_records_snapshot`)
+- `src/sampler/mod.rs` (`choose_anchor_record`, `next_*_batch_inner_with_weights`, `pad_with_reuse`)
+
 - **`ingestion_max_records` tuning**: setting this above `batch_size` usually improves sample diversity (broader anchor/negative candidate pool) and reduces near-term repetition, but returns diminish once source availability, split boundaries, and recipe constraints dominate. For remote backends such as Hugging Face, larger initial ingestion targets can require pulling more initial shards before the first batch, so startup latency can increase depending on shard sizes and network throughput.
 - **File indexing**: deterministic path ordering + deterministic index permutation for paging.
 - **Source ordering**: round-robin by source, deterministic within-source ordering by seed/epoch (file source). For `HuggingFaceRowSource`, shard download order is deterministic by seed, but row selection within a refresh is not stable across cache wipes (see `HuggingFaceRowSource` doc).
