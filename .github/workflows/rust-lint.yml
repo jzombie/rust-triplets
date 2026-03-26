@@ -1,5 +1,8 @@
 name: rust-lint
 
+permissions:
+  contents: read
+
 on: [pull_request]
 
 # Ensure only one run per branch/PR at a time. If new commits are pushed,
