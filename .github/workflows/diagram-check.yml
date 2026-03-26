@@ -20,7 +20,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install mmdr
-        run: cargo install --locked mermaid-rs-renderer --version 0.2.1
+        run: cargo install --locked mermaid-rs-renderer
 
       - name: Re-render diagrams
         run: ./scripts/render-diagrams.sh
