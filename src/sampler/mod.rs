@@ -15,6 +15,7 @@ use std::thread;
 use crate::config::{
     ChunkingStrategy, NegativeStrategy, SamplerConfig, Selector, TextRecipe, TripletRecipe,
 };
+use crate::constants::sampler::AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME;
 use crate::constants::sampler::{
     ANCHOR_POSITIVE_SWAP_MASK, EPOCH_SEED_OFFSET, EXHAUSTION_RETRY_LIMIT, NEG_REASON_WRONG_ARTICLE,
     NEG_REASON_WRONG_DATE, NEG_REASON_WRONG_QA, PREFETCHER_SOURCE_ID, PREFETCHER_STOPPED_REASON,
@@ -30,19 +31,12 @@ use crate::errors::SamplerError;
 use crate::hash::{derive_epoch_seed, stable_hash_str};
 use crate::ingestion::IngestionManager;
 use crate::metadata::{META_FIELD_DATE, MetadataKey};
+use crate::metrics::{chunk_proximity_score, window_index_proximity};
 use crate::source::DataSource;
 use crate::splits::{
     EpochStateStore, PersistedSamplerState, SamplerStateStore, SplitLabel, SplitStore,
 };
 use crate::types::{RecipeKey, RecordId, SourceId};
-
-/// Auto-injected recipe name used when a source has at least one section whose
-/// token count exceeds `chunking.max_window_tokens` during normal ingest sync.
-///
-/// This recipe is appended for any eligible source during normal ingest sync, regardless
-/// if custom recipes are configured or not.
-const AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME: &str =
-    "auto_injected_long_section_chunk_pair_wrong_article";
 
 // AUTO-RECIPE HANDLING OVERVIEW (end-to-end):
 // Stage A: Source-level injection eligibility ("should this source even get the recipe?")
@@ -110,8 +104,7 @@ impl rand::RngCore for DeterministicRng {
 ///
 /// Definitions:
 /// - `trust` (range 0.0-1.0): comes from `RecordChunk.quality.trust`; scales the contribution of a chunk.
-/// - `start_ratio` (range 0.0-1.0): fraction of the section where the window starts; 0.0 is the first token.
-/// - `base`: window chunks use `1.0 - start_ratio`; summary chunks use their configured `summary_fallback_weight`.
+/// - `base`: window chunks use proximity-to-head (`1 / (index + 1)`); summary chunks use their configured `summary_fallback_weight`.
 /// - `chunk_weight_floor`: minimum weight applied after scaling.
 ///
 /// Formula: `max(chunk_weight_floor, base * trust)`.
@@ -119,7 +112,7 @@ pub fn chunk_weight(strategy: &ChunkingStrategy, chunk: &RecordChunk) -> f32 {
     let floor = strategy.chunk_weight_floor;
     let trust = chunk.quality.trust.clamp(0.0, 1.0);
     let base = match &chunk.view {
-        ChunkView::Window { start_ratio, .. } => 1.0 - start_ratio,
+        ChunkView::Window { index, .. } => window_index_proximity(*index),
         ChunkView::SummaryFallback { weight, .. } => *weight,
     };
     (base * trust).max(floor)
@@ -1343,8 +1336,9 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             return None;
         }
 
-        let weight = recipe.weight
-            * self.triplet_chunk_weight(&anchor_chunk, &positive_chunk, &negative_chunk);
+        let chunk_weight =
+            self.triplet_chunk_weight(recipe, &anchor_chunk, &positive_chunk, &negative_chunk);
+        let weight = recipe.weight * chunk_weight;
         let recipe_name = if fallback_used {
             format!("{}_fallback_same_split", recipe.name)
         } else {
@@ -1398,12 +1392,30 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
 
     fn triplet_chunk_weight(
         &self,
+        recipe: &TripletRecipe,
         anchor: &RecordChunk,
         positive: &RecordChunk,
         negative: &RecordChunk,
     ) -> f32 {
-        (self.chunk_weight(anchor) + self.chunk_weight(positive) + self.chunk_weight(negative))
-            / 3.0
+        let floor = self.config.chunking.chunk_weight_floor;
+        let negative_weight = negative.quality.trust.clamp(0.0, 1.0).max(floor);
+        if Self::is_auto_chunk_pair_recipe(recipe) {
+            // For the auto long-section recipe, use one coherence signal (proximity)
+            // for the anchor/positive pair.
+            let pair_trust = ((anchor.quality.trust.clamp(0.0, 1.0)
+                + positive.quality.trust.clamp(0.0, 1.0))
+                / 2.0)
+                .clamp(0.0, 1.0);
+            let pair_weight = (chunk_proximity_score(anchor, positive) * pair_trust).max(floor);
+            // Keep negative weighting simple in this recipe: trust + floor only.
+            return (pair_weight + pair_weight + negative_weight) / 3.0;
+        }
+        // Non-auto recipes also apply anchor-positive proximity, while keeping
+        // negative weighting trust-only.
+        let pair_proximity = chunk_proximity_score(anchor, positive);
+        let anchor_weight = (self.chunk_weight(anchor) * pair_proximity).max(floor);
+        let positive_weight = (self.chunk_weight(positive) * pair_proximity).max(floor);
+        (anchor_weight + positive_weight + negative_weight) / 3.0
     }
 
     fn decorate_chunk(&mut self, record: &DataRecord, chunk: &mut RecordChunk) {
@@ -1538,7 +1550,6 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                     index: 0,
                     overlap: 0,
                     span,
-                    start_ratio: 0.0,
                 },
                 text,
                 tokens_estimate: span,
@@ -1560,7 +1571,6 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                         index,
                         overlap: *overlap,
                         span,
-                        start_ratio: start as f32 / total_tokens as f32,
                     },
                     text: window,
                     tokens_estimate: end - start,

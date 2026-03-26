@@ -72,6 +72,12 @@ pub mod sampler {
     pub const NEG_REASON_WRONG_ARTICLE: &str = "wrong_article";
     /// Negative-pair reason tag for mismatched question/answer pairings.
     pub const NEG_REASON_WRONG_QA: &str = "wrong_qa_pairing";
+    /// Recipe name auto-injected when long sections require chunk-window pairing.
+    ///
+    /// This recipe is appended for eligible sources during normal ingest sync,
+    /// regardless of whether custom triplet recipes are configured.
+    pub const AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME: &str =
+        "auto_injected_long_section_chunk_pair_wrong_article";
     /// Denominator used for the anchor/positive swap coin-flip (swap when `rng & mask == 0`).
     ///
     /// A value of `1` means the least-significant bit is tested, giving a uniform 50 % swap

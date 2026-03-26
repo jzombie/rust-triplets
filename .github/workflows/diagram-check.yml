@@ -1,0 +1,46 @@
+name: Diagram Freshness Check
+
+permissions:
+  contents: write
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  verify-diagrams:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install mmdr
+        run: cargo install --locked mermaid-rs-renderer
+
+      - name: Re-render diagrams
+        run: ./scripts/render-diagrams.sh
+
+      - name: Commit regenerated SVGs
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]] && [[ "${{ github.event.pull_request.head.repo.fork }}" == "true" ]]; then
+            echo "Fork PR detected; skipping auto-commit because push permission is unavailable."
+            exit 0
+          fi
+
+          git add assets/diagrams
+          if git diff --cached --quiet; then
+            echo "No diagram changes to commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore(diagrams): regenerate SVG assets [skip ci]"
+
+          BRANCH="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}"
+          git push origin "HEAD:${BRANCH}"

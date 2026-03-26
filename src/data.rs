@@ -93,8 +93,6 @@ pub enum ChunkView {
         overlap: usize,
         /// Nominal window span in tokens.
         span: usize,
-        /// Position of the window's start as a fraction of total tokens in the section (0.0 = first token, 1.0 = past the end).
-        start_ratio: f32,
     },
     /// Summary fallback chunk used when window extraction is unavailable.
     SummaryFallback {

@@ -8,7 +8,7 @@ Compose an effectively unlimited supply of [training triplets](https://en.wikipe
 
 - Multiple input source mixing, rule-driven sampling recipes, using a`Rayon`-managed thread pool with optional multi-batch prebuffering for training.
 - Optional per-recipe training instructions.
-- Configurable source sampling weights, independent source cursors, source/record trust weighting, recipe weighting, and position-aware window weighting (`start_ratio`), so you can tune per-source sampling frequency and per-sample training weight.
+- Configurable source sampling weights, independent source cursors, source/record trust weighting, and recipe weighting, so you can tune per-source sampling frequency and per-sample training weight.
 - Automatic & deterministic data splits.
 - Optional split-store state snapshotting: split assignments (train/validation/test) and sampler cursor state are persisted to a compact binary file. Only record IDs and lightweight metadata are stored — record text and payloads are never written to the split store, keeping snapshot files small even for large corpora. Resume a multi-epoch training run from any persisted checkpoint.
 - Automatic source chunking (ensure all data is eventually consumed regardless of context window size).
@@ -65,7 +65,7 @@ use triplets::data::ChunkView;
 #   anchor: RecordChunk {
 #     record_id: "source_a::article_a".to_string(),
 #     section_idx: 0,
-#     view: ChunkView::Window { index: 0, overlap: 0, span: 512, start_ratio: 0.0 },
+#     view: ChunkView::Window { index: 0, overlap: 0, span: 512 },
 #     text: "Researchers report a breakthrough in solar cell efficiency.".to_string(),
 #     tokens_estimate: 9,
 #     quality: QualityScore::default(),
@@ -73,7 +73,7 @@ use triplets::data::ChunkView;
 #   positive: RecordChunk {
 #     record_id: "source_a::article_a".to_string(),
 #     section_idx: 1,
-#     view: ChunkView::Window { index: 0, overlap: 0, span: 512, start_ratio: 0.0 },
+#     view: ChunkView::Window { index: 0, overlap: 0, span: 512 },
 #     text: "The team achieved 35% efficiency using perovskite layers.".to_string(),
 #     tokens_estimate: 9,
 #     quality: QualityScore::default(),
@@ -81,7 +81,7 @@ use triplets::data::ChunkView;
 #   negative: RecordChunk {
 #     record_id: "source_a::article_b".to_string(),
 #     section_idx: 0,
-#     view: ChunkView::Window { index: 0, overlap: 0, span: 512, start_ratio: 0.0 },
+#     view: ChunkView::Window { index: 0, overlap: 0, span: 512 },
 #     text: "Local council approves new zoning guidelines for downtown.".to_string(),
 #     tokens_estimate: 8,
 #     quality: QualityScore::default(),
@@ -116,7 +116,9 @@ Why this matters:
 - Sources can be over/under-sampled independently via source weights (including per-batch reweighting).
 - When a source has limited fresh records, replay/oversampling can happen for that source without coupling all other sources to the same behavior.
 
-Key weighting concepts:
+## Sample scoring and weighting
+
+Scoring layers:
 - **Default trust** (`QualityScore::default().trust`): 0.5 (used when a record/source doesn't override trust).
 - **Source weights** control how often each source contributes in a batch (`next_*_batch_with_weights`).
 - **Trust weights** (`DataRecord.quality.trust`, optional taxonomy overrides) scale sample influence by source/record quality.
@@ -129,6 +131,29 @@ Source weight semantics:
 - **Omitted sources default to 1.0:** If a source id is not present in a per-call weight map, it is treated as having weight `1.0` for that call.
 - **Invalid entries cause errors:** Passing a weight map that references an unknown source id or contains a negative weight will cause the weight-aware ingestion APIs to return an error (`SamplerError::InvalidWeight`). Callers should handle the `Result` returned by the weight-aware methods (for example, the ingestion helpers `advance_with_weights`, `refresh_all_with_weights`, and `force_refresh_all_with_weights`, and the sampler paths that propagate their errors).
 - **Zero weights are allowed:** A source weight of exactly `0.0` disables contribution from that source for the call (it is effectively skipped). If all provided weights are non-positive, the implementation falls back to equal weighting.
+
+Chunk proximity semantics:
+
+- For two window chunks from the same `(record_id, section_idx)`, let `delta = |anchor_index - positive_index|`.
+- Distance is `delta / (delta + 1)`.
+- Proximity is `1 - distance`, which simplifies to `1 / (delta + 1)`.
+- Examples:
+  - same window (`delta = 0`) -> proximity `1.0`
+  - adjacent windows (`delta = 1`) -> proximity `0.5`
+  - gap of 2 (`delta = 2`) -> proximity `0.333...`
+
+Triplet chunk-weight formulas:
+
+- Non-auto triplet recipes apply anchor-positive pair proximity.
+  - Anchor and positive use per-chunk weighting.
+  - For window chunks, per-chunk base is head proximity `1 / (index + 1)`, then trust is applied and `chunk_weight_floor` is enforced.
+  - Anchor and positive chunk weights are then scaled by pair proximity.
+  - Negative weighting is trust-only (`negative_trust.max(chunk_weight_floor)`), not position/proximity based.
+  - Final triplet chunk-weight is `(anchor_weight + positive_weight + negative_weight) / 3`.
+- The auto long-section recipe uses anchor-positive pair proximity directly.
+  - Pair weight uses `(pair_proximity * avg(pair_trust)).max(chunk_weight_floor)`.
+  - Negative weight uses `negative_trust.max(chunk_weight_floor)`.
+  - Final triplet chunk-weight is the average of `(pair_weight, pair_weight, negative_weight)`.
 
 ## Recipes
 
@@ -159,14 +184,14 @@ let _recipe = TripletRecipe {
 
 **`TripletRecipe` field reference:**
 
-| Field                                                | Description                                                                                                                                                                                                                                                                                                                                                                                                           |
-|------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `name`                                               | Unique identifier; appears in `SampleTriplet.recipe` and derived text sample names.                                                                                                                                                                                                                                                                                                                                   |
-| `anchor` / `positive_selector` / `negative_selector` | `Selector` rules: `Role(SectionRole::Anchor)` picks a section with that role; `Random` picks any section; etc.                                                                                                                                                                                                                                                                                                        |
-| `negative_strategy`                                  | Candidate pool for the negative slot: `WrongArticle` draws from different records; `WrongDate` draws from records with a different date (file source only).                                                                                                                                                                                                                                                           |
-| `weight`                                             | Relative sampling frequency among recipes; only the ratio between weights matters.                                                                                                                                                                                                                                                                                                                                    |
-| `instruction`                                        | Optional instruction string propagated to every `SampleTriplet.instruction` and `TextSample.instruction` produced by this recipe. Use for instruction-tuning workflows where the encoder is prompted per task (`"Retrieve a relevant document."`, `"Classify the sentiment."`, etc.). `None` means no instruction is attached and the output field is `None`.                                                         |
-| `allow_same_anchor_positive`                         | When `true`, allows triplets where anchor and positive carry identical text (SimCSE / dropout-trick training). The encoder sees the same text twice; dropout produces two slightly different embeddings at training time. The negative must still differ from both. Defaults to `false`. The HuggingFace source sets this `true` automatically in text-columns mode (when `text=` is mapped but `anchor=` is absent). |
+| Field                                                | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+|------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `name`                                               | Unique identifier; appears in `SampleTriplet.recipe` and derived text sample names.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `anchor` / `positive_selector` / `negative_selector` | `Selector` rules: `Role(SectionRole::Anchor)` picks a section with that role; `Random` picks any section; etc.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `negative_strategy`                                  | Candidate pool for the negative slot: `WrongArticle` draws from different records; `WrongPublicationDate` draws from records with a different metadata publication date; `QuestionAnswerMismatch` draws mismatched QA pairs.                                                                                                                                                                                                                                                                                                                                                                           |
+| `weight`                                             | Relative sampling frequency among recipes; only the ratio between weights matters.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `instruction`                                        | Optional instruction string propagated to every `SampleTriplet.instruction` and `TextSample.instruction` produced by this recipe. Use for instruction-tuning workflows where the encoder is prompted per task (`"Retrieve a relevant document."`, `"Classify the sentiment."`, etc.). `None` means no instruction is attached and the output field is `None`.                                                                                                                                                                                                                                          |
+| `allow_same_anchor_positive`                         | When `true`, allows triplets where anchor and positive carry identical text (SimCSE / dropout-trick training). The encoder sees the same text twice; dropout produces two slightly different embeddings at training time. The negative must still differ from both. Defaults to `false`. The HuggingFace source sets this `true` automatically in text-columns mode (when `text=` is mapped but `anchor=` is absent). In that mode, anchor/positive chunk cursors are section-specific, so chunked samples can still come from different window indices even when the underlying raw text is the same. |
 
 ### How recipe selection works
 
@@ -187,6 +212,7 @@ let _recipe = TripletRecipe {
 - Recipe selectors: anchor=`Context`, positive=`Context`, negative=`Context` with `WrongArticle` negatives.
 - It augments the source's recipe pool; it does not change `select_chunk` globally.
 - Anchor and positive are two independent chunk draws (not concatenated text, not derived from each other).
+- Its scoring follows the formulas in [Sample scoring and weighting](#sample-scoring-and-weighting).
 
 ## How it works
 
@@ -212,11 +238,11 @@ Each source is independent: sources can carry their own recipe rules tailored to
 
 ## Features
 
-| Feature            | What it enables                                                                                                                                                                                                                                                                                                                                                            | Default |
-|--------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|
-| `huggingface`      | `HuggingFaceRowSource` — streaming download and sampling from Hugging Face dataset repositories (parquet/ndjson shards, ClassLabel resolution, disk-cap eviction). Adds `hf-hub`, `parquet`, `ureq`, `rayon`, `serde_json`.                                                                                                                                                | No      |
-| `bm25-mining`      | BM25 hard-negative ranking within strategy-defined candidate pools. Adds a `bm25` dependency. Rule-based strategy selection always runs first to define the eligible pool; BM25 re-ranks within that pool when this feature is enabled. When absent, candidate selection within each strategy pool is uniform (no re-ranking step).                                        | No      |
-| `extended-metrics` | Enables additional per-triplet similarity diagnostics in the `multi_source_demo` output. Currently prints the Jaccard similarity (word-token overlap) between the anchor and each of the positive and negative chunks for every triplet in a batch. Adds no dependencies. Intended for manual inspection and debugging of sampling quality, not for use in training loops. | No      |
+| Feature            | What it enables                                                                                                                                                                                                                                                                                                                                                         | Default |
+|--------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|
+| `huggingface`      | `HuggingFaceRowSource` — streaming download and sampling from Hugging Face dataset repositories (parquet/ndjson shards, ClassLabel resolution, disk-cap eviction). Adds `hf-hub`, `parquet`, `ureq`, `rayon`, `serde_json`.                                                                                                                                             | No      |
+| `bm25-mining`      | BM25 hard-negative ranking within strategy-defined candidate pools. Adds a `bm25` dependency. Rule-based strategy selection always runs first to define the eligible pool; BM25 re-ranks within that pool when this feature is enabled. When absent, candidate selection within each strategy pool is uniform (no re-ranking step).                                     | No      |
+| `extended-metrics` | Enables additional per-triplet diagnostics in the `multi_source_demo` output. Prints Jaccard and byte-cosine similarity between anchor↔positive and anchor↔negative, plus per-source summary tables (including anchor-positive chunk proximity). Adds no dependencies. Intended for manual inspection and debugging of sampling quality, not for use in training loops. | No      |
 
 ```toml
 [dependencies]
@@ -231,7 +257,7 @@ Neither feature is on by default; enable them independently or together.
 # sample triplet batches from the example dataset
 cargo run --example multi_source_demo
 
-# sample with extended per-triplet similarity metrics (Jaccard anchor↔positive and anchor↔negative)
+# sample with extended per-triplet metrics (Jaccard/byte-cos plus proximity summary)
 cargo run --features extended-metrics --example multi_source_demo
 
 # inspect CLI flags
@@ -760,8 +786,9 @@ The sampler core only calls `NegativeBackend` methods — all backend-specific s
 - **Combinatorial triplet supply from modest corpora**: triplets are assembled on demand from source record combinations at batch time, not precomputed corpus-wide. Optional prefetch/prebuffering only materializes a bounded queue of upcoming sampled batches. N records still yield up to N×(N−1) raw combinations per recipe, multiplied across configured recipes and chunk windows.
 - **Optional BM25 hard-negative mining** (`bm25-mining` feature): ranks same-split candidates inside each strategy-defined pool by BM25 score. Rule-based sampling remains the default fast path; BM25 is a ranking layer on top of existing strategy pools, not a global filter. Because negatives are mined per-source by default, each source is still treated as a domain boundary.
 - **Automatic long-section recipe injection**: for sources with sections longer than `chunking.max_window_tokens`, automatically adds `auto_injected_long_section_chunk_pair_wrong_article`, which builds anchor/positive from two different context windows of the same record and uses a context section from a different record as the negative.
+- **Auto-recipe chunk proximity weighting**: auto-injected long-section triplets include an anchor-positive proximity multiplier. See [Sample scoring and weighting](#sample-scoring-and-weighting) for exact formulas.
 - **Deterministic long-section chunking**: short text stays as one chunk; long text becomes multiple chunk candidates (sliding windows) sampled over time. Defaults are `max_window_tokens=1024`, `overlap_tokens=[64]`, and `summary_fallback_tokens=512` (all configurable via `SamplerConfig.chunking`).
-- **Weight-aware sampling controls** across source weights, recipe weights, and chunk trust/quality weighting.
+- **Weight-aware sampling controls** across source weights, recipe weights, and chunk trust/quality weighting. See [Sample scoring and weighting](#sample-scoring-and-weighting) for exact behavior.
 - **Anti-shortcut anchor/positive swap**: deterministic 50% coin-flip swaps anchor and positive slots at triplet finalization, so both orderings appear at equal frequency. Important for InfoNCE and other contrastive objectives where asymmetric slot distributions would otherwise provide a shortcut. Seeded by sampler RNG; fully reproducible and covered by state-persistence mechanics.
 - **Anti-shortcut metadata-prefix variation** via `KvpPrefixSampler` (variant choice, per-field presence probabilities, field-order shuffle, and prefix dropout).
 - **Per-source batch mixing controls** with independent source frequency controls (including over/under-sampling).
@@ -782,12 +809,43 @@ This reflects the built-in file-corpus helpers (`FileCorpusIndex`) used by files
 - **Ingestion**: `next_triplet_batch(split)`, `next_pair_batch(split)`, and `next_text_batch(split)` trigger refresh; per-source buffers refill when empty (or on force refresh).
 - **Memory bound**: refresh/cache limits are bounded by `ingestion_max_records` with a floor at `batch_size`.
 - **Per-source cache**: each registered source keeps its own independent LRU window of `ingestion_max_records` records. The total in-memory record pool across N sources is therefore N × `ingestion_max_records`. This means every source always has the full candidate budget available — candidate availability does not shrink as more sources are added, as it would with a single shared pool divided N ways.
+
+### Cache flow diagram
+
+The sampler uses a two-stage ingest path for each source:
+
+1. Source `refresh(...)` returns a snapshot batch.
+2. Snapshot records are appended to a per-source FIFO buffer (`VecDeque`).
+3. A drain step moves up to a target number of records from source buffers into per-source LRU caches.
+4. The sampler builds a flat snapshot across all per-source caches and samples anchors/positives/negatives from that pool.
+5. If a source buffer contains updated versions of existing `record_id`s, cache entries are replaced and promoted to most-recent.
+
+![Triplets cache flow diagram](assets/diagrams/cache-flow.svg)
+
+Diagram source and rendering workflow:
+
+- Source of truth: `docs/diagrams/cache-flow.mmd`
+- Rendered artifact: `assets/diagrams/cache-flow.svg`
+- Regenerate: `./scripts/render-diagrams.sh` (requires `mmdr`, install via `cargo install --locked mermaid-rs-renderer`)
+
+Notes on reuse and duplicates:
+
+- Cache eviction is based on LRU recency and cache size, not on whether a record was recently used as an anchor.
+- Anchor reuse is expected: sampling cursors rotate and can revisit cached records across attempts and across batches.
+- In-batch dedupe happens before padding (triplets use an `(anchor_id, positive_id, negative_id)` key), but `pad_with_reuse` may intentionally duplicate already-sampled items to reach `batch_size`.
+- There is no global no-repeat guarantee across batches.
+
+Implementation sources:
+
+- `src/ingestion.rs` (`RecordCache`, `IngestionManager`, `weighted_drain_into_caches`, `all_records_snapshot`)
+- `src/sampler/mod.rs` (`choose_anchor_record`, `next_*_batch_inner_with_weights`, `pad_with_reuse`)
+
 - **`ingestion_max_records` tuning**: setting this above `batch_size` usually improves sample diversity (broader anchor/negative candidate pool) and reduces near-term repetition, but returns diminish once source availability, split boundaries, and recipe constraints dominate. For remote backends such as Hugging Face, larger initial ingestion targets can require pulling more initial shards before the first batch, so startup latency can increase depending on shard sizes and network throughput.
 - **File indexing**: deterministic path ordering + deterministic index permutation for paging.
 - **Source ordering**: round-robin by source, deterministic within-source ordering by seed/epoch (file source). For `HuggingFaceRowSource`, shard download order is deterministic by seed, but row selection within a refresh is not stable across cache wipes (see `HuggingFaceRowSource` doc).
 - **Splits**: labels are deterministic from `record_id + seed + ratios`; split APIs enforce `allowed_splits`.
 - **Coverage caveat**: if `len_hint` drifts mid-epoch in streaming backends, strict single-pass coverage is not guaranteed.
-- **Weights**: recipe/source/chunk weights affect scaling, not deterministic ordering.
+- **Weights**: recipe/source/chunk weights affect scaling, not deterministic ordering. See [Sample scoring and weighting](#sample-scoring-and-weighting).
 - **Scale note**: full scan/sort/index rebuild cost grows roughly linearly with file count and path bytes. This is intentional and appropriate for the target corpus scale (thousands to low millions of files). For LLM-scale pre-training across billions of tokens, the right tool is a format designed for that workload (Arrow/Parquet, WebDataset shards, or a dedicated high-throughput dataloader) — this crate targets iterative fine-tuning on domain-specific corpora, not bulk pre-training infrastructure.
 - **Order note**: index batching preserves permutation order; chunked index reads do not remove deterministic shuffling.
 - **Manual epoch control**: `sampler.set_epoch(n)` resets per-source cursors and reshuffles deterministically for that epoch.
