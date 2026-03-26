@@ -18,7 +18,7 @@ use crate::heuristics::{
     estimate_source_split_capacity_from_counts, format_replay_factor, format_u128_with_commas,
     resolve_text_recipes_for_source, split_counts_for_total,
 };
-use crate::metrics::source_skew;
+use crate::metrics::{chunk_proximity_score, source_skew, window_chunk_distance};
 use crate::sampler::chunk_weight;
 use crate::source::DataSource;
 use crate::splits::{FileSplitStore, SplitLabel, SplitRatios, SplitStore};
@@ -28,6 +28,12 @@ use crate::{
 };
 
 type DynSource = Box<dyn DataSource + 'static>;
+
+#[cfg(feature = "extended-metrics")]
+type MetricEntry = (f32, f32, f32, f32, f32);
+
+#[cfg(feature = "extended-metrics")]
+type SourceMetricsMap = HashMap<String, Vec<MetricEntry>>;
 
 fn managed_demo_split_store_path() -> Result<PathBuf, String> {
     let cache_root = CacheRoot::from_discovery()
@@ -641,9 +647,9 @@ where
         print_demo_config(&config_snapshot);
         println!("=== benchmark: {} triplet batches ===", batch_count);
 
-        // source_id -> Vec<(pos_jaccard, pos_byte_cosine, neg_jaccard, neg_byte_cosine)>
+        // source_id -> Vec<(pos_jaccard, pos_byte_cosine, neg_jaccard, neg_byte_cosine, pos_proximity)>
         #[cfg(feature = "extended-metrics")]
-        let mut source_metrics: HashMap<String, Vec<(f32, f32, f32, f32)>> = HashMap::new();
+        let mut source_metrics: SourceMetricsMap = HashMap::new();
 
         for i in 0..batch_count {
             let t0 = Instant::now();
@@ -674,11 +680,13 @@ where
                                 &triplet.anchor.text,
                                 &triplet.negative.text,
                             );
+                            let proximity =
+                                chunk_proximity_score(&triplet.anchor, &triplet.positive);
                             let source = extract_source(&triplet.anchor.record_id);
                             source_metrics
                                 .entry(source)
                                 .or_default()
-                                .push((pj, pc, nj, nc));
+                                .push((pj, pc, nj, nc, proximity));
                         }
                     }
                 }
@@ -885,6 +893,8 @@ fn print_triplet_batch(
         if let Some(instr) = &triplet.instruction {
             println!("instruction shown to model:\n{}\n", instr);
         }
+        let pos_proximity = chunk_proximity_score(&triplet.anchor, &triplet.positive);
+        let pos_distance = window_chunk_distance(&triplet.anchor, &triplet.positive);
         #[cfg(feature = "extended-metrics")]
         let (pos_sim, neg_sim) = {
             use crate::metrics::lexical_similarity_scores;
@@ -901,13 +911,23 @@ fn print_triplet_batch(
         };
         #[cfg(not(feature = "extended-metrics"))]
         let (pos_sim, neg_sim): (Option<(f32, f32)>, Option<(f32, f32)>) = (None, None);
-        print_chunk_block("ANCHOR", &triplet.anchor, strategy, split_store, None);
+        print_chunk_block(
+            "ANCHOR",
+            &triplet.anchor,
+            strategy,
+            split_store,
+            None,
+            None,
+            None,
+        );
         print_chunk_block(
             "POSITIVE",
             &triplet.positive,
             strategy,
             split_store,
             pos_sim,
+            Some(pos_proximity),
+            pos_distance,
         );
         print_chunk_block(
             "NEGATIVE",
@@ -915,6 +935,8 @@ fn print_triplet_batch(
             strategy,
             split_store,
             neg_sim,
+            None,
+            None,
         );
     }
     print_source_summary(
@@ -942,7 +964,15 @@ fn print_text_batch(strategy: &ChunkingStrategy, batch: &TextBatch, split_store:
         if let Some(instr) = &sample.instruction {
             println!("instruction shown to model:\n{}\n", instr);
         }
-        print_chunk_block("TEXT", &sample.chunk, strategy, split_store, None);
+        print_chunk_block(
+            "TEXT",
+            &sample.chunk,
+            strategy,
+            split_store,
+            None,
+            None,
+            None,
+        );
     }
     print_source_summary(
         "text samples",
@@ -973,8 +1003,24 @@ fn print_pair_batch(
         if let Some(reason) = &pair.reason {
             println!("reason       : {}", reason);
         }
-        print_chunk_block("ANCHOR", &pair.anchor, strategy, split_store, None);
-        print_chunk_block("OTHER", &pair.positive, strategy, split_store, None);
+        print_chunk_block(
+            "ANCHOR",
+            &pair.anchor,
+            strategy,
+            split_store,
+            None,
+            None,
+            None,
+        );
+        print_chunk_block(
+            "OTHER",
+            &pair.positive,
+            strategy,
+            split_store,
+            None,
+            None,
+            None,
+        );
     }
     print_source_summary(
         "pair anchors",
@@ -1018,7 +1064,7 @@ fn metric_mean_median(vals: &mut [f32]) -> (f32, f32) {
 }
 
 #[cfg(feature = "extended-metrics")]
-fn print_metric_summary(source_data: &HashMap<String, Vec<(f32, f32, f32, f32)>>) {
+fn print_metric_summary(source_data: &SourceMetricsMap) {
     let total: usize = source_data.values().map(|v| v.len()).sum();
     let n_sources = source_data.len();
     println!(
@@ -1029,11 +1075,7 @@ fn print_metric_summary(source_data: &HashMap<String, Vec<(f32, f32, f32, f32)>>
     );
 
     // Returns [pos, neg] as (mean, median) pairs for one metric across entries.
-    fn metric_pair(
-        entries: &[(f32, f32, f32, f32)],
-        pos_idx: usize,
-        neg_idx: usize,
-    ) -> [(f32, f32); 2] {
+    fn metric_pair(entries: &[MetricEntry], pos_idx: usize, neg_idx: usize) -> [(f32, f32); 2] {
         let extract = |idx: usize| -> Vec<f32> {
             entries
                 .iter()
@@ -1041,7 +1083,8 @@ fn print_metric_summary(source_data: &HashMap<String, Vec<(f32, f32, f32, f32)>>
                     0 => e.0,
                     1 => e.1,
                     2 => e.2,
-                    _ => e.3,
+                    3 => e.3,
+                    _ => e.4,
                 })
                 .collect()
         };
@@ -1056,7 +1099,7 @@ fn print_metric_summary(source_data: &HashMap<String, Vec<(f32, f32, f32, f32)>>
     fn print_metric_section(
         label: &str,
         sources: &[&String],
-        source_data: &HashMap<String, Vec<(f32, f32, f32, f32)>>,
+        source_data: &SourceMetricsMap,
         pos_idx: usize,
         neg_idx: usize,
         total: usize,
@@ -1092,7 +1135,7 @@ fn print_metric_summary(source_data: &HashMap<String, Vec<(f32, f32, f32, f32)>>
             );
         }
         if n_sources > 1 {
-            let all: Vec<(f32, f32, f32, f32)> = source_data.values().flatten().copied().collect();
+            let all: Vec<MetricEntry> = source_data.values().flatten().copied().collect();
             let [pos, neg] = metric_pair(&all, pos_idx, neg_idx);
             let gap_mean = pos.0 - neg.0;
             let gap_med = pos.1 - neg.1;
@@ -1101,6 +1144,58 @@ fn print_metric_summary(source_data: &HashMap<String, Vec<(f32, f32, f32, f32)>>
                 "{:<24} {:>5}  {:.3} / {:.3}     {:.3} / {:.3}     {:+.3} / {:+.3}",
                 "ALL", total, pos.0, pos.1, neg.0, neg.1, gap_mean, gap_med,
             );
+        }
+    }
+
+    fn print_single_metric_section(
+        label: &str,
+        sources: &[&String],
+        source_data: &SourceMetricsMap,
+        idx: usize,
+        total: usize,
+        n_sources: usize,
+    ) {
+        const SEP: usize = 58;
+        println!();
+        println!("[{}]", label);
+        println!("{:<24} {:>5}  {:<16}", "source", "n", "mean / median");
+        println!("{}", "-".repeat(SEP));
+        for source in sources {
+            let entries = &source_data[*source];
+            let mut vals: Vec<f32> = entries
+                .iter()
+                .map(|e| match idx {
+                    0 => e.0,
+                    1 => e.1,
+                    2 => e.2,
+                    3 => e.3,
+                    _ => e.4,
+                })
+                .collect();
+            let (mean, median) = metric_mean_median(&mut vals);
+            println!(
+                "{:<24} {:>5}  {:.3} / {:.3}",
+                source,
+                entries.len(),
+                mean,
+                median,
+            );
+        }
+        if n_sources > 1 {
+            let mut all: Vec<f32> = source_data
+                .values()
+                .flatten()
+                .map(|e| match idx {
+                    0 => e.0,
+                    1 => e.1,
+                    2 => e.2,
+                    3 => e.3,
+                    _ => e.4,
+                })
+                .collect();
+            let (mean, median) = metric_mean_median(&mut all);
+            println!("{}", "-".repeat(SEP));
+            println!("{:<24} {:>5}  {:.3} / {:.3}", "ALL", total, mean, median);
         }
     }
 
@@ -1125,6 +1220,14 @@ fn print_metric_summary(source_data: &HashMap<String, Vec<(f32, f32, f32, f32)>>
         total,
         n_sources,
     );
+    print_single_metric_section(
+        "anchor-positive proximity",
+        &sources,
+        source_data,
+        4,
+        total,
+        n_sources,
+    );
     println!();
 }
 
@@ -1139,10 +1242,9 @@ impl ChunkDebug for RecordChunk {
                 index,
                 span,
                 overlap,
-                start_ratio,
             } => format!(
-                "window#index={} span={} overlap={} start_ratio={:.3} tokens={}",
-                index, span, overlap, start_ratio, self.tokens_estimate
+                "window#index={} span={} overlap={} tokens={}",
+                index, span, overlap, self.tokens_estimate
             ),
             ChunkView::SummaryFallback { strategy, .. } => {
                 format!("summary:{} tokens={}", strategy, self.tokens_estimate)
@@ -1157,6 +1259,8 @@ fn print_chunk_block(
     strategy: &ChunkingStrategy,
     split_store: &impl SplitStore,
     anchor_sim: Option<(f32, f32)>,
+    ap_proximity: Option<f32>,
+    ap_distance: Option<f32>,
 ) {
     let chunk_weight = chunk_weight(strategy, chunk);
     let split = split_store
@@ -1170,6 +1274,12 @@ fn print_chunk_block(
     println!("record_id    : {}", chunk.record_id);
     println!("section_idx  : {}", chunk.section_idx);
     println!("token_est    : {}", chunk.tokens_estimate);
+    if let Some(proximity) = ap_proximity {
+        println!("a<->p proximity  : {:.4}", proximity);
+    }
+    if let Some(distance) = ap_distance {
+        println!("a<->p distance   : {:.4}", distance);
+    }
     if let Some((j, c)) = anchor_sim {
         println!("jaccard(↔a)  : {:.4}  byte-cos(↔a): {:.4}", j, c);
     }
@@ -2110,7 +2220,6 @@ mod tests {
                 index: 1,
                 overlap: 2,
                 span: 12,
-                start_ratio: 0.25,
             },
             text: "anchor text".to_string(),
             tokens_estimate: 8,
@@ -2134,7 +2243,6 @@ mod tests {
                 index: 0,
                 overlap: 0,
                 span: 16,
-                start_ratio: 0.0,
             },
             text: "negative text".to_string(),
             tokens_estimate: 7,
@@ -2485,11 +2593,11 @@ mod tests {
         let source_data = HashMap::from([
             (
                 "source_a".to_string(),
-                vec![(0.9, 0.8, 0.2, 0.1), (0.8, 0.7, 0.3, 0.2)],
+                vec![(0.9, 0.8, 0.2, 0.1, 0.7), (0.8, 0.7, 0.3, 0.2, 0.8)],
             ),
             (
                 "source_b".to_string(),
-                vec![(0.7, 0.6, 0.4, 0.3), (0.6, 0.5, 0.5, 0.4)],
+                vec![(0.7, 0.6, 0.4, 0.3, 0.5), (0.6, 0.5, 0.5, 0.4, 0.6)],
             ),
         ]);
 

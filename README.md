@@ -8,7 +8,7 @@ Compose an effectively unlimited supply of [training triplets](https://en.wikipe
 
 - Multiple input source mixing, rule-driven sampling recipes, using a`Rayon`-managed thread pool with optional multi-batch prebuffering for training.
 - Optional per-recipe training instructions.
-- Configurable source sampling weights, independent source cursors, source/record trust weighting, recipe weighting, and position-aware window weighting (`start_ratio`), so you can tune per-source sampling frequency and per-sample training weight.
+- Configurable source sampling weights, independent source cursors, source/record trust weighting, and recipe weighting, so you can tune per-source sampling frequency and per-sample training weight.
 - Automatic & deterministic data splits.
 - Optional split-store state snapshotting: split assignments (train/validation/test) and sampler cursor state are persisted to a compact binary file. Only record IDs and lightweight metadata are stored — record text and payloads are never written to the split store, keeping snapshot files small even for large corpora. Resume a multi-epoch training run from any persisted checkpoint.
 - Automatic source chunking (ensure all data is eventually consumed regardless of context window size).
@@ -65,7 +65,7 @@ use triplets::data::ChunkView;
 #   anchor: RecordChunk {
 #     record_id: "source_a::article_a".to_string(),
 #     section_idx: 0,
-#     view: ChunkView::Window { index: 0, overlap: 0, span: 512, start_ratio: 0.0 },
+#     view: ChunkView::Window { index: 0, overlap: 0, span: 512 },
 #     text: "Researchers report a breakthrough in solar cell efficiency.".to_string(),
 #     tokens_estimate: 9,
 #     quality: QualityScore::default(),
@@ -73,7 +73,7 @@ use triplets::data::ChunkView;
 #   positive: RecordChunk {
 #     record_id: "source_a::article_a".to_string(),
 #     section_idx: 1,
-#     view: ChunkView::Window { index: 0, overlap: 0, span: 512, start_ratio: 0.0 },
+#     view: ChunkView::Window { index: 0, overlap: 0, span: 512 },
 #     text: "The team achieved 35% efficiency using perovskite layers.".to_string(),
 #     tokens_estimate: 9,
 #     quality: QualityScore::default(),
@@ -81,7 +81,7 @@ use triplets::data::ChunkView;
 #   negative: RecordChunk {
 #     record_id: "source_a::article_b".to_string(),
 #     section_idx: 0,
-#     view: ChunkView::Window { index: 0, overlap: 0, span: 512, start_ratio: 0.0 },
+#     view: ChunkView::Window { index: 0, overlap: 0, span: 512 },
 #     text: "Local council approves new zoning guidelines for downtown.".to_string(),
 #     tokens_estimate: 8,
 #     quality: QualityScore::default(),
@@ -187,6 +187,30 @@ let _recipe = TripletRecipe {
 - Recipe selectors: anchor=`Context`, positive=`Context`, negative=`Context` with `WrongArticle` negatives.
 - It augments the source's recipe pool; it does not change `select_chunk` globally.
 - Anchor and positive are two independent chunk draws (not concatenated text, not derived from each other).
+- For this auto recipe, triplet weight is additionally scaled by anchor-positive **chunk proximity** (higher when the two selected windows are closer in the same section).
+
+#### Chunk proximity semantics
+
+- For two window chunks from the same `(record_id, section_idx)`, let `delta = |anchor_index - positive_index|`.
+- Distance is `delta / (delta + 1)`.
+- Proximity is `1 - distance`, which simplifies to `1 / (delta + 1)`.
+- Examples:
+  - same window (`delta = 0`) -> proximity `1.0`
+  - adjacent windows (`delta = 1`) -> proximity `0.5`
+  - gap of 2 (`delta = 2`) -> proximity `0.333...`
+
+#### Auto vs non-auto weighting
+
+- Non-auto triplet recipes also apply anchor-positive pair proximity.
+  - Anchor and positive use per-chunk weighting.
+  - For window chunks, per-chunk base is head proximity `1 / (index + 1)`, then trust is applied and `chunk_weight_floor` is enforced.
+  - Anchor and positive chunk weights are then scaled by pair proximity.
+  - Negative weighting is trust-only (`negative_trust.max(chunk_weight_floor)`), not position/proximity based.
+  - Final triplet chunk-weight is `(anchor_weight + positive_weight + negative_weight) / 3`.
+- The auto long-section recipe uses anchor-positive pair proximity directly.
+  - Pair weight uses `(pair_proximity * avg(pair_trust)).max(chunk_weight_floor)`.
+  - Negative weight uses `negative_trust.max(chunk_weight_floor)`.
+  - Final triplet chunk-weight is the average of `(pair_weight, pair_weight, negative_weight)`.
 
 ## How it works
 
@@ -212,11 +236,11 @@ Each source is independent: sources can carry their own recipe rules tailored to
 
 ## Features
 
-| Feature            | What it enables                                                                                                                                                                                                                                                                                                                                                            | Default |
-|--------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|
-| `huggingface`      | `HuggingFaceRowSource` — streaming download and sampling from Hugging Face dataset repositories (parquet/ndjson shards, ClassLabel resolution, disk-cap eviction). Adds `hf-hub`, `parquet`, `ureq`, `rayon`, `serde_json`.                                                                                                                                                | No      |
-| `bm25-mining`      | BM25 hard-negative ranking within strategy-defined candidate pools. Adds a `bm25` dependency. Rule-based strategy selection always runs first to define the eligible pool; BM25 re-ranks within that pool when this feature is enabled. When absent, candidate selection within each strategy pool is uniform (no re-ranking step).                                        | No      |
-| `extended-metrics` | Enables additional per-triplet similarity diagnostics in the `multi_source_demo` output. Currently prints the Jaccard similarity (word-token overlap) between the anchor and each of the positive and negative chunks for every triplet in a batch. Adds no dependencies. Intended for manual inspection and debugging of sampling quality, not for use in training loops. | No      |
+| Feature            | What it enables                                                                                                                                                                                                                                                                                                                                                         | Default |
+|--------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|
+| `huggingface`      | `HuggingFaceRowSource` — streaming download and sampling from Hugging Face dataset repositories (parquet/ndjson shards, ClassLabel resolution, disk-cap eviction). Adds `hf-hub`, `parquet`, `ureq`, `rayon`, `serde_json`.                                                                                                                                             | No      |
+| `bm25-mining`      | BM25 hard-negative ranking within strategy-defined candidate pools. Adds a `bm25` dependency. Rule-based strategy selection always runs first to define the eligible pool; BM25 re-ranks within that pool when this feature is enabled. When absent, candidate selection within each strategy pool is uniform (no re-ranking step).                                     | No      |
+| `extended-metrics` | Enables additional per-triplet diagnostics in the `multi_source_demo` output. Prints Jaccard and byte-cosine similarity between anchor↔positive and anchor↔negative, plus per-source summary tables (including anchor-positive chunk proximity). Adds no dependencies. Intended for manual inspection and debugging of sampling quality, not for use in training loops. | No      |
 
 ```toml
 [dependencies]
@@ -231,7 +255,7 @@ Neither feature is on by default; enable them independently or together.
 # sample triplet batches from the example dataset
 cargo run --example multi_source_demo
 
-# sample with extended per-triplet similarity metrics (Jaccard anchor↔positive and anchor↔negative)
+# sample with extended per-triplet metrics (Jaccard/byte-cos plus proximity summary)
 cargo run --features extended-metrics --example multi_source_demo
 
 # inspect CLI flags
@@ -760,6 +784,7 @@ The sampler core only calls `NegativeBackend` methods — all backend-specific s
 - **Combinatorial triplet supply from modest corpora**: triplets are assembled on demand from source record combinations at batch time, not precomputed corpus-wide. Optional prefetch/prebuffering only materializes a bounded queue of upcoming sampled batches. N records still yield up to N×(N−1) raw combinations per recipe, multiplied across configured recipes and chunk windows.
 - **Optional BM25 hard-negative mining** (`bm25-mining` feature): ranks same-split candidates inside each strategy-defined pool by BM25 score. Rule-based sampling remains the default fast path; BM25 is a ranking layer on top of existing strategy pools, not a global filter. Because negatives are mined per-source by default, each source is still treated as a domain boundary.
 - **Automatic long-section recipe injection**: for sources with sections longer than `chunking.max_window_tokens`, automatically adds `auto_injected_long_section_chunk_pair_wrong_article`, which builds anchor/positive from two different context windows of the same record and uses a context section from a different record as the negative.
+- **Auto-recipe chunk proximity weighting**: auto-injected long-section triplets include a proximity multiplier derived from anchor-positive window distance in the same section (closer windows score higher).
 - **Deterministic long-section chunking**: short text stays as one chunk; long text becomes multiple chunk candidates (sliding windows) sampled over time. Defaults are `max_window_tokens=1024`, `overlap_tokens=[64]`, and `summary_fallback_tokens=512` (all configurable via `SamplerConfig.chunking`).
 - **Weight-aware sampling controls** across source weights, recipe weights, and chunk trust/quality weighting.
 - **Anti-shortcut anchor/positive swap**: deterministic 50% coin-flip swaps anchor and positive slots at triplet finalization, so both orderings appear at equal frequency. Important for InfoNCE and other contrastive objectives where asymmetric slot distributions would otherwise provide a shortcut. Seeded by sampler RNG; fully reproducible and covered by state-persistence mechanics.
