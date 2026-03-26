@@ -174,6 +174,98 @@ fn deterministic_rng_state_roundtrip_and_fill_bytes_are_stable() {
 }
 
 #[test]
+fn next_chunk_from_pool_returns_none_for_empty_pool() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 17).unwrap());
+    let mut inner = TripletSamplerInner::new(base_config(), store);
+
+    assert!(inner.next_chunk_from_pool("rec", 0, Vec::new()).is_none());
+}
+
+#[test]
+fn recipe_order_cycled_and_text_recipe_order_cycled_return_empty_for_zero_count() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 18).unwrap());
+    let mut inner = TripletSamplerInner::new(base_config(), store);
+
+    assert!(inner.recipe_order_cycled(0, 3).is_empty());
+    assert!(inner.text_recipe_order_cycled(0, 5).is_empty());
+}
+
+#[test]
+fn select_chunk_random_handles_empty_and_non_empty_sections() {
+    let split = SplitRatios::default();
+    let mut config = base_config();
+    config.chunking.max_window_tokens = 4;
+    config.chunking.overlap_tokens = vec![0];
+    let store = Arc::new(DeterministicSplitStore::new(split, 19).unwrap());
+    let mut inner = TripletSamplerInner::new(config, store);
+
+    let empty_record = DataRecord {
+        id: "empty_random".into(),
+        source: "unit".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        quality: QualityScore::default(),
+        taxonomy: vec![],
+        sections: vec![],
+        meta_prefix: None,
+    };
+    assert!(
+        inner
+            .select_chunk(&empty_record, &Selector::Random)
+            .is_none()
+    );
+
+    let non_empty_record = DataRecord {
+        id: "non_empty_random".into(),
+        source: "unit".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        quality: QualityScore::default(),
+        taxonomy: vec![],
+        sections: vec![RecordSection {
+            role: SectionRole::Context,
+            heading: None,
+            text: "one two three four five six".into(),
+            sentences: vec!["one two three four five six".into()],
+        }],
+        meta_prefix: None,
+    };
+    let sampled = inner
+        .select_chunk(&non_empty_record, &Selector::Random)
+        .expect("random selector should sample from non-empty sections");
+    assert_eq!(sampled.record_id, "non_empty_random");
+}
+
+#[test]
+fn record_has_long_section_returns_false_when_window_tokens_are_disabled() {
+    let split = SplitRatios::default();
+    let mut config = base_config();
+    config.chunking.max_window_tokens = 0;
+    let store = Arc::new(DeterministicSplitStore::new(split, 20).unwrap());
+    let inner = TripletSamplerInner::new(config, store);
+
+    let long_record = DataRecord {
+        id: "long_record".into(),
+        source: "unit".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        quality: QualityScore::default(),
+        taxonomy: vec![],
+        sections: vec![RecordSection {
+            role: SectionRole::Context,
+            heading: None,
+            text: "one two three four five six seven eight".into(),
+            sentences: vec!["one two three four five six seven eight".into()],
+        }],
+        meta_prefix: None,
+    };
+
+    assert!(!inner.record_has_long_anchor_or_context_section(&long_record));
+}
+
+#[test]
 fn prefetcher_tracks_errors() {
     let calls = Arc::new(AtomicUsize::new(0));
     let calls_ref = Arc::clone(&calls);
