@@ -6,6 +6,7 @@ fn base_config() -> super::SamplerConfig {
 use super::backends::bm25_backend::record_bm25_text;
 use super::*;
 use crate::config::{ChunkingStrategy, NegativeStrategy, Selector, TextRecipe, TripletRecipe};
+use crate::metrics::chunk_proximity_score;
 
 /// Primary source id used by sampler unit tests.
 pub const PRIMARY_SOURCE_ID: &str = "source_a";
@@ -129,7 +130,6 @@ fn strategy_reason_and_chunk_key_cover_all_variants() {
             index: 2,
             overlap: 0,
             span: 8,
-            start_ratio: 0.25,
         },
         text: "window".into(),
         tokens_estimate: 8,
@@ -171,6 +171,98 @@ fn deterministic_rng_state_roundtrip_and_fill_bytes_are_stable() {
     let mut rng_e = DeterministicRng::new(999);
     let mut rng_f = DeterministicRng::new(999);
     assert_eq!(rng_e.next_u32() as u64, (rng_f.next_u64() as u32) as u64);
+}
+
+#[test]
+fn next_chunk_from_pool_returns_none_for_empty_pool() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 17).unwrap());
+    let mut inner = TripletSamplerInner::new(base_config(), store);
+
+    assert!(inner.next_chunk_from_pool("rec", 0, Vec::new()).is_none());
+}
+
+#[test]
+fn recipe_order_cycled_and_text_recipe_order_cycled_return_empty_for_zero_count() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 18).unwrap());
+    let mut inner = TripletSamplerInner::new(base_config(), store);
+
+    assert!(inner.recipe_order_cycled(0, 3).is_empty());
+    assert!(inner.text_recipe_order_cycled(0, 5).is_empty());
+}
+
+#[test]
+fn select_chunk_random_handles_empty_and_non_empty_sections() {
+    let split = SplitRatios::default();
+    let mut config = base_config();
+    config.chunking.max_window_tokens = 4;
+    config.chunking.overlap_tokens = vec![0];
+    let store = Arc::new(DeterministicSplitStore::new(split, 19).unwrap());
+    let mut inner = TripletSamplerInner::new(config, store);
+
+    let empty_record = DataRecord {
+        id: "empty_random".into(),
+        source: "unit".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        quality: QualityScore::default(),
+        taxonomy: vec![],
+        sections: vec![],
+        meta_prefix: None,
+    };
+    assert!(
+        inner
+            .select_chunk(&empty_record, &Selector::Random)
+            .is_none()
+    );
+
+    let non_empty_record = DataRecord {
+        id: "non_empty_random".into(),
+        source: "unit".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        quality: QualityScore::default(),
+        taxonomy: vec![],
+        sections: vec![RecordSection {
+            role: SectionRole::Context,
+            heading: None,
+            text: "one two three four five six".into(),
+            sentences: vec!["one two three four five six".into()],
+        }],
+        meta_prefix: None,
+    };
+    let sampled = inner
+        .select_chunk(&non_empty_record, &Selector::Random)
+        .expect("random selector should sample from non-empty sections");
+    assert_eq!(sampled.record_id, "non_empty_random");
+}
+
+#[test]
+fn record_has_long_section_returns_false_when_window_tokens_are_disabled() {
+    let split = SplitRatios::default();
+    let mut config = base_config();
+    config.chunking.max_window_tokens = 0;
+    let store = Arc::new(DeterministicSplitStore::new(split, 20).unwrap());
+    let inner = TripletSamplerInner::new(config, store);
+
+    let long_record = DataRecord {
+        id: "long_record".into(),
+        source: "unit".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        quality: QualityScore::default(),
+        taxonomy: vec![],
+        sections: vec![RecordSection {
+            role: SectionRole::Context,
+            heading: None,
+            text: "one two three four five six seven eight".into(),
+            sentences: vec!["one two three four five six seven eight".into()],
+        }],
+        meta_prefix: None,
+    };
+
+    assert!(!inner.record_has_long_anchor_or_context_section(&long_record));
 }
 
 #[test]
@@ -988,7 +1080,7 @@ impl DataSource for RecipeDecoratedSource {
 }
 
 #[test]
-fn chunk_view_carries_start_ratio() {
+fn chunk_view_carries_window_index() {
     let split = SplitRatios::default();
     let mut config = base_config();
     config.chunking = ChunkingStrategy {
@@ -1024,17 +1116,17 @@ fn chunk_view_carries_start_ratio() {
         .lock()
         .unwrap()
         .materialize_chunks(&record, 0, section);
-    let ratios: Vec<f32> = chunks
+    let indices: Vec<usize> = chunks
         .iter()
         .filter_map(|chunk| match chunk.view {
-            ChunkView::Window { start_ratio, .. } => Some(start_ratio),
+            ChunkView::Window { index, .. } => Some(index),
             _ => None,
         })
         .collect();
-    assert!(ratios.len() >= 3);
-    assert!((ratios[0] - 0.0).abs() < 1e-6);
-    assert!((ratios[1] - 0.4).abs() < 1e-6);
-    assert!((ratios[2] - 0.8).abs() < 1e-6);
+    assert!(indices.len() >= 3);
+    assert_eq!(indices[0], 0);
+    assert_eq!(indices[1], 1);
+    assert_eq!(indices[2], 2);
 }
 
 #[test]
@@ -1161,7 +1253,7 @@ fn chunk_windows_materialize_all_configured_overlaps() {
 }
 
 #[test]
-fn chunk_weight_applies_linear_offset_and_floor() {
+fn chunk_weight_windows_use_trust_and_floor() {
     let split = SplitRatios::default();
     let mut config = base_config();
     config.chunking.chunk_weight_floor = 0.25;
@@ -1172,14 +1264,13 @@ fn chunk_weight_applies_linear_offset_and_floor() {
         record_id: "unit".into(),
         section_idx: 0,
         view: ChunkView::Window {
-            index: 0,
+            index: 3,
             overlap: 0,
             span: 10,
-            start_ratio: 0.75,
         },
         text: "dummy".into(),
         tokens_estimate: 10,
-        quality: QualityScore::default(),
+        quality: QualityScore { trust: 1.0 },
     };
     assert_eq!(
         sampler.inner.lock().unwrap().chunk_weight(&base_chunk),
@@ -1191,11 +1282,10 @@ fn chunk_weight_applies_linear_offset_and_floor() {
         index: 0,
         overlap: 0,
         span: 10,
-        start_ratio: 0.1,
     };
     assert_eq!(
         sampler.inner.lock().unwrap().chunk_weight(&early_chunk),
-        0.45
+        1.0
     );
 }
 
@@ -1239,7 +1329,6 @@ fn chunk_weight_applies_trust_scaling() {
             index: 0,
             overlap: 0,
             span: 10,
-            start_ratio: 0.2,
         },
         text: "dummy".into(),
         tokens_estimate: 10,
@@ -1247,7 +1336,7 @@ fn chunk_weight_applies_trust_scaling() {
     };
 
     let weight = sampler.inner.lock().unwrap().chunk_weight(&trusted_chunk);
-    assert!((weight - 0.4).abs() < f32::EPSILON);
+    assert!((weight - 0.5).abs() < f32::EPSILON);
 }
 
 #[test]
@@ -1258,6 +1347,17 @@ fn triplet_weight_averages_chunk_weights() {
     let store = Arc::new(DeterministicSplitStore::new(split, 7).unwrap());
     let sampler = TripletSampler::new(config, store);
 
+    let recipe = TripletRecipe {
+        name: "regular_recipe".into(),
+        anchor: Selector::Role(SectionRole::Anchor),
+        positive_selector: Selector::Role(SectionRole::Context),
+        negative_selector: Selector::Role(SectionRole::Context),
+        negative_strategy: NegativeStrategy::WrongArticle,
+        weight: 1.0,
+        instruction: None,
+        allow_same_anchor_positive: false,
+    };
+
     let anchor = RecordChunk {
         record_id: "a".into(),
         section_idx: 0,
@@ -1265,7 +1365,6 @@ fn triplet_weight_averages_chunk_weights() {
             index: 0,
             overlap: 0,
             span: 10,
-            start_ratio: 0.0,
         },
         text: "a".into(),
         tokens_estimate: 10,
@@ -1278,7 +1377,6 @@ fn triplet_weight_averages_chunk_weights() {
             index: 0,
             overlap: 0,
             span: 10,
-            start_ratio: 0.5,
         },
         text: "b".into(),
         tokens_estimate: 10,
@@ -1291,7 +1389,6 @@ fn triplet_weight_averages_chunk_weights() {
             index: 0,
             overlap: 0,
             span: 10,
-            start_ratio: 1.0,
         },
         text: "c".into(),
         tokens_estimate: 10,
@@ -1302,10 +1399,379 @@ fn triplet_weight_averages_chunk_weights() {
         .inner
         .lock()
         .unwrap()
-        .triplet_chunk_weight(&anchor, &positive, &negative);
+        .triplet_chunk_weight(&recipe, &anchor, &positive, &negative);
     let trust = QualityScore::default().trust;
-    let expected = trust * (1.0 + 0.5 + 0.0) / 3.0;
+    let expected = trust;
     assert!((avg - expected).abs() < f32::EPSILON);
+}
+
+#[test]
+fn non_auto_triplet_negative_weight_uses_trust_only() {
+    let split = SplitRatios::default();
+    let mut config = base_config();
+    config.chunking.chunk_weight_floor = 0.0;
+    let store = Arc::new(DeterministicSplitStore::new(split, 71).unwrap());
+    let sampler = TripletSampler::new(config, store);
+
+    let recipe = TripletRecipe {
+        name: "regular_recipe".into(),
+        anchor: Selector::Role(SectionRole::Anchor),
+        positive_selector: Selector::Role(SectionRole::Context),
+        negative_selector: Selector::Role(SectionRole::Context),
+        negative_strategy: NegativeStrategy::WrongArticle,
+        weight: 1.0,
+        instruction: None,
+        allow_same_anchor_positive: false,
+    };
+
+    let anchor = RecordChunk {
+        record_id: "a".into(),
+        section_idx: 0,
+        view: ChunkView::Window {
+            index: 0,
+            overlap: 0,
+            span: 10,
+        },
+        text: "a".into(),
+        tokens_estimate: 10,
+        quality: QualityScore::default(),
+    };
+    let positive = RecordChunk {
+        record_id: "b".into(),
+        section_idx: 0,
+        view: ChunkView::Window {
+            index: 0,
+            overlap: 0,
+            span: 10,
+        },
+        text: "b".into(),
+        tokens_estimate: 10,
+        quality: QualityScore::default(),
+    };
+    let negative = RecordChunk {
+        record_id: "c".into(),
+        section_idx: 0,
+        view: ChunkView::Window {
+            index: 9,
+            overlap: 0,
+            span: 10,
+        },
+        text: "c".into(),
+        tokens_estimate: 10,
+        quality: QualityScore::default(),
+    };
+
+    let avg = sampler
+        .inner
+        .lock()
+        .unwrap()
+        .triplet_chunk_weight(&recipe, &anchor, &positive, &negative);
+    let trust = QualityScore::default().trust;
+    let expected = trust;
+    assert!((avg - expected).abs() < f32::EPSILON, "avg={avg}");
+}
+
+#[test]
+fn non_auto_triplet_weight_applies_anchor_positive_proximity() {
+    let split = SplitRatios::default();
+    let mut config = base_config();
+    config.chunking.chunk_weight_floor = 0.0;
+    let store = Arc::new(DeterministicSplitStore::new(split, 72).unwrap());
+    let sampler = TripletSampler::new(config, store);
+
+    let recipe = TripletRecipe {
+        name: "regular_recipe".into(),
+        anchor: Selector::Role(SectionRole::Anchor),
+        positive_selector: Selector::Role(SectionRole::Context),
+        negative_selector: Selector::Role(SectionRole::Context),
+        negative_strategy: NegativeStrategy::WrongArticle,
+        weight: 1.0,
+        instruction: None,
+        allow_same_anchor_positive: false,
+    };
+
+    let anchor = RecordChunk {
+        record_id: "r".into(),
+        section_idx: 0,
+        view: ChunkView::Window {
+            index: 0,
+            overlap: 0,
+            span: 10,
+        },
+        text: "a".into(),
+        tokens_estimate: 10,
+        quality: QualityScore::default(),
+    };
+    let positive = RecordChunk {
+        record_id: "r".into(),
+        section_idx: 0,
+        view: ChunkView::Window {
+            index: 3,
+            overlap: 0,
+            span: 10,
+        },
+        text: "b".into(),
+        tokens_estimate: 10,
+        quality: QualityScore::default(),
+    };
+    let negative = RecordChunk {
+        record_id: "n".into(),
+        section_idx: 0,
+        view: ChunkView::Window {
+            index: 9,
+            overlap: 0,
+            span: 10,
+        },
+        text: "c".into(),
+        tokens_estimate: 10,
+        quality: QualityScore::default(),
+    };
+
+    let avg = sampler
+        .inner
+        .lock()
+        .unwrap()
+        .triplet_chunk_weight(&recipe, &anchor, &positive, &negative);
+
+    let trust = QualityScore::default().trust;
+    // pair proximity for delta=3 is 0.25.
+    let expected = ((trust * 0.25) + (trust * 0.25 * 0.25) + trust) / 3.0;
+    assert!(
+        (avg - expected).abs() < 1e-6,
+        "avg={avg} expected={expected}"
+    );
+}
+
+#[test]
+fn non_auto_triplet_weight_tracks_positive_window_index() {
+    let split = SplitRatios::default();
+    let mut config = base_config();
+    config.chunking.chunk_weight_floor = 0.0;
+    let store = Arc::new(DeterministicSplitStore::new(split, 73).unwrap());
+    let sampler = TripletSampler::new(config, store);
+
+    let recipe = TripletRecipe {
+        name: "regular_recipe".into(),
+        anchor: Selector::Role(SectionRole::Anchor),
+        positive_selector: Selector::Role(SectionRole::Context),
+        negative_selector: Selector::Role(SectionRole::Context),
+        negative_strategy: NegativeStrategy::WrongArticle,
+        weight: 1.0,
+        instruction: None,
+        allow_same_anchor_positive: false,
+    };
+
+    let anchor = RecordChunk {
+        record_id: "r".into(),
+        section_idx: 0,
+        view: ChunkView::Window {
+            index: 0,
+            overlap: 0,
+            span: 10,
+        },
+        text: "a".into(),
+        tokens_estimate: 10,
+        quality: QualityScore::default(),
+    };
+    let negative = RecordChunk {
+        record_id: "n".into(),
+        section_idx: 0,
+        view: ChunkView::Window {
+            index: 9,
+            overlap: 0,
+            span: 10,
+        },
+        text: "c".into(),
+        tokens_estimate: 10,
+        quality: QualityScore::default(),
+    };
+
+    // [(positive_index, expected_proximity, expected_weight)]
+    let cases: &[(usize, f32, f32)] = &[
+        (0, 1.0, 0.5),
+        (1, 0.5, 0.29166666),
+        (2, 1.0 / 3.0, 0.24074075),
+        (3, 0.25, 0.21875),
+    ];
+
+    let mut previous_weight: Option<f32> = None;
+    for (positive_index, expected_proximity, expected_weight) in cases {
+        let positive = RecordChunk {
+            record_id: "r".into(),
+            section_idx: 0,
+            view: ChunkView::Window {
+                index: *positive_index,
+                overlap: 0,
+                span: 10,
+            },
+            text: "b".into(),
+            tokens_estimate: 10,
+            quality: QualityScore::default(),
+        };
+
+        let proximity = chunk_proximity_score(&anchor, &positive);
+        assert!(
+            (proximity - *expected_proximity).abs() < 1e-6,
+            "index={positive_index} proximity={proximity} expected={expected_proximity}"
+        );
+
+        let weight = sampler
+            .inner
+            .lock()
+            .unwrap()
+            .triplet_chunk_weight(&recipe, &anchor, &positive, &negative);
+        assert!(
+            (weight - *expected_weight).abs() < 1e-6,
+            "index={positive_index} weight={weight} expected={expected_weight}"
+        );
+
+        if let Some(prev) = previous_weight {
+            assert!(
+                weight <= prev,
+                "expected weight to be non-increasing with index: prev={prev} current={weight} index={positive_index}"
+            );
+        }
+        previous_weight = Some(weight);
+    }
+}
+
+#[test]
+fn auto_chunk_pair_triplet_weight_uses_proximity_inside_chunk_weight() {
+    let split = SplitRatios::default();
+    let mut config = base_config();
+    config.chunking.chunk_weight_floor = 0.0;
+    let store = Arc::new(DeterministicSplitStore::new(split, 77).unwrap());
+    let sampler = TripletSampler::new(config, store);
+
+    let auto_recipe = TripletRecipe {
+        name: "auto_injected_long_section_chunk_pair_wrong_article".into(),
+        anchor: Selector::Role(SectionRole::Context),
+        positive_selector: Selector::Role(SectionRole::Context),
+        negative_selector: Selector::Role(SectionRole::Context),
+        negative_strategy: NegativeStrategy::WrongArticle,
+        weight: 1.0,
+        instruction: None,
+        allow_same_anchor_positive: false,
+    };
+
+    let anchor = RecordChunk {
+        record_id: "r".into(),
+        section_idx: 0,
+        view: ChunkView::Window {
+            index: 0,
+            overlap: 0,
+            span: 10,
+        },
+        text: "a".into(),
+        tokens_estimate: 10,
+        quality: QualityScore::default(),
+    };
+    let positive = RecordChunk {
+        record_id: "r".into(),
+        section_idx: 0,
+        view: ChunkView::Window {
+            index: 1,
+            overlap: 0,
+            span: 10,
+        },
+        text: "b".into(),
+        tokens_estimate: 10,
+        quality: QualityScore::default(),
+    };
+
+    let negative = RecordChunk {
+        record_id: "r".into(),
+        section_idx: 0,
+        view: ChunkView::Window {
+            index: 2,
+            overlap: 0,
+            span: 10,
+        },
+        text: "c".into(),
+        tokens_estimate: 10,
+        quality: QualityScore::default(),
+    };
+
+    let weight = sampler.inner.lock().unwrap().triplet_chunk_weight(
+        &auto_recipe,
+        &anchor,
+        &positive,
+        &negative,
+    );
+
+    // index distance = |0 - 1| => proximity = 1 / (1 + 1) = 0.5; trust(default)=0.5
+    // pair_weight = 0.5 * 0.5 = 0.25
+    // negative_weight = trust-only = 0.5
+    // avg = (0.2 + 0.2 + 0.5) / 3
+    let expected = (0.25 + 0.25 + 0.5) / 3.0;
+    assert!((weight - expected).abs() < 1e-6, "weight={weight}");
+}
+
+#[test]
+fn non_adjacent_auto_window_pair_proximity_is_not_half() {
+    let split = SplitRatios::default();
+    let mut config = base_config();
+    config.chunking = ChunkingStrategy {
+        max_window_tokens: 4,
+        overlap_tokens: vec![0],
+        summary_fallback_weight: 0.0,
+        summary_fallback_tokens: 0,
+        chunk_weight_floor: 0.0,
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 19).unwrap());
+    let sampler = TripletSampler::new(config, store);
+
+    let record = DataRecord {
+        id: "non_adjacent_proximity".into(),
+        source: "unit".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        quality: QualityScore::default(),
+        taxonomy: vec![],
+        sections: vec![RecordSection {
+            role: SectionRole::Context,
+            heading: None,
+            text: "one two three four five six seven eight nine ten".into(),
+            sentences: vec!["one two three four five six seven eight nine ten".into()],
+        }],
+        meta_prefix: None,
+    };
+
+    let mut inner = sampler.inner.lock().unwrap();
+    let selector = Selector::Role(SectionRole::Context);
+
+    let windows = inner.materialize_chunks(&record, 0, &record.sections[0]);
+    assert_eq!(
+        windows
+            .iter()
+            .filter(|chunk| matches!(chunk.view, ChunkView::Window { .. }))
+            .count(),
+        3
+    );
+
+    let mut non_adjacent_pair = None;
+    for _ in 0..6 {
+        let (anchor, positive) = inner
+            .select_anchor_positive_pair(&record, &selector, &selector, true)
+            .expect("window pair");
+        let delta = match (&anchor.view, &positive.view) {
+            (ChunkView::Window { index: left, .. }, ChunkView::Window { index: right, .. }) => {
+                left.abs_diff(*right)
+            }
+            _ => panic!("expected window chunks"),
+        };
+        if delta > 1 {
+            non_adjacent_pair = Some((anchor, positive));
+            break;
+        }
+    }
+
+    let (anchor, positive) = non_adjacent_pair.expect("expected at least one non-adjacent pair");
+    let proximity = chunk_proximity_score(&anchor, &positive);
+    assert!(
+        (proximity - 0.5).abs() > 1e-6,
+        "non-adjacent proximity should not be 0.5; got {proximity}"
+    );
 }
 
 // Enforcement test: text, pair, and triplet samples must all be drawn from
@@ -2713,7 +3179,6 @@ fn reentry_same_epoch_restarts_from_same_chunk_offset() {
             index,
             overlap: 0,
             span: 2,
-            start_ratio: index as f32 / 3.0,
         },
         text: text.to_string(),
         tokens_estimate: 2,
@@ -2761,7 +3226,6 @@ fn reentry_after_epoch_change_can_restart_from_different_chunk_offset() {
             index,
             overlap: 0,
             span: 2,
-            start_ratio: index as f32 / 3.0,
         },
         text: text.to_string(),
         tokens_estimate: 2,

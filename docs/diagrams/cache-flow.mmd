@@ -1,0 +1,51 @@
+flowchart TD
+    A[Training call\nnext_triplet_batch / next_pair_batch / next_text_batch]
+    B[IngestionManager.refresh_all_internal]
+
+    A --> B
+
+    subgraph L1[Source A lane]
+      A1[DataSource A refresh]
+      A2[Source A buffer\nVecDeque]
+      A3[Drain pick A]
+      A4[Source A RecordCache\nLRU by record_id]
+      A4 --> A5{A cache > max?}
+      A5 -- yes --> A6[Evict oldest A]
+      A5 -- no --> A7[Keep A cache]
+      A6 --> A7
+      A1 --> A2 --> A3 --> A4
+    end
+
+    subgraph L2[Source B lane]
+      B1[DataSource B refresh]
+      B2[Source B buffer\nVecDeque]
+      B3[Drain pick B]
+      B4[Source B RecordCache\nLRU by record_id]
+      B4 --> B5{B cache > max?}
+      B5 -- yes --> B6[Evict oldest B]
+      B5 -- no --> B7[Keep B cache]
+      B6 --> B7
+      B1 --> B2 --> B3 --> B4
+    end
+
+    B --> A1
+    B --> B1
+
+    D[Drain scheduler\nround-robin or weighted across sources]
+    A2 --> D
+    B2 --> D
+    D --> A3
+    D --> B3
+
+    K[all_records_snapshot\nflatten Source A + Source B caches]
+    L[TripletSampler.sync_records_from_cache]
+    M[Anchor + recipe selection]
+    N[Triplet / Pair / Text batch]
+
+    A7 --> K
+    B7 --> K
+    K --> L --> M --> N
+
+    O[If batch is short after in-batch dedupe]
+    P[pad_with_reuse clones sampled items\nto reach batch_size]
+    O --> P --> N

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::data::{ChunkView, RecordChunk};
 use crate::types::SourceId;
 
 /// Aggregate skew metrics for per-source sample counts.
@@ -88,6 +89,49 @@ pub fn source_skew(counts: &HashMap<SourceId, usize>) -> Option<SourceSkew> {
     })
 }
 
+/// Compute normalized distance between two chunk windows from the same section.
+///
+/// Returns `Some(distance)` in `[0.0, 1.0]` when both chunks are `Window` views
+/// from the same `(record_id, section_idx)`. Returns `None` when distance is not
+/// comparable (different records/sections or non-window views).
+pub fn window_chunk_distance(anchor: &RecordChunk, positive: &RecordChunk) -> Option<f32> {
+    if anchor.record_id != positive.record_id || anchor.section_idx != positive.section_idx {
+        return None;
+    }
+    match (&anchor.view, &positive.view) {
+        (ChunkView::Window { index: left, .. }, ChunkView::Window { index: right, .. }) => {
+            let delta = left.abs_diff(*right) as f32;
+            Some(delta / (delta + 1.0))
+        }
+        _ => None,
+    }
+}
+
+/// Convert chunk distance into a chunk proximity score in `[0.0, 1.0]`.
+///
+/// A higher score means anchor/positive chunks are closer in the document.
+/// When distance cannot be computed, returns `1.0` (neutral multiplier).
+pub fn chunk_proximity_score(anchor: &RecordChunk, positive: &RecordChunk) -> f32 {
+    window_chunk_distance(anchor, positive)
+        .map(|distance| 1.0 - distance)
+        .unwrap_or(1.0)
+}
+
+/// Backward-compatible alias for `chunk_proximity_score`.
+pub fn chunk_distance_relevance_score(anchor: &RecordChunk, positive: &RecordChunk) -> f32 {
+    chunk_proximity_score(anchor, positive)
+}
+
+/// Proximity score of a window chunk to the section head (index 0).
+///
+/// Returns a value in `(0.0, 1.0]` using `1 / (index + 1)`.
+/// - index `0` -> `1.0`
+/// - index `1` -> `0.5`
+/// - index `3` -> `0.25`
+pub fn window_index_proximity(index: usize) -> f32 {
+    1.0 / (index as f32 + 1.0)
+}
+
 /// Compute byte-level Jaccard and cosine similarity scores between two strings.
 ///
 /// Uses raw UTF-8 byte occurrence frequencies (no tokenisation), so it is fast
@@ -150,6 +194,21 @@ pub(crate) fn lexical_similarity_scores(left: &str, right: &str) -> (f32, f32) {
 mod tests {
     use super::*;
 
+    fn window_chunk(record_id: &str, section_idx: usize, index: usize) -> RecordChunk {
+        RecordChunk {
+            record_id: record_id.to_string(),
+            section_idx,
+            view: ChunkView::Window {
+                index,
+                overlap: 0,
+                span: 16,
+            },
+            text: "x".to_string(),
+            tokens_estimate: 1,
+            quality: crate::data::QualityScore::default(),
+        }
+    }
+
     #[test]
     fn source_skew_returns_none_for_empty_counts() {
         let counts = HashMap::new();
@@ -209,6 +268,47 @@ mod tests {
         assert_eq!(skew.per_source[0].source, "A");
         assert_eq!(skew.per_source[1].source, "B");
         assert!(skew.per_source.iter().all(|entry| entry.share == 0.0));
+    }
+
+    #[test]
+    fn window_chunk_distance_uses_index_delta() {
+        let a = window_chunk("record", 0, 1);
+        let b = window_chunk("record", 0, 4);
+        let distance = window_chunk_distance(&a, &b).expect("distance");
+        assert!((distance - 0.75).abs() < 1e-6, "distance={distance}");
+    }
+
+    #[test]
+    fn chunk_proximity_score_inverts_distance() {
+        let a = window_chunk("record", 0, 1);
+        let b = window_chunk("record", 0, 4);
+        let proximity = chunk_proximity_score(&a, &b);
+        assert!((proximity - 0.25).abs() < 1e-6, "proximity={proximity}");
+    }
+
+    #[test]
+    fn chunk_proximity_score_is_neutral_when_not_comparable() {
+        let a = window_chunk("record_a", 0, 1);
+        let b = window_chunk("record_b", 0, 4);
+        assert_eq!(window_chunk_distance(&a, &b), None);
+        assert_eq!(chunk_proximity_score(&a, &b), 1.0);
+    }
+
+    #[test]
+    fn chunk_distance_relevance_score_alias_matches_proximity() {
+        let a = window_chunk("record", 0, 1);
+        let b = window_chunk("record", 0, 4);
+        assert_eq!(
+            chunk_distance_relevance_score(&a, &b),
+            chunk_proximity_score(&a, &b)
+        );
+    }
+
+    #[test]
+    fn window_index_proximity_scores_drop_with_index() {
+        assert!((window_index_proximity(0) - 1.0).abs() < 1e-6);
+        assert!((window_index_proximity(1) - 0.5).abs() < 1e-6);
+        assert!((window_index_proximity(3) - 0.25).abs() < 1e-6);
     }
 
     #[cfg(any(feature = "bm25-mining", feature = "extended-metrics"))]
