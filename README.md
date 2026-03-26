@@ -116,7 +116,9 @@ Why this matters:
 - Sources can be over/under-sampled independently via source weights (including per-batch reweighting).
 - When a source has limited fresh records, replay/oversampling can happen for that source without coupling all other sources to the same behavior.
 
-Key weighting concepts:
+## Sample scoring and weighting
+
+Scoring layers:
 - **Default trust** (`QualityScore::default().trust`): 0.5 (used when a record/source doesn't override trust).
 - **Source weights** control how often each source contributes in a batch (`next_*_batch_with_weights`).
 - **Trust weights** (`DataRecord.quality.trust`, optional taxonomy overrides) scale sample influence by source/record quality.
@@ -129,6 +131,29 @@ Source weight semantics:
 - **Omitted sources default to 1.0:** If a source id is not present in a per-call weight map, it is treated as having weight `1.0` for that call.
 - **Invalid entries cause errors:** Passing a weight map that references an unknown source id or contains a negative weight will cause the weight-aware ingestion APIs to return an error (`SamplerError::InvalidWeight`). Callers should handle the `Result` returned by the weight-aware methods (for example, the ingestion helpers `advance_with_weights`, `refresh_all_with_weights`, and `force_refresh_all_with_weights`, and the sampler paths that propagate their errors).
 - **Zero weights are allowed:** A source weight of exactly `0.0` disables contribution from that source for the call (it is effectively skipped). If all provided weights are non-positive, the implementation falls back to equal weighting.
+
+Chunk proximity semantics:
+
+- For two window chunks from the same `(record_id, section_idx)`, let `delta = |anchor_index - positive_index|`.
+- Distance is `delta / (delta + 1)`.
+- Proximity is `1 - distance`, which simplifies to `1 / (delta + 1)`.
+- Examples:
+  - same window (`delta = 0`) -> proximity `1.0`
+  - adjacent windows (`delta = 1`) -> proximity `0.5`
+  - gap of 2 (`delta = 2`) -> proximity `0.333...`
+
+Triplet chunk-weight formulas:
+
+- Non-auto triplet recipes apply anchor-positive pair proximity.
+  - Anchor and positive use per-chunk weighting.
+  - For window chunks, per-chunk base is head proximity `1 / (index + 1)`, then trust is applied and `chunk_weight_floor` is enforced.
+  - Anchor and positive chunk weights are then scaled by pair proximity.
+  - Negative weighting is trust-only (`negative_trust.max(chunk_weight_floor)`), not position/proximity based.
+  - Final triplet chunk-weight is `(anchor_weight + positive_weight + negative_weight) / 3`.
+- The auto long-section recipe uses anchor-positive pair proximity directly.
+  - Pair weight uses `(pair_proximity * avg(pair_trust)).max(chunk_weight_floor)`.
+  - Negative weight uses `negative_trust.max(chunk_weight_floor)`.
+  - Final triplet chunk-weight is the average of `(pair_weight, pair_weight, negative_weight)`.
 
 ## Recipes
 
@@ -187,30 +212,7 @@ let _recipe = TripletRecipe {
 - Recipe selectors: anchor=`Context`, positive=`Context`, negative=`Context` with `WrongArticle` negatives.
 - It augments the source's recipe pool; it does not change `select_chunk` globally.
 - Anchor and positive are two independent chunk draws (not concatenated text, not derived from each other).
-- For this auto recipe, triplet weight is additionally scaled by anchor-positive **chunk proximity** (higher when the two selected windows are closer in the same section).
-
-#### Chunk proximity semantics
-
-- For two window chunks from the same `(record_id, section_idx)`, let `delta = |anchor_index - positive_index|`.
-- Distance is `delta / (delta + 1)`.
-- Proximity is `1 - distance`, which simplifies to `1 / (delta + 1)`.
-- Examples:
-  - same window (`delta = 0`) -> proximity `1.0`
-  - adjacent windows (`delta = 1`) -> proximity `0.5`
-  - gap of 2 (`delta = 2`) -> proximity `0.333...`
-
-#### Auto vs non-auto weighting
-
-- Non-auto triplet recipes also apply anchor-positive pair proximity.
-  - Anchor and positive use per-chunk weighting.
-  - For window chunks, per-chunk base is head proximity `1 / (index + 1)`, then trust is applied and `chunk_weight_floor` is enforced.
-  - Anchor and positive chunk weights are then scaled by pair proximity.
-  - Negative weighting is trust-only (`negative_trust.max(chunk_weight_floor)`), not position/proximity based.
-  - Final triplet chunk-weight is `(anchor_weight + positive_weight + negative_weight) / 3`.
-- The auto long-section recipe uses anchor-positive pair proximity directly.
-  - Pair weight uses `(pair_proximity * avg(pair_trust)).max(chunk_weight_floor)`.
-  - Negative weight uses `negative_trust.max(chunk_weight_floor)`.
-  - Final triplet chunk-weight is the average of `(pair_weight, pair_weight, negative_weight)`.
+- Its scoring follows the formulas in [Sample scoring and weighting](#sample-scoring-and-weighting).
 
 ## How it works
 
@@ -784,9 +786,9 @@ The sampler core only calls `NegativeBackend` methods — all backend-specific s
 - **Combinatorial triplet supply from modest corpora**: triplets are assembled on demand from source record combinations at batch time, not precomputed corpus-wide. Optional prefetch/prebuffering only materializes a bounded queue of upcoming sampled batches. N records still yield up to N×(N−1) raw combinations per recipe, multiplied across configured recipes and chunk windows.
 - **Optional BM25 hard-negative mining** (`bm25-mining` feature): ranks same-split candidates inside each strategy-defined pool by BM25 score. Rule-based sampling remains the default fast path; BM25 is a ranking layer on top of existing strategy pools, not a global filter. Because negatives are mined per-source by default, each source is still treated as a domain boundary.
 - **Automatic long-section recipe injection**: for sources with sections longer than `chunking.max_window_tokens`, automatically adds `auto_injected_long_section_chunk_pair_wrong_article`, which builds anchor/positive from two different context windows of the same record and uses a context section from a different record as the negative.
-- **Auto-recipe chunk proximity weighting**: auto-injected long-section triplets include a proximity multiplier derived from anchor-positive window distance in the same section (closer windows score higher).
+- **Auto-recipe chunk proximity weighting**: auto-injected long-section triplets include an anchor-positive proximity multiplier. See [Sample scoring and weighting](#sample-scoring-and-weighting) for exact formulas.
 - **Deterministic long-section chunking**: short text stays as one chunk; long text becomes multiple chunk candidates (sliding windows) sampled over time. Defaults are `max_window_tokens=1024`, `overlap_tokens=[64]`, and `summary_fallback_tokens=512` (all configurable via `SamplerConfig.chunking`).
-- **Weight-aware sampling controls** across source weights, recipe weights, and chunk trust/quality weighting.
+- **Weight-aware sampling controls** across source weights, recipe weights, and chunk trust/quality weighting. See [Sample scoring and weighting](#sample-scoring-and-weighting) for exact behavior.
 - **Anti-shortcut anchor/positive swap**: deterministic 50% coin-flip swaps anchor and positive slots at triplet finalization, so both orderings appear at equal frequency. Important for InfoNCE and other contrastive objectives where asymmetric slot distributions would otherwise provide a shortcut. Seeded by sampler RNG; fully reproducible and covered by state-persistence mechanics.
 - **Anti-shortcut metadata-prefix variation** via `KvpPrefixSampler` (variant choice, per-field presence probabilities, field-order shuffle, and prefix dropout).
 - **Per-source batch mixing controls** with independent source frequency controls (including over/under-sampling).
@@ -812,7 +814,7 @@ This reflects the built-in file-corpus helpers (`FileCorpusIndex`) used by files
 - **Source ordering**: round-robin by source, deterministic within-source ordering by seed/epoch (file source). For `HuggingFaceRowSource`, shard download order is deterministic by seed, but row selection within a refresh is not stable across cache wipes (see `HuggingFaceRowSource` doc).
 - **Splits**: labels are deterministic from `record_id + seed + ratios`; split APIs enforce `allowed_splits`.
 - **Coverage caveat**: if `len_hint` drifts mid-epoch in streaming backends, strict single-pass coverage is not guaranteed.
-- **Weights**: recipe/source/chunk weights affect scaling, not deterministic ordering.
+- **Weights**: recipe/source/chunk weights affect scaling, not deterministic ordering. See [Sample scoring and weighting](#sample-scoring-and-weighting).
 - **Scale note**: full scan/sort/index rebuild cost grows roughly linearly with file count and path bytes. This is intentional and appropriate for the target corpus scale (thousands to low millions of files). For LLM-scale pre-training across billions of tokens, the right tool is a format designed for that workload (Arrow/Parquet, WebDataset shards, or a dedicated high-throughput dataloader) — this crate targets iterative fine-tuning on domain-specific corpora, not bulk pre-training infrastructure.
 - **Order note**: index batching preserves permutation order; chunked index reads do not remove deterministic shuffling.
 - **Manual epoch control**: `sampler.set_epoch(n)` resets per-source cursors and reshuffles deterministically for that epoch.
