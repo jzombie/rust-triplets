@@ -6,7 +6,10 @@ use simd_r_drive::storage_engine::traits::DataStoreWriter;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
-use triplets::source::backends::huggingface_source::load_hf_sources_from_list;
+use triplets::constants::sampler::AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME;
+use triplets::source::backends::huggingface_source::{
+    HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE, load_hf_sources_from_list,
+};
 use triplets::{
     ChunkingStrategy, DataSource, DeterministicSplitStore, HfListRoots, HfSourceEntry,
     HuggingFaceRowSource, HuggingFaceRowsConfig, Sampler, SamplerConfig, SplitLabel, SplitRatios,
@@ -195,7 +198,7 @@ fn huggingface_text_mode_triplets_can_use_different_anchor_positive_windows() {
 
     let recipes = source.default_triplet_recipes();
     assert_eq!(recipes.len(), 1);
-    assert_eq!(recipes[0].name, "huggingface_text_simcse_wrong_article");
+    assert_eq!(recipes[0].name, HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE);
     assert!(recipes[0].allow_same_anchor_positive);
 
     let split = SplitRatios {
@@ -220,15 +223,27 @@ fn huggingface_text_mode_triplets_can_use_different_anchor_positive_windows() {
     let sampler = TripletSampler::new(sampler_config, store);
     sampler.register_source(Box::new(source));
 
+    let mut observed_hf_simcse_triplet = false;
     let mut observed_different_window_pair = false;
-    for _ in 0..24 {
+    for _ in 0..64 {
         let batch = sampler
             .next_triplet_batch(SplitLabel::Train)
             .expect("triplet batch");
         assert_eq!(batch.triplets.len(), 1);
         let triplet = &batch.triplets[0];
 
-        assert_eq!(triplet.recipe, "huggingface_text_simcse_wrong_article");
+        if triplet.recipe != HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE {
+            // In text= mode the source contributes the SimCSE recipe, but the sampler may
+            // additionally auto-inject the long-section chunk-pair recipe when sections
+            // exceed the chunk window. Those auto-injected samples are out-of-scope for
+            // this assertion, so we skip only that known recipe and treat any other recipe
+            // as a regression.
+            if triplet.recipe == AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME {
+                continue;
+            }
+            panic!("unexpected recipe in HF text-mode test: {}", triplet.recipe);
+        }
+        observed_hf_simcse_triplet = true;
         assert_eq!(triplet.anchor.record_id, triplet.positive.record_id);
 
         let anchor_window = match &triplet.anchor.view {
@@ -247,6 +262,10 @@ fn huggingface_text_mode_triplets_can_use_different_anchor_positive_windows() {
         }
     }
 
+    assert!(
+        observed_hf_simcse_triplet,
+        "expected to observe at least one HF SimCSE triplet in text= mode"
+    );
     assert!(
         observed_different_window_pair,
         "expected HF text= mode to occasionally sample different window indices for anchor and positive"

@@ -1644,7 +1644,7 @@ fn auto_chunk_pair_triplet_weight_uses_proximity_inside_chunk_weight() {
     let sampler = TripletSampler::new(config, store);
 
     let auto_recipe = TripletRecipe {
-        name: "auto_injected_long_section_chunk_pair_wrong_article".into(),
+        name: AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME.into(),
         anchor: Selector::Role(SectionRole::Context),
         positive_selector: Selector::Role(SectionRole::Context),
         negative_selector: Selector::Role(SectionRole::Context),

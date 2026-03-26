@@ -15,6 +15,7 @@ use std::thread;
 use crate::config::{
     ChunkingStrategy, NegativeStrategy, SamplerConfig, Selector, TextRecipe, TripletRecipe,
 };
+use crate::constants::sampler::AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME;
 use crate::constants::sampler::{
     ANCHOR_POSITIVE_SWAP_MASK, EPOCH_SEED_OFFSET, EXHAUSTION_RETRY_LIMIT, NEG_REASON_WRONG_ARTICLE,
     NEG_REASON_WRONG_DATE, NEG_REASON_WRONG_QA, PREFETCHER_SOURCE_ID, PREFETCHER_STOPPED_REASON,
@@ -36,14 +37,6 @@ use crate::splits::{
     EpochStateStore, PersistedSamplerState, SamplerStateStore, SplitLabel, SplitStore,
 };
 use crate::types::{RecipeKey, RecordId, SourceId};
-
-/// Auto-injected recipe name used when a source has at least one section whose
-/// token count exceeds `chunking.max_window_tokens` during normal ingest sync.
-///
-/// This recipe is appended for any eligible source during normal ingest sync, regardless
-/// if custom recipes are configured or not.
-const AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME: &str =
-    "auto_injected_long_section_chunk_pair_wrong_article";
 
 // AUTO-RECIPE HANDLING OVERVIEW (end-to-end):
 // Stage A: Source-level injection eligibility ("should this source even get the recipe?")

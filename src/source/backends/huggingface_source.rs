@@ -52,6 +52,19 @@ use chrono::{DateTime, Utc};
 
 use crate::source::{DataSource, SourceCursor, SourceSnapshot};
 
+const HF_SOURCE_KEY_ANCHOR: &str = "anchor";
+const HF_SOURCE_KEY_POSITIVE: &str = "positive";
+const HF_SOURCE_KEY_CONTEXT: &str = "context";
+const HF_SOURCE_KEY_TEXT: &str = "text";
+const HF_SOURCE_KEY_TEXT_COLUMNS: &str = "text_columns";
+const HF_SOURCE_KEY_TRUST: &str = "trust";
+const HF_SOURCE_KEY_SOURCE_ID: &str = "source_id";
+
+/// Default HF text-columns-mode SimCSE-style recipe name.
+pub const HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE: &str = "huggingface_text_simcse_wrong_article";
+const HF_RECIPE_ANCHOR_CONTEXT_WRONG_ARTICLE: &str = "huggingface_anchor_context_wrong_article";
+const HF_RECIPE_ANCHOR_ANCHOR_WRONG_ARTICLE: &str = "huggingface_anchor_anchor_wrong_article";
+
 fn managed_cache_root() -> Result<CacheRoot, String> {
     #[cfg(test)]
     {
@@ -250,19 +263,19 @@ pub fn parse_hf_source_line(line: &str) -> Result<HfSourceEntry, String> {
         let key = raw_key.trim().to_ascii_lowercase();
         let value = raw_value.trim();
         match key.as_str() {
-            "anchor" => {
+            HF_SOURCE_KEY_ANCHOR => {
                 entry.anchor_columns = parse_csv_fields(value);
             }
-            "positive" => {
+            HF_SOURCE_KEY_POSITIVE => {
                 entry.positive_columns = parse_csv_fields(value);
             }
-            "context" => {
+            HF_SOURCE_KEY_CONTEXT => {
                 entry.context_columns = parse_csv_fields(value);
             }
-            "text" | "text_columns" => {
+            HF_SOURCE_KEY_TEXT | HF_SOURCE_KEY_TEXT_COLUMNS => {
                 entry.text_columns = parse_csv_fields(value);
             }
-            "trust" => {
+            HF_SOURCE_KEY_TRUST => {
                 let t: f32 = value.parse().map_err(|_| {
                     format!("invalid trust value '{value}': expected a float in [0.0, 1.0]")
                 })?;
@@ -271,7 +284,7 @@ pub fn parse_hf_source_line(line: &str) -> Result<HfSourceEntry, String> {
                 }
                 entry.trust = Some(t);
             }
-            "source_id" => {
+            HF_SOURCE_KEY_SOURCE_ID => {
                 if value.is_empty() {
                     return Err("source_id must not be empty".to_string());
                 }
@@ -4318,7 +4331,7 @@ impl DataSource for HuggingFaceRowSource {
         // provide the necessary embedding variation between the two identical slots.
         if self.config.anchor_columns.is_empty() {
             return vec![TripletRecipe {
-                name: "huggingface_text_simcse_wrong_article".into(),
+                name: HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE.into(),
                 anchor: Selector::Role(SectionRole::Anchor),
                 positive_selector: Selector::Role(SectionRole::Context),
                 negative_selector: Selector::Role(SectionRole::Context),
@@ -4333,7 +4346,7 @@ impl DataSource for HuggingFaceRowSource {
             // Majority lane remains context negatives for broad coverage and
             // stable optimization across varied HF schemas.
             TripletRecipe {
-                name: "huggingface_anchor_context_wrong_article".into(),
+                name: HF_RECIPE_ANCHOR_CONTEXT_WRONG_ARTICLE.into(),
                 anchor: Selector::Role(SectionRole::Anchor),
                 positive_selector: Selector::Role(SectionRole::Context),
                 negative_selector: Selector::Role(SectionRole::Context),
@@ -4345,7 +4358,7 @@ impl DataSource for HuggingFaceRowSource {
             // Medium-hard lane adds anchor-as-negative pressure to improve
             // discrimination between title-like anchor fields.
             TripletRecipe {
-                name: "huggingface_anchor_anchor_wrong_article".into(),
+                name: HF_RECIPE_ANCHOR_ANCHOR_WRONG_ARTICLE.into(),
                 anchor: Selector::Role(SectionRole::Anchor),
                 positive_selector: Selector::Role(SectionRole::Context),
                 negative_selector: Selector::Role(SectionRole::Anchor),
@@ -6094,7 +6107,7 @@ mod tests {
         let source = test_source(config);
         let recipes = source.default_triplet_recipes();
         assert_eq!(recipes.len(), 1);
-        assert_eq!(recipes[0].name, "huggingface_text_simcse_wrong_article");
+        assert_eq!(recipes[0].name, HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE);
         assert!(
             recipes[0].allow_same_anchor_positive,
             "SimCSE recipe must allow same anchor/positive text"
@@ -6114,8 +6127,8 @@ mod tests {
         let source = test_source(config);
         let recipes = source.default_triplet_recipes();
         assert_eq!(recipes.len(), 2);
-        assert_eq!(recipes[0].name, "huggingface_anchor_context_wrong_article");
-        assert_eq!(recipes[1].name, "huggingface_anchor_anchor_wrong_article");
+        assert_eq!(recipes[0].name, HF_RECIPE_ANCHOR_CONTEXT_WRONG_ARTICLE);
+        assert_eq!(recipes[1].name, HF_RECIPE_ANCHOR_ANCHOR_WRONG_ARTICLE);
         assert_eq!(recipes[0].weight, 0.75);
         assert_eq!(recipes[1].weight, 0.25);
         assert!(

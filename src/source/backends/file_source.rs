@@ -11,6 +11,11 @@ use crate::types::{CategoryId, SourceId, TaxonomyValue};
 use crate::utils::{file_times, is_text_file};
 use crate::utils::{make_section, normalize_inline_whitespace};
 
+const FILE_RECIPE_TITLE_CONTEXT_WRONG_DATE: &str = "title_context_wrong_date";
+const FILE_RECIPE_TITLE_ANCHOR_WRONG_DATE: &str = "title_anchor_wrong_date";
+const FILE_RECIPE_TITLE_CONTEXT_WRONG_ARTICLE: &str = "title_context_wrong_article";
+const FILE_RECIPE_TITLE_ANCHOR_WRONG_ARTICLE: &str = "title_anchor_wrong_article";
+
 /// Builds taxonomy values from a root path and file path.
 pub type TaxonomyBuilder =
     Arc<dyn Fn(&Path, &Path, &SourceId) -> Vec<TaxonomyValue> + Send + Sync + 'static>;
@@ -142,7 +147,7 @@ pub fn default_title_context_triplet_recipes(include_date_aware: bool) -> Vec<Tr
         // Make date-aware summary negatives nearly as common as summary wrong-article
         // negatives so temporal contrast is meaningfully represented.
         recipes.push(TripletRecipe {
-            name: "title_context_wrong_date".into(),
+            name: FILE_RECIPE_TITLE_CONTEXT_WRONG_DATE.into(),
             anchor: Selector::Role(SectionRole::Anchor),
             positive_selector: Selector::Role(SectionRole::Context),
             negative_selector: Selector::Role(SectionRole::Context),
@@ -155,7 +160,7 @@ pub fn default_title_context_triplet_recipes(include_date_aware: bool) -> Vec<Tr
         // without overwhelming the primary summary-driven objectives.
         // Date-aware means publication-date metadata comparison, not file mtime.
         recipes.push(TripletRecipe {
-            name: "title_anchor_wrong_date".into(),
+            name: FILE_RECIPE_TITLE_ANCHOR_WRONG_DATE.into(),
             anchor: Selector::Role(SectionRole::Anchor),
             positive_selector: Selector::Role(SectionRole::Context),
             negative_selector: Selector::Role(SectionRole::Anchor),
@@ -168,7 +173,7 @@ pub fn default_title_context_triplet_recipes(include_date_aware: bool) -> Vec<Tr
     // Rebalance summary wrong-article depending on whether date-aware lanes are
     // enabled so the full pool stays intentionally weighted in both modes.
     recipes.push(TripletRecipe {
-        name: "title_context_wrong_article".into(),
+        name: FILE_RECIPE_TITLE_CONTEXT_WRONG_ARTICLE.into(),
         anchor: Selector::Role(SectionRole::Anchor),
         positive_selector: Selector::Role(SectionRole::Context),
         negative_selector: Selector::Role(SectionRole::Context),
@@ -180,7 +185,7 @@ pub fn default_title_context_triplet_recipes(include_date_aware: bool) -> Vec<Tr
     // Medium-hard lane adds anchor-as-negative pressure to improve
     // discrimination among title-like anchor fields.
     recipes.push(TripletRecipe {
-        name: "title_anchor_wrong_article".into(),
+        name: FILE_RECIPE_TITLE_ANCHOR_WRONG_ARTICLE.into(),
         anchor: Selector::Role(SectionRole::Anchor),
         positive_selector: Selector::Role(SectionRole::Context),
         negative_selector: Selector::Role(SectionRole::Anchor),
@@ -427,17 +432,17 @@ mod tests {
         let defaults = source.default_triplet_recipes();
         assert!(!defaults.is_empty());
         let names: Vec<&str> = defaults.iter().map(|recipe| recipe.name.as_ref()).collect();
-        assert!(!names.contains(&"title_context_wrong_date"));
-        assert!(!names.contains(&"title_anchor_wrong_date"));
-        assert!(names.contains(&"title_context_wrong_article"));
-        assert!(names.contains(&"title_anchor_wrong_article"));
+        assert!(!names.contains(&FILE_RECIPE_TITLE_CONTEXT_WRONG_DATE));
+        assert!(!names.contains(&FILE_RECIPE_TITLE_ANCHOR_WRONG_DATE));
+        assert!(names.contains(&FILE_RECIPE_TITLE_CONTEXT_WRONG_ARTICLE));
+        assert!(names.contains(&FILE_RECIPE_TITLE_ANCHOR_WRONG_ARTICLE));
         let summary_wrong_article = defaults
             .iter()
-            .find(|recipe| recipe.name == "title_context_wrong_article")
+            .find(|recipe| recipe.name == FILE_RECIPE_TITLE_CONTEXT_WRONG_ARTICLE)
             .unwrap();
         let anchor_wrong_article = defaults
             .iter()
-            .find(|recipe| recipe.name == "title_anchor_wrong_article")
+            .find(|recipe| recipe.name == FILE_RECIPE_TITLE_ANCHOR_WRONG_ARTICLE)
             .unwrap();
         assert_eq!(summary_wrong_article.weight, 0.75);
         assert_eq!(anchor_wrong_article.weight, 0.25);
@@ -452,25 +457,25 @@ mod tests {
         );
         let defaults = source.default_triplet_recipes();
         let names: Vec<&str> = defaults.iter().map(|recipe| recipe.name.as_ref()).collect();
-        assert!(names.contains(&"title_context_wrong_date"));
-        assert!(names.contains(&"title_anchor_wrong_date"));
-        assert!(names.contains(&"title_context_wrong_article"));
-        assert!(names.contains(&"title_anchor_wrong_article"));
+        assert!(names.contains(&FILE_RECIPE_TITLE_CONTEXT_WRONG_DATE));
+        assert!(names.contains(&FILE_RECIPE_TITLE_ANCHOR_WRONG_DATE));
+        assert!(names.contains(&FILE_RECIPE_TITLE_CONTEXT_WRONG_ARTICLE));
+        assert!(names.contains(&FILE_RECIPE_TITLE_ANCHOR_WRONG_ARTICLE));
         let summary_wrong_date = defaults
             .iter()
-            .find(|recipe| recipe.name == "title_context_wrong_date")
+            .find(|recipe| recipe.name == FILE_RECIPE_TITLE_CONTEXT_WRONG_DATE)
             .unwrap();
         let anchor_wrong_date = defaults
             .iter()
-            .find(|recipe| recipe.name == "title_anchor_wrong_date")
+            .find(|recipe| recipe.name == FILE_RECIPE_TITLE_ANCHOR_WRONG_DATE)
             .unwrap();
         let summary_wrong_article = defaults
             .iter()
-            .find(|recipe| recipe.name == "title_context_wrong_article")
+            .find(|recipe| recipe.name == FILE_RECIPE_TITLE_CONTEXT_WRONG_ARTICLE)
             .unwrap();
         let anchor_wrong_article = defaults
             .iter()
-            .find(|recipe| recipe.name == "title_anchor_wrong_article")
+            .find(|recipe| recipe.name == FILE_RECIPE_TITLE_ANCHOR_WRONG_ARTICLE)
             .unwrap();
         assert_eq!(summary_wrong_date.weight, 0.30);
         assert_eq!(anchor_wrong_date.weight, 0.10);
