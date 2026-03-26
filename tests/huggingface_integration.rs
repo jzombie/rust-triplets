@@ -5,10 +5,12 @@ use simd_r_drive::storage_engine::DataStore;
 use simd_r_drive::storage_engine::traits::DataStoreWriter;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 use triplets::source::backends::huggingface_source::load_hf_sources_from_list;
 use triplets::{
-    DataSource, HfListRoots, HfSourceEntry, HuggingFaceRowSource, HuggingFaceRowsConfig,
-    SamplerConfig, build_hf_sources, parse_csv_fields, parse_hf_source_line, parse_hf_uri,
+    ChunkingStrategy, DataSource, DeterministicSplitStore, HfListRoots, HfSourceEntry,
+    HuggingFaceRowSource, HuggingFaceRowsConfig, Sampler, SamplerConfig, SplitLabel, SplitRatios,
+    TripletSampler, build_hf_sources, parse_csv_fields, parse_hf_source_line, parse_hf_uri,
     resolve_hf_list_roots,
 };
 
@@ -165,6 +167,90 @@ fn huggingface_reads_local_ndjson_snapshot() {
             .iter()
             .any(|section| section.text.contains("ndjson"))
     }));
+}
+
+#[test]
+fn huggingface_text_mode_triplets_can_use_different_anchor_positive_windows() {
+    let temp = tempfile::tempdir().expect("failed creating tempdir");
+    let shard_path = temp.path().join("part-00000.ndjson");
+
+    write_lines(
+        &shard_path,
+        &[
+            r#"{"id":"r1","text":"alpha beta gamma delta epsilon zeta eta theta iota kappa"}"#,
+            r#"{"id":"r2","text":"one two three four five six seven eight nine ten"}"#,
+        ],
+    );
+
+    let mut source_config = HuggingFaceRowsConfig::new(
+        "hf_text_windows",
+        "local/test-dataset",
+        "default",
+        "train",
+        temp.path(),
+    );
+    source_config.shard_extensions = vec!["ndjson".to_string()];
+    source_config.text_columns = vec!["text".to_string()];
+    let source = HuggingFaceRowSource::new(source_config).expect("failed creating source");
+
+    let recipes = source.default_triplet_recipes();
+    assert_eq!(recipes.len(), 1);
+    assert_eq!(recipes[0].name, "huggingface_text_simcse_wrong_article");
+    assert!(recipes[0].allow_same_anchor_positive);
+
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+    let mut sampler_config = seeded_config(41);
+    sampler_config.split = split;
+    sampler_config.allowed_splits = vec![SplitLabel::Train];
+    sampler_config.batch_size = 1;
+    sampler_config.ingestion_max_records = 16;
+    sampler_config.chunking = ChunkingStrategy {
+        max_window_tokens: 3,
+        overlap_tokens: vec![0],
+        summary_fallback_weight: 0.0,
+        summary_fallback_tokens: 0,
+        chunk_weight_floor: 0.0,
+    };
+
+    let store = Arc::new(DeterministicSplitStore::new(split, 777).expect("split store"));
+    let sampler = TripletSampler::new(sampler_config, store);
+    sampler.register_source(Box::new(source));
+
+    let mut observed_different_window_pair = false;
+    for _ in 0..24 {
+        let batch = sampler
+            .next_triplet_batch(SplitLabel::Train)
+            .expect("triplet batch");
+        assert_eq!(batch.triplets.len(), 1);
+        let triplet = &batch.triplets[0];
+
+        assert_eq!(triplet.recipe, "huggingface_text_simcse_wrong_article");
+        assert_eq!(triplet.anchor.record_id, triplet.positive.record_id);
+
+        let anchor_window = match &triplet.anchor.view {
+            triplets::data::ChunkView::Window { index, .. } => Some(*index),
+            _ => None,
+        };
+        let positive_window = match &triplet.positive.view {
+            triplets::data::ChunkView::Window { index, .. } => Some(*index),
+            _ => None,
+        };
+        if let (Some(a), Some(p)) = (anchor_window, positive_window)
+            && a != p
+        {
+            observed_different_window_pair = true;
+            break;
+        }
+    }
+
+    assert!(
+        observed_different_window_pair,
+        "expected HF text= mode to occasionally sample different window indices for anchor and positive"
+    );
 }
 
 #[test]
