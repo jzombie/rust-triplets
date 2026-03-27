@@ -775,6 +775,41 @@ pub(super) trait NegativeBackend: Send {
 
 The sampler core only calls `NegativeBackend` methods — all backend-specific state (BM25 indices, cursor maps, etc.) stays fully encapsulated in the concrete type.
 
+### `ChunkingAlgorithm` trait
+
+Chunk materialization is now modular and pluggable through `ChunkingAlgorithm`.
+
+```rust,ignore
+pub trait ChunkingAlgorithm: Send + Sync {
+  fn materialize(
+    &self,
+    strategy: &ChunkingStrategy,
+    record: &DataRecord,
+    section_idx: usize,
+    section: &RecordSection,
+  ) -> Vec<RecordChunk>;
+}
+```
+
+- Default behavior is unchanged: `TripletSampler::new(...)` uses `SlidingWindowChunker`.
+- To plug in a custom chunking policy, use `TripletSampler::new_with_chunker(...)`.
+- `SamplerConfig.chunking` still carries the tunable strategy parameters and is passed to your implementation.
+
+Example:
+
+```rust,ignore
+use std::sync::Arc;
+use triplets::{ChunkingAlgorithm, SamplerConfig, SlidingWindowChunker, TripletSampler};
+
+let sampler = TripletSampler::new_with_chunker(
+  SamplerConfig::default(),
+  split_store,
+  Arc::new(SlidingWindowChunker),
+);
+```
+
+This keeps sampler internals stable while making chunking behavior independently evolvable.
+
 ## Capabilities
 
 - **Automatic deterministic splits** (train/validation/test) from record IDs + seed.
@@ -787,7 +822,7 @@ The sampler core only calls `NegativeBackend` methods — all backend-specific s
 - **Optional BM25 hard-negative mining** (`bm25-mining` feature): ranks same-split candidates inside each strategy-defined pool by BM25 score. Rule-based sampling remains the default fast path; BM25 is a ranking layer on top of existing strategy pools, not a global filter. Because negatives are mined per-source by default, each source is still treated as a domain boundary.
 - **Automatic long-section recipe injection**: for sources with sections longer than `chunking.max_window_tokens`, automatically adds `auto_injected_long_section_chunk_pair_wrong_article`, which builds anchor/positive from two different context windows of the same record and uses a context section from a different record as the negative.
 - **Auto-recipe chunk proximity weighting**: auto-injected long-section triplets include an anchor-positive proximity multiplier. See [Sample scoring and weighting](#sample-scoring-and-weighting) for exact formulas.
-- **Deterministic long-section chunking**: short text stays as one chunk; long text becomes multiple chunk candidates (sliding windows) sampled over time. Defaults are `max_window_tokens=1024`, `overlap_tokens=[64]`, and `summary_fallback_tokens=512` (all configurable via `SamplerConfig.chunking`).
+- **Deterministic long-section chunking**: short text stays as one chunk; long text becomes multiple chunk candidates (sliding windows) sampled over time. Defaults are `max_window_tokens=1024`, `overlap_tokens=[64]`, and `summary_fallback_tokens=512` (all configurable via `SamplerConfig.chunking`). Sliding windows are the built-in default via `SlidingWindowChunker`, and chunking is now pluggable through `ChunkingAlgorithm`.
 - **Weight-aware sampling controls** across source weights, recipe weights, and chunk trust/quality weighting. See [Sample scoring and weighting](#sample-scoring-and-weighting) for exact behavior.
 - **Anti-shortcut anchor/positive swap**: deterministic 50% coin-flip swaps anchor and positive slots at triplet finalization, so both orderings appear at equal frequency. Important for InfoNCE and other contrastive objectives where asymmetric slot distributions would otherwise provide a shortcut. Seeded by sampler RNG; fully reproducible and covered by state-persistence mechanics.
 - **Anti-shortcut metadata-prefix variation** via `KvpPrefixSampler` (variant choice, per-field presence probabilities, field-order shuffle, and prefix dropout).

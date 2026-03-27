@@ -1,6 +1,8 @@
 #![doc = include_str!("../README.md")]
 #![warn(missing_docs)]
 
+/// Pluggable chunking algorithms and default sliding-window implementation.
+pub mod chunking;
 /// Sampling configuration types.
 pub mod config;
 /// Centralized constants used across sampler, splits, and sources.
@@ -35,6 +37,7 @@ pub mod utils;
 
 mod errors;
 
+pub use chunking::{ChunkingAlgorithm, SlidingWindowChunker};
 pub use config::{
     ChunkingStrategy, NegativeStrategy, SamplerConfig, Selector, TextRecipe, TripletRecipe,
 };

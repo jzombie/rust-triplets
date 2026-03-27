@@ -5,6 +5,7 @@ fn base_config() -> super::SamplerConfig {
 #[cfg(feature = "bm25-mining")]
 use super::backends::bm25_backend::record_bm25_text;
 use super::*;
+use crate::chunking::ChunkingAlgorithm;
 use crate::config::{ChunkingStrategy, NegativeStrategy, Selector, TextRecipe, TripletRecipe};
 use crate::metrics::chunk_proximity_score;
 
@@ -1250,6 +1251,201 @@ fn chunk_windows_materialize_all_configured_overlaps() {
     assert!(overlap_2_count > 0);
     assert_eq!(overlap_1_count, 2);
     assert_eq!(overlap_2_count, 3);
+}
+
+struct FixedChunker;
+
+impl ChunkingAlgorithm for FixedChunker {
+    fn materialize(
+        &self,
+        _strategy: &ChunkingStrategy,
+        record: &DataRecord,
+        section_idx: usize,
+        _section: &RecordSection,
+    ) -> Vec<RecordChunk> {
+        vec![RecordChunk {
+            record_id: record.id.clone(),
+            section_idx,
+            view: ChunkView::SummaryFallback {
+                strategy: "fixed".into(),
+                weight: 0.7,
+            },
+            text: "fixed-chunk".into(),
+            tokens_estimate: 1,
+            quality: record.quality,
+        }]
+    }
+}
+
+struct MarkerChunker;
+
+impl ChunkingAlgorithm for MarkerChunker {
+    fn materialize(
+        &self,
+        _strategy: &ChunkingStrategy,
+        record: &DataRecord,
+        section_idx: usize,
+        _section: &RecordSection,
+    ) -> Vec<RecordChunk> {
+        vec![
+            RecordChunk {
+                record_id: record.id.clone(),
+                section_idx,
+                view: ChunkView::Window {
+                    index: 0,
+                    overlap: 0,
+                    span: 2,
+                },
+                text: format!("custom::{}::{}::w0", record.id, section_idx),
+                tokens_estimate: 2,
+                quality: record.quality,
+            },
+            RecordChunk {
+                record_id: record.id.clone(),
+                section_idx,
+                view: ChunkView::Window {
+                    index: 1,
+                    overlap: 0,
+                    span: 2,
+                },
+                text: format!("custom::{}::{}::w1", record.id, section_idx),
+                tokens_estimate: 2,
+                quality: record.quality,
+            },
+        ]
+    }
+}
+
+#[test]
+fn sampler_uses_custom_chunking_algorithm_when_provided() {
+    let split = SplitRatios::default();
+    let config = base_config();
+    let store = Arc::new(DeterministicSplitStore::new(split, 17).unwrap());
+    let sampler = TripletSampler::new_with_chunker(config, store, Arc::new(FixedChunker));
+
+    let section_text = "one two three four five";
+    let record = DataRecord {
+        id: "custom_chunk_record".into(),
+        source: "unit".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        quality: QualityScore { trust: 1.0 },
+        taxonomy: vec![],
+        sections: vec![RecordSection {
+            role: SectionRole::Context,
+            heading: None,
+            text: section_text.into(),
+            sentences: vec![section_text.into()],
+        }],
+        meta_prefix: None,
+    };
+
+    let chunks = sampler
+        .inner
+        .lock()
+        .unwrap()
+        .materialize_chunks(&record, 0, &record.sections[0]);
+
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].text, "fixed-chunk");
+    assert!(matches!(chunks[0].view, ChunkView::SummaryFallback { .. }));
+}
+
+#[test]
+fn runtime_batches_do_not_bypass_custom_chunker() {
+    let mut config = base_config();
+    config.batch_size = 2;
+    config.split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+    config.allowed_splits = vec![SplitLabel::Train];
+    config.recipes = vec![TripletRecipe {
+        name: "custom_chunker_runtime_triplet".into(),
+        anchor: Selector::Role(SectionRole::Context),
+        positive_selector: Selector::Role(SectionRole::Context),
+        negative_selector: Selector::Role(SectionRole::Context),
+        negative_strategy: NegativeStrategy::WrongArticle,
+        weight: 1.0,
+        instruction: None,
+        allow_same_anchor_positive: false,
+    }];
+    config.text_recipes = vec![TextRecipe {
+        name: "custom_chunker_runtime_text".into(),
+        selector: Selector::Role(SectionRole::Context),
+        weight: 1.0,
+        instruction: None,
+    }];
+
+    let store = Arc::new(DeterministicSplitStore::new(config.split, 33).unwrap());
+    let sampler = TripletSampler::new_with_chunker(config, store, Arc::new(MarkerChunker));
+
+    let mk = |id: &str| DataRecord {
+        id: id.into(),
+        source: "unit".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        quality: QualityScore { trust: 1.0 },
+        taxonomy: vec![],
+        sections: vec![RecordSection {
+            role: SectionRole::Context,
+            heading: None,
+            text: "alpha beta gamma delta".into(),
+            sentences: vec!["alpha beta gamma delta".into()],
+        }],
+        meta_prefix: None,
+    };
+
+    sampler.register_source(Box::new(InMemorySource::new(
+        "unit",
+        vec![mk("c1"), mk("c2"), mk("c3")],
+    )));
+
+    let text_batch = sampler.next_text_batch(SplitLabel::Train).unwrap();
+    assert!(!text_batch.samples.is_empty());
+    for sample in text_batch.samples {
+        assert!(
+            sample.chunk.text.starts_with("custom::"),
+            "text sample bypassed custom chunker: {}",
+            sample.chunk.text
+        );
+    }
+
+    let pair_batch = sampler.next_pair_batch(SplitLabel::Train).unwrap();
+    assert!(!pair_batch.pairs.is_empty());
+    for pair in pair_batch.pairs {
+        assert!(
+            pair.anchor.text.starts_with("custom::"),
+            "pair anchor bypassed custom chunker: {}",
+            pair.anchor.text
+        );
+        assert!(
+            pair.positive.text.starts_with("custom::"),
+            "pair positive bypassed custom chunker: {}",
+            pair.positive.text
+        );
+    }
+
+    let triplet_batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
+    assert!(!triplet_batch.triplets.is_empty());
+    for triplet in triplet_batch.triplets {
+        assert!(
+            triplet.anchor.text.starts_with("custom::"),
+            "triplet anchor bypassed custom chunker: {}",
+            triplet.anchor.text
+        );
+        assert!(
+            triplet.positive.text.starts_with("custom::"),
+            "triplet positive bypassed custom chunker: {}",
+            triplet.positive.text
+        );
+        assert!(
+            triplet.negative.text.starts_with("custom::"),
+            "triplet negative bypassed custom chunker: {}",
+            triplet.negative.text
+        );
+    }
 }
 
 #[test]
