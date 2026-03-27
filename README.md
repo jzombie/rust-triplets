@@ -14,20 +14,28 @@ Compose an effectively unlimited supply of [training triplets](https://en.wikipe
 - Automatic source chunking (ensure all data is eventually consumed regardless of context window size).
 - Anti-regime and diversity features: Anchor/positive swapping; negatives drawn from other anchors/positives; long anchor/positive sections are chunked into additional anchor/positive windows; deterministic pseudo-random ID sampling via IndexPermutation (affine/LCG-style permutation with cycle-walking); and hash-shuffled source cycling (epoch/cycle-seeded) layered over split-aware Round-Robin cursors to avoid fixed Round-Robin regimes.
 - Combine any combination of text-based streaming and static data sources.
-- Included adapters for HuggingFace and file-based sources. Included traits to roll your own data loaders from any source.
+- Pluggable extension points in one pipeline: `DataSource`/`IndexableSource` for ingestion, `NegativeBackend` for negative mining, and `ChunkingAlgorithm` for section chunking (with built-in file/HuggingFace adapters included).
 - Fast, reproducible baseline sampling (great for iteration/debug), with optional BM25 hard-negative mining when you want stricter lexical difficulty.
 - Low memory footprint; quick to compile; written in Rust.
+- Tested on macOS, Linux, and Windows.
 - [MIT][mit-license-page] and [Apache 2.0][apache-2.0-license-page] licensed.
 
 > _The loss function and choice of ML framework is a separate concern; this crate only handles the data._
 
-Jump to the [quick start](#quick-start).
-
 View the [capabilities](#capabilities) for a deeper dive into the aforementioned list.
 
-> _CI is configured to run tests/linting on macOS, Linux, and Windows._
+> _**Note:** This crate is intended primarily for textual (or textualized) data — records that can be represented as text (for example: documents, QA pairs, logs, or metadata-prefixed chunks) suitable for language-model training, embedding/metric-learning workflows, and related text-model pipelines._
 
-**Note:** This crate is intended primarily for textual (or textualized) data — records that can be represented as text (for example: documents, QA pairs, logs, or metadata-prefixed chunks) suitable for language-model training, embedding/metric-learning workflows, and related text-model pipelines.
+## Getting started
+
+If you're new to the crate, start here:
+
+1. Run the demo and inspect batch output behavior:
+  - `cargo run --example multi_source_demo`
+2. Skim the minimal sampler wiring snippet in [Quick start](#quick-start).
+3. Then read [Using the sampler](#using-the-sampler) for persistence, split-store, and operational details.
+
+If you only need the API shape first, jump to [What a triplet looks like](#what-a-triplet-looks-like).
 
 ## What is a triplet?
 
