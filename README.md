@@ -14,20 +14,28 @@ Compose an effectively unlimited supply of [training triplets](https://en.wikipe
 - Automatic source chunking (ensure all data is eventually consumed regardless of context window size).
 - Anti-regime and diversity features: Anchor/positive swapping; negatives drawn from other anchors/positives; long anchor/positive sections are chunked into additional anchor/positive windows; deterministic pseudo-random ID sampling via IndexPermutation (affine/LCG-style permutation with cycle-walking); and hash-shuffled source cycling (epoch/cycle-seeded) layered over split-aware Round-Robin cursors to avoid fixed Round-Robin regimes.
 - Combine any combination of text-based streaming and static data sources.
-- Included adapters for HuggingFace and file-based sources. Included traits to roll your own data loaders from any source.
+- Pluggable extension points in one pipeline: `DataSource`/`IndexableSource` for ingestion, `NegativeBackend` for negative mining, and `ChunkingAlgorithm` for section chunking (with built-in file/HuggingFace adapters included).
 - Fast, reproducible baseline sampling (great for iteration/debug), with optional BM25 hard-negative mining when you want stricter lexical difficulty.
 - Low memory footprint; quick to compile; written in Rust.
+- Tested on macOS, Linux, and Windows.
 - [MIT][mit-license-page] and [Apache 2.0][apache-2.0-license-page] licensed.
 
 > _The loss function and choice of ML framework is a separate concern; this crate only handles the data._
 
-Jump to the [quick start](#quick-start).
-
 View the [capabilities](#capabilities) for a deeper dive into the aforementioned list.
 
-> _CI is configured to run tests/linting on macOS, Linux, and Windows._
+> _**Note:** This crate is intended primarily for textual (or textualized) data — records that can be represented as text (for example: documents, QA pairs, logs, or metadata-prefixed chunks) suitable for language-model training, embedding/metric-learning workflows, and related text-model pipelines._
 
-**Note:** This crate is intended primarily for textual (or textualized) data — records that can be represented as text (for example: documents, QA pairs, logs, or metadata-prefixed chunks) suitable for language-model training, embedding/metric-learning workflows, and related text-model pipelines.
+## Getting started
+
+If you're new to the crate, start here:
+
+1. Run the demo and inspect batch output behavior:
+  - `cargo run --example multi_source_demo`
+2. Skim the minimal sampler wiring snippet in [Quick start](#quick-start).
+3. Then read [Using the sampler](#using-the-sampler) for persistence, split-store, and operational details.
+
+If you only need the API shape first, jump to [What a triplet looks like](#what-a-triplet-looks-like).
 
 ## What is a triplet?
 
@@ -775,6 +783,41 @@ pub(super) trait NegativeBackend: Send {
 
 The sampler core only calls `NegativeBackend` methods — all backend-specific state (BM25 indices, cursor maps, etc.) stays fully encapsulated in the concrete type.
 
+### `ChunkingAlgorithm` trait
+
+Chunk materialization is now modular and pluggable through `ChunkingAlgorithm`.
+
+```rust,ignore
+pub trait ChunkingAlgorithm: Send + Sync {
+  fn materialize(
+    &self,
+    strategy: &ChunkingStrategy,
+    record: &DataRecord,
+    section_idx: usize,
+    section: &RecordSection,
+  ) -> Vec<RecordChunk>;
+}
+```
+
+- Default behavior is unchanged: `TripletSampler::new(...)` uses `SlidingWindowChunker`.
+- To plug in a custom chunking policy, use `TripletSampler::new_with_chunker(...)`.
+- `SamplerConfig.chunking` still carries the tunable strategy parameters and is passed to your implementation.
+
+Example:
+
+```rust,ignore
+use std::sync::Arc;
+use triplets::{ChunkingAlgorithm, SamplerConfig, SlidingWindowChunker, TripletSampler};
+
+let sampler = TripletSampler::new_with_chunker(
+  SamplerConfig::default(),
+  split_store,
+  Arc::new(SlidingWindowChunker),
+);
+```
+
+This keeps sampler internals stable while making chunking behavior independently evolvable.
+
 ## Capabilities
 
 - **Automatic deterministic splits** (train/validation/test) from record IDs + seed.
@@ -787,7 +830,7 @@ The sampler core only calls `NegativeBackend` methods — all backend-specific s
 - **Optional BM25 hard-negative mining** (`bm25-mining` feature): ranks same-split candidates inside each strategy-defined pool by BM25 score. Rule-based sampling remains the default fast path; BM25 is a ranking layer on top of existing strategy pools, not a global filter. Because negatives are mined per-source by default, each source is still treated as a domain boundary.
 - **Automatic long-section recipe injection**: for sources with sections longer than `chunking.max_window_tokens`, automatically adds `auto_injected_long_section_chunk_pair_wrong_article`, which builds anchor/positive from two different context windows of the same record and uses a context section from a different record as the negative.
 - **Auto-recipe chunk proximity weighting**: auto-injected long-section triplets include an anchor-positive proximity multiplier. See [Sample scoring and weighting](#sample-scoring-and-weighting) for exact formulas.
-- **Deterministic long-section chunking**: short text stays as one chunk; long text becomes multiple chunk candidates (sliding windows) sampled over time. Defaults are `max_window_tokens=1024`, `overlap_tokens=[64]`, and `summary_fallback_tokens=512` (all configurable via `SamplerConfig.chunking`).
+- **Deterministic long-section chunking**: short text stays as one chunk; long text becomes multiple chunk candidates (sliding windows) sampled over time. Defaults are `max_window_tokens=1024`, `overlap_tokens=[64]`, and `summary_fallback_tokens=512` (all configurable via `SamplerConfig.chunking`). Sliding windows are the built-in default via `SlidingWindowChunker`, and chunking is now pluggable through `ChunkingAlgorithm`.
 - **Weight-aware sampling controls** across source weights, recipe weights, and chunk trust/quality weighting. See [Sample scoring and weighting](#sample-scoring-and-weighting) for exact behavior.
 - **Anti-shortcut anchor/positive swap**: deterministic 50% coin-flip swaps anchor and positive slots at triplet finalization, so both orderings appear at equal frequency. Important for InfoNCE and other contrastive objectives where asymmetric slot distributions would otherwise provide a shortcut. Seeded by sampler RNG; fully reproducible and covered by state-persistence mechanics.
 - **Anti-shortcut metadata-prefix variation** via `KvpPrefixSampler` (variant choice, per-field presence probabilities, field-order shuffle, and prefix dropout).

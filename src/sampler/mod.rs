@@ -1,5 +1,6 @@
 mod backends;
 
+use crate::chunking::{ChunkingAlgorithm, SlidingWindowChunker};
 use chrono::Duration;
 use indexmap::IndexMap;
 use line_ending::LineEnding;
@@ -254,6 +255,8 @@ pub struct TripletSampler<S: SplitStore + EpochStateStore + SamplerStateStore + 
 struct TripletSamplerInner<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> {
     /// Immutable sampler configuration (seed, batch size, recipes, splits, etc.).
     config: SamplerConfig,
+    /// Active chunking implementation used to materialize section chunks.
+    chunker: Arc<dyn ChunkingAlgorithm>,
     /// Split store backing train/val/test assignments and persisted sampler state.
     split_store: Arc<S>,
     /// On-demand ingestion manager that fills the batch-sized buffer.
@@ -314,6 +317,14 @@ struct TripletSamplerInner<S: SplitStore + EpochStateStore + SamplerStateStore +
 
 impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSamplerInner<S> {
     fn new(config: SamplerConfig, split_store: Arc<S>) -> Self {
+        Self::new_with_chunker(config, split_store, Arc::new(SlidingWindowChunker))
+    }
+
+    fn new_with_chunker(
+        config: SamplerConfig,
+        split_store: Arc<S>,
+        chunker: Arc<dyn ChunkingAlgorithm>,
+    ) -> Self {
         let buffer_size = config.ingestion_max_records.max(config.batch_size).max(2);
         let using_config_triplet_recipes = !config.recipes.is_empty();
         let using_config_text_recipes = !config.text_recipes.is_empty();
@@ -339,6 +350,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         let mut sampler = Self {
             rng: DeterministicRng::new(config.seed),
             config,
+            chunker,
             split_store,
             ingestion,
             records: IndexMap::new(),
@@ -1532,82 +1544,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         section_idx: usize,
         section: &RecordSection,
     ) -> Vec<RecordChunk> {
-        let strategy = &self.config.chunking;
-        let text = section.text.as_str();
-        let tokens: Vec<&str> = text.split_whitespace().collect();
-        if tokens.is_empty() {
-            return Vec::new();
-        }
-        let mut chunks = Vec::new();
-        let total_tokens = tokens.len();
-        let span = strategy.max_window_tokens.min(total_tokens);
-        if span == tokens.len() {
-            let text = text.to_string();
-            chunks.push(RecordChunk {
-                record_id: record.id.clone(),
-                section_idx,
-                view: ChunkView::Window {
-                    index: 0,
-                    overlap: 0,
-                    span,
-                },
-                text,
-                tokens_estimate: span,
-                quality: record.quality,
-            });
-            return chunks;
-        }
-        for overlap in &strategy.overlap_tokens {
-            let stride = span.saturating_sub(*overlap).max(1);
-            let mut start = 0;
-            let mut index = 0;
-            while start < tokens.len() {
-                let end = (start + span).min(tokens.len());
-                let window = tokens[start..end].join(" ");
-                chunks.push(RecordChunk {
-                    record_id: record.id.clone(),
-                    section_idx,
-                    view: ChunkView::Window {
-                        index,
-                        overlap: *overlap,
-                        span,
-                    },
-                    text: window,
-                    tokens_estimate: end - start,
-                    quality: record.quality,
-                });
-                if end == tokens.len() {
-                    break;
-                }
-                start += stride;
-                index += 1;
-            }
-        }
-        if tokens.len() > strategy.max_window_tokens && strategy.summary_fallback_tokens > 0 {
-            let fallback_cap = strategy
-                .summary_fallback_tokens
-                .min(strategy.max_window_tokens)
-                .max(1);
-            let fallback_len = tokens.len().min(fallback_cap);
-            let summary_tokens = tokens
-                .iter()
-                .take(fallback_len)
-                .copied()
-                .collect::<Vec<_>>()
-                .join(" ");
-            chunks.push(RecordChunk {
-                record_id: record.id.clone(),
-                section_idx,
-                view: ChunkView::SummaryFallback {
-                    strategy: "head".into(),
-                    weight: strategy.summary_fallback_weight,
-                },
-                text: summary_tokens,
-                tokens_estimate: fallback_len,
-                quality: record.quality,
-            });
-        }
-        chunks
+        self.chunker
+            .materialize(&self.config.chunking, record, section_idx, section)
     }
 
     fn build_derived_text_recipes(recipes: &[TripletRecipe]) -> Vec<TextRecipe> {
@@ -2366,6 +2304,18 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     /// Create a sampler from config and a split-state backend.
     pub fn new(config: SamplerConfig, split_store: Arc<S>) -> Self {
         let inner = TripletSamplerInner::new(config, split_store);
+        Self {
+            inner: Mutex::new(inner),
+        }
+    }
+
+    /// Create a sampler from config with a custom chunking implementation.
+    pub fn new_with_chunker(
+        config: SamplerConfig,
+        split_store: Arc<S>,
+        chunker: Arc<dyn ChunkingAlgorithm>,
+    ) -> Self {
+        let inner = TripletSamplerInner::new_with_chunker(config, split_store, chunker);
         Self {
             inner: Mutex::new(inner),
         }
