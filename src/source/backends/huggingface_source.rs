@@ -5277,6 +5277,162 @@ mod tests {
     }
 
     #[test]
+    fn shard_store_helpers_and_known_total_rows_are_stable() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config.clone());
+
+        assert_eq!(source.known_total_rows(), None);
+        {
+            let mut state = source.state.lock().unwrap();
+            state.total_rows = Some(11);
+        }
+        assert_eq!(source.known_total_rows(), Some(11));
+
+        let parquet_path = dir.path().join("part-001.parquet");
+        let store_path = HuggingFaceRowSource::shard_store_path_for(&parquet_path);
+        assert!(HuggingFaceRowSource::is_store_shard_path(&store_path));
+        assert!(!HuggingFaceRowSource::is_store_shard_path(&parquet_path));
+        assert_eq!(store_path, dir.path().join("part-001.simdr"));
+
+        let candidate = "url::https://host/datasets/org/ds/resolve/main/train/part-001.parquet";
+        let candidate_store = HuggingFaceRowSource::candidate_store_path(&config, candidate);
+        assert!(candidate_store.ends_with(Path::new("train/part-001.simdr")));
+
+        let row_key = HuggingFaceRowSource::row_store_row_key(42);
+        assert!(row_key.starts_with(HF_SHARD_STORE_ROW_PREFIX));
+        assert_eq!(row_key.len(), HF_SHARD_STORE_ROW_PREFIX.len() + 8);
+    }
+
+    #[test]
+    fn read_store_row_count_validates_payload_size_and_roundtrips_written_value() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config);
+        let store_path = dir.path().join("rows.simdr");
+        let store = DataStore::open(&store_path).unwrap();
+
+        store
+            .write(HF_SHARD_STORE_META_ROWS_KEY, &[1u8, 2, 3])
+            .unwrap();
+        let err = source.read_store_row_count(&store).unwrap_err();
+        let message = format!("{err}");
+        assert!(message.contains("payload size mismatch"));
+
+        source.write_store_row_count(&store, 7).unwrap();
+        assert_eq!(source.read_store_row_count(&store).unwrap(), 7);
+    }
+
+    #[test]
+    fn read_store_row_count_returns_zero_when_meta_key_is_absent() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config);
+        let store_path = dir.path().join("empty.simdr");
+        let store = DataStore::open(&store_path).unwrap();
+
+        assert_eq!(source.read_store_row_count(&store).unwrap(), 0);
+    }
+
+    #[test]
+    fn shard_store_path_for_passthrough_when_already_simdr() {
+        let path = PathBuf::from("cache/shard.simdr");
+        let mapped = HuggingFaceRowSource::shard_store_path_for(&path);
+        assert_eq!(mapped, path);
+    }
+
+    #[test]
+    fn get_or_open_shard_store_reuses_cached_handle_and_prune_keeps_active_only() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config);
+
+        let store_a = dir.path().join("a.simdr");
+        let store_b = dir.path().join("b.simdr");
+
+        let first = source.get_or_open_shard_store(&store_a).unwrap();
+        let second = source.get_or_open_shard_store(&store_a).unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+
+        let _third = source.get_or_open_shard_store(&store_b).unwrap();
+        {
+            let cache = source.store_cache.lock().unwrap();
+            assert!(cache.contains_key(&store_a));
+            assert!(cache.contains_key(&store_b));
+        }
+
+        source.prune_store_cache_to_shards(&[ShardIndex {
+            path: store_a.clone(),
+            global_start: 0,
+            row_count: 1,
+            random_access: true,
+            parquet_row_groups: vec![(0, 1)],
+            checkpoints: Vec::new(),
+            remote_candidate: None,
+        }]);
+
+        let cache = source.store_cache.lock().unwrap();
+        assert!(cache.contains_key(&store_a));
+        assert!(!cache.contains_key(&store_b));
+    }
+
+    #[test]
+    fn parquet_cache_row_group_rows_for_hits_cache_and_evicts_lru() {
+        let dir = tempdir().unwrap();
+        let path_a = dir.path().join("a.parquet");
+        let path_b = dir.path().join("b.parquet");
+        write_parquet_fixture(&path_a, &[("a1", "alpha")]);
+        write_parquet_fixture(&path_b, &[("b1", "beta")]);
+
+        let mut cache = ParquetCache::default();
+        let rows_a_first = cache.row_group_rows_for("hf_test", &path_a, 0, 1).unwrap();
+        let rows_a_second = cache.row_group_rows_for("hf_test", &path_a, 0, 1).unwrap();
+        assert!(Arc::ptr_eq(&rows_a_first, &rows_a_second));
+
+        let _rows_b = cache.row_group_rows_for("hf_test", &path_b, 0, 1).unwrap();
+        assert_eq!(cache.row_groups.len(), 1);
+        assert!(cache.row_groups.contains_key(&(path_b.clone(), 0)));
+        assert!(!cache.row_groups.contains_key(&(path_a.clone(), 0)));
+    }
+
+    #[test]
+    fn refresh_row_group_order_removes_existing_key_and_ignores_missing() {
+        let key_a = (PathBuf::from("a.parquet"), 0usize);
+        let key_b = (PathBuf::from("b.parquet"), 0usize);
+        let mut order = VecDeque::from([key_a.clone(), key_b.clone(), key_a.clone()]);
+
+        ParquetCache::refresh_row_group_order(&mut order, &key_a);
+        assert_eq!(order, VecDeque::from([key_b.clone(), key_a.clone()]));
+
+        let missing = (PathBuf::from("missing.parquet"), 0usize);
+        ParquetCache::refresh_row_group_order(&mut order, &missing);
+        assert_eq!(order, VecDeque::from([key_b, key_a]));
+    }
+
+    #[test]
+    fn build_eligible_rows_from_store_shard_uses_global_offsets() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config);
+
+        let store_path = dir.path().join("eligible.simdr");
+        write_simdr_fixture(&store_path, &[("r1", "alpha"), ("r2", "beta")]);
+
+        let shards = vec![ShardIndex {
+            path: store_path,
+            global_start: 5,
+            row_count: 2,
+            random_access: true,
+            parquet_row_groups: vec![(0, 2)],
+            checkpoints: Vec::new(),
+            remote_candidate: None,
+        }];
+
+        let eligible = source.build_eligible_rows_from_shards(&shards).unwrap();
+        assert_eq!(eligible, vec![5, 6]);
+    }
+
+    #[test]
     fn effective_targets_respect_minimum_multiplier_and_sampler_override() {
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path().to_path_buf());
