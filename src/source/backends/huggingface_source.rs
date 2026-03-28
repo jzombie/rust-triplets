@@ -6885,6 +6885,29 @@ mod tests {
     }
 
     #[test]
+    fn fetch_global_row_count_with_runtime_uses_test_endpoint_override() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let runtime = HuggingFaceRowSource::build_http_runtime(&config).unwrap();
+        let body = serde_json::to_vec(&json!({
+            "size": {
+                "splits": [
+                    {"config": "default", "split": "train", "num_rows": 34}
+                ]
+            }
+        }))
+        .unwrap();
+        let (base_url, server) = spawn_one_shot_http(body);
+
+        let rows = with_env_var(TRIPLETS_HF_SIZE_ENDPOINT, &base_url, || {
+            HuggingFaceRowSource::fetch_global_row_count_with_runtime(&config, Some(&runtime))
+        })
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(rows, Some(34));
+    }
+
+    #[test]
     fn endpoint_helpers_fallback_for_empty_env_values() {
         let parquet = with_env_var(TRIPLETS_HF_PARQUET_ENDPOINT, "   ", || {
             HuggingFaceRowSource::parquet_manifest_endpoint()
@@ -6967,6 +6990,30 @@ mod tests {
     }
 
     #[test]
+    fn list_remote_candidates_with_runtime_returns_manifest_candidates() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let runtime = HuggingFaceRowSource::build_http_runtime(&config).unwrap();
+        let body = serde_json::to_vec(&json!({
+            "parquet_files": [
+                {"url": "https://host/datasets/x/resolve/main/train/2.ndjson", "size": 7}
+            ]
+        }))
+        .unwrap();
+        let (base_url, server) = spawn_one_shot_http(body);
+
+        let (candidates, sizes) = with_env_var(TRIPLETS_HF_PARQUET_ENDPOINT, &base_url, || {
+            HuggingFaceRowSource::list_remote_candidates_with_runtime(&config, Some(&runtime))
+        })
+        .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(sizes.len(), 1);
+        assert!(candidates[0].ends_with("/2.ndjson"));
+    }
+
+    #[test]
     fn list_remote_candidates_does_not_fall_back_when_all_manifest_shards_cached() {
         // Regression test: list_remote_candidates must NOT fall through to the hf-hub
         // siblings listing when a parquet manifest exists, regardless of whether all
@@ -7031,6 +7078,33 @@ mod tests {
             HuggingFaceRowSource::fetch_global_row_count(&config)
         });
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn fetch_classlabel_maps_with_runtime_resolves_columns_from_info_response() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let runtime = HuggingFaceRowSource::build_http_runtime(&config).unwrap();
+        let body = serde_json::to_vec(&json!({
+            "dataset_info": {
+                "features": {
+                    "sentiment": {
+                        "_type": "ClassLabel",
+                        "names": ["neutral", "bullish", "bearish"]
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        let (base_url, server) = spawn_one_shot_http(body);
+
+        let maps = with_env_var(TRIPLETS_HF_INFO_ENDPOINT, &base_url, || {
+            HuggingFaceRowSource::fetch_classlabel_maps_with_runtime(&config, Some(&runtime))
+        });
+        server.join().unwrap();
+
+        assert_eq!(maps.len(), 1);
+        assert_eq!(maps["sentiment"], vec!["neutral", "bullish", "bearish"]);
     }
 
     #[test]
