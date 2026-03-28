@@ -248,7 +248,7 @@ Each source is independent: sources can carry their own recipe rules tailored to
 
 | Feature            | What it enables                                                                                                                                                                                                                                                                                                                                                         | Default |
 |--------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|
-| `huggingface`      | `HuggingFaceRowSource` — streaming download and sampling from Hugging Face dataset repositories (parquet/ndjson shards, ClassLabel resolution, disk-cap eviction). Adds `hf-hub`, `parquet`, `ureq`, `rayon`, `serde_json`.                                                                                                                                             | No      |
+| `huggingface`      | `HuggingFaceRowSource` — streaming download and sampling from Hugging Face dataset repositories (parquet/ndjson shards, ClassLabel resolution, disk-cap eviction). Adds `hf-hub`, `parquet`, `reqwest`, `tokio`, `rayon`, `serde_json`. Tokio usage is isolated to the Hugging Face backend path; the crate’s public source/sampler APIs remain synchronous. | No      |
 | `bm25-mining`      | BM25 hard-negative ranking within strategy-defined candidate pools. Adds a `bm25` dependency. Rule-based strategy selection always runs first to define the eligible pool; BM25 re-ranks within that pool when this feature is enabled. When absent, candidate selection within each strategy pool is uniform (no re-ranking step).                                     | No      |
 | `extended-metrics` | Enables additional per-triplet diagnostics in the `multi_source_demo` output. Prints Jaccard and byte-cosine similarity between anchor↔positive and anchor↔negative, plus per-source summary tables (including anchor-positive chunk proximity). Adds no dependencies. Intended for manual inspection and debugging of sampling quality, not for use in training loops. | No      |
 
@@ -677,7 +677,7 @@ When set, the variable value replaces the default `https://datasets-server.huggi
 **Only public HuggingFace datasets are currently supported.** There is no authentication support:
 
 - The `hf-hub` client is constructed with `.with_token(None)` — the HF Hub token is explicitly disabled and `HF_TOKEN` (or any other credential source) is never consulted.
-- The three `ureq` HTTP calls to the datasets-server (`/parquet`, `/size`, `/info`) are made without an `Authorization` header.
+- The datasets-server HTTP calls (`/parquet`, `/size`, `/info`) use `reqwest` and are sent without an `Authorization` header.
 
 Datasets that require authentication (gated models, private repos, or organization-private datasets) will return HTTP 401/403 errors from both the datasets-server manifest endpoints and the `hf-hub` shard download path, and the source will fail to construct.
 
