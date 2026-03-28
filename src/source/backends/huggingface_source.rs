@@ -12,9 +12,9 @@ use simd_r_drive::storage_engine::traits::{DataStoreReader, DataStoreWriter};
 use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::future::Future;
 use std::fs;
 use std::fs::File;
+use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::Path;
@@ -961,7 +961,8 @@ impl HuggingFaceRowSource {
 
         // Auto-resolve ClassLabel columns from the datasets-server /info endpoint.
         // If the fetch fails the label_maps stay empty and raw integers are used.
-        config.label_maps = Self::fetch_classlabel_maps_with_runtime(&config, Some(http_runtime.as_ref()));
+        config.label_maps =
+            Self::fetch_classlabel_maps_with_runtime(&config, Some(http_runtime.as_ref()));
 
         fs::create_dir_all(&config.snapshot_dir).map_err(|err| {
             SamplerError::SourceUnavailable {
@@ -989,7 +990,10 @@ impl HuggingFaceRowSource {
         }
 
         let materialized_rows = discovered;
-        let total_rows = match Self::fetch_global_row_count_with_runtime(&config, Some(http_runtime.as_ref())) {
+        let total_rows = match Self::fetch_global_row_count_with_runtime(
+            &config,
+            Some(http_runtime.as_ref()),
+        ) {
             Ok(value) => value,
             Err(err) => {
                 warn!(
@@ -1953,7 +1957,9 @@ impl HuggingFaceRowSource {
         "https://datasets-server.huggingface.co/info".to_string()
     }
 
-    fn build_http_runtime(config: &HuggingFaceRowsConfig) -> Result<tokio::runtime::Runtime, SamplerError> {
+    fn build_http_runtime(
+        config: &HuggingFaceRowsConfig,
+    ) -> Result<tokio::runtime::Runtime, SamplerError> {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -2008,10 +2014,13 @@ impl HuggingFaceRowSource {
                 reason: format!("{endpoint_label} returned non-success response: {err}"),
             })?;
 
-        response.text().await.map_err(|err| SamplerError::SourceUnavailable {
-            source_id: config.source_id.clone(),
-            reason: format!("failed reading {endpoint_label} response body: {err}"),
-        })
+        response
+            .text()
+            .await
+            .map_err(|err| SamplerError::SourceUnavailable {
+                source_id: config.source_id.clone(),
+                reason: format!("failed reading {endpoint_label} response body: {err}"),
+            })
     }
 
     /// Fetch ClassLabel name mappings from the datasets-server `/info` endpoint.
@@ -2415,29 +2424,32 @@ impl HuggingFaceRowSource {
                 .error_for_status()
                 .map_err(|err| SamplerError::SourceUnavailable {
                     source_id: config.source_id.clone(),
-                    reason: format!("download URL '{}' returned non-success response: {err}", remote_url),
+                    reason: format!(
+                        "download URL '{}' returned non-success response: {err}",
+                        remote_url
+                    ),
                 })?;
 
-            let mut file =
-                tokio::fs::File::create(&temp_target)
-                    .await
-                    .map_err(|err| SamplerError::SourceUnavailable {
-                        source_id: config.source_id.clone(),
-                        reason: format!(
-                            "failed creating target shard {}: {err}",
-                            temp_target.display()
-                        ),
-                    })?;
+            let mut file = tokio::fs::File::create(&temp_target).await.map_err(|err| {
+                SamplerError::SourceUnavailable {
+                    source_id: config.source_id.clone(),
+                    reason: format!(
+                        "failed creating target shard {}: {err}",
+                        temp_target.display()
+                    ),
+                }
+            })?;
             let started = Instant::now();
             let mut total_bytes = 0u64;
             let mut last_report = Instant::now();
-            while let Some(chunk) = response
-                .chunk()
-                .await
-                .map_err(|err| SamplerError::SourceUnavailable {
-                    source_id: config.source_id.clone(),
-                    reason: format!("failed reading shard stream '{}': {err}", remote_url),
-                })?
+            while let Some(chunk) =
+                response
+                    .chunk()
+                    .await
+                    .map_err(|err| SamplerError::SourceUnavailable {
+                        source_id: config.source_id.clone(),
+                        reason: format!("failed reading shard stream '{}': {err}", remote_url),
+                    })?
             {
                 file.write_all(&chunk)
                     .await
@@ -2454,7 +2466,8 @@ impl HuggingFaceRowSource {
                     if let Some(expected) = expected_bytes
                         && expected > 0
                     {
-                        let pct = ((total_bytes as f64 / expected as f64) * 100.0).clamp(0.0, 100.0);
+                        let pct =
+                            ((total_bytes as f64 / expected as f64) * 100.0).clamp(0.0, 100.0);
                         let rate = if elapsed > 0.0 {
                             total_bytes as f64 / elapsed
                         } else {
