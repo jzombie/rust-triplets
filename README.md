@@ -124,6 +124,19 @@ Why this matters:
 - Sources can be over/under-sampled independently via source weights (including per-batch reweighting).
 - When a source has limited fresh records, replay/oversampling can happen for that source without coupling all other sources to the same behavior.
 
+## Threading model
+
+Threading/concurrency behavior is intentionally layered and mostly synchronous at API boundaries.
+
+- Public sampler/source APIs are synchronous (`next_*_batch`, `refresh`, etc.). You can call them from any thread, but each call runs to completion on the caller side.
+- Per-call source refresh fan-out: within a batch/refresh cycle, sources are fetched in parallel, then joined and merged deterministically before sample assembly.
+- `BatchPrefetcher` adds a separate concurrency layer: one dedicated background producer thread repeatedly calls sampler batch APIs and pushes results into a bounded queue; the training loop consumes via `next()`.
+- With feature `huggingface`, each `HuggingFaceRowSource` maintains its own Tokio runtime for HF network I/O (`reqwest` + `hf-hub` tokio client), but this is isolated to the HF backend implementation. The rest of the crate does not require a global async runtime.
+- HF sources may also run a background shard-expansion thread to materialize additional remote shards while keeping sampler-facing calls synchronous.
+- Split assignment and source paging remain deterministic for a fixed seed/config; concurrency changes throughput and timing, not deterministic mapping rules.
+
+Practical takeaway: you get parallel source I/O and optional asynchronous prefetching, while the top-level training-data API remains simple and synchronous.
+
 ## Sample scoring and weighting
 
 Scoring layers:
@@ -355,9 +368,8 @@ Operational notes:
 - File-backed indexing is rebuilt per process/run and stored in an OS temp-backed index store.
 - Persisting sampler/split state is explicit and manual.
 - One split-store file shares sampler/source cursor + RNG state unless you use separate store files.
-- Batch calls are thread-safe but serialized; refresh work within a call can be parallelized per source.
+- Threading/concurrency details are centralized in [Threading model](#threading-model).
 - Source cursors advance independently per source, so one source can continue making progress even if another source is sparse or slower.
-- Refresh concurrency is per call: source refreshes run in parallel for that call, then the sampler joins all refresh threads before merging buffers (not an always-on per-source background ingest loop).
 - Prefetchers smooth latency by filling bounded queues from the existing batch APIs (`next_triplet_batch`, `next_pair_batch`, `next_text_batch`).
 - New data from streaming sources is pulled in on the next batch call.
 - `sampler.save_sampler_state(None)` is manual; skipping it means no resume state after restart.
@@ -841,8 +853,7 @@ This keeps sampler internals stable while making chunking behavior independently
 - **Source-agnostic backends** (`DataSource` or `IndexableSource` + `IndexableAdapter`).
 - **Supply-chain style orchestration**: multi-source intake (`refresh`) with per-call parallel ingest, optional per-source weighting, staged buffering, deterministic split routing, and batch assembly into train-ready outputs.
 - **Bounded ingestion** windows instead of loading full corpora into memory.
-- **Per-call source threading**: during refresh, each source is fetched on its own short-lived thread, then merged deterministically for batch assembly.
-- **Background batch prefetching** via `BatchPrefetcher`: spawns a dedicated background thread that drives a tight production loop, pushing results into a bounded channel queue. The training loop blocks only on `next()`. Within each batch call the background thread makes, the sampler fans out to per-source threads for ingestion — both concurrency layers are active simultaneously. GPU-side throughput depends on queue depth and the number of workers feeding it; the prefetcher queue size should be tuned so the GPU never drains the buffer between steps (see `prefetch_triplet_batches(split, queue_depth)`).
+- **Threading behavior**: see [Threading model](#threading-model) for the canonical sampler, prefetcher, and Hugging Face backend concurrency model.
 - **Streaming-friendly**: sources can be finite or unbounded.
 
 ## Sampling behavior (current)
@@ -894,7 +905,7 @@ Implementation sources:
 - **Manual epoch control**: `sampler.set_epoch(n)` resets per-source cursors and reshuffles deterministically for that epoch.
 - **Persisted state scope**: epoch tracking is split-aware, but sampler/source cursors + RNG/round-robin state are persisted per store file.
 - **Triplet recipe behavior**: if `SamplerConfig.recipes` is non-empty, those recipes are used for all sources; otherwise each source's `default_triplet_recipes()` is used (if any).
-- **Optional BM25 hard negatives**: with feature `bm25-mining`, a single global BM25 index is rebuilt on the main thread after each source refresh cycle (not on every drain-only ingest step; source I/O fetches run in parallel threads but the index build always happens on the caller's thread after those fetches join). The index covers the entire N × `ingestion_max_records` record pool — every candidate in every per-source cache contributes, with no cap on index size. Records are stored once in the primary record map; the BM25 index holds only lightweight per-record metadata (`record_id`, `source`, `split`, `date`) and tokenized text for ranking — no `DataRecord` copies. During sampling, BM25-ranked candidates are filtered to the strategy-selected pool, same-split constraints are enforced, and candidate selection rotates deterministically per anchor to improve diversity. BM25 shifts the pool toward lexically harder negatives; it does not replace the diversity-first baseline — the output mix remains varied (hard, medium, and soft), not exclusively hardest-first. BM25 is a keyword-overlap ranker and is well-suited as an inexpensive first pass for negative hardness; for semantic re-ranking (dense retrieval, cross-encoder scoring, iterative mining with the trained encoder), those are out of scope for the data pipeline and integrate via pre-ranked source construction or by reweighting source batches in the training loop.
+- **Optional BM25 hard negatives**: with feature `bm25-mining`, one global BM25 index is rebuilt on the caller thread after each source-refresh cycle (never on drain-only steps). Source I/O fetches can run in parallel, then the index build runs after those refreshes join. The index covers the full N × `ingestion_max_records` per-source cache pool and stores lightweight ranking metadata/tokenized text (not duplicated `DataRecord`s). At sampling time BM25 ranks within the strategy-filtered, same-split candidate pool, and candidate choice rotates deterministically per anchor for diversity.
 - **Pair batches**: derived from triplets and follow the same source/recipe selection behavior.
 - **Text recipe behavior**:
   - If `SamplerConfig.text_recipes` is non-empty, those are used directly.
