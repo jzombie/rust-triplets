@@ -6217,6 +6217,7 @@ mod tests {
         let (base_url, server) = spawn_one_shot_http(payload);
         let candidate =
             format!("url::{base_url}/datasets/org/ds/resolve/main/train/new-shard.ndjson");
+        let new_path = HuggingFaceRowSource::candidate_target_path(&config, &candidate);
 
         {
             let mut state = source.state.lock().unwrap();
@@ -6252,7 +6253,18 @@ mod tests {
         assert!(source.download_next_remote_shard().unwrap());
         server.join().unwrap();
 
-        assert!(!old_path.exists());
+        // Eviction removes at least one shard once disk cap is exceeded.
+        // Which shard is removed can vary on filesystems with coarse mtime
+        // resolution (tie-break is path order), so assert eviction semantics
+        // rather than a specific filename.
+        assert!(
+            !(old_path.exists() && new_path.exists()),
+            "expected at least one manifest shard to be evicted"
+        );
+        {
+            let state = source.state.lock().unwrap();
+            assert_eq!(state.shards.len(), 1);
+        }
         let cache = source.cache.lock().unwrap();
         assert!(cache.rows.is_empty());
         assert!(cache.order.is_empty());
