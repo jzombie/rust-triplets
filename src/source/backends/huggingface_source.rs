@@ -891,6 +891,7 @@ impl RowCache {
 /// is non-fatal and only produces a warning.
 pub struct HuggingFaceRowSource {
     config: HuggingFaceRowsConfig,
+    http_runtime: Arc<tokio::runtime::Runtime>,
     sampler_config: Arc<Mutex<Option<SamplerConfig>>>,
     state: Arc<Mutex<SourceState>>,
     cache: Arc<Mutex<RowCache>>,
@@ -908,6 +909,7 @@ impl Clone for HuggingFaceRowSource {
     fn clone(&self) -> Self {
         Self {
             config: self.config.clone(),
+            http_runtime: Arc::clone(&self.http_runtime),
             sampler_config: Arc::clone(&self.sampler_config),
             state: Arc::clone(&self.state),
             cache: Arc::clone(&self.cache),
@@ -944,6 +946,7 @@ impl HuggingFaceRowSource {
     /// Build a new source by indexing local shard files.
     pub fn new(mut config: HuggingFaceRowsConfig) -> Result<Self, SamplerError> {
         let start_new = Instant::now();
+        let http_runtime = Arc::new(Self::build_http_runtime(&config)?);
         if config.checkpoint_stride == 0 {
             return Err(SamplerError::Configuration(
                 "huggingface source checkpoint_stride must be > 0".to_string(),
@@ -958,7 +961,7 @@ impl HuggingFaceRowSource {
 
         // Auto-resolve ClassLabel columns from the datasets-server /info endpoint.
         // If the fetch fails the label_maps stay empty and raw integers are used.
-        config.label_maps = Self::fetch_classlabel_maps(&config);
+        config.label_maps = Self::fetch_classlabel_maps_with_runtime(&config, Some(http_runtime.as_ref()));
 
         fs::create_dir_all(&config.snapshot_dir).map_err(|err| {
             SamplerError::SourceUnavailable {
@@ -986,7 +989,7 @@ impl HuggingFaceRowSource {
         }
 
         let materialized_rows = discovered;
-        let total_rows = match Self::fetch_global_row_count(&config) {
+        let total_rows = match Self::fetch_global_row_count_with_runtime(&config, Some(http_runtime.as_ref())) {
             Ok(value) => value,
             Err(err) => {
                 warn!(
@@ -1014,6 +1017,7 @@ impl HuggingFaceRowSource {
 
         Ok(Self {
             config,
+            http_runtime,
             sampler_config: Arc::new(Mutex::new(None)),
             state: Arc::new(Mutex::new(SourceState {
                 materialized_rows,
@@ -1766,11 +1770,19 @@ impl HuggingFaceRowSource {
     }
 
     /// Resolve and filter remote shard candidates from manifest or repository listing.
+    #[cfg(test)]
     fn list_remote_candidates(
         config: &HuggingFaceRowsConfig,
     ) -> Result<(Vec<String>, HashMap<String, u64>), SamplerError> {
+        Self::list_remote_candidates_with_runtime(config, None)
+    }
+
+    fn list_remote_candidates_with_runtime(
+        config: &HuggingFaceRowsConfig,
+        runtime: Option<&tokio::runtime::Runtime>,
+    ) -> Result<(Vec<String>, HashMap<String, u64>), SamplerError> {
         if let Ok((candidates, candidate_sizes, matched_manifest_entries)) =
-            Self::list_remote_candidates_from_parquet_manifest(config)
+            Self::list_remote_candidates_from_parquet_manifest_with_runtime(config, runtime)
             && matched_manifest_entries > 0
         {
             // Parquet manifest exists for this dataset.  Return the full candidate
@@ -1797,7 +1809,7 @@ impl HuggingFaceRowSource {
             "[triplets:hf] reading remote file list for dataset {}",
             config.dataset
         );
-        let info = Self::block_on_http(config, async {
+        let info = Self::block_on_http_with_runtime(runtime, config, async {
             let api = ApiBuilder::new()
                 .with_progress(true)
                 .with_token(None)
@@ -1951,10 +1963,14 @@ impl HuggingFaceRowSource {
             })
     }
 
-    fn block_on_http<T>(
+    fn block_on_http_with_runtime<T>(
+        runtime: Option<&tokio::runtime::Runtime>,
         config: &HuggingFaceRowsConfig,
         future: impl Future<Output = Result<T, SamplerError>>,
     ) -> Result<T, SamplerError> {
+        if let Some(existing_runtime) = runtime {
+            return existing_runtime.block_on(future);
+        }
         let runtime = Self::build_http_runtime(config)?;
         runtime.block_on(future)
     }
@@ -2008,9 +2024,18 @@ impl HuggingFaceRowSource {
     /// All failure paths (unreachable endpoint, HTTP error, unreadable body,
     /// invalid JSON) emit a `warn!` log and return an empty map.  The caller
     /// continues normally with raw integer strings as a fallback.
+    #[cfg(test)]
     fn fetch_classlabel_maps(config: &HuggingFaceRowsConfig) -> HashMap<String, Vec<String>> {
+        Self::fetch_classlabel_maps_with_runtime(config, None)
+    }
+
+    fn fetch_classlabel_maps_with_runtime(
+        config: &HuggingFaceRowsConfig,
+        runtime: Option<&tokio::runtime::Runtime>,
+    ) -> HashMap<String, Vec<String>> {
         let endpoint = Self::info_endpoint();
-        let body = match Self::block_on_http(
+        let body = match Self::block_on_http_with_runtime(
+            runtime,
             config,
             Self::fetch_http_body_text(
                 config,
@@ -2090,8 +2115,16 @@ impl HuggingFaceRowSource {
     }
 
     /// Query datasets-server parquet manifest and derive shard candidates.
+    #[cfg(test)]
     fn list_remote_candidates_from_parquet_manifest(
         config: &HuggingFaceRowsConfig,
+    ) -> Result<ParquetManifestCandidates, SamplerError> {
+        Self::list_remote_candidates_from_parquet_manifest_with_runtime(config, None)
+    }
+
+    fn list_remote_candidates_from_parquet_manifest_with_runtime(
+        config: &HuggingFaceRowsConfig,
+        runtime: Option<&tokio::runtime::Runtime>,
     ) -> Result<ParquetManifestCandidates, SamplerError> {
         let endpoint = Self::parquet_manifest_endpoint();
         info!(
@@ -2107,7 +2140,8 @@ impl HuggingFaceRowSource {
         if !config.split.is_empty() {
             query.push((HF_JSON_KEY_SPLIT, config.split.as_str()));
         }
-        let body = Self::block_on_http(
+        let body = Self::block_on_http_with_runtime(
+            runtime,
             config,
             Self::fetch_http_body_text(
                 config,
@@ -2250,8 +2284,16 @@ impl HuggingFaceRowSource {
     }
 
     /// Fetch exact split row count metadata from datasets-server size endpoint.
+    #[cfg(test)]
     fn fetch_global_row_count(
         config: &HuggingFaceRowsConfig,
+    ) -> Result<Option<usize>, SamplerError> {
+        Self::fetch_global_row_count_with_runtime(config, None)
+    }
+
+    fn fetch_global_row_count_with_runtime(
+        config: &HuggingFaceRowsConfig,
+        runtime: Option<&tokio::runtime::Runtime>,
     ) -> Result<Option<usize>, SamplerError> {
         let endpoint = Self::size_endpoint();
         info!(
@@ -2268,7 +2310,8 @@ impl HuggingFaceRowSource {
         if !config.split.is_empty() {
             query.push((HF_JSON_KEY_SPLIT, config.split.as_str()));
         }
-        let body = Self::block_on_http(
+        let body = Self::block_on_http_with_runtime(
+            runtime,
             config,
             Self::fetch_http_body_text(config, &endpoint, &query, "datasets-server size endpoint"),
         )?;
@@ -2328,12 +2371,13 @@ impl HuggingFaceRowSource {
         Ok(path)
     }
 
-    fn download_remote_url_to_target(
+    fn download_remote_url_to_target_with_runtime(
         config: &HuggingFaceRowsConfig,
         remote_url: &str,
         target: &Path,
         expected_bytes: Option<u64>,
         shard_label: &str,
+        runtime: Option<&tokio::runtime::Runtime>,
     ) -> Result<(), SamplerError> {
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent).map_err(|err| SamplerError::SourceUnavailable {
@@ -2356,7 +2400,7 @@ impl HuggingFaceRowSource {
             shard_label,
             target.display()
         );
-        let (total_bytes, elapsed) = Self::block_on_http(config, async {
+        let (total_bytes, elapsed) = Self::block_on_http_with_runtime(runtime, config, async {
             use tokio::io::AsyncWriteExt;
 
             let client = Self::http_client(config)?;
@@ -2591,11 +2635,28 @@ impl HuggingFaceRowSource {
     }
 
     /// Download a shard (URL or hf-hub path) and materialize it under snapshot dir.
+    #[cfg(test)]
     fn download_and_materialize_shard(
         config: &HuggingFaceRowsConfig,
         remote_path: &str,
         expected_bytes: Option<u64>,
         shard_label: &str,
+    ) -> Result<PathBuf, SamplerError> {
+        Self::download_and_materialize_shard_with_runtime(
+            config,
+            remote_path,
+            expected_bytes,
+            shard_label,
+            None,
+        )
+    }
+
+    fn download_and_materialize_shard_with_runtime(
+        config: &HuggingFaceRowsConfig,
+        remote_path: &str,
+        expected_bytes: Option<u64>,
+        shard_label: &str,
+        runtime: Option<&tokio::runtime::Runtime>,
     ) -> Result<PathBuf, SamplerError> {
         if let Some(remote_url) = remote_path.strip_prefix(REMOTE_URL_PREFIX) {
             let target = Self::candidate_target_path(config, remote_path);
@@ -2610,12 +2671,13 @@ impl HuggingFaceRowSource {
                 }
                 let temp_target =
                     Self::allocate_temp_download_path(config, remote_path, "parquet")?;
-                Self::download_remote_url_to_target(
+                Self::download_remote_url_to_target_with_runtime(
                     config,
                     remote_url,
                     &temp_target,
                     expected_bytes,
                     shard_label,
+                    runtime,
                 )?;
                 return Ok(temp_target);
             }
@@ -2636,12 +2698,13 @@ impl HuggingFaceRowSource {
                 })?;
             }
 
-            Self::download_remote_url_to_target(
+            Self::download_remote_url_to_target_with_runtime(
                 config,
                 remote_url,
                 &target,
                 expected_bytes,
                 shard_label,
+                runtime,
             )?;
             return Ok(target);
         }
@@ -2662,17 +2725,18 @@ impl HuggingFaceRowSource {
                 remote_path.trim_start_matches('/')
             );
             let temp_target = Self::allocate_temp_download_path(config, remote_path, "parquet")?;
-            Self::download_remote_url_to_target(
+            Self::download_remote_url_to_target_with_runtime(
                 config,
                 &remote_url,
                 &temp_target,
                 expected_bytes,
                 shard_label,
+                runtime,
             )?;
             return Ok(temp_target);
         }
 
-        let mut local_cached = Self::block_on_http(config, async {
+        let mut local_cached = Self::block_on_http_with_runtime(runtime, config, async {
             let api = ApiBuilder::new()
                 .with_progress(true)
                 .with_token(None)
@@ -2694,7 +2758,7 @@ impl HuggingFaceRowSource {
         })?;
         if !local_cached.exists() {
             for _ in 0..5 {
-                local_cached = Self::block_on_http(config, async {
+                local_cached = Self::block_on_http_with_runtime(runtime, config, async {
                     let api = ApiBuilder::new()
                         .with_progress(true)
                         .with_token(None)
@@ -2927,7 +2991,10 @@ impl HuggingFaceRowSource {
                     })?;
                 if state.remote_candidates.is_none() {
                     let (mut candidates, candidate_sizes) =
-                        Self::list_remote_candidates(&self.config)?;
+                        Self::list_remote_candidates_with_runtime(
+                            &self.config,
+                            Some(self.http_runtime.as_ref()),
+                        )?;
                     candidates.sort();
                     candidates.dedup();
                     let sampler_seed = self.configured_sampler_seed().unwrap_or(0);
@@ -3071,11 +3138,12 @@ impl HuggingFaceRowSource {
             "[triplets:hf] {} downloading {} ({} cached before)",
             self.config.source_id, label, cached_shards,
         );
-        let local_path = Self::download_and_materialize_shard(
+        let local_path = Self::download_and_materialize_shard_with_runtime(
             &self.config,
             &remote_path,
             expected_bytes,
             &label,
+            Some(self.http_runtime.as_ref()),
         )?;
 
         let global_start = {
@@ -4479,8 +4547,10 @@ mod tests {
     }
 
     fn test_source(config: HuggingFaceRowsConfig) -> HuggingFaceRowSource {
+        let http_runtime = Arc::new(HuggingFaceRowSource::build_http_runtime(&config).unwrap());
         let source = HuggingFaceRowSource {
             config,
+            http_runtime,
             sampler_config: Arc::new(Mutex::new(None)),
             state: Arc::new(Mutex::new(SourceState {
                 materialized_rows: 0,
@@ -5889,8 +5959,10 @@ mod tests {
     fn configured_sampler_seed_and_paging_seed_require_sampler_config() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
+        let http_runtime = Arc::new(HuggingFaceRowSource::build_http_runtime(&config).unwrap());
         let source = HuggingFaceRowSource {
             config,
+            http_runtime,
             sampler_config: Arc::new(Mutex::new(None)),
             state: Arc::new(Mutex::new(SourceState {
                 materialized_rows: 0,
