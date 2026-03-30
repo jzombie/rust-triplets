@@ -140,7 +140,7 @@ pub fn window_index_proximity(index: usize) -> f32 {
 ///
 /// Used by BM25 ranking tests to verify top-ranked candidates beat the
 /// uniform-pool baseline, and by the `extended-metrics` demo output.
-#[cfg(any(feature = "bm25-mining", feature = "extended-metrics"))]
+#[cfg(any(feature = "extended-metrics", all(test, feature = "bm25-mining")))]
 pub(crate) fn lexical_similarity_scores(left: &str, right: &str) -> (f32, f32) {
     if left.is_empty() || right.is_empty() {
         return (0.0, 0.0);

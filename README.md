@@ -130,6 +130,7 @@ Threading/concurrency behavior is intentionally layered and mostly synchronous a
 
 - Public sampler/source APIs are synchronous (`next_*_batch`, `refresh`, etc.). You can call them from any thread, but each call runs to completion on the caller side.
 - Per-call source refresh fan-out: within a batch/refresh cycle, sources are fetched in parallel, then joined and merged deterministically before sample assembly.
+- `IndexablePager::refresh_with` fetches records in parallel within a single source refresh. The fetcher closure must be `Fn + Send + Sync` (not `FnMut`).
 - `BatchPrefetcher` adds a separate concurrency layer: one dedicated background producer thread repeatedly calls sampler batch APIs and pushes results into a bounded queue; the training loop consumes via `next()`.
 - With feature `huggingface`, each `HuggingFaceRowSource` maintains its own Tokio runtime for HF network I/O (`reqwest` + `hf-hub` tokio client), but this is isolated to the HF backend implementation. The rest of the crate does not require a global async runtime.
 - HF sources may also run a background shard-expansion thread to materialize additional remote shards while keeping sampler-facing calls synchronous.
@@ -957,7 +958,7 @@ fn reported_record_count(&self, config: &SamplerConfig) -> Result<u128, SamplerE
 }
 ```
 
-For time-ordered corpora, prefer the `IndexableSource` + `IndexableAdapter` path (and use `IndexablePager` directly only when you need a custom `refresh(...)`) for deterministic shuffled paging with cursor resume.
+For time-ordered corpora, prefer the `IndexableSource` + `IndexableAdapter` path (and use `IndexablePager` directly only when you need a custom `refresh(...)` with a `Fn + Send + Sync` fetcher) for deterministic shuffled paging with cursor resume.
 
 Helper-based example:
 
