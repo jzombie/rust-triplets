@@ -208,7 +208,9 @@ impl IndexablePager {
             if records.len() >= max {
                 break;
             }
-            if let Some(r) = result? { records.push(r) }
+            if let Some(r) = result? {
+                records.push(r)
+            }
             final_cursor = cursor_after;
         }
         // Sequential fallback for any shortage caused by None returns.
