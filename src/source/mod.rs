@@ -9,7 +9,7 @@
 use chrono::{DateTime, Utc};
 use std::hash::Hash;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::config::{SamplerConfig, TripletRecipe};
 use crate::data::DataRecord;
@@ -143,13 +143,20 @@ impl IndexablePager {
     ///
     /// Useful when records are indexable but not exposed through `IndexableSource`
     /// (for example, temporary index stores or precomputed path lists).
-    pub fn refresh_with(
+    ///
+    /// The fetcher is called concurrently using rayon. It must be `Fn + Send + Sync`
+    /// (not merely `FnMut`). All callers that pass a closure over a shared
+    /// `&IndexableSource` satisfy this because `record_at` takes `&self`.
+    pub fn refresh_with<F>(
         &self,
         total: usize,
         cursor: Option<&SourceCursor>,
         limit: Option<usize>,
-        mut fetch: impl FnMut(usize) -> Result<Option<DataRecord>, SamplerError>,
-    ) -> Result<SourceSnapshot, SamplerError> {
+        fetch: F,
+    ) -> Result<SourceSnapshot, SamplerError>
+    where
+        F: Fn(usize) -> Result<Option<DataRecord>, SamplerError> + Send + Sync,
+    {
         if total == 0 {
             return Ok(SourceSnapshot {
                 records: Vec::new(),
@@ -164,47 +171,63 @@ impl IndexablePager {
             start = 0;
         }
         let max = limit.unwrap_or(total);
-        let mut records = Vec::new();
         let seed = Self::seed_for(&self.source_id, total);
+
+        // Pre-generate the full permuted index sequence with per-position cursor
+        // values. Pure integer arithmetic — negligible cost vs. record fetch.
         let mut permutation = IndexPermutation::new(total, seed, start as u64);
-        let report_every = Duration::from_millis(750);
-        let refresh_start = Instant::now();
-        let mut last_report = refresh_start;
-        let mut attempts = 0usize;
+        let seq: Vec<(usize, usize)> = (0..total)
+            .map(|_| {
+                let idx = permutation.next();
+                (idx, permutation.cursor())
+            })
+            .collect();
+
         let should_report = total >= 10_000 || max >= 1_024;
+        let refresh_start = Instant::now();
         if should_report {
             eprintln!(
                 "[triplets:source] refresh start source='{}' total={} target={}",
                 self.source_id, total, max
             );
         }
-        for _ in 0..total {
-            attempts += 1;
+
+        use rayon::prelude::*;
+        // Only process the first `max` entries in parallel. Since almost
+        // all index positions return Some, this fills the quota in a single
+        // parallel pass. Any residual shortage (from None returns) is
+        // handled by a short sequential sweep of the remaining entries.
+        let par_end = max.min(total);
+        let results: Vec<Result<Option<DataRecord>, SamplerError>> =
+            seq[..par_end].par_iter().map(|&(idx, _)| fetch(idx)).collect();
+        let mut records = Vec::with_capacity(max.min(total));
+        let mut final_cursor = start;
+        for (result, &(_, cursor_after)) in results.into_iter().zip(seq[..par_end].iter()) {
             if records.len() >= max {
                 break;
             }
-            let idx = permutation.next();
-            if let Some(record) = fetch(idx)? {
-                records.push(record);
+            match result? {
+                Some(r) => records.push(r),
+                None => {}
             }
-            if should_report && last_report.elapsed() >= report_every {
-                eprintln!(
-                    "[triplets:source] refresh progress source='{}' attempted={}/{} fetched={}/{} elapsed={:.1}s",
-                    self.source_id,
-                    attempts,
-                    total,
-                    records.len(),
-                    max,
-                    refresh_start.elapsed().as_secs_f64()
-                );
-                last_report = Instant::now();
-            }
+            final_cursor = cursor_after;
         }
+        // Sequential fallback for any shortage caused by None returns.
+        for &(idx, cursor_after) in &seq[par_end..] {
+            if records.len() >= max {
+                break;
+            }
+            if let Some(r) = fetch(idx)? {
+                records.push(r);
+            }
+            final_cursor = cursor_after;
+        }
+
         if should_report {
             eprintln!(
                 "[triplets:source] refresh done source='{}' attempted={} fetched={} elapsed={:.2}s",
                 self.source_id,
-                attempts,
+                total,
                 records.len(),
                 refresh_start.elapsed().as_secs_f64()
             );
@@ -214,12 +237,11 @@ impl IndexablePager {
             .map(|record| record.updated_at)
             .max()
             .unwrap_or_else(Utc::now);
-        let next_start = permutation.cursor();
         Ok(SourceSnapshot {
             records,
             cursor: SourceCursor {
                 last_seen,
-                revision: next_start as u64,
+                revision: final_cursor as u64,
             },
         })
     }
@@ -415,6 +437,7 @@ mod tests {
     use crate::data::{QualityScore, RecordSection, SectionRole};
     use crate::types::RecordId;
     use chrono::Duration;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
     use std::time::Duration as StdDuration;
 
@@ -661,12 +684,11 @@ mod tests {
     #[test]
     fn indexable_pager_reporting_branch_emits_progress_when_refresh_is_slow() {
         let pager = IndexablePager::new("slow_reporting");
-        let mut slept = false;
+        let slept = AtomicBool::new(false);
         let snapshot = pager
             .refresh_with(2_000, None, Some(1_024), |_idx| {
-                if !slept {
+                if !slept.swap(true, Ordering::Relaxed) {
                     thread::sleep(StdDuration::from_millis(800));
-                    slept = true;
                 }
                 Ok(None)
             })
