@@ -12,7 +12,7 @@ Compose an effectively unlimited supply of [training triplets](https://en.wikipe
 - Automatic & deterministic data splits.
 - Optional split-store state snapshotting: split assignments (train/validation/test) and sampler cursor state are persisted to a compact binary file. Only record IDs and lightweight metadata are stored — record text and payloads are never written to the split store, keeping snapshot files small even for large corpora. Resume a multi-epoch training run from any persisted checkpoint.
 - Automatic source chunking (ensure all data is eventually consumed regardless of context window size).
-- Anti-regime and diversity features: Anchor/positive swapping; negatives drawn from other anchors/positives; long anchor/positive sections are chunked into additional anchor/positive windows; deterministic pseudo-random ID sampling via IndexPermutation (affine/LCG-style permutation with cycle-walking); and hash-shuffled source cycling (epoch/cycle-seeded) layered over split-aware Round-Robin cursors to avoid fixed Round-Robin regimes.
+- Anti-regime and diversity features: anchor/positive swapping; long-section chunking into additional windows; deterministic pseudo-random ID sampling via `IndexPermutation` (affine/LCG-style permutation); and hash-shuffled epoch-seeded source cycling layered over split-aware round-robin cursors. See [Randomization](#randomization) for the complete model.
 - Combine any combination of text-based streaming and static data sources.
 - Pluggable extension points in one pipeline: `DataSource`/`IndexableSource` for ingestion, `NegativeBackend` for negative mining, and `ChunkingAlgorithm` for section chunking (with built-in file/HuggingFace adapters included).
 - Fast, reproducible baseline sampling (great for iteration/debug), with optional BM25 hard-negative mining when you want stricter lexical difficulty.
@@ -22,7 +22,7 @@ Compose an effectively unlimited supply of [training triplets](https://en.wikipe
 
 > _The loss function and choice of ML framework is a separate concern; this crate only handles the data._
 
-View the [capabilities](#capabilities) for a deeper dive into the aforementioned list.
+View the [capabilities](#capabilities) for a deeper dive into the aforementioned list, and [Randomization](#randomization) for how all sources of randomness are structured and seeded.
 
 > _**Note:** This crate is intended primarily for textual (or textualized) data — records that can be represented as text (for example: documents, QA pairs, logs, or metadata-prefixed chunks) suitable for language-model training, embedding/metric-learning workflows, and related text-model pipelines._
 
@@ -134,9 +134,67 @@ Threading/concurrency behavior is intentionally layered and mostly synchronous a
 - `BatchPrefetcher` adds a separate concurrency layer: one dedicated background producer thread repeatedly calls sampler batch APIs and pushes results into a bounded queue; the training loop consumes via `next()`.
 - With feature `huggingface`, each `HuggingFaceRowSource` maintains its own Tokio runtime for HF network I/O (`reqwest` + `hf-hub` tokio client), but this is isolated to the HF backend implementation. The rest of the crate does not require a global async runtime.
 - HF sources may also run a background shard-expansion thread to materialize additional remote shards while keeping sampler-facing calls synchronous.
-- Split assignment and source paging remain deterministic for a fixed seed/config; concurrency changes throughput and timing, not deterministic mapping rules.
+- Split assignment and source paging remain deterministic for a fixed seed/config; concurrency changes throughput and timing, not deterministic mapping rules. See [Randomization](#randomization).
 
 Practical takeaway: you get parallel source I/O and optional asynchronous prefetching, while the top-level training-data API remains simple and synchronous.
+
+## Randomization
+
+All randomness in `triplets` is **deterministic and reproducible** for a fixed seed and configuration. This section centralizes every layer of randomness in the crate.
+
+### Seed hierarchy
+
+| Layer | Derived from | Controls |
+|---|---|---|
+| Global base seed | `SamplerConfig.seed` | Root of all downstream seeds |
+| Epoch seed | `derive_epoch_seed(base_seed, epoch)` | Per-epoch re-ordering of all shuffled sequences |
+| Per-record sort key | `stable_hash_str(epoch_seed, record.id)` | Record ordering within each source |
+| Source-cycle sort key | `stable_hash_str(epoch_seed ^ cycle, source_id)` | Source traversal order each cycle |
+
+### Per-record ordering and `stable_hash_str`
+
+Within each source, records are sorted each epoch by `stable_hash_str(epoch_seed, record.id)`, producing a different but fully reproducible ordering per epoch. Both `stable_hash_str` and `derive_epoch_seed` are part of the public API via `triplets::hash`:
+
+```rust,no_run
+use triplets::hash::{derive_epoch_seed, stable_hash_str};
+
+let base_seed: u64 = 42;
+let epoch_seed = derive_epoch_seed(base_seed, 3);
+let sort_key = stable_hash_str(epoch_seed, "my-record-id");
+```
+
+Use `stable_hash_str` when deriving per-record RNG seeds in a custom source — for example, to assign disjoint tag subsets to different sections of the same record deterministically:
+
+```rust,no_run
+use triplets::hash::stable_hash_str;
+use rand::SeedableRng;
+use rand::seq::SliceRandom;
+
+let seed = stable_hash_str(0x1337_c0de_cafe_babe, "AAPL");
+let mut rng = rand::rngs::SmallRng::seed_from_u64(seed);
+let mut tags = vec!["Revenue", "Assets", "Liabilities"];
+tags.shuffle(&mut rng);
+```
+
+### Source-cycle shuffling
+
+After each source completes a pass, the traversal order for the next cycle is re-shuffled using the epoch seed mixed with a cycle counter. This prevents a fixed round-robin ordering from persisting across epochs.
+
+### Record-index permutation (`IndexPermutation`)
+
+For deterministic paging without materializing all record IDs upfront, `FileCorpusIndex` uses an affine/LCG-style `IndexPermutation` with cycle-walking. Each epoch produces a different permutation from the same base seed without requiring a full in-memory ID list.
+
+### Anchor/positive swap (anti-shortcut)
+
+At triplet finalization, a deterministic 50% coin-flip swaps the anchor and positive slots so both orderings appear at equal frequency across training. This prevents contrastive objectives (InfoNCE and similar) from exploiting a fixed slot assignment as a shortcut. The coin-flip is seeded by the sampler RNG and its state is included in split-store checkpoints.
+
+### Split assignment
+
+Split labels (train/validation/test) are assigned deterministically from `record_id + seed + ratios`. Split membership is **not** affected by epoch changes, source reorders, or any RNG state — records always land in the same split for a fixed seed and ratio configuration. Only record ordering and pairings within a split vary across epochs.
+
+### RNG state persistence
+
+The sampler's RNG state — including the anchor/positive swap coin-flip position, round-robin index, and epoch counter — is saved in the split-store checkpoint written by `save_sampler_state`. Resuming from a checkpoint restores exactly the RNG position it was at when the checkpoint was created.
 
 ## Sample scoring and weighting
 
@@ -834,7 +892,7 @@ This keeps sampler internals stable while making chunking behavior independently
 ## Capabilities
 
 - **Automatic deterministic splits** (train/validation/test) from record IDs + seed.
-- **Sampler-seed-driven source determinism** for built-in deterministic source ordering (file source) and deterministic shard download order (Hugging Face). Note: HF row-level selection within a `refresh` call depends on how many shards are locally cached and is not reproducible across cache wipes — only split assignment and shard download order are stable end-to-end for HF sources.
+- **Sampler-seed-driven source determinism** for built-in deterministic source ordering (file source) and deterministic shard download order (Hugging Face). Note: HF row-level selection within a `refresh` call depends on how many shards are locally cached and is not reproducible across cache wipes — only split assignment and shard download order are stable end-to-end for HF sources. See [Randomization](#randomization) for the complete seed hierarchy.
 - **Runtime batch sampling** via `next_triplet_batch`, `next_pair_batch`, and `next_text_batch`.
 - **Recipe-driven sample construction** for triplet/pair/text generation (anchor/positive/negative selectors).
 - **Per-source independent recipe rules**: when `SamplerConfig.recipes` is left empty, each source supplies its own `default_triplet_recipes()` so sources with different data shapes — documents, QA pairs, structured logs — can each use tailored anchor/positive/negative strategies without affecting one another. A global recipe set can still be provided to override all sources uniformly.
@@ -845,7 +903,7 @@ This keeps sampler internals stable while making chunking behavior independently
 - **Auto-recipe chunk proximity weighting**: auto-injected long-section triplets include an anchor-positive proximity multiplier. See [Sample scoring and weighting](#sample-scoring-and-weighting) for exact formulas.
 - **Deterministic long-section chunking**: short text stays as one chunk; long text becomes multiple chunk candidates (sliding windows) sampled over time. Defaults are `max_window_tokens=1024`, `overlap_tokens=[64]`, and `summary_fallback_tokens=512` (all configurable via `SamplerConfig.chunking`). Sliding windows are the built-in default via `SlidingWindowChunker`, and chunking is now pluggable through `ChunkingAlgorithm`.
 - **Weight-aware sampling controls** across source weights, recipe weights, and chunk trust/quality weighting. See [Sample scoring and weighting](#sample-scoring-and-weighting) for exact behavior.
-- **Anti-shortcut anchor/positive swap**: deterministic 50% coin-flip swaps anchor and positive slots at triplet finalization, so both orderings appear at equal frequency. Important for InfoNCE and other contrastive objectives where asymmetric slot distributions would otherwise provide a shortcut. Seeded by sampler RNG; fully reproducible and covered by state-persistence mechanics.
+- **Anti-shortcut anchor/positive swap**: swaps anchor and positive slots at triplet finalization via a deterministic 50% coin-flip so both orderings appear at equal frequency. Important for InfoNCE and other contrastive objectives where asymmetric slot distributions would otherwise provide a shortcut. See [Randomization](#randomization).
 - **Anti-shortcut metadata-prefix variation** via `KvpPrefixSampler` (variant choice, per-field presence probabilities, field-order shuffle, and prefix dropout).
 - **Per-source batch mixing controls** with independent source frequency controls (including over/under-sampling).
 - **Per-source trust controls** to weight quality/trust independently by source/taxonomy.
@@ -896,15 +954,15 @@ Implementation sources:
 - `src/sampler/mod.rs` (`choose_anchor_record`, `next_*_batch_inner_with_weights`, `pad_with_reuse`)
 
 - **`ingestion_max_records` tuning**: setting this above `batch_size` usually improves sample diversity (broader anchor/negative candidate pool) and reduces near-term repetition, but returns diminish once source availability, split boundaries, and recipe constraints dominate. For remote backends such as Hugging Face, larger initial ingestion targets can require pulling more initial shards before the first batch, so startup latency can increase depending on shard sizes and network throughput.
-- **File indexing**: deterministic path ordering + deterministic index permutation for paging.
-- **Source ordering**: round-robin by source, deterministic within-source ordering by seed/epoch (file source). For `HuggingFaceRowSource`, shard download order is deterministic by seed, but row selection within a refresh is not stable across cache wipes (see `HuggingFaceRowSource` doc).
-- **Splits**: labels are deterministic from `record_id + seed + ratios`; split APIs enforce `allowed_splits`.
+- **File indexing**: deterministic path ordering + deterministic index permutation for paging. See [Randomization](#randomization).
+- **Source ordering**: round-robin by source, deterministic within-source ordering by seed/epoch (file source). For `HuggingFaceRowSource`, shard download order is deterministic by seed, but row selection within a refresh is not stable across cache wipes (see `HuggingFaceRowSource` doc). See [Randomization](#randomization).
+- **Splits**: labels are deterministic from `record_id + seed + ratios`; split APIs enforce `allowed_splits`. See [Randomization](#randomization).
 - **Coverage caveat**: if `len_hint` drifts mid-epoch in streaming backends, strict single-pass coverage is not guaranteed.
 - **Weights**: recipe/source/chunk weights affect scaling, not deterministic ordering. See [Sample scoring and weighting](#sample-scoring-and-weighting).
 - **Scale note**: full scan/sort/index rebuild cost grows roughly linearly with file count and path bytes. This is intentional and appropriate for the target corpus scale (thousands to low millions of files). For LLM-scale pre-training across billions of tokens, the right tool is a format designed for that workload (Arrow/Parquet, WebDataset shards, or a dedicated high-throughput dataloader) — this crate targets iterative fine-tuning on domain-specific corpora, not bulk pre-training infrastructure.
 - **Order note**: index batching preserves permutation order; chunked index reads do not remove deterministic shuffling.
-- **Manual epoch control**: `sampler.set_epoch(n)` resets per-source cursors and reshuffles deterministically for that epoch.
-- **Persisted state scope**: epoch tracking is split-aware, but sampler/source cursors + RNG/round-robin state are persisted per store file.
+- **Manual epoch control**: `sampler.set_epoch(n)` resets per-source cursors and reshuffles deterministically for that epoch. See [Randomization](#randomization).
+- **Persisted state scope**: epoch tracking is split-aware, but sampler/source cursors + RNG/round-robin state are persisted per store file. See [Randomization](#randomization).
 - **Triplet recipe behavior**: if `SamplerConfig.recipes` is non-empty, those recipes are used for all sources; otherwise each source's `default_triplet_recipes()` is used (if any).
 - **Optional BM25 hard negatives**: with feature `bm25-mining`, one global BM25 index is rebuilt on the caller thread after each source-refresh cycle (never on drain-only steps). Source I/O fetches can run in parallel, then the index build runs after those refreshes join. The index covers the full N × `ingestion_max_records` per-source cache pool and stores lightweight ranking metadata/tokenized text (not duplicated `DataRecord`s). At sampling time BM25 ranks within the strategy-filtered, same-split candidate pool, and candidate choice rotates deterministically per anchor for diversity.
 - **Pair batches**: derived from triplets and follow the same source/recipe selection behavior.
