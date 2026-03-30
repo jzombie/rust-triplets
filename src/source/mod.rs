@@ -438,7 +438,7 @@ mod tests {
     use crate::data::{QualityScore, RecordSection, SectionRole};
     use crate::types::RecordId;
     use chrono::Duration;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::thread;
     use std::time::Duration as StdDuration;
 
@@ -718,6 +718,42 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn indexable_pager_sequential_fallback_fills_quota_when_parallel_pass_yields_none() {
+        // Exercise the seq[par_end..] fallback loop: parallel pass entries all
+        // return None, so the sequential sweep has to supply the records.
+        // total=8, limit=4 -> par_end=4. First 4 calls (parallel) get None;
+        // next 4 calls (sequential fallback) get Some, filling the quota.
+        let pager = IndexablePager::new("fallback_fill");
+        let call_count = AtomicUsize::new(0);
+        let par_end = 4usize;
+        let snapshot = pager
+            .refresh_with(8, None, Some(par_end), |idx| {
+                let n = call_count.fetch_add(1, Ordering::Relaxed);
+                if n < par_end {
+                    Ok(None)
+                } else {
+                    Ok(Some(DataRecord {
+                        id: format!("r_{idx}"),
+                        source: "fallback_fill".to_string(),
+                        created_at: Utc::now(),
+                        updated_at: Utc::now(),
+                        quality: QualityScore { trust: 1.0 },
+                        taxonomy: Vec::new(),
+                        sections: vec![RecordSection {
+                            role: SectionRole::Anchor,
+                            heading: None,
+                            text: "t".to_string(),
+                            sentences: vec!["t".to_string()],
+                        }],
+                        meta_prefix: None,
+                    }))
+                }
+            })
+            .unwrap();
+        assert_eq!(snapshot.records.len(), par_end);
     }
 
     #[test]
