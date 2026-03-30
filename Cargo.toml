@@ -1,6 +1,6 @@
 [package]
 name = "triplets"
-version = "0.12.0-alpha"
+version = "0.13.0-alpha"
 edition = "2024"
 description = "Composable data sampling primitives for deterministic multi-source ML/AI training-data orchestration."
 license = "MIT OR Apache-2.0"
@@ -30,7 +30,7 @@ clap = { version = "4.6.0", features = ["derive"] }
 hf-hub = { version = "0.5.0", optional = true, default-features = false, features = ["tokio", "rustls-tls"] }
 indexmap = "2.13.0"
 line-ending = "1.5.1"
-parquet = { version = "58.0.0", optional = true, features = ["json"] }
+parquet = { version = "58.1.0", optional = true, features = ["json"] }
 rand = { version = "0.9.2", features = ["std", "small_rng"] }
 rayon = "1.11.0"
 reqwest = { version = "0.12.28", optional = true, default-features = false, features = ["rustls-tls", "stream", "json"] }
@@ -39,7 +39,7 @@ serde_json = { version = "1.0.149", optional = true }
 simd-r-drive = "0.16.0-alpha"
 tempfile = "3.27.0"
 thiserror = "2.0.18"
-tokio = { version = "1.48.0", optional = true, features = ["rt", "fs", "io-util"] }
+tokio = { version = "1.50.0", optional = true, features = ["rt", "fs", "io-util"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 walkdir = "2.5.0"
