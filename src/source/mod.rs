@@ -198,18 +198,17 @@ impl IndexablePager {
         // parallel pass. Any residual shortage (from None returns) is
         // handled by a short sequential sweep of the remaining entries.
         let par_end = max.min(total);
-        let results: Vec<Result<Option<DataRecord>, SamplerError>> =
-            seq[..par_end].par_iter().map(|&(idx, _)| fetch(idx)).collect();
+        let results: Vec<Result<Option<DataRecord>, SamplerError>> = seq[..par_end]
+            .par_iter()
+            .map(|&(idx, _)| fetch(idx))
+            .collect();
         let mut records = Vec::with_capacity(max.min(total));
         let mut final_cursor = start;
         for (result, &(_, cursor_after)) in results.into_iter().zip(seq[..par_end].iter()) {
             if records.len() >= max {
                 break;
             }
-            match result? {
-                Some(r) => records.push(r),
-                None => {}
-            }
+            if let Some(r) = result? { records.push(r) }
             final_cursor = cursor_after;
         }
         // Sequential fallback for any shortage caused by None returns.
