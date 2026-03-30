@@ -2,12 +2,18 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 
+/// Run `f` against a fresh [`DefaultHasher`] and return the resulting digest.
 pub fn stable_hash_with(f: impl FnOnce(&mut DefaultHasher)) -> u64 {
     let mut hasher = DefaultHasher::new();
     f(&mut hasher);
     hasher.finish()
 }
 
+/// Return a deterministic u64 hash of `value` mixed with `seed`.
+///
+/// Suitable for deriving per-record RNG seeds where `seed` is a global base
+/// (e.g. a shuffle seed constant) and `value` is a unique identifier such as
+/// a ticker symbol or record id.
 pub fn stable_hash_str(seed: u64, value: &str) -> u64 {
     stable_hash_with(|hasher| {
         seed.hash(hasher);
@@ -15,6 +21,7 @@ pub fn stable_hash_str(seed: u64, value: &str) -> u64 {
     })
 }
 
+/// Return a deterministic u64 hash of the string form of `path` mixed with `seed`.
 pub fn stable_hash_path(seed: u64, path: &Path) -> u64 {
     stable_hash_with(|hasher| {
         seed.hash(hasher);

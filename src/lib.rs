@@ -12,7 +12,8 @@ pub mod data;
 mod epoch;
 /// Reusable example runners shared by downstream crates.
 pub mod example_apps;
-mod hash;
+/// Stable deterministic hashing utilities.
+pub mod hash;
 /// Capacity and sampling estimation helpers.
 pub mod heuristics;
 /// Background ingestion and caching infrastructure.
@@ -46,6 +47,7 @@ pub use data::{
     SectionRole, TextBatch, TextSample, TripletBatch,
 };
 pub use errors::SamplerError;
+pub use hash::stable_hash_str;
 pub use ingestion::{IngestionManager, RecordCache};
 pub use kvp::{KvpField, KvpPrefixSampler};
 pub use sampler::{BatchPrefetcher, Sampler, TripletSampler};
