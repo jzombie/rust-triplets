@@ -10,6 +10,7 @@
 //! in `TripletSamplerInner::new`.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use indexmap::IndexMap;
 
@@ -50,11 +51,11 @@ pub(super) trait NegativeBackend: Send {
         &mut self,
         anchor: &DataRecord,
         anchor_split: SplitLabel,
-        pool: Vec<DataRecord>,
+        pool: Vec<Arc<DataRecord>>,
         fallback_used: bool,
         anchor_query_text: Option<&str>,
         rng: &mut dyn rand::RngCore,
-    ) -> Option<(DataRecord, bool)>;
+    ) -> Option<(Arc<DataRecord>, bool)>;
 
     /// Called at the start of each `sync_records_from_cache` cycle, before the
     /// record pool is updated.  Backends should reset any per-anchor cursor state
@@ -67,7 +68,7 @@ pub(super) trait NegativeBackend: Send {
     /// those sources rather than performing a full global reset.
     fn on_records_refreshed(
         &mut self,
-        records: &IndexMap<RecordId, DataRecord>,
+        records: &IndexMap<RecordId, Arc<DataRecord>>,
         max_window_tokens: usize,
         split_fn: &dyn Fn(&RecordId) -> Option<SplitLabel>,
         refreshed_source_ids: &[SourceId],

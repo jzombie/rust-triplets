@@ -262,7 +262,7 @@ struct TripletSamplerInner<S: SplitStore + EpochStateStore + SamplerStateStore +
     /// On-demand ingestion manager that fills the batch-sized buffer.
     ingestion: IngestionManager,
     /// Current in-memory record pool keyed by record id.
-    records: IndexMap<RecordId, DataRecord>,
+    records: IndexMap<RecordId, Arc<DataRecord>>,
     /// Deterministic RNG for per-batch shuffles and sampling.
     rng: DeterministicRng,
     /// Config-level triplet recipes used when sources do not supply their own.
@@ -841,7 +841,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         &mut self,
         source: Option<&str>,
         split: SplitLabel,
-    ) -> Option<DataRecord> {
+    ) -> Option<Arc<DataRecord>> {
         if let Some(source) = source {
             let indices = self.source_record_indices.get(source)?;
             if indices.is_empty() {
@@ -852,7 +852,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             let offset_seed = self.epoch_seed() ^ (cycle as u64);
             let offset = (stable_hash_str(offset_seed, source) as usize) % indices.len();
             let mut wrapped = false;
-            let mut selected: Option<DataRecord> = None;
+            let mut selected: Option<Arc<DataRecord>> = None;
             for _ in 0..indices.len() {
                 let pos = (cursor % indices.len()).saturating_add(offset) % indices.len();
                 let idx = indices[pos];
@@ -864,7 +864,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                     if self.split_store.label_for(&record.id) != Some(split) {
                         continue;
                     }
-                    selected = Some(record.clone());
+                    selected = Some(Arc::clone(record));
                     break;
                 }
             }
@@ -879,7 +879,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             if let Some(record_id) = self.chunk_index.get(&chunk_id)
                 && let Some(record) = self.records.get(record_id)
             {
-                return Some(record.clone());
+                return Some(Arc::clone(record));
             }
         }
         None
@@ -923,7 +923,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         &'_ self,
         record: &DataRecord,
         offset_days: i32,
-    ) -> Option<DataRecord> {
+    ) -> Option<Arc<DataRecord>> {
         let target = record.created_at + Duration::days(offset_days.into());
         let key = record.taxonomy.first().cloned();
         let record_split = self.split_store.label_for(&record.id)?;
@@ -952,7 +952,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         anchor_record: &DataRecord,
         strategy: &NegativeStrategy,
         anchor_query_text: Option<&str>,
-    ) -> Option<(DataRecord, bool)> {
+    ) -> Option<(Arc<DataRecord>, bool)> {
         let anchor_split = self.split_store.label_for(&anchor_record.id)?;
 
         let in_anchor_split = |candidate: &DataRecord| {
@@ -966,7 +966,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             NegativeStrategy::WrongArticle => {
                 let anchor_date =
                     taxonomy_value(anchor_record, META_FIELD_DATE).map(|d| d.to_string());
-                let mut same_date: Vec<DataRecord> = self
+                let mut same_date: Vec<Arc<DataRecord>> = self
                     .records
                     .values()
                     .filter(|candidate| {
@@ -1025,7 +1025,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             NegativeStrategy::WrongPublicationDate => {
                 let anchor_date =
                     taxonomy_value(anchor_record, META_FIELD_DATE).map(|d| d.to_string());
-                let pool: Vec<DataRecord> = self
+                let pool: Vec<Arc<DataRecord>> = self
                     .records
                     .values()
                     .filter(|candidate| {
@@ -1078,7 +1078,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 )
             }
             NegativeStrategy::QuestionAnswerMismatch => {
-                let pool: Vec<DataRecord> = self
+                let pool: Vec<Arc<DataRecord>> = self
                     .records
                     .values()
                     .filter(|candidate| {
@@ -1603,7 +1603,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 self.sources_with_long_sections
                     .insert(record.source.clone());
             }
-            self.records.insert(record.id.clone(), record);
+            self.records.insert(record.id.clone(), Arc::new(record));
         }
         self.prune_cursor_state();
         self.rebuild_chunk_index();

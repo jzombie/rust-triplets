@@ -5,6 +5,7 @@
 //! zero-sized, all randomness state lives in the sampler's own `rng` field.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use indexmap::IndexMap;
 
@@ -29,11 +30,11 @@ impl NegativeBackend for DefaultBackend {
         &mut self,
         _anchor: &DataRecord,
         _anchor_split: SplitLabel,
-        pool: Vec<DataRecord>,
+        pool: Vec<Arc<DataRecord>>,
         fallback_used: bool,
         _anchor_query_text: Option<&str>,
         rng: &mut dyn rand::RngCore,
-    ) -> Option<(DataRecord, bool)> {
+    ) -> Option<(Arc<DataRecord>, bool)> {
         use rand::prelude::IndexedRandom as _;
         pool.choose(rng)
             .cloned()
@@ -44,7 +45,7 @@ impl NegativeBackend for DefaultBackend {
 
     fn on_records_refreshed(
         &mut self,
-        _records: &IndexMap<RecordId, DataRecord>,
+        _records: &IndexMap<RecordId, Arc<DataRecord>>,
         _max_window_tokens: usize,
         _split_fn: &dyn Fn(&RecordId) -> Option<SplitLabel>,
         _refreshed_source_ids: &[SourceId],
@@ -119,7 +120,7 @@ mod tests {
         let mut backend = DefaultBackend;
         let mut rng = StdRng::seed_from_u64(11);
         let anchor = record("anchor");
-        let pool = vec![record("neg_a"), record("neg_b"), record("neg_c")];
+        let pool = vec![Arc::new(record("neg_a")), Arc::new(record("neg_b")), Arc::new(record("neg_c"))];
 
         let selected = backend.choose_negative(
             &anchor,
@@ -138,7 +139,7 @@ mod tests {
     #[test]
     fn default_backend_noop_methods_and_test_hooks_are_stable() {
         let mut backend = DefaultBackend;
-        let records = IndexMap::from_iter([("r1".to_string(), record("r1"))]);
+        let records = IndexMap::from_iter([("r1".to_string(), Arc::new(record("r1")))]);
         let valid_ids = HashSet::from_iter(["r1".to_string()]);
 
         backend.on_sync_start();

@@ -9,6 +9,7 @@
 //! only a `Box<dyn NegativeBackend>` and knows nothing about BM25 internals.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use bm25::{Document, Language, SearchEngine, SearchEngineBuilder};
 use indexmap::IndexMap;
@@ -93,11 +94,11 @@ impl Bm25Backend {
         &mut self,
         anchor: &DataRecord,
         anchor_split: SplitLabel,
-        pool: &[DataRecord],
+        pool: &[Arc<DataRecord>],
         fallback_used: bool,
         anchor_query_text: Option<&str>,
         rng: &mut dyn rand::RngCore,
-    ) -> Option<(DataRecord, bool)> {
+    ) -> Option<(Arc<DataRecord>, bool)> {
         if pool.is_empty() {
             return None;
         }
@@ -123,11 +124,11 @@ impl Bm25Backend {
         //
         // Cursors are cleared in on_sync_start() so a refreshed corpus
         // restarts rotation from rank-1 for each anchor.
-        let pool_by_id: HashMap<&str, &DataRecord> =
+        let pool_by_id: HashMap<&str, &Arc<DataRecord>> =
             pool.iter().map(|r| (r.id.as_str(), r)).collect();
 
         let candidate_ids = self.ranked_candidates(anchor, anchor_split, anchor_query_text);
-        let ranked_pool: Vec<DataRecord> = candidate_ids
+        let ranked_pool: Vec<Arc<DataRecord>> = candidate_ids
             .iter()
             .filter_map(|id| pool_by_id.get(id.as_str()).copied().cloned())
             .collect();
@@ -306,11 +307,11 @@ impl NegativeBackend for Bm25Backend {
         &mut self,
         anchor: &DataRecord,
         anchor_split: SplitLabel,
-        pool: Vec<DataRecord>,
+        pool: Vec<Arc<DataRecord>>,
         fallback_used: bool,
         anchor_query_text: Option<&str>,
         rng: &mut dyn rand::RngCore,
-    ) -> Option<(DataRecord, bool)> {
+    ) -> Option<(Arc<DataRecord>, bool)> {
         self.select_hard_negative(
             anchor,
             anchor_split,
@@ -329,7 +330,7 @@ impl NegativeBackend for Bm25Backend {
 
     fn on_records_refreshed(
         &mut self,
-        records: &IndexMap<RecordId, DataRecord>,
+        records: &IndexMap<RecordId, Arc<DataRecord>>,
         max_window_tokens: usize,
         split_fn: &dyn Fn(&RecordId) -> Option<SplitLabel>,
         refreshed_source_ids: &[SourceId],
@@ -359,7 +360,7 @@ impl NegativeBackend for Bm25Backend {
             records_by_source
                 .entry(r.source.as_str())
                 .or_default()
-                .push(r);
+                .push(r.as_ref());
         }
         for source_id in refreshed_source_ids {
             let source_records = records_by_source

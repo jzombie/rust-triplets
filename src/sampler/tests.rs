@@ -2858,7 +2858,7 @@ fn readable_triplet_examples_by_mode() {
             let (negative, _fallback_used) = inner
                 .select_negative_record(&anchor, &NegativeStrategy::WrongArticle, None)
                 .expect("expected BM25 negative selection");
-            negatives.push(negative.id);
+            negatives.push(negative.id.clone());
         }
 
         let negative_titles: Vec<String> =
@@ -2975,7 +2975,7 @@ fn bm25_not_rng_only_when_only_anchor_text_changes() {
             let (negative, _fallback_used) = inner
                 .select_negative_record(&anchor, &NegativeStrategy::WrongArticle, None)
                 .expect("expected BM25 negative selection");
-            negatives.push(negative.id);
+            negatives.push(negative.id.clone());
         }
         negatives
     };
@@ -4542,8 +4542,8 @@ fn selector_edge_cases_cover_internal_branches() {
     store
         .upsert(neighbor.id.clone(), SplitLabel::Train)
         .unwrap();
-    inner.records.insert(record.id.clone(), record.clone());
-    inner.records.insert(neighbor.id.clone(), neighbor.clone());
+    inner.records.insert(record.id.clone(), Arc::new(record.clone()));
+    inner.records.insert(neighbor.id.clone(), Arc::new(neighbor.clone()));
 
     let temporal_chunk = inner
         .select_chunk(&record, &Selector::TemporalOffset(1))
@@ -4564,7 +4564,7 @@ fn empty_recipe_configs_error_when_sampling_without_sources() {
     let mut inner = TripletSamplerInner::new(config, Arc::clone(&store));
     let record = sample_record();
     store.upsert(record.id.clone(), SplitLabel::Train).unwrap();
-    inner.records.insert(record.id.clone(), record.clone());
+    inner.records.insert(record.id.clone(), Arc::new(record.clone()));
     inner
         .chunk_index
         .insert(record.id.clone(), record.id.clone());
@@ -4644,7 +4644,7 @@ fn source_less_batch_builders_sample_from_primed_epoch_tracker() {
             inner
                 .chunk_index
                 .insert(record.id.clone(), record.id.clone());
-            inner.records.insert(record.id.clone(), record);
+            inner.records.insert(record.id.clone(), Arc::new(record));
         }
         inner.epoch_tracker.ensure_loaded().unwrap();
         let records_by_split = inner.records_by_split().unwrap();
@@ -4735,7 +4735,7 @@ fn source_less_batch_builders_report_last_recipe_when_sampling_exhausts() {
         inner
             .chunk_index
             .insert(record.id.clone(), record.id.clone());
-        inner.records.insert(record.id.clone(), record);
+        inner.records.insert(record.id.clone(), Arc::new(record));
         inner.epoch_tracker.ensure_loaded().unwrap();
         let records_by_split = inner.records_by_split().unwrap();
         inner
@@ -4886,7 +4886,7 @@ fn records_by_split_and_anchor_selection_cover_edge_cases() {
     let mut inner = TripletSamplerInner::new(base_config(), Arc::clone(&store));
 
     let record = trader_record("source_a::record_a", "2025-01-01", "Alpha", "Body alpha");
-    inner.records.insert(record.id.clone(), record.clone());
+    inner.records.insert(record.id.clone(), Arc::new(record.clone()));
     inner
         .chunk_index
         .insert(record.id.clone(), record.id.clone());
@@ -4919,7 +4919,7 @@ fn records_by_split_and_anchor_selection_cover_edge_cases() {
         .unwrap();
     inner
         .records
-        .insert(validation_record.id.clone(), validation_record);
+        .insert(validation_record.id.clone(), Arc::new(validation_record));
     inner
         .source_record_indices
         .insert("source_b".into(), vec![1]);
@@ -4963,8 +4963,8 @@ fn temporal_neighbor_auto_pair_and_weighted_retry_paths_are_covered() {
     store
         .upsert(neighbor.id.clone(), SplitLabel::Train)
         .unwrap();
-    inner.records.insert(anchor.id.clone(), anchor.clone());
-    inner.records.insert(neighbor.id.clone(), neighbor.clone());
+    inner.records.insert(anchor.id.clone(), Arc::new(anchor.clone()));
+    inner.records.insert(neighbor.id.clone(), Arc::new(neighbor.clone()));
 
     let selected = inner
         .select_temporal_neighbor(&anchor, 1)
@@ -5253,7 +5253,7 @@ fn bm25_negative_is_lexically_closer_than_uniform_pool_baseline() {
 
     // Control baseline for non-BM25 behavior: uniform random choice over the
     // same strategy pool used by WrongArticle (same source, same split).
-    let pool: Vec<DataRecord> = inner
+    let pool: Vec<Arc<DataRecord>> = inner
         .records
         .values()
         .filter(|candidate| {
@@ -8147,8 +8147,8 @@ fn same_selector_triplet_returns_none_when_only_one_chunk_exists() {
         meta_prefix: None,
     };
 
-    inner.records.insert(anchor.id.clone(), anchor.clone());
-    inner.records.insert(negative.id.clone(), negative.clone());
+    inner.records.insert(anchor.id.clone(), Arc::new(anchor.clone()));
+    inner.records.insert(negative.id.clone(), Arc::new(negative.clone()));
     inner.rebuild_chunk_index();
 
     let recipe = TripletRecipe {
