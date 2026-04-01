@@ -27,7 +27,7 @@ pub struct DefaultBackend;
 
 impl NegativeBackend for DefaultBackend {
     fn choose_negative(
-        &mut self,
+        &self,
         _anchor: &DataRecord,
         _anchor_split: SplitLabel,
         pool: Vec<Arc<DataRecord>>,
@@ -99,7 +99,7 @@ mod tests {
 
     #[test]
     fn default_backend_returns_none_for_empty_pool() {
-        let mut backend = DefaultBackend;
+        let backend = DefaultBackend;
         let mut rng = StdRng::seed_from_u64(7);
         let anchor = record("anchor");
 
@@ -117,10 +117,14 @@ mod tests {
 
     #[test]
     fn default_backend_selects_from_pool_and_preserves_fallback_flag() {
-        let mut backend = DefaultBackend;
+        let backend = DefaultBackend;
         let mut rng = StdRng::seed_from_u64(11);
         let anchor = record("anchor");
-        let pool = vec![Arc::new(record("neg_a")), Arc::new(record("neg_b")), Arc::new(record("neg_c"))];
+        let pool = vec![
+            Arc::new(record("neg_a")),
+            Arc::new(record("neg_b")),
+            Arc::new(record("neg_c")),
+        ];
 
         let selected = backend.choose_negative(
             &anchor,

@@ -9,7 +9,7 @@
 //! only a `Box<dyn NegativeBackend>` and knows nothing about BM25 internals.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use bm25::{Document, Language, SearchEngine, SearchEngineBuilder};
 use indexmap::IndexMap;
@@ -53,36 +53,38 @@ struct PerSourceBm25Index {
 /// top-K rotation cursors.  The sampler core holds this as
 /// `Box<dyn NegativeBackend>` and interacts only through that trait.
 pub struct Bm25Backend {
-    /// Cached BM25-ranked candidate IDs keyed by anchor record ID.
-    hard_negatives: HashMap<RecordId, Vec<RecordId>>,
+    /// BM25-ranked candidate IDs keyed by anchor record ID.
+    /// Written once per anchor (full-article query), then read-only until records refresh.
+    hard_negatives: RwLock<HashMap<RecordId, Vec<RecordId>>>,
     /// Per-source BM25 search engines, keyed by source identifier.
+    /// Rebuilt on refresh; read-only during sampling.
     source_indexes: HashMap<SourceId, PerSourceBm25Index>,
     /// Per-`(anchor_id, split)` cursor for deterministic top-K rotation.
-    negative_cursors: HashMap<(RecordId, SplitLabel), usize>,
+    negative_cursors: RwLock<HashMap<(RecordId, SplitLabel), usize>>,
     /// Token limit used when building BM25 document text; mirrors
     /// `config.chunking.max_window_tokens` and is refreshed on every
     /// `on_records_refreshed` call.
     max_window_tokens: usize,
     /// Total calls to `select_hard_negative` (non-empty pool).
     #[cfg(feature = "extended-metrics")]
-    bm25_selection_count: u64,
+    bm25_selection_count: std::sync::atomic::AtomicU64,
     /// Calls where BM25 yielded no candidates intersecting the pool and
     /// the random fallback path was taken.
     #[cfg(feature = "extended-metrics")]
-    bm25_fallback_count: u64,
+    bm25_fallback_count: std::sync::atomic::AtomicU64,
 }
 
 impl Bm25Backend {
     pub fn new() -> Self {
         Self {
-            hard_negatives: HashMap::new(),
+            hard_negatives: RwLock::new(HashMap::new()),
             source_indexes: HashMap::new(),
-            negative_cursors: HashMap::new(),
+            negative_cursors: RwLock::new(HashMap::new()),
             max_window_tokens: 0,
             #[cfg(feature = "extended-metrics")]
-            bm25_selection_count: 0,
+            bm25_selection_count: std::sync::atomic::AtomicU64::new(0),
             #[cfg(feature = "extended-metrics")]
-            bm25_fallback_count: 0,
+            bm25_fallback_count: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -91,7 +93,7 @@ impl Bm25Backend {
     /// Core selection logic: intersect globally BM25-ranked candidates with
     /// the caller-supplied strategy pool, then rotate through the top-K.
     fn select_hard_negative(
-        &mut self,
+        &self,
         anchor: &DataRecord,
         anchor_split: SplitLabel,
         pool: &[Arc<DataRecord>],
@@ -105,7 +107,8 @@ impl Bm25Backend {
 
         #[cfg(feature = "extended-metrics")]
         {
-            self.bm25_selection_count += 1;
+            self.bm25_selection_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
 
         // BM25 top-K rotation.
@@ -138,12 +141,14 @@ impl Bm25Backend {
                 .len()
                 .min(BM25_HARD_NEGATIVE_ROTATION_TOP_K.max(1));
             let cursor_key = (anchor.id.clone(), anchor_split);
-            let cursor = self.negative_cursors.entry(cursor_key).or_insert(0);
+            let mut cursors = self.negative_cursors.write().unwrap();
+            let cursor = cursors.entry(cursor_key).or_insert(0);
             if *cursor >= top_k {
                 *cursor = 0;
             }
             let selected = ranked_pool.get(*cursor).cloned();
             *cursor = (*cursor + 1) % top_k;
+            drop(cursors);
             return selected.map(|record| (record, fallback_used));
         }
 
@@ -151,7 +156,8 @@ impl Bm25Backend {
         // sampling within `pool`.
         #[cfg(feature = "extended-metrics")]
         {
-            self.bm25_fallback_count += 1;
+            self.bm25_fallback_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         let mut fallback = pool.to_vec();
         fallback.sort_by(|a, b| a.id.cmp(&b.id));
@@ -178,21 +184,24 @@ impl Bm25Backend {
     /// The cache is invalidated in `on_records_refreshed` when the anchor's own
     /// source refreshes, and stale entries are removed by `prune_cursors`.
     fn ranked_candidates(
-        &mut self,
+        &self,
         anchor: &DataRecord,
         anchor_split: SplitLabel,
         anchor_query_text: Option<&str>,
     ) -> Vec<RecordId> {
         // When using full-article text, serve from cache if available.
         if anchor_query_text.is_none()
-            && let Some(cached) = self.hard_negatives.get(&anchor.id)
+            && let Some(cached) = self.hard_negatives.read().unwrap().get(&anchor.id).cloned()
         {
-            return cached.clone();
+            return cached;
         }
 
         let Some(index) = self.source_indexes.get(anchor.source.as_str()) else {
             if anchor_query_text.is_none() {
-                self.hard_negatives.insert(anchor.id.clone(), Vec::new());
+                self.hard_negatives
+                    .write()
+                    .unwrap()
+                    .insert(anchor.id.clone(), Vec::new());
             }
             return Vec::new();
         };
@@ -252,6 +261,8 @@ impl Bm25Backend {
         // because different windows of the same record produce different rankings.
         if anchor_query_text.is_none() {
             self.hard_negatives
+                .write()
+                .unwrap()
                 .insert(anchor.id.clone(), ranked.clone());
         }
         ranked
@@ -304,7 +315,7 @@ impl Bm25Backend {
 
 impl NegativeBackend for Bm25Backend {
     fn choose_negative(
-        &mut self,
+        &self,
         anchor: &DataRecord,
         anchor_split: SplitLabel,
         pool: Vec<Arc<DataRecord>>,
@@ -325,7 +336,7 @@ impl NegativeBackend for Bm25Backend {
     fn on_sync_start(&mut self) {
         // Strict mode: per-anchor cursor state must never outlive a corpus
         // snapshot boundary.  Clear it before the new snapshot is loaded.
-        self.negative_cursors.clear();
+        self.negative_cursors.write().unwrap().clear();
     }
 
     fn on_records_refreshed(
@@ -346,7 +357,7 @@ impl NegativeBackend for Bm25Backend {
         // from unchanged sources keep their cached lists intact.
         let refreshed_set: HashSet<&str> =
             refreshed_source_ids.iter().map(|s| s.as_str()).collect();
-        self.hard_negatives.retain(|anchor_id, _| {
+        self.hard_negatives.write().unwrap().retain(|anchor_id, _| {
             records
                 .get(anchor_id)
                 .map(|r| !refreshed_set.contains(r.source.as_str()))
@@ -379,20 +390,29 @@ impl NegativeBackend for Bm25Backend {
 
     fn prune_cursors(&mut self, valid_ids: &HashSet<RecordId>) {
         self.negative_cursors
+            .write()
+            .unwrap()
             .retain(|(record_id, _), _| valid_ids.contains(record_id));
         // Also remove hard-negative cache entries for anchors that are no
         // longer in the record pool.
         self.hard_negatives
+            .write()
+            .unwrap()
             .retain(|anchor_id, _| valid_ids.contains(anchor_id));
     }
 
     fn cursors_empty(&self) -> bool {
-        self.negative_cursors.is_empty()
+        self.negative_cursors.read().unwrap().is_empty()
     }
 
     #[cfg(all(feature = "bm25-mining", feature = "extended-metrics"))]
     fn bm25_fallback_stats(&self) -> (u64, u64) {
-        (self.bm25_fallback_count, self.bm25_selection_count)
+        (
+            self.bm25_fallback_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.bm25_selection_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
     }
 
     #[cfg(test)]
@@ -407,7 +427,7 @@ impl Bm25Backend {
     /// Expose `ranked_candidates` for test code in `sampler::tests`.
     #[cfg(test)]
     pub(in crate::sampler) fn ranked_candidates_pub(
-        &mut self,
+        &self,
         anchor: &DataRecord,
         anchor_split: SplitLabel,
     ) -> Vec<RecordId> {
@@ -421,7 +441,7 @@ impl Bm25Backend {
         &self,
         anchor_id: &RecordId,
     ) -> Option<Vec<RecordId>> {
-        self.hard_negatives.get(anchor_id).cloned()
+        self.hard_negatives.read().unwrap().get(anchor_id).cloned()
     }
 
     /// Return the record IDs of all documents across all per-source indexes.
@@ -449,13 +469,13 @@ impl Bm25Backend {
     /// Return the number of active negative-cursor entries.
     #[cfg(test)]
     pub(in crate::sampler) fn negative_cursors_len(&self) -> usize {
-        self.negative_cursors.len()
+        self.negative_cursors.read().unwrap().len()
     }
 
     /// Return `true` when no negative-cursor entries are active.
     #[cfg(test)]
     pub(in crate::sampler) fn negative_cursors_is_empty(&self) -> bool {
-        self.negative_cursors.is_empty()
+        self.negative_cursors.read().unwrap().is_empty()
     }
 
     /// Insert a synthetic cursor entry.  Used by tests that need to pre-seed
@@ -463,11 +483,11 @@ impl Bm25Backend {
     /// `sync_records_from_cache`.
     #[cfg(test)]
     pub(in crate::sampler) fn negative_cursors_insert(
-        &mut self,
+        &self,
         key: (RecordId, SplitLabel),
         value: usize,
     ) {
-        self.negative_cursors.insert(key, value);
+        self.negative_cursors.write().unwrap().insert(key, value);
     }
 }
 

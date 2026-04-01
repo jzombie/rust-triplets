@@ -34,7 +34,7 @@ pub(super) use self::default_backend::DefaultBackend;
 /// selecting** within it.  Strategy predicates (source isolation, split
 /// isolation, date matching) have already been applied by the caller before
 /// `choose_negative` is invoked.
-pub(super) trait NegativeBackend: Send {
+pub(super) trait NegativeBackend: Send + Sync {
     /// Select a hard-negative record from `pool` for `anchor`.
     ///
     /// `anchor_query_text` is the rendered text of the anchor's already-selected
@@ -48,7 +48,7 @@ pub(super) trait NegativeBackend: Send {
     /// `fallback_used` threads through from the caller and is returned unchanged
     /// so the batch builder can record whether the negative is from a degraded pool.
     fn choose_negative(
-        &mut self,
+        &self,
         anchor: &DataRecord,
         anchor_split: SplitLabel,
         pool: Vec<Arc<DataRecord>>,
