@@ -6,7 +6,7 @@
 
 Compose an effectively unlimited supply of [training triplets](https://en.wikipedia.org/wiki/Triplet_loss), pairs, or plaintext samples, from your existing corpus, with optional [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) hard-negative mining.
 
-- Multiple input source mixing, rule-driven sampling recipes, using a`Rayon`-managed thread pool with optional multi-batch prebuffering for training.
+- Multiple input source mixing, rule-driven sampling recipes, using a `Rayon`-managed thread pool for intra-batch parallelism and source I/O fan-out, with optional multi-batch prebuffering for training.
 - Optional per-recipe training instructions.
 - Configurable source sampling weights, independent source cursors, source/record trust weighting, and recipe weighting, so you can tune per-source sampling frequency and per-sample training weight.
 - Automatic & deterministic data splits.
@@ -131,12 +131,16 @@ Threading/concurrency behavior is intentionally layered and mostly synchronous a
 - Public sampler/source APIs are synchronous (`next_*_batch`, `refresh`, etc.). You can call them from any thread, but each call runs to completion on the caller side.
 - Per-call source refresh fan-out: within a batch/refresh cycle, sources are fetched in parallel, then joined and merged deterministically before sample assembly.
 - `IndexablePager::refresh_with` fetches records in parallel within a single source refresh. The fetcher closure must be `Fn + Send + Sync` (not `FnMut`).
+- **Intra-batch triplet assembly** runs three phases inside each `next_triplet_batch` call:
+  1. **Phase 1 (sequential):** anchor pre-assignment and per-slot fork-seed generation advance the main RNG deterministically.
+  2. **Phase 2 (parallel, `rayon::par_iter`):** anchor and positive chunk selection runs concurrently across all slots. Each slot uses an independent deterministic RNG derived from its Phase 1 fork seed, so the output is identical regardless of Rayon's internal thread scheduling.
+  3. **Phase 3 (sequential):** negative selection, BM25 cursor rotation, coin-flip anchor/positive swap, deduplication, and finalization run in slot order. Negative selection is kept sequential to guarantee that BM25 cursor state advances in a fixed, reproducible order across calls.
 - `BatchPrefetcher` adds a separate concurrency layer: one dedicated background producer thread repeatedly calls sampler batch APIs and pushes results into a bounded queue; the training loop consumes via `next()`.
 - With feature `huggingface`, each `HuggingFaceRowSource` maintains its own Tokio runtime for HF network I/O (`reqwest` + `hf-hub` tokio client), but this is isolated to the HF backend implementation. The rest of the crate does not require a global async runtime.
 - HF sources may also run a background shard-expansion thread to materialize additional remote shards while keeping sampler-facing calls synchronous.
 - Split assignment and source paging remain deterministic for a fixed seed/config; concurrency changes throughput and timing, not deterministic mapping rules. See [Randomization](#randomization).
 
-Practical takeaway: you get parallel source I/O and optional asynchronous prefetching, while the top-level training-data API remains simple and synchronous.
+Practical takeaway: you get parallel source I/O, parallel anchor+positive chunk selection within each batch, and optional asynchronous prefetching, while the top-level training-data API remains simple and synchronous.
 
 ## Randomization
 
@@ -816,24 +820,29 @@ Strategy filtering (source isolation, split isolation, date predicates) runs fir
 ### `NegativeBackend` trait
 
 ```rust,ignore
-pub(super) trait NegativeBackend: Send {
+pub(super) trait NegativeBackend: Send + Sync {
     /// Select a negative from the strategy-filtered `pool` for `anchor`.
+    ///
+    /// `anchor_query_text` is the rendered text of the anchor's selected chunk window.
+    /// BM25-aware backends use it as the search query instead of re-deriving text
+    /// from the full article; pass `None` to fall back to full-article text.
     fn choose_negative(
-        &mut self,
+        &self,
         anchor: &DataRecord,
         anchor_split: SplitLabel,
-        pool: Vec<DataRecord>,
+        pool: Vec<Arc<DataRecord>>,
         fallback_used: bool,
+        anchor_query_text: Option<&str>,
         rng: &mut dyn rand::RngCore,
-    ) -> Option<(DataRecord, bool)>;
+    ) -> Option<(Arc<DataRecord>, bool)>;
 
     fn on_sync_start(&mut self);
     fn on_records_refreshed(
         &mut self,
-        records: &IndexMap<RecordId, DataRecord>,
+        records: &IndexMap<RecordId, Arc<DataRecord>>,
         max_window_tokens: usize,
         split_fn: &dyn Fn(&RecordId) -> Option<SplitLabel>,
-        sources_refreshed: bool,
+        refreshed_source_ids: &[SourceId],
     );
     fn prune_cursors(&mut self, valid_ids: &HashSet<RecordId>);
     fn cursors_empty(&self) -> bool;
