@@ -9514,3 +9514,802 @@ fn bm25_query_uses_raw_chunk_text_not_decorated_text() {
         selected_prefix.id,
     );
 }
+
+// ── Parallel helper coverage ──────────────────────────────────────────────────
+
+/// Calls `select_chunk_parallel` with `Selector::Paragraph` on a sampler inner directly.
+/// Covers the Paragraph arm of `select_chunk_parallel` (previously never reached).
+#[test]
+fn select_chunk_parallel_paragraph_selector_returns_chunk_or_none() {
+    let split = SplitRatios::default();
+    let mut config = base_config();
+    config.chunking.max_window_tokens = 8;
+    config.chunking.overlap_tokens = vec![0];
+    let store = Arc::new(DeterministicSplitStore::new(split, 601).unwrap());
+    let sampler = TripletSampler::new(config, store);
+
+    let record = DataRecord {
+        id: "para_test".into(),
+        source: "unit".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        quality: QualityScore::default(),
+        taxonomy: vec![],
+        sections: vec![RecordSection {
+            role: SectionRole::Context,
+            heading: None,
+            text: "one two three four five".into(),
+            sentences: vec!["one two three four five".into()],
+        }],
+        meta_prefix: None,
+    };
+
+    let inner = sampler.inner.lock().unwrap();
+    let mut rng = DeterministicRng::new(7777);
+
+    // Paragraph(0) exists — should return a chunk from section 0.
+    let chunk = inner.select_chunk_parallel(&record, &Selector::Paragraph(0), &mut rng);
+    assert!(
+        chunk.is_some(),
+        "Paragraph(0) should return Some when section exists"
+    );
+    assert_eq!(chunk.unwrap().record_id, "para_test");
+
+    // Paragraph(99) doesn't exist — section get returns None, so result is None.
+    let none = inner.select_chunk_parallel(&record, &Selector::Paragraph(99), &mut rng);
+    assert!(
+        none.is_none(),
+        "Paragraph(99) should return None when no such section"
+    );
+}
+
+/// Calls `select_chunk_parallel` with `Selector::Random` on an empty and non-empty record.
+/// Covers the Random arm of `select_chunk_parallel`.
+#[test]
+fn select_chunk_parallel_random_selector_handles_empty_and_non_empty() {
+    let split = SplitRatios::default();
+    let mut config = base_config();
+    config.chunking.max_window_tokens = 8;
+    config.chunking.overlap_tokens = vec![0];
+    let store = Arc::new(DeterministicSplitStore::new(split, 602).unwrap());
+    let sampler = TripletSampler::new(config, store);
+
+    let empty_record = DataRecord {
+        id: "rand_empty".into(),
+        source: "unit".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        quality: QualityScore::default(),
+        taxonomy: vec![],
+        sections: vec![],
+        meta_prefix: None,
+    };
+
+    let record_with_sections = DataRecord {
+        id: "rand_nonempty".into(),
+        source: "unit".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        quality: QualityScore::default(),
+        taxonomy: vec![],
+        sections: vec![RecordSection {
+            role: SectionRole::Context,
+            heading: None,
+            text: "alpha beta gamma delta epsilon".into(),
+            sentences: vec!["alpha beta gamma delta epsilon".into()],
+        }],
+        meta_prefix: None,
+    };
+
+    let inner = sampler.inner.lock().unwrap();
+    let mut rng = DeterministicRng::new(8888);
+
+    // Empty record → no sections → Random must return None.
+    let none = inner.select_chunk_parallel(&empty_record, &Selector::Random, &mut rng);
+    assert!(none.is_none(), "Random on empty record must return None");
+
+    // Record with sections → Random picks one, returns Some.
+    let some = inner.select_chunk_parallel(&record_with_sections, &Selector::Random, &mut rng);
+    assert!(
+        some.is_some(),
+        "Random on non-empty record must return Some"
+    );
+    assert_eq!(some.unwrap().record_id, "rand_nonempty");
+}
+
+/// Calls `select_chunk_parallel` with `Selector::TemporalOffset`.
+/// Covers the TemporalOffset arm of `select_chunk_parallel`.
+#[test]
+fn select_chunk_parallel_temporal_offset_returns_chunk_from_neighbor() {
+    let split = SplitRatios {
+        train: 0.7,
+        validation: 0.2,
+        test: 0.1,
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 603).unwrap());
+
+    // Find IDs that land in the Train split so the split guard passes.
+    let find_train = |prefix: &str| -> String {
+        for i in 0..10_000u32 {
+            let id = format!("{prefix}_{i}");
+            if store.label_for(&id) == Some(SplitLabel::Train) {
+                return id;
+            }
+        }
+        panic!("no Train id for prefix {prefix}");
+    };
+    let anchor_id = find_train("toff_par_anchor");
+    let neighbor_id = find_train("toff_par_neighbor");
+
+    let mut config = base_config();
+    config.seed = 603;
+    config.batch_size = 1;
+    config.recipes = Vec::new();
+    config.text_recipes = Vec::new();
+    let sampler = TripletSampler::new(config, Arc::clone(&store));
+
+    let base = Utc::now();
+    let anchor_rec = record_with_offset(&anchor_id, base, 0);
+    let neighbor_rec = {
+        let mut r = record_with_offset(&neighbor_id, base, 86400); // +1 day
+        // Give the neighbor a Context section so select_role_parallel finds it.
+        r.sections = vec![RecordSection {
+            role: SectionRole::Context,
+            heading: None,
+            text: "neighbor context text here".into(),
+            sentences: vec!["neighbor context text here".into()],
+        }];
+        r
+    };
+
+    sampler.register_source(Box::new(InMemorySource::new(
+        PRIMARY_SOURCE_ID,
+        vec![anchor_rec.clone(), neighbor_rec],
+    )));
+    sampler
+        .inner
+        .lock()
+        .unwrap()
+        .ingest_internal(SplitLabel::Train)
+        .unwrap();
+
+    let inner = sampler.inner.lock().unwrap();
+    let anchor = inner
+        .records
+        .get(&anchor_id)
+        .cloned()
+        .expect("anchor record");
+    let mut rng = DeterministicRng::new(9999);
+
+    // offset=1 → nearest neighbor (1 day away) → has Context section → returns chunk.
+    let chunk = inner.select_chunk_parallel(&anchor, &Selector::TemporalOffset(1), &mut rng);
+    assert!(
+        chunk.is_some(),
+        "TemporalOffset(1) should yield a context chunk from the temporal neighbor"
+    );
+}
+
+/// Covers `select_role_parallel` when a record has NO sections matching the requested role,
+/// so the empty-indices path returns None. Also covers the `select_anchor_positive_for_recipe`
+/// non-auto path's `?` short-circuit (line 1671) when selection fails.
+#[test]
+fn select_role_parallel_returns_none_when_no_matching_role() {
+    let split = SplitRatios::default();
+    let config = base_config();
+    let store = Arc::new(DeterministicSplitStore::new(split, 604).unwrap());
+    let sampler = TripletSampler::new(config, store);
+
+    // Record has ONLY Anchor sections — querying Context must fail.
+    let anchor_only_record = DataRecord {
+        id: "anchor_only".into(),
+        source: "unit".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        quality: QualityScore::default(),
+        taxonomy: vec![],
+        sections: vec![RecordSection {
+            role: SectionRole::Anchor,
+            heading: None,
+            text: "anchor text here".into(),
+            sentences: vec!["anchor text here".into()],
+        }],
+        meta_prefix: None,
+    };
+
+    let inner = sampler.inner.lock().unwrap();
+    let mut rng = DeterministicRng::new(1234);
+
+    // Selector::Role(Context) on an Anchor-only record → empty indices → None.
+    let result = inner.select_chunk_parallel(
+        &anchor_only_record,
+        &Selector::Role(SectionRole::Context),
+        &mut rng,
+    );
+    assert!(
+        result.is_none(),
+        "Context selector on Anchor-only record must return None"
+    );
+
+    // Also validate the non-auto path in select_anchor_positive_for_recipe returns None
+    // when the anchor selector has no matching sections (covering the ?-propagation line).
+    let recipe = TripletRecipe {
+        name: "no_anchor_test".into(),
+        anchor: Selector::Role(SectionRole::Context), // no Context sections in record
+        positive_selector: Selector::Role(SectionRole::Anchor),
+        negative_selector: Selector::Role(SectionRole::Anchor),
+        negative_strategy: NegativeStrategy::WrongArticle,
+        weight: 1.0,
+        instruction: None,
+        allow_same_anchor_positive: false,
+    };
+    let ap = inner.select_anchor_positive_for_recipe(&recipe, &anchor_only_record, &mut rng);
+    assert!(
+        ap.is_none(),
+        "non-auto recipe with no matching anchor sections must return None"
+    );
+}
+
+/// Covers `select_role_parallel` when matching sections exist but all produce empty chunk pools.
+/// An empty section text yields zero chunks, causing the parallel role selector to fall through.
+#[test]
+fn select_role_parallel_returns_none_when_all_pools_are_empty() {
+    let split = SplitRatios::default();
+    let mut config = base_config();
+    // max_window_tokens must be > 0 so the chunker tries to produce windows;
+    // empty text still results in an empty pool regardless.
+    config.chunking.max_window_tokens = 8;
+    config.chunking.overlap_tokens = vec![0];
+    let store = Arc::new(DeterministicSplitStore::new(split, 605).unwrap());
+    let sampler = TripletSampler::new(config, store);
+
+    // A Context section with whitespace-only text produces zero whitespace tokens
+    // → materialize_chunks returns an empty Vec → pool is empty.
+    let empty_section_record = DataRecord {
+        id: "empty_pool_rec".into(),
+        source: "unit".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        quality: QualityScore::default(),
+        taxonomy: vec![],
+        sections: vec![RecordSection {
+            role: SectionRole::Context,
+            heading: None,
+            text: "".into(), // empty → no tokens → empty pool
+            sentences: vec![],
+        }],
+        meta_prefix: None,
+    };
+
+    let inner = sampler.inner.lock().unwrap();
+    let mut rng = DeterministicRng::new(5678);
+
+    let result = inner.select_chunk_parallel(
+        &empty_section_record,
+        &Selector::Role(SectionRole::Context),
+        &mut rng,
+    );
+    assert!(
+        result.is_none(),
+        "Context selector with empty-text section must return None (pool always empty)"
+    );
+}
+
+/// Covers `decorate_chunk_parallel` when the prefix alone fills the entire window
+/// (prefix_tokens.len() >= max_window branch) and when the body is truncated.
+#[test]
+fn decorate_chunk_parallel_truncation_paths() {
+    // ── Case 1: prefix fills the entire window ───────────────────────────────
+    let split = SplitRatios::default();
+    let mut config_a = base_config();
+    config_a.chunking.max_window_tokens = 3; // tiny window
+    config_a.chunking.overlap_tokens = vec![0];
+    let store_a = Arc::new(DeterministicSplitStore::new(split, 606).unwrap());
+    let sampler_a = TripletSampler::new(config_a, store_a);
+
+    let mut record_a = DataRecord {
+        id: "pfx_fill".into(),
+        source: "unit".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        quality: QualityScore::default(),
+        taxonomy: vec![],
+        sections: vec![RecordSection {
+            role: SectionRole::Context,
+            heading: None,
+            text: "word1 word2".into(),
+            sentences: vec!["word1 word2".into()],
+        }],
+        meta_prefix: None,
+    };
+
+    // Prefix has 4 tokens, window = 3 → prefix_tokens.len() (4) >= max_window (3).
+    let mut kvp_a = KvpPrefixSampler::new(1.0);
+    kvp_a.add_variant([("k", "a b c d")] as [(&str, &str); 1]); // 4 prefix tokens
+    record_a.meta_prefix = Some(kvp_a);
+
+    let inner_a = sampler_a.inner.lock().unwrap();
+    let mut rng_a = DeterministicRng::new(11111);
+
+    // Create a chunk from section 0.
+    let mut chunk_a = inner_a
+        .materialize_chunks(&record_a, 0, &record_a.sections[0])
+        .into_iter()
+        .next()
+        .expect("non-empty section must produce at least one chunk");
+
+    inner_a.decorate_chunk_parallel(&record_a, &mut chunk_a, &mut rng_a);
+
+    // The prefix fills the window: exactly max_window tokens kept from the prefix.
+    let tokens: Vec<&str> = chunk_a.text.split_whitespace().collect();
+    assert_eq!(
+        tokens.len(),
+        3,
+        "prefix-fills-window path must truncate to max_window tokens"
+    );
+    assert_eq!(chunk_a.tokens_estimate, 3);
+    drop(inner_a);
+
+    // ── Case 2: prefix partial + body truncated ──────────────────────────────
+    let mut config_b = base_config();
+    config_b.chunking.max_window_tokens = 5;
+    config_b.chunking.overlap_tokens = vec![0];
+    let store_b = Arc::new(DeterministicSplitStore::new(split, 607).unwrap());
+    let sampler_b = TripletSampler::new(config_b, store_b);
+
+    let mut record_b = DataRecord {
+        id: "pfx_body_trunc".into(),
+        source: "unit".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        quality: QualityScore::default(),
+        taxonomy: vec![],
+        sections: vec![RecordSection {
+            role: SectionRole::Context,
+            heading: None,
+            text: "word1 word2 word3 word4 word5 word6 word7 word8".into(),
+            sentences: vec!["word1 word2 word3 word4 word5 word6 word7 word8".into()],
+        }],
+        meta_prefix: None,
+    };
+
+    // Prefix has 2 tokens, window = 5 → remaining = 3 body tokens from the chunk.
+    let mut kvp_b = KvpPrefixSampler::new(1.0);
+    kvp_b.add_variant([("p", "pa pb")] as [(&str, &str); 1]); // 2 prefix tokens
+    record_b.meta_prefix = Some(kvp_b);
+
+    let inner_b = sampler_b.inner.lock().unwrap();
+    let mut rng_b = DeterministicRng::new(22222);
+
+    let mut chunk_b = inner_b
+        .materialize_chunks(&record_b, 0, &record_b.sections[0])
+        .into_iter()
+        .next()
+        .expect("non-empty section must produce at least one chunk");
+
+    inner_b.decorate_chunk_parallel(&record_b, &mut chunk_b, &mut rng_b);
+
+    // total body words in the chunk ≥ remaining (3), so trimmed body is present.
+    assert_eq!(
+        chunk_b.tokens_estimate, 5,
+        "truncated chunk must have max_window tokens"
+    );
+    let decorated_tokens: Vec<&str> = chunk_b.text.split_whitespace().collect();
+    assert_eq!(
+        decorated_tokens.len(),
+        5,
+        "decorated text must have exactly 5 tokens"
+    );
+}
+
+/// Covers `decorate_chunk` (sequential, &mut self) no-truncation path when
+/// max_window_tokens = 0 (disabled), making total_tokens <= max_window always false.
+/// This exercises the `else` branch of `if max_window > 0 && total_tokens > max_window`.
+#[test]
+fn decorate_chunk_no_truncation_when_window_is_zero() {
+    let split = SplitRatios::default();
+    let mut config = base_config();
+    config.chunking.max_window_tokens = 0; // no window limit
+    let store = Arc::new(DeterministicSplitStore::new(split, 608).unwrap());
+    let sampler = TripletSampler::new(config, store);
+
+    let mut record = DataRecord {
+        id: "no_trunc_rec".into(),
+        source: "unit".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        quality: QualityScore::default(),
+        taxonomy: vec![],
+        sections: vec![RecordSection {
+            role: SectionRole::Context,
+            heading: None,
+            text: "body token one two three".into(),
+            sentences: vec!["body token one two three".into()],
+        }],
+        meta_prefix: None,
+    };
+
+    // Prefix has 2 tokens; with max_window=0 no truncation occurs.
+    let mut kvp = KvpPrefixSampler::new(1.0);
+    kvp.add_variant([("x", "pre fix")] as [(&str, &str); 1]); // 2 tokens
+    record.meta_prefix = Some(kvp);
+
+    let mut inner = sampler.inner.lock().unwrap();
+
+    // Build a fake chunk whose text matches the section body.
+    let mut chunk = RecordChunk {
+        record_id: "no_trunc_rec".into(),
+        section_idx: 0,
+        view: ChunkView::Window {
+            index: 0,
+            overlap: 0,
+            span: 5,
+        },
+        text: "body token one two three".to_string(),
+        tokens_estimate: 5,
+        quality: QualityScore::default(),
+    };
+
+    inner.decorate_chunk_seeded(&record, &mut chunk);
+
+    // No truncation → prefix prepended to full body text.
+    assert!(
+        chunk.text.contains("pre"),
+        "decorated text should contain part of the prefix key/value"
+    );
+    assert!(
+        chunk.text.contains("body token one two three"),
+        "full body should be present when no truncation occurs"
+    );
+    // prefix format is "meta: x=pre fix" (3 whitespace tokens) + 5 body tokens = 8 total.
+    assert!(
+        chunk.tokens_estimate > 5,
+        "tokens_estimate should include prefix tokens"
+    );
+}
+
+/// Covers `select_anchor_positive_parallel` retry-exhaustion path: when anchor and positive
+/// use the same selector and the record has only one possible chunk, every retry returns the
+/// same chunk → `same_selector_pair_is_valid` always returns false → `return None`.
+#[test]
+fn select_anchor_positive_parallel_returns_none_when_retries_exhausted() {
+    let split = SplitRatios::default();
+    let mut config = base_config();
+    // Large window so the one short section produces exactly ONE window chunk.
+    config.chunking.max_window_tokens = 1024;
+    config.chunking.overlap_tokens = vec![0];
+    let store = Arc::new(DeterministicSplitStore::new(split, 609).unwrap());
+    let sampler = TripletSampler::new(config, store);
+
+    // Record with a SINGLE Anchor section that produces exactly one window chunk.
+    let single_chunk_record = DataRecord {
+        id: "single_chunk".into(),
+        source: "unit".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        quality: QualityScore::default(),
+        taxonomy: vec![],
+        sections: vec![RecordSection {
+            role: SectionRole::Anchor,
+            heading: None,
+            text: "unique text word".into(), // short: fits in one window
+            sentences: vec!["unique text word".into()],
+        }],
+        meta_prefix: None,
+    };
+
+    let inner = sampler.inner.lock().unwrap();
+    let mut rng = DeterministicRng::new(33333);
+    let selector = Selector::Role(SectionRole::Anchor);
+
+    // anchor_selector == positive_selector → retry loop; only one chunk available
+    // → same chunk always drawn → same_selector_pair_is_valid always false → None.
+    let result = inner.select_anchor_positive_parallel(
+        &single_chunk_record,
+        &selector,
+        &selector,
+        false, // enforce_window_pair=false so only key comparison matters
+        &mut rng,
+    );
+    assert!(
+        result.is_none(),
+        "retry exhaustion with single-chunk record must return None"
+    );
+}
+
+/// Covers `_for_split` weight API success paths (lines that are only reached when the
+/// inner batch succeeds after a failed attempt and a force-refresh). The existing
+/// exhaustion test (without sources) now covers the post-loop fallthrough,
+/// but this test confirms the success arm via a properly registered source.
+#[test]
+fn for_split_weight_apis_succeed_with_registered_source() {
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 610).unwrap());
+
+    let mut config = base_config();
+    config.seed = 610;
+    config.batch_size = 1;
+    config.recipes = vec![TripletRecipe {
+        name: "for_split_weight_test".into(),
+        anchor: Selector::Role(SectionRole::Anchor),
+        positive_selector: Selector::Role(SectionRole::Context),
+        negative_selector: Selector::Role(SectionRole::Context),
+        negative_strategy: NegativeStrategy::WrongArticle,
+        weight: 1.0,
+        instruction: None,
+        allow_same_anchor_positive: false,
+    }];
+    config.text_recipes = vec![TextRecipe {
+        name: "for_split_text_test".into(),
+        selector: Selector::Role(SectionRole::Context),
+        weight: 1.0,
+        instruction: None,
+    }];
+
+    let sampler = TripletSampler::new(config, Arc::clone(&store));
+
+    // Register enough records for negative selection.
+    let records: Vec<_> = (0..8)
+        .map(|i| {
+            trader_record(
+                &format!("fsw_{i}"),
+                "2025-01-01",
+                &format!("title {i}"),
+                &format!("body text words extra {i}"),
+            )
+        })
+        .collect();
+    sampler.register_source(Box::new(InMemorySource::new(PRIMARY_SOURCE_ID, records)));
+    sampler
+        .inner
+        .lock()
+        .unwrap()
+        .ingest_internal(SplitLabel::Train)
+        .unwrap();
+
+    let weights = std::collections::HashMap::new();
+
+    let pair_batch = sampler
+        .next_pair_batch_with_weights_for_split(SplitLabel::Train, &weights)
+        .expect("pair batch must succeed with registered source");
+    assert_eq!(pair_batch.pairs.len(), 1);
+
+    let text_batch = sampler
+        .next_text_batch_with_weights_for_split(SplitLabel::Train, &weights)
+        .expect("text batch must succeed with registered source");
+    assert_eq!(text_batch.samples.len(), 1);
+
+    let triplet_batch = sampler
+        .next_triplet_batch_with_weights_for_split(SplitLabel::Train, &weights)
+        .expect("triplet batch must succeed with registered source");
+    assert_eq!(triplet_batch.triplets.len(), 1);
+}
+
+// ── BM25 coverage ────────────────────────────────────────────────────────────
+
+/// Covers the BM25 query-token-limit truncation path (lines 222-223):
+/// when `anchor_query_text` has more than BM25_QUERY_TOKEN_LIMIT tokens,
+/// the backend truncates it before querying the search engine.
+#[cfg(feature = "bm25-mining")]
+#[test]
+fn bm25_query_text_over_token_limit_is_truncated_before_search() {
+    // BM25_QUERY_TOKEN_LIMIT = 64 (from constants::sampler).
+    const TOKEN_LIMIT: usize = 64;
+
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 611).unwrap());
+
+    let config = base_config();
+    let sampler = TripletSampler::new(config, Arc::clone(&store));
+
+    // Register enough records for BM25 to index.
+    let records: Vec<_> = (0..6)
+        .map(|i| {
+            trader_record(
+                &format!("bm25_trunc_{i}"),
+                "2025-01-01",
+                &format!("title {i}"),
+                &format!("body text content {i}"),
+            )
+        })
+        .collect();
+    sampler.register_source(Box::new(InMemorySource::new(
+        PRIMARY_SOURCE_ID,
+        records.clone(),
+    )));
+    sampler
+        .inner
+        .lock()
+        .unwrap()
+        .ingest_internal(SplitLabel::Train)
+        .unwrap();
+
+    // Construct a query text that exceeds TOKEN_LIMIT (64) tokens.
+    let long_query: String = (0..(TOKEN_LIMIT + 10))
+        .map(|i| format!("word{i}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        long_query.split_whitespace().count() > TOKEN_LIMIT,
+        "query must exceed the token limit to exercise the truncation path"
+    );
+
+    let mut inner = sampler.inner.lock().unwrap();
+    let anchor = inner.records.get("bm25_trunc_0").cloned().expect("anchor");
+
+    // The long query triggers the truncation branch; the call must not panic.
+    let _result = inner.select_negative_record_seeded(
+        &anchor,
+        &NegativeStrategy::WrongArticle,
+        Some(&long_query),
+    );
+    // Whether a negative is found is not the point — coverage of the truncation
+    // path (assignment to query_limited) is the goal.
+}
+
+/// Covers `record_bm25_text` with `max_tokens = 0`, which returns the full
+/// concatenated text without any token-count cap.
+#[cfg(feature = "bm25-mining")]
+#[test]
+fn record_bm25_text_with_zero_max_tokens_returns_full_text() {
+    let record = DataRecord {
+        id: "bm25_text_zero".into(),
+        source: "unit".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        quality: QualityScore::default(),
+        taxonomy: vec![],
+        sections: vec![
+            RecordSection {
+                role: SectionRole::Anchor,
+                heading: Some("Heading".into()),
+                text: "anchor body text with many tokens here and there and everywhere".into(),
+                sentences: vec![
+                    "anchor body text with many tokens here and there and everywhere".into(),
+                ],
+            },
+            RecordSection {
+                role: SectionRole::Context,
+                heading: None,
+                text: "context section body words more and more content".into(),
+                sentences: vec!["context section body words more and more content".into()],
+            },
+        ],
+        meta_prefix: None,
+    };
+
+    // With max_tokens = 0 every token is kept.
+    let full = record_bm25_text(&record, 0);
+    let capped = record_bm25_text(&record, 5);
+
+    assert!(
+        full.split_whitespace().count() > 5,
+        "full text should have more tokens than the capped version"
+    );
+    assert_eq!(
+        capped.split_whitespace().count(),
+        5,
+        "capped version should contain exactly 5 tokens"
+    );
+    // Ensure the full text actually contains the heading.
+    assert!(
+        full.contains("Heading"),
+        "full text (max_tokens=0) must include the heading"
+    );
+}
+
+/// Covers `index_meta_record_ids` returning `None` when no source indexes
+/// have been built yet (the early-return path on an empty `source_indexes`).
+#[cfg(feature = "bm25-mining")]
+#[test]
+fn bm25_index_meta_record_ids_returns_none_when_no_indexes_built() {
+    let split = SplitRatios::default();
+    let config = base_config();
+    let store = Arc::new(DeterministicSplitStore::new(split, 612).unwrap());
+    let sampler = TripletSampler::new(config, store);
+
+    // No sources registered → no records ingested → source_indexes is empty.
+    let mut inner_mut = sampler.inner.lock().unwrap();
+    let ids = inner_mut.bm25_backend_mut().index_meta_record_ids();
+    assert!(
+        ids.is_none(),
+        "index_meta_record_ids must return None when source_indexes is empty"
+    );
+}
+
+/// Covers the `Err(err) => return Err(err)` arms (lines 2786, 2808, 2830) in all three
+/// `next_*_batch_with_weights_for_split` functions.  These arms fire when the inner batch
+/// function returns a **non-Exhausted** error (e.g. `SamplerError::Configuration`).
+///
+/// Setup: records are inserted directly into `inner.records` + `inner.chunk_index` so that
+/// `ensure_split_has_records` passes, but no sources are registered (so `source_order` is
+/// empty) and no recipes are configured – which causes the inner call to return a
+/// `Configuration` error instead of `Exhausted`.
+#[test]
+fn for_split_non_exhausted_error_propagates_immediately() {
+    // All records land in Train because train ratio is 1.0.
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 613).unwrap());
+
+    // Build a config with no recipes so the inner call returns Configuration.
+    let mut config = base_config();
+    config.seed = 613;
+    config.batch_size = 1;
+    config.recipes = vec![];
+    config.text_recipes = vec![];
+    config.allowed_splits = vec![SplitLabel::Train];
+
+    let sampler = TripletSampler::new(config, Arc::clone(&store));
+
+    // Manually seed one record into inner.records and inner.chunk_index.
+    // We intentionally do NOT call register_source / rebuild_source_index, so
+    // source_order stays empty → sources.is_empty() == true inside the inner fns.
+    let record_id: RecordId = "no_recipe_rec".to_string();
+    let section = RecordSection {
+        role: SectionRole::Context,
+        heading: None,
+        text: "some context text".into(),
+        sentences: vec!["some context text".into()],
+    };
+    let record = DataRecord {
+        id: record_id.clone(),
+        source: "unit".into(),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        quality: QualityScore::default(),
+        taxonomy: vec![],
+        sections: vec![section],
+        meta_prefix: None,
+    };
+    {
+        let mut inner = sampler.inner.lock().unwrap();
+        inner
+            .records
+            .insert(record_id.clone(), std::sync::Arc::new(record));
+        // chunk_index maps chunk_id → record_id; use the same id for both.
+        inner
+            .chunk_index
+            .insert(record_id.clone(), record_id.clone());
+        // source_order is intentionally left empty.
+    }
+
+    let weights: std::collections::HashMap<_, f32> = std::collections::HashMap::new();
+
+    // pair: Configuration("no triplet recipes available") → Err arm at line 2786
+    let pair_err = sampler
+        .next_pair_batch_with_weights_for_split(SplitLabel::Train, &weights)
+        .expect_err("must fail with no recipes configured");
+    assert!(
+        matches!(pair_err, SamplerError::Configuration(_)),
+        "expected Configuration error from pair batch, got: {pair_err:?}"
+    );
+
+    // text: Configuration("no text recipes configured") → Err arm at line 2808
+    let text_err = sampler
+        .next_text_batch_with_weights_for_split(SplitLabel::Train, &weights)
+        .expect_err("must fail with no text recipes configured");
+    assert!(
+        matches!(text_err, SamplerError::Configuration(_)),
+        "expected Configuration error from text batch, got: {text_err:?}"
+    );
+
+    // triplet: Configuration("no triplet recipes configured") → Err arm at line 2830
+    let triplet_err = sampler
+        .next_triplet_batch_with_weights_for_split(SplitLabel::Train, &weights)
+        .expect_err("must fail with no triplet recipes configured");
+    assert!(
+        matches!(triplet_err, SamplerError::Configuration(_)),
+        "expected Configuration error from triplet batch, got: {triplet_err:?}"
+    );
+}
