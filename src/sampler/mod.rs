@@ -18,10 +18,10 @@ use crate::config::{
 };
 use crate::constants::sampler::AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME;
 use crate::constants::sampler::{
-    ANCHOR_POSITIVE_SWAP_MASK, EPOCH_SEED_OFFSET, EXHAUSTION_RETRY_LIMIT, NEG_REASON_WRONG_ARTICLE,
-    NEG_REASON_WRONG_DATE, NEG_REASON_WRONG_QA, PREFETCHER_SOURCE_ID, PREFETCHER_STOPPED_REASON,
-    RECIPE_LABEL_TEXT, RECIPE_LABEL_TRIPLETS, ROLE_LABEL_ANCHOR, ROLE_LABEL_CONTEXT,
-    SAME_SELECTOR_PAIR_RETRY_LIMIT,
+    ANCHOR_POSITIVE_SWAP_MASK, EPOCH_SEED_OFFSET, EXHAUSTION_RETRY_LIMIT, MIN_RECIPE_WEIGHT,
+    NEG_REASON_WRONG_ARTICLE, NEG_REASON_WRONG_DATE, NEG_REASON_WRONG_QA, PREFETCHER_SOURCE_ID,
+    PREFETCHER_STOPPED_REASON, RECIPE_LABEL_TEXT, RECIPE_LABEL_TRIPLETS, ROLE_LABEL_ANCHOR,
+    ROLE_LABEL_CONTEXT, SAME_SELECTOR_PAIR_RETRY_LIMIT,
 };
 use crate::data::{
     ChunkView, DataRecord, PairLabel, RecordChunk, RecordSection, SampleBatch, SamplePair,
@@ -1757,19 +1757,19 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             derived.push(TextRecipe {
                 name: Cow::Owned(format!("{base}_anchor")),
                 selector: recipe.anchor.clone(),
-                weight: recipe.weight.max(0.0001),
+                weight: recipe.weight.max(MIN_RECIPE_WEIGHT),
                 instruction: None,
             });
             derived.push(TextRecipe {
                 name: Cow::Owned(format!("{base}_positive")),
                 selector: recipe.positive_selector.clone(),
-                weight: recipe.weight.max(0.0001),
+                weight: recipe.weight.max(MIN_RECIPE_WEIGHT),
                 instruction: None,
             });
             derived.push(TextRecipe {
                 name: Cow::Owned(format!("{base}_negative")),
                 selector: recipe.negative_selector.clone(),
-                weight: recipe.weight.max(0.0001),
+                weight: recipe.weight.max(MIN_RECIPE_WEIGHT),
                 instruction: None,
             });
         }
