@@ -95,7 +95,7 @@ Streams rows directly from the Hugging Face Hub without requiring a full dataset
 ```
 
 ### CSV Source
-Load rows from a CSV file with explicit column mappings. Supports two modes:
+Load rows from a CSV file with explicit column mappings. The file **must have a named header row** — columns are always selected by name. Supports two modes:
 
 - **Role mode** — map separate columns to anchor and positive (context) roles.
 - **Text mode** — map a single column for SimCSE-style contrastive pre-training.

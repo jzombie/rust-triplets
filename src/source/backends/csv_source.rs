@@ -26,6 +26,9 @@ pub const CSV_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE: &str = "csv_text_simcse_wrong_ar
 ///   `Anchor` and a `Context` section from the same column (SimCSE-style).
 ///
 /// `anchor_column` and `text_column` are mutually exclusive.
+///
+/// The CSV file **must** have a named header row.  Columns are always looked up
+/// by name, so a header-free file cannot be used with this source.
 #[derive(Clone, Debug)]
 pub struct CsvSourceConfig {
     /// Stable source identifier used in records and persistence keys.
@@ -47,8 +50,6 @@ pub struct CsvSourceConfig {
     pub text_column: Option<String>,
     /// Trust/quality score assigned to every record from this source.
     pub trust: f32,
-    /// Whether the CSV file has a header row.  Defaults to `true`.
-    pub has_headers: bool,
 }
 
 impl CsvSourceConfig {
@@ -61,7 +62,6 @@ impl CsvSourceConfig {
             positive_column: None,
             text_column: None,
             trust: 0.85,
-            has_headers: true,
         }
     }
 
@@ -86,12 +86,6 @@ impl CsvSourceConfig {
     /// Override the default trust score.
     pub fn with_trust(mut self, trust: f32) -> Self {
         self.trust = trust;
-        self
-    }
-
-    /// Set whether the CSV file has a header row.
-    pub fn with_headers(mut self, has_headers: bool) -> Self {
-        self.has_headers = has_headers;
         self
     }
 
@@ -168,7 +162,7 @@ impl CsvSource {
         let (created_at, updated_at) = file_times(&config.path);
 
         let mut reader = csv::ReaderBuilder::new()
-            .has_headers(config.has_headers)
+            .has_headers(true)
             .flexible(false)
             .trim(csv::Trim::All)
             .from_path(&config.path)
@@ -177,9 +171,7 @@ impl CsvSource {
                 reason: format!("failed to open CSV file '{}': {err}", config.path.display()),
             })?;
 
-        // When has_headers is false the csv crate still owns a "headers" slot
-        // but it will be empty; column lookup by name is unavailable so we
-        // require named headers in that case. Build the header map once.
+        // Columns are selected by name against the header row.
         let headers = reader
             .headers()
             .map_err(|err| SamplerError::SourceUnavailable {
@@ -769,26 +761,6 @@ mod tests {
             snapshot.records.len() <= 3,
             "expected at most 3 records, got {}",
             snapshot.records.len()
-        );
-    }
-
-    // ──────────────────────────────────────────────────────── with_headers
-
-    #[test]
-    fn with_headers_false_is_exercised_and_fails_column_lookup() {
-        // The csv crate returns an empty header record when has_headers=false, so
-        // any named-column lookup fails with a Configuration error.  This test
-        // ensures the with_headers builder method body is reached.
-        let f = write_csv("Hello world\n");
-        let err = CsvSource::new(
-            CsvSourceConfig::new("hdr", f.path())
-                .with_headers(false)
-                .with_text_column("text"),
-        )
-        .unwrap_err();
-        assert!(
-            matches!(err, SamplerError::Configuration(_)),
-            "expected Configuration error, got {err:?}"
         );
     }
 
