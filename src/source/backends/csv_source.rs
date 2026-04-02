@@ -771,4 +771,111 @@ mod tests {
             snapshot.records.len()
         );
     }
+
+    // ──────────────────────────────────────────────────────── with_headers
+
+    #[test]
+    fn with_headers_false_is_exercised_and_fails_column_lookup() {
+        // The csv crate returns an empty header record when has_headers=false, so
+        // any named-column lookup fails with a Configuration error.  This test
+        // ensures the with_headers builder method body is reached.
+        let f = write_csv("Hello world\n");
+        let err = CsvSource::new(
+            CsvSourceConfig::new("hdr", f.path())
+                .with_headers(false)
+                .with_text_column("text"),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, SamplerError::Configuration(_)),
+            "expected Configuration error, got {err:?}"
+        );
+    }
+
+    // ──────────────────────────────────────────── validate: third error branch
+
+    #[test]
+    fn rejects_positive_and_text_column_without_anchor() {
+        // positive_column + text_column (but no anchor_column) must reach the
+        // third validate() check after passing the first two guards.
+        let f = write_csv("text,answer\nhello,world\n");
+        let err = CsvSource::new(
+            CsvSourceConfig::new("src", f.path())
+                .with_text_column("text")
+                .with_positive_column("answer"),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, SamplerError::Configuration(_)),
+            "expected Configuration error, got {err:?}"
+        );
+    }
+
+    // ───────────────────────────────────────────────── file open failure path
+
+    #[test]
+    fn returns_source_unavailable_for_nonexistent_file() {
+        // Exercises the from_path error closure.
+        let err = CsvSource::new(
+            CsvSourceConfig::new("src", "/nonexistent/does-not-exist.csv").with_text_column("text"),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, SamplerError::SourceUnavailable { .. }),
+            "expected SourceUnavailable, got {err:?}"
+        );
+    }
+
+    // ──────────────────────────────────────────────────── row parse error path
+
+    #[test]
+    fn returns_source_unavailable_for_malformed_row() {
+        // With flexible(false), a data row that has more columns than the header
+        // triggers a csv parse error, which must map to SourceUnavailable.
+        let f = write_csv("question,answer\nWhat is Rust?,Good language.,extra_column\n");
+        let err = CsvSource::new(
+            CsvSourceConfig::new("src", f.path())
+                .with_anchor_column("question")
+                .with_positive_column("answer"),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, SamplerError::SourceUnavailable { .. }),
+            "expected SourceUnavailable for malformed row, got {err:?}"
+        );
+    }
+
+    // ─────────────────────────────── text mode: whitespace-only cell is skipped
+
+    #[test]
+    fn text_mode_skips_whitespace_only_cells() {
+        // A cell containing only spaces is trimmed to "" by the csv reader
+        // (Trim::All).  Our normalize_inline_whitespace("") returns "", so
+        // the record is skipped via the empty-text guard in build_record.
+        // Blank lines (just "\n") are silently dropped by the csv crate before
+        // reaching build_record, so we need an actual whitespace-valued cell.
+        let f = write_csv("text\nHello\n   \nWorld\n");
+        let source =
+            CsvSource::new(CsvSourceConfig::new("corpus", f.path()).with_text_column("text"))
+                .unwrap();
+        let snapshot = source.refresh(&sampler_config(), None, None).unwrap();
+        assert_eq!(
+            snapshot.records.len(),
+            2,
+            "whitespace-only cell should be skipped"
+        );
+    }
+
+    // ─────────────────────────────────────── IndexableSource::id() is reachable
+
+    #[test]
+    fn indexable_source_id_matches_config() {
+        // IndexableSource::id() is only invoked through the trait
+        // object; call it directly to ensure the implementation is exercised.
+        let f = write_csv("text\nHello\n");
+        let source =
+            CsvSource::new(CsvSourceConfig::new("explicit_id", f.path()).with_text_column("text"))
+                .unwrap();
+        assert_eq!(IndexableSource::id(&source), "explicit_id");
+    }
 }
