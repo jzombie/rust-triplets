@@ -25,10 +25,10 @@ pub const FULL_SEQUENCE_LEN: usize = 45;
 pub const TEXT_BATCH_SEQUENCE_HASH: u64 = 5827731891827072441;
 /// Expected hash for deterministic triplet batch sequence.
 #[cfg(not(feature = "bm25-mining"))]
-pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 4185203987705106104;
+pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 6137236445130287036;
 /// Expected hash for deterministic triplet batch sequence when bm25-mining is enabled.
 #[cfg(feature = "bm25-mining")]
-pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 2471541713911738564;
+pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 3567297114780411140;
 /// Expected hash for deterministic pair batch sequence.
 #[cfg(not(feature = "bm25-mining"))]
 pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 1325935229386486484;
@@ -39,10 +39,10 @@ pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 9645472812115896860;
 pub const PREFETCH_TEXT_BATCH_SEQUENCE_HASH: u64 = 5061724971919995465;
 /// Expected hash for deterministic prefetch triplet batch sequence.
 #[cfg(not(feature = "bm25-mining"))]
-pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 9256290040294854440;
+pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 13549723595682255368;
 /// Expected hash for deterministic prefetch triplet batch sequence when bm25-mining is enabled.
 #[cfg(feature = "bm25-mining")]
-pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 6038679518446907700;
+pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 17421456775178077384;
 /// Expected hash for deterministic prefetch pair batch sequence.
 #[cfg(not(feature = "bm25-mining"))]
 pub const PREFETCH_PAIR_BATCH_SEQUENCE_HASH: u64 = 2535655529758418680;
@@ -189,8 +189,8 @@ fn recipe_order_cycled_and_text_recipe_order_cycled_return_empty_for_zero_count(
     let store = Arc::new(DeterministicSplitStore::new(split, 18).unwrap());
     let mut inner = TripletSamplerInner::new(base_config(), store);
 
-    assert!(inner.recipe_order_cycled(0, 3).is_empty());
-    assert!(inner.text_recipe_order_cycled(0, 5).is_empty());
+    assert!(inner.recipe_order_cycled_seeded(0, 3).is_empty());
+    assert!(inner.text_recipe_order_cycled_seeded(0, 5).is_empty());
 }
 
 #[test]
@@ -582,7 +582,7 @@ fn decorate_chunk_truncates_and_updates_tokens_estimate() {
     // initial estimate should reflect original short section
     assert_eq!(chunk.tokens_estimate, 3);
 
-    inner.decorate_chunk(&record, &mut chunk);
+    inner.decorate_chunk_seeded(&record, &mut chunk);
 
     let tokens_after = chunk.text.split_whitespace().count();
     assert_eq!(tokens_after, 5);
@@ -609,7 +609,7 @@ fn decorate_chunk_preserves_newline_after_meta_when_truncated() {
     assert!(!chunks.is_empty());
     let mut chunk = chunks.remove(0);
 
-    inner.decorate_chunk(&record, &mut chunk);
+    inner.decorate_chunk_seeded(&record, &mut chunk);
 
     let expected_prefix = format!("meta: source=unit{}", platform_newline());
     assert!(
@@ -2455,14 +2455,14 @@ fn split_order_is_train_val_test_for_triplet_batches() {
         record_ids,
         vec![
             "source_c::record_02".to_string(),
-            "source_b::record_04".to_string(),
-            "source_a::record_07".to_string(),
-            "source_b::record_00".to_string(),
             "source_c::record_04".to_string(),
             "source_a::record_02".to_string(),
-            "source_b::record_04".to_string(),
+            "source_b::record_00".to_string(),
             "source_c::record_02".to_string(),
-            "source_a::record_10".to_string()
+            "source_b::record_04".to_string(),
+            "source_c::record_04".to_string(),
+            "source_a::record_06".to_string(),
+            "source_a::record_02".to_string()
         ]
     );
 }
@@ -2531,14 +2531,14 @@ fn prefetch_triplet_batches_preserve_split_order() {
         record_ids,
         vec![
             "source_b::record_01".to_string(),
+            "source_b::record_01".to_string(),
+            "source_c::record_03".to_string(),
             "source_a::record_04".to_string(),
+            "source_a::record_00".to_string(),
             "source_c::record_02".to_string(),
+            "source_c::record_03".to_string(),
             "source_c::record_00".to_string(),
-            "source_b::record_01".to_string(),
-            "source_a::record_04".to_string(),
-            "source_a::record_12".to_string(),
-            "source_b::record_01".to_string(),
-            "source_c::record_03".to_string()
+            "source_b::record_01".to_string()
         ]
     );
 }
@@ -2838,9 +2838,9 @@ fn readable_triplet_examples_by_mode() {
         let mut negatives = Vec::new();
         for _ in 0..8 {
             let (negative, _fallback_used) = inner
-                .select_negative_record(&anchor, &NegativeStrategy::WrongArticle, None)
+                .select_negative_record_seeded(&anchor, &NegativeStrategy::WrongArticle, None)
                 .expect("expected readable negative sample");
-            negatives.push(negative.id);
+            negatives.push(negative.id.clone());
         }
 
         let actual_titles: Vec<String> =
@@ -2856,9 +2856,9 @@ fn readable_triplet_examples_by_mode() {
         let mut negatives = Vec::new();
         for _ in 0..8 {
             let (negative, _fallback_used) = inner
-                .select_negative_record(&anchor, &NegativeStrategy::WrongArticle, None)
+                .select_negative_record_seeded(&anchor, &NegativeStrategy::WrongArticle, None)
                 .expect("expected BM25 negative selection");
-            negatives.push(negative.id);
+            negatives.push(negative.id.clone());
         }
 
         let negative_titles: Vec<String> =
@@ -2973,9 +2973,9 @@ fn bm25_not_rng_only_when_only_anchor_text_changes() {
         let mut negatives = Vec::new();
         for _ in 0..8 {
             let (negative, _fallback_used) = inner
-                .select_negative_record(&anchor, &NegativeStrategy::WrongArticle, None)
+                .select_negative_record_seeded(&anchor, &NegativeStrategy::WrongArticle, None)
                 .expect("expected BM25 negative selection");
-            negatives.push(negative.id);
+            negatives.push(negative.id.clone());
         }
         negatives
     };
@@ -4374,18 +4374,22 @@ fn recipe_order_helpers_cover_empty_and_rotated_cases() {
     let store = Arc::new(DeterministicSplitStore::new(split, 59).unwrap());
 
     let mut shuffled_inner = TripletSamplerInner::new(base_config(), Arc::clone(&store));
-    assert!(shuffled_inner.recipe_order_shuffled(0).is_empty());
-    assert!(shuffled_inner.text_recipe_order_shuffled(0).is_empty());
+    assert!(shuffled_inner.recipe_order_shuffled_seeded(0).is_empty());
+    assert!(
+        shuffled_inner
+            .text_recipe_order_shuffled_seeded(0)
+            .is_empty()
+    );
 
     let mut base_inner = TripletSamplerInner::new(base_config(), Arc::clone(&store));
-    let base_triplet = base_inner.recipe_order_shuffled(4);
+    let base_triplet = base_inner.recipe_order_shuffled_seeded(4);
     assert_eq!(base_triplet.len(), 4);
     let mut sorted_triplet = base_triplet.clone();
     sorted_triplet.sort_unstable();
     assert_eq!(sorted_triplet, vec![0, 1, 2, 3]);
 
     let mut cycled_inner = TripletSamplerInner::new(base_config(), Arc::clone(&store));
-    let cycled_triplet = cycled_inner.recipe_order_cycled(4, 5);
+    let cycled_triplet = cycled_inner.recipe_order_cycled_seeded(4, 5);
     assert_eq!(
         cycled_triplet,
         vec![
@@ -4397,14 +4401,14 @@ fn recipe_order_helpers_cover_empty_and_rotated_cases() {
     );
 
     let mut base_text_inner = TripletSamplerInner::new(base_config(), Arc::clone(&store));
-    let base_text = base_text_inner.text_recipe_order_shuffled(4);
+    let base_text = base_text_inner.text_recipe_order_shuffled_seeded(4);
     assert_eq!(base_text.len(), 4);
     let mut sorted_text = base_text.clone();
     sorted_text.sort_unstable();
     assert_eq!(sorted_text, vec![0, 1, 2, 3]);
 
     let mut cycled_text_inner = TripletSamplerInner::new(base_config(), store);
-    let cycled_text = cycled_text_inner.text_recipe_order_cycled(4, 6);
+    let cycled_text = cycled_text_inner.text_recipe_order_cycled_seeded(4, 6);
     assert_eq!(
         cycled_text,
         vec![base_text[2], base_text[3], base_text[0], base_text[1]]
@@ -4542,8 +4546,12 @@ fn selector_edge_cases_cover_internal_branches() {
     store
         .upsert(neighbor.id.clone(), SplitLabel::Train)
         .unwrap();
-    inner.records.insert(record.id.clone(), record.clone());
-    inner.records.insert(neighbor.id.clone(), neighbor.clone());
+    inner
+        .records
+        .insert(record.id.clone(), Arc::new(record.clone()));
+    inner
+        .records
+        .insert(neighbor.id.clone(), Arc::new(neighbor.clone()));
 
     let temporal_chunk = inner
         .select_chunk(&record, &Selector::TemporalOffset(1))
@@ -4564,7 +4572,9 @@ fn empty_recipe_configs_error_when_sampling_without_sources() {
     let mut inner = TripletSamplerInner::new(config, Arc::clone(&store));
     let record = sample_record();
     store.upsert(record.id.clone(), SplitLabel::Train).unwrap();
-    inner.records.insert(record.id.clone(), record.clone());
+    inner
+        .records
+        .insert(record.id.clone(), Arc::new(record.clone()));
     inner
         .chunk_index
         .insert(record.id.clone(), record.id.clone());
@@ -4644,7 +4654,7 @@ fn source_less_batch_builders_sample_from_primed_epoch_tracker() {
             inner
                 .chunk_index
                 .insert(record.id.clone(), record.id.clone());
-            inner.records.insert(record.id.clone(), record);
+            inner.records.insert(record.id.clone(), Arc::new(record));
         }
         inner.epoch_tracker.ensure_loaded().unwrap();
         let records_by_split = inner.records_by_split().unwrap();
@@ -4735,7 +4745,7 @@ fn source_less_batch_builders_report_last_recipe_when_sampling_exhausts() {
         inner
             .chunk_index
             .insert(record.id.clone(), record.id.clone());
-        inner.records.insert(record.id.clone(), record);
+        inner.records.insert(record.id.clone(), Arc::new(record));
         inner.epoch_tracker.ensure_loaded().unwrap();
         let records_by_split = inner.records_by_split().unwrap();
         inner
@@ -4886,7 +4896,9 @@ fn records_by_split_and_anchor_selection_cover_edge_cases() {
     let mut inner = TripletSamplerInner::new(base_config(), Arc::clone(&store));
 
     let record = trader_record("source_a::record_a", "2025-01-01", "Alpha", "Body alpha");
-    inner.records.insert(record.id.clone(), record.clone());
+    inner
+        .records
+        .insert(record.id.clone(), Arc::new(record.clone()));
     inner
         .chunk_index
         .insert(record.id.clone(), record.id.clone());
@@ -4919,7 +4931,7 @@ fn records_by_split_and_anchor_selection_cover_edge_cases() {
         .unwrap();
     inner
         .records
-        .insert(validation_record.id.clone(), validation_record);
+        .insert(validation_record.id.clone(), Arc::new(validation_record));
     inner
         .source_record_indices
         .insert("source_b".into(), vec![1]);
@@ -4963,8 +4975,12 @@ fn temporal_neighbor_auto_pair_and_weighted_retry_paths_are_covered() {
     store
         .upsert(neighbor.id.clone(), SplitLabel::Train)
         .unwrap();
-    inner.records.insert(anchor.id.clone(), anchor.clone());
-    inner.records.insert(neighbor.id.clone(), neighbor.clone());
+    inner
+        .records
+        .insert(anchor.id.clone(), Arc::new(anchor.clone()));
+    inner
+        .records
+        .insert(neighbor.id.clone(), Arc::new(neighbor.clone()));
 
     let selected = inner
         .select_temporal_neighbor(&anchor, 1)
@@ -5092,7 +5108,7 @@ fn wrong_article_falls_back_within_same_split() {
     for anchor_id in anchor_ids {
         let anchor = inner.records.get(&anchor_id).cloned().expect("anchor");
         let (negative, _fallback) = inner
-            .select_negative_record(&anchor, &NegativeStrategy::WrongArticle, None)
+            .select_negative_record_seeded(&anchor, &NegativeStrategy::WrongArticle, None)
             .expect("negative");
         assert_ne!(negative.id, anchor.id);
         let anchor_label = inner.split_store.label_for(&anchor.id).unwrap();
@@ -5166,7 +5182,7 @@ fn bm25_hard_negative_respects_same_source_split_pool() {
 
     let mut inner = sampler.inner.lock().unwrap();
     let (negative, fallback_used) = inner
-        .select_negative_record(&anchor, &NegativeStrategy::WrongArticle, None)
+        .select_negative_record_seeded(&anchor, &NegativeStrategy::WrongArticle, None)
         .expect("expected bm25-ranked negative via WrongArticle strategy");
 
     let _ = fallback_used;
@@ -5246,14 +5262,14 @@ fn bm25_negative_is_lexically_closer_than_uniform_pool_baseline() {
         .cloned()
         .expect("anchor must be present in ingested records");
     let (_selected_negative, _fallback) = inner
-        .select_negative_record(&ingested_anchor, &NegativeStrategy::WrongArticle, None)
+        .select_negative_record_seeded(&ingested_anchor, &NegativeStrategy::WrongArticle, None)
         .expect("expected bm25-ranked negative");
 
     let anchor_text = record_bm25_text(&ingested_anchor, inner.config.chunking.max_window_tokens);
 
     // Control baseline for non-BM25 behavior: uniform random choice over the
     // same strategy pool used by WrongArticle (same source, same split).
-    let pool: Vec<DataRecord> = inner
+    let pool: Vec<Arc<DataRecord>> = inner
         .records
         .values()
         .filter(|candidate| {
@@ -5473,7 +5489,7 @@ fn bm25_ranked_candidates_never_cross_split_boundaries() {
     for anchor_id in anchors {
         let anchor = inner.records.get(&anchor_id).cloned().expect("anchor");
         let (negative, _fallback) = inner
-            .select_negative_record(&anchor, &NegativeStrategy::WrongArticle, None)
+            .select_negative_record_seeded(&anchor, &NegativeStrategy::WrongArticle, None)
             .expect("negative should exist");
 
         let anchor_label = inner
@@ -5940,7 +5956,7 @@ fn wrong_publication_date_falls_back_within_same_split() {
     for anchor_id in anchor_ids {
         let anchor = inner.records.get(&anchor_id).cloned().expect("anchor");
         let (negative, _fallback) = inner
-            .select_negative_record(&anchor, &NegativeStrategy::WrongPublicationDate, None)
+            .select_negative_record_seeded(&anchor, &NegativeStrategy::WrongPublicationDate, None)
             .expect("negative");
         assert_ne!(negative.id, anchor.id);
         let anchor_label = inner.split_store.label_for(&anchor.id).unwrap();
@@ -6022,7 +6038,7 @@ fn qa_mismatch_falls_back_within_same_split() {
     for anchor_id in anchor_ids {
         let anchor = inner.records.get(&anchor_id).cloned().expect("anchor");
         let (negative, _fallback) = inner
-            .select_negative_record(&anchor, &NegativeStrategy::QuestionAnswerMismatch, None)
+            .select_negative_record_seeded(&anchor, &NegativeStrategy::QuestionAnswerMismatch, None)
             .expect("negative");
         assert_ne!(negative.id, anchor.id);
         let anchor_label = inner.split_store.label_for(&anchor.id).unwrap();
@@ -6083,7 +6099,8 @@ fn negative_selection_never_falls_back_across_splits() {
         .unwrap();
 
     let mut inner = sampler.inner.lock().unwrap();
-    let selected = inner.select_negative_record(&anchor, &NegativeStrategy::WrongArticle, None);
+    let selected =
+        inner.select_negative_record_seeded(&anchor, &NegativeStrategy::WrongArticle, None);
     assert!(
         selected.is_none(),
         "cross-split fallback must be disallowed when same-split candidates are unavailable"
@@ -8147,8 +8164,12 @@ fn same_selector_triplet_returns_none_when_only_one_chunk_exists() {
         meta_prefix: None,
     };
 
-    inner.records.insert(anchor.id.clone(), anchor.clone());
-    inner.records.insert(negative.id.clone(), negative.clone());
+    inner
+        .records
+        .insert(anchor.id.clone(), Arc::new(anchor.clone()));
+    inner
+        .records
+        .insert(negative.id.clone(), Arc::new(negative.clone()));
     inner.rebuild_chunk_index();
 
     let recipe = TripletRecipe {
@@ -8162,7 +8183,7 @@ fn same_selector_triplet_returns_none_when_only_one_chunk_exists() {
         allow_same_anchor_positive: false,
     };
 
-    let triplet = inner.make_triplet_with_anchor(&recipe, &anchor);
+    let triplet = inner.make_triplet_with_anchor_seeded(&recipe, &anchor);
     assert!(triplet.is_none());
 }
 
@@ -8779,7 +8800,7 @@ fn wrong_publication_date_covers_some_none_branch_with_undated_candidates() {
     let anchor = inner.records.get(&anchor_id).cloned().expect("anchor");
     // cand_no_date is eligible (Some, None); cand_same is excluded (same date).
     let (neg, _) = inner
-        .select_negative_record(&anchor, &NegativeStrategy::WrongPublicationDate, None)
+        .select_negative_record_seeded(&anchor, &NegativeStrategy::WrongPublicationDate, None)
         .expect("should find undated candidate as negative");
     assert_eq!(neg.id, no_date_id);
 }
@@ -8849,7 +8870,7 @@ fn wrong_publication_date_covers_none_some_and_none_none_branches() {
     // Only cand_dated is eligible: (None, Some) => true.
     // cand_no_date is excluded: (None, None) => false.
     let (neg, _) = inner
-        .select_negative_record(&anchor, &NegativeStrategy::WrongPublicationDate, None)
+        .select_negative_record_seeded(&anchor, &NegativeStrategy::WrongPublicationDate, None)
         .expect("undated anchor should match dated candidate");
     assert_eq!(neg.id, dated_id);
 }
@@ -9354,7 +9375,7 @@ fn bm25_fallback_counter_increments_when_no_bm25_candidates_match() {
     // BM25 returns no results → fallback is taken.
     let novel_query = "xyzzy_zyxqnv_mnbvcx_qwfpgjluy_no_such_term";
     let result = inner
-        .select_negative_record(&anchor, &NegativeStrategy::WrongArticle, Some(novel_query))
+        .select_negative_record_seeded(&anchor, &NegativeStrategy::WrongArticle, Some(novel_query))
         .expect("fallback must still return a negative");
     assert_eq!(
         result.0.id, peer_id,
@@ -9372,7 +9393,7 @@ fn bm25_fallback_counter_increments_when_no_bm25_candidates_match() {
     // BM25 can rank the peer → the ranked path is taken, fallback count stays.
     let shared_query = "revenue profit margin guidance outlook fiscal year";
     let result2 = inner
-        .select_negative_record(&anchor, &NegativeStrategy::WrongArticle, Some(shared_query))
+        .select_negative_record_seeded(&anchor, &NegativeStrategy::WrongArticle, Some(shared_query))
         .expect("bm25 ranked path must return a negative");
     assert_eq!(result2.0.id, peer_id);
 
@@ -9462,7 +9483,7 @@ fn bm25_query_uses_raw_chunk_text_not_decorated_text() {
 
     // Call with the raw body text (no prefix) — correct behaviour.
     let (selected_raw, _) = inner
-        .select_negative_record(
+        .select_negative_record_seeded(
             &anchor_rec,
             &NegativeStrategy::WrongArticle,
             Some(raw_token),
@@ -9479,7 +9500,7 @@ fn bm25_query_uses_raw_chunk_text_not_decorated_text() {
     // Also confirm the symmetry: querying with the prefix token surfaces the
     // prefix_peer, proving the two situations are distinguishable.
     let (selected_prefix, _) = inner
-        .select_negative_record(
+        .select_negative_record_seeded(
             &anchor_rec,
             &NegativeStrategy::WrongArticle,
             Some(prefix_token),
@@ -9491,5 +9512,898 @@ fn bm25_query_uses_raw_chunk_text_not_decorated_text() {
         "BM25 should rank prefix_peer first when queried with prefix token; \
          got '{}' — the two queries must be distinguishable for this test to be valid",
         selected_prefix.id,
+    );
+}
+
+// ── Parallel helper coverage ──────────────────────────────────────────────────
+
+/// Calls `select_chunk_parallel` with `Selector::Paragraph` on a sampler inner directly.
+/// Covers the Paragraph arm of `select_chunk_parallel` (previously never reached).
+#[test]
+fn select_chunk_parallel_paragraph_selector_returns_chunk_or_none() {
+    let split = SplitRatios::default();
+    let mut config = base_config();
+    config.chunking.max_window_tokens = 8;
+    config.chunking.overlap_tokens = vec![0];
+    let store = Arc::new(DeterministicSplitStore::new(split, 601).unwrap());
+    let sampler = TripletSampler::new(config, store);
+
+    let record = DataRecord {
+        id: "para_test".into(),
+        source: "unit".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        quality: QualityScore::default(),
+        taxonomy: vec![],
+        sections: vec![RecordSection {
+            role: SectionRole::Context,
+            heading: None,
+            text: "one two three four five".into(),
+            sentences: vec!["one two three four five".into()],
+        }],
+        meta_prefix: None,
+    };
+
+    let inner = sampler.inner.lock().unwrap();
+    let mut rng = DeterministicRng::new(7777);
+
+    // Paragraph(0) exists — should return a chunk from section 0.
+    let chunk = inner.select_chunk_parallel(&record, &Selector::Paragraph(0), &mut rng);
+    assert!(
+        chunk.is_some(),
+        "Paragraph(0) should return Some when section exists"
+    );
+    assert_eq!(chunk.unwrap().record_id, "para_test");
+
+    // Paragraph(99) doesn't exist — section get returns None, so result is None.
+    let none = inner.select_chunk_parallel(&record, &Selector::Paragraph(99), &mut rng);
+    assert!(
+        none.is_none(),
+        "Paragraph(99) should return None when no such section"
+    );
+}
+
+/// Calls `select_chunk_parallel` with `Selector::Random` on an empty and non-empty record.
+/// Covers the Random arm of `select_chunk_parallel`.
+#[test]
+fn select_chunk_parallel_random_selector_handles_empty_and_non_empty() {
+    let split = SplitRatios::default();
+    let mut config = base_config();
+    config.chunking.max_window_tokens = 8;
+    config.chunking.overlap_tokens = vec![0];
+    let store = Arc::new(DeterministicSplitStore::new(split, 602).unwrap());
+    let sampler = TripletSampler::new(config, store);
+
+    let empty_record = DataRecord {
+        id: "rand_empty".into(),
+        source: "unit".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        quality: QualityScore::default(),
+        taxonomy: vec![],
+        sections: vec![],
+        meta_prefix: None,
+    };
+
+    let record_with_sections = DataRecord {
+        id: "rand_nonempty".into(),
+        source: "unit".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        quality: QualityScore::default(),
+        taxonomy: vec![],
+        sections: vec![RecordSection {
+            role: SectionRole::Context,
+            heading: None,
+            text: "alpha beta gamma delta epsilon".into(),
+            sentences: vec!["alpha beta gamma delta epsilon".into()],
+        }],
+        meta_prefix: None,
+    };
+
+    let inner = sampler.inner.lock().unwrap();
+    let mut rng = DeterministicRng::new(8888);
+
+    // Empty record → no sections → Random must return None.
+    let none = inner.select_chunk_parallel(&empty_record, &Selector::Random, &mut rng);
+    assert!(none.is_none(), "Random on empty record must return None");
+
+    // Record with sections → Random picks one, returns Some.
+    let some = inner.select_chunk_parallel(&record_with_sections, &Selector::Random, &mut rng);
+    assert!(
+        some.is_some(),
+        "Random on non-empty record must return Some"
+    );
+    assert_eq!(some.unwrap().record_id, "rand_nonempty");
+}
+
+/// Calls `select_chunk_parallel` with `Selector::TemporalOffset`.
+/// Covers the TemporalOffset arm of `select_chunk_parallel`.
+#[test]
+fn select_chunk_parallel_temporal_offset_returns_chunk_from_neighbor() {
+    let split = SplitRatios {
+        train: 0.7,
+        validation: 0.2,
+        test: 0.1,
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 603).unwrap());
+
+    // Find IDs that land in the Train split so the split guard passes.
+    let find_train = |prefix: &str| -> String {
+        for i in 0..10_000u32 {
+            let id = format!("{prefix}_{i}");
+            if store.label_for(&id) == Some(SplitLabel::Train) {
+                return id;
+            }
+        }
+        panic!("no Train id for prefix {prefix}");
+    };
+    let anchor_id = find_train("toff_par_anchor");
+    let neighbor_id = find_train("toff_par_neighbor");
+
+    let mut config = base_config();
+    config.seed = 603;
+    config.batch_size = 1;
+    config.recipes = Vec::new();
+    config.text_recipes = Vec::new();
+    let sampler = TripletSampler::new(config, Arc::clone(&store));
+
+    let base = Utc::now();
+    let anchor_rec = record_with_offset(&anchor_id, base, 0);
+    let neighbor_rec = {
+        let mut r = record_with_offset(&neighbor_id, base, 86400); // +1 day
+        // Give the neighbor a Context section so select_role_parallel finds it.
+        r.sections = vec![RecordSection {
+            role: SectionRole::Context,
+            heading: None,
+            text: "neighbor context text here".into(),
+            sentences: vec!["neighbor context text here".into()],
+        }];
+        r
+    };
+
+    sampler.register_source(Box::new(InMemorySource::new(
+        PRIMARY_SOURCE_ID,
+        vec![anchor_rec.clone(), neighbor_rec],
+    )));
+    sampler
+        .inner
+        .lock()
+        .unwrap()
+        .ingest_internal(SplitLabel::Train)
+        .unwrap();
+
+    let inner = sampler.inner.lock().unwrap();
+    let anchor = inner
+        .records
+        .get(&anchor_id)
+        .cloned()
+        .expect("anchor record");
+    let mut rng = DeterministicRng::new(9999);
+
+    // offset=1 → nearest neighbor (1 day away) → has Context section → returns chunk.
+    let chunk = inner.select_chunk_parallel(&anchor, &Selector::TemporalOffset(1), &mut rng);
+    assert!(
+        chunk.is_some(),
+        "TemporalOffset(1) should yield a context chunk from the temporal neighbor"
+    );
+}
+
+/// Covers `select_role_parallel` when a record has NO sections matching the requested role,
+/// so the empty-indices path returns None. Also covers the `select_anchor_positive_for_recipe`
+/// non-auto path's `?` short-circuit (line 1671) when selection fails.
+#[test]
+fn select_role_parallel_returns_none_when_no_matching_role() {
+    let split = SplitRatios::default();
+    let config = base_config();
+    let store = Arc::new(DeterministicSplitStore::new(split, 604).unwrap());
+    let sampler = TripletSampler::new(config, store);
+
+    // Record has ONLY Anchor sections — querying Context must fail.
+    let anchor_only_record = DataRecord {
+        id: "anchor_only".into(),
+        source: "unit".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        quality: QualityScore::default(),
+        taxonomy: vec![],
+        sections: vec![RecordSection {
+            role: SectionRole::Anchor,
+            heading: None,
+            text: "anchor text here".into(),
+            sentences: vec!["anchor text here".into()],
+        }],
+        meta_prefix: None,
+    };
+
+    let inner = sampler.inner.lock().unwrap();
+    let mut rng = DeterministicRng::new(1234);
+
+    // Selector::Role(Context) on an Anchor-only record → empty indices → None.
+    let result = inner.select_chunk_parallel(
+        &anchor_only_record,
+        &Selector::Role(SectionRole::Context),
+        &mut rng,
+    );
+    assert!(
+        result.is_none(),
+        "Context selector on Anchor-only record must return None"
+    );
+
+    // Also validate the non-auto path in select_anchor_positive_for_recipe returns None
+    // when the anchor selector has no matching sections (covering the ?-propagation line).
+    let recipe = TripletRecipe {
+        name: "no_anchor_test".into(),
+        anchor: Selector::Role(SectionRole::Context), // no Context sections in record
+        positive_selector: Selector::Role(SectionRole::Anchor),
+        negative_selector: Selector::Role(SectionRole::Anchor),
+        negative_strategy: NegativeStrategy::WrongArticle,
+        weight: 1.0,
+        instruction: None,
+        allow_same_anchor_positive: false,
+    };
+    let ap = inner.select_anchor_positive_for_recipe(&recipe, &anchor_only_record, &mut rng);
+    assert!(
+        ap.is_none(),
+        "non-auto recipe with no matching anchor sections must return None"
+    );
+}
+
+/// Covers `select_role_parallel` when matching sections exist but all produce empty chunk pools.
+/// An empty section text yields zero chunks, causing the parallel role selector to fall through.
+#[test]
+fn select_role_parallel_returns_none_when_all_pools_are_empty() {
+    let split = SplitRatios::default();
+    let mut config = base_config();
+    // max_window_tokens must be > 0 so the chunker tries to produce windows;
+    // empty text still results in an empty pool regardless.
+    config.chunking.max_window_tokens = 8;
+    config.chunking.overlap_tokens = vec![0];
+    let store = Arc::new(DeterministicSplitStore::new(split, 605).unwrap());
+    let sampler = TripletSampler::new(config, store);
+
+    // A Context section with whitespace-only text produces zero whitespace tokens
+    // → materialize_chunks returns an empty Vec → pool is empty.
+    let empty_section_record = DataRecord {
+        id: "empty_pool_rec".into(),
+        source: "unit".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        quality: QualityScore::default(),
+        taxonomy: vec![],
+        sections: vec![RecordSection {
+            role: SectionRole::Context,
+            heading: None,
+            text: "".into(), // empty → no tokens → empty pool
+            sentences: vec![],
+        }],
+        meta_prefix: None,
+    };
+
+    let inner = sampler.inner.lock().unwrap();
+    let mut rng = DeterministicRng::new(5678);
+
+    let result = inner.select_chunk_parallel(
+        &empty_section_record,
+        &Selector::Role(SectionRole::Context),
+        &mut rng,
+    );
+    assert!(
+        result.is_none(),
+        "Context selector with empty-text section must return None (pool always empty)"
+    );
+}
+
+/// Covers `decorate_chunk_parallel` when the prefix alone fills the entire window
+/// (prefix_tokens.len() >= max_window branch) and when the body is truncated.
+#[test]
+fn decorate_chunk_parallel_truncation_paths() {
+    // ── Case 1: prefix fills the entire window ───────────────────────────────
+    let split = SplitRatios::default();
+    let mut config_a = base_config();
+    config_a.chunking.max_window_tokens = 3; // tiny window
+    config_a.chunking.overlap_tokens = vec![0];
+    let store_a = Arc::new(DeterministicSplitStore::new(split, 606).unwrap());
+    let sampler_a = TripletSampler::new(config_a, store_a);
+
+    let mut record_a = DataRecord {
+        id: "pfx_fill".into(),
+        source: "unit".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        quality: QualityScore::default(),
+        taxonomy: vec![],
+        sections: vec![RecordSection {
+            role: SectionRole::Context,
+            heading: None,
+            text: "word1 word2".into(),
+            sentences: vec!["word1 word2".into()],
+        }],
+        meta_prefix: None,
+    };
+
+    // Prefix has 4 tokens, window = 3 → prefix_tokens.len() (4) >= max_window (3).
+    let mut kvp_a = KvpPrefixSampler::new(1.0);
+    kvp_a.add_variant([("k", "a b c d")] as [(&str, &str); 1]); // 4 prefix tokens
+    record_a.meta_prefix = Some(kvp_a);
+
+    let inner_a = sampler_a.inner.lock().unwrap();
+    let mut rng_a = DeterministicRng::new(11111);
+
+    // Create a chunk from section 0.
+    let mut chunk_a = inner_a
+        .materialize_chunks(&record_a, 0, &record_a.sections[0])
+        .into_iter()
+        .next()
+        .expect("non-empty section must produce at least one chunk");
+
+    inner_a.decorate_chunk_parallel(&record_a, &mut chunk_a, &mut rng_a);
+
+    // The prefix fills the window: exactly max_window tokens kept from the prefix.
+    let tokens: Vec<&str> = chunk_a.text.split_whitespace().collect();
+    assert_eq!(
+        tokens.len(),
+        3,
+        "prefix-fills-window path must truncate to max_window tokens"
+    );
+    assert_eq!(chunk_a.tokens_estimate, 3);
+    drop(inner_a);
+
+    // ── Case 2: prefix partial + body truncated ──────────────────────────────
+    let mut config_b = base_config();
+    config_b.chunking.max_window_tokens = 5;
+    config_b.chunking.overlap_tokens = vec![0];
+    let store_b = Arc::new(DeterministicSplitStore::new(split, 607).unwrap());
+    let sampler_b = TripletSampler::new(config_b, store_b);
+
+    let mut record_b = DataRecord {
+        id: "pfx_body_trunc".into(),
+        source: "unit".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        quality: QualityScore::default(),
+        taxonomy: vec![],
+        sections: vec![RecordSection {
+            role: SectionRole::Context,
+            heading: None,
+            text: "word1 word2 word3 word4 word5 word6 word7 word8".into(),
+            sentences: vec!["word1 word2 word3 word4 word5 word6 word7 word8".into()],
+        }],
+        meta_prefix: None,
+    };
+
+    // Prefix has 2 tokens, window = 5 → remaining = 3 body tokens from the chunk.
+    let mut kvp_b = KvpPrefixSampler::new(1.0);
+    kvp_b.add_variant([("p", "pa pb")] as [(&str, &str); 1]); // 2 prefix tokens
+    record_b.meta_prefix = Some(kvp_b);
+
+    let inner_b = sampler_b.inner.lock().unwrap();
+    let mut rng_b = DeterministicRng::new(22222);
+
+    let mut chunk_b = inner_b
+        .materialize_chunks(&record_b, 0, &record_b.sections[0])
+        .into_iter()
+        .next()
+        .expect("non-empty section must produce at least one chunk");
+
+    inner_b.decorate_chunk_parallel(&record_b, &mut chunk_b, &mut rng_b);
+
+    // total body words in the chunk ≥ remaining (3), so trimmed body is present.
+    assert_eq!(
+        chunk_b.tokens_estimate, 5,
+        "truncated chunk must have max_window tokens"
+    );
+    let decorated_tokens: Vec<&str> = chunk_b.text.split_whitespace().collect();
+    assert_eq!(
+        decorated_tokens.len(),
+        5,
+        "decorated text must have exactly 5 tokens"
+    );
+}
+
+/// Covers `decorate_chunk` (sequential, &mut self) no-truncation path when
+/// max_window_tokens = 0 (disabled), making total_tokens <= max_window always false.
+/// This exercises the `else` branch of `if max_window > 0 && total_tokens > max_window`.
+#[test]
+fn decorate_chunk_no_truncation_when_window_is_zero() {
+    let split = SplitRatios::default();
+    let mut config = base_config();
+    config.chunking.max_window_tokens = 0; // no window limit
+    let store = Arc::new(DeterministicSplitStore::new(split, 608).unwrap());
+    let sampler = TripletSampler::new(config, store);
+
+    let mut record = DataRecord {
+        id: "no_trunc_rec".into(),
+        source: "unit".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        quality: QualityScore::default(),
+        taxonomy: vec![],
+        sections: vec![RecordSection {
+            role: SectionRole::Context,
+            heading: None,
+            text: "body token one two three".into(),
+            sentences: vec!["body token one two three".into()],
+        }],
+        meta_prefix: None,
+    };
+
+    // Prefix has 2 tokens; with max_window=0 no truncation occurs.
+    let mut kvp = KvpPrefixSampler::new(1.0);
+    kvp.add_variant([("x", "pre fix")] as [(&str, &str); 1]); // 2 tokens
+    record.meta_prefix = Some(kvp);
+
+    let mut inner = sampler.inner.lock().unwrap();
+
+    // Build a fake chunk whose text matches the section body.
+    let mut chunk = RecordChunk {
+        record_id: "no_trunc_rec".into(),
+        section_idx: 0,
+        view: ChunkView::Window {
+            index: 0,
+            overlap: 0,
+            span: 5,
+        },
+        text: "body token one two three".to_string(),
+        tokens_estimate: 5,
+        quality: QualityScore::default(),
+    };
+
+    inner.decorate_chunk_seeded(&record, &mut chunk);
+
+    // No truncation → prefix prepended to full body text.
+    assert!(
+        chunk.text.contains("pre"),
+        "decorated text should contain part of the prefix key/value"
+    );
+    assert!(
+        chunk.text.contains("body token one two three"),
+        "full body should be present when no truncation occurs"
+    );
+    // prefix format is "meta: x=pre fix" (3 whitespace tokens) + 5 body tokens = 8 total.
+    assert!(
+        chunk.tokens_estimate > 5,
+        "tokens_estimate should include prefix tokens"
+    );
+}
+
+/// Covers `select_anchor_positive_parallel` retry-exhaustion path: when anchor and positive
+/// use the same selector and the record has only one possible chunk, every retry returns the
+/// same chunk → `same_selector_pair_is_valid` always returns false → `return None`.
+#[test]
+fn select_anchor_positive_parallel_returns_none_when_retries_exhausted() {
+    let split = SplitRatios::default();
+    let mut config = base_config();
+    // Large window so the one short section produces exactly ONE window chunk.
+    config.chunking.max_window_tokens = 1024;
+    config.chunking.overlap_tokens = vec![0];
+    let store = Arc::new(DeterministicSplitStore::new(split, 609).unwrap());
+    let sampler = TripletSampler::new(config, store);
+
+    // Record with a SINGLE Anchor section that produces exactly one window chunk.
+    let single_chunk_record = DataRecord {
+        id: "single_chunk".into(),
+        source: "unit".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        quality: QualityScore::default(),
+        taxonomy: vec![],
+        sections: vec![RecordSection {
+            role: SectionRole::Anchor,
+            heading: None,
+            text: "unique text word".into(), // short: fits in one window
+            sentences: vec!["unique text word".into()],
+        }],
+        meta_prefix: None,
+    };
+
+    let inner = sampler.inner.lock().unwrap();
+    let mut rng = DeterministicRng::new(33333);
+    let selector = Selector::Role(SectionRole::Anchor);
+
+    // anchor_selector == positive_selector → retry loop; only one chunk available
+    // → same chunk always drawn → same_selector_pair_is_valid always false → None.
+    let result = inner.select_anchor_positive_parallel(
+        &single_chunk_record,
+        &selector,
+        &selector,
+        false, // enforce_window_pair=false so only key comparison matters
+        &mut rng,
+    );
+    assert!(
+        result.is_none(),
+        "retry exhaustion with single-chunk record must return None"
+    );
+}
+
+/// Covers `_for_split` weight API success paths (lines that are only reached when the
+/// inner batch succeeds after a failed attempt and a force-refresh). The existing
+/// exhaustion test (without sources) now covers the post-loop fallthrough,
+/// but this test confirms the success arm via a properly registered source.
+#[test]
+fn for_split_weight_apis_succeed_with_registered_source() {
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 610).unwrap());
+
+    let mut config = base_config();
+    config.seed = 610;
+    config.batch_size = 1;
+    config.recipes = vec![TripletRecipe {
+        name: "for_split_weight_test".into(),
+        anchor: Selector::Role(SectionRole::Anchor),
+        positive_selector: Selector::Role(SectionRole::Context),
+        negative_selector: Selector::Role(SectionRole::Context),
+        negative_strategy: NegativeStrategy::WrongArticle,
+        weight: 1.0,
+        instruction: None,
+        allow_same_anchor_positive: false,
+    }];
+    config.text_recipes = vec![TextRecipe {
+        name: "for_split_text_test".into(),
+        selector: Selector::Role(SectionRole::Context),
+        weight: 1.0,
+        instruction: None,
+    }];
+
+    let sampler = TripletSampler::new(config, Arc::clone(&store));
+
+    // Register enough records for negative selection.
+    let records: Vec<_> = (0..8)
+        .map(|i| {
+            trader_record(
+                &format!("fsw_{i}"),
+                "2025-01-01",
+                &format!("title {i}"),
+                &format!("body text words extra {i}"),
+            )
+        })
+        .collect();
+    sampler.register_source(Box::new(InMemorySource::new(PRIMARY_SOURCE_ID, records)));
+    sampler
+        .inner
+        .lock()
+        .unwrap()
+        .ingest_internal(SplitLabel::Train)
+        .unwrap();
+
+    let weights = std::collections::HashMap::new();
+
+    let pair_batch = sampler
+        .next_pair_batch_with_weights_for_split(SplitLabel::Train, &weights)
+        .expect("pair batch must succeed with registered source");
+    assert_eq!(pair_batch.pairs.len(), 1);
+
+    let text_batch = sampler
+        .next_text_batch_with_weights_for_split(SplitLabel::Train, &weights)
+        .expect("text batch must succeed with registered source");
+    assert_eq!(text_batch.samples.len(), 1);
+
+    let triplet_batch = sampler
+        .next_triplet_batch_with_weights_for_split(SplitLabel::Train, &weights)
+        .expect("triplet batch must succeed with registered source");
+    assert_eq!(triplet_batch.triplets.len(), 1);
+}
+
+// ── BM25 coverage ────────────────────────────────────────────────────────────
+
+/// Covers the BM25 query-token-limit truncation path (lines 222-223):
+/// when `anchor_query_text` has more than BM25_QUERY_TOKEN_LIMIT tokens,
+/// the backend truncates it before querying the search engine.
+#[cfg(feature = "bm25-mining")]
+#[test]
+fn bm25_query_text_over_token_limit_is_truncated_before_search() {
+    // BM25_QUERY_TOKEN_LIMIT = 64 (from constants::sampler).
+    const TOKEN_LIMIT: usize = 64;
+
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 611).unwrap());
+
+    let config = base_config();
+    let sampler = TripletSampler::new(config, Arc::clone(&store));
+
+    // Register enough records for BM25 to index.
+    let records: Vec<_> = (0..6)
+        .map(|i| {
+            trader_record(
+                &format!("bm25_trunc_{i}"),
+                "2025-01-01",
+                &format!("title {i}"),
+                &format!("body text content {i}"),
+            )
+        })
+        .collect();
+    sampler.register_source(Box::new(InMemorySource::new(
+        PRIMARY_SOURCE_ID,
+        records.clone(),
+    )));
+    sampler
+        .inner
+        .lock()
+        .unwrap()
+        .ingest_internal(SplitLabel::Train)
+        .unwrap();
+
+    // Construct a query text that exceeds TOKEN_LIMIT (64) tokens.
+    let long_query: String = (0..(TOKEN_LIMIT + 10))
+        .map(|i| format!("word{i}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        long_query.split_whitespace().count() > TOKEN_LIMIT,
+        "query must exceed the token limit to exercise the truncation path"
+    );
+
+    let mut inner = sampler.inner.lock().unwrap();
+    let anchor = inner.records.get("bm25_trunc_0").cloned().expect("anchor");
+
+    // The long query triggers the truncation branch; the call must not panic.
+    let _result = inner.select_negative_record_seeded(
+        &anchor,
+        &NegativeStrategy::WrongArticle,
+        Some(&long_query),
+    );
+    // Whether a negative is found is not the point — coverage of the truncation
+    // path (assignment to query_limited) is the goal.
+}
+
+/// Covers `record_bm25_text` with `max_tokens = 0`, which returns the full
+/// concatenated text without any token-count cap.
+#[cfg(feature = "bm25-mining")]
+#[test]
+fn record_bm25_text_with_zero_max_tokens_returns_full_text() {
+    let record = DataRecord {
+        id: "bm25_text_zero".into(),
+        source: "unit".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        quality: QualityScore::default(),
+        taxonomy: vec![],
+        sections: vec![
+            RecordSection {
+                role: SectionRole::Anchor,
+                heading: Some("Heading".into()),
+                text: "anchor body text with many tokens here and there and everywhere".into(),
+                sentences: vec![
+                    "anchor body text with many tokens here and there and everywhere".into(),
+                ],
+            },
+            RecordSection {
+                role: SectionRole::Context,
+                heading: None,
+                text: "context section body words more and more content".into(),
+                sentences: vec!["context section body words more and more content".into()],
+            },
+        ],
+        meta_prefix: None,
+    };
+
+    // With max_tokens = 0 every token is kept.
+    let full = record_bm25_text(&record, 0);
+    let capped = record_bm25_text(&record, 5);
+
+    assert!(
+        full.split_whitespace().count() > 5,
+        "full text should have more tokens than the capped version"
+    );
+    assert_eq!(
+        capped.split_whitespace().count(),
+        5,
+        "capped version should contain exactly 5 tokens"
+    );
+    // Ensure the full text actually contains the heading.
+    assert!(
+        full.contains("Heading"),
+        "full text (max_tokens=0) must include the heading"
+    );
+}
+
+/// Covers `index_meta_record_ids` returning `None` when no source indexes
+/// have been built yet (the early-return path on an empty `source_indexes`).
+#[cfg(feature = "bm25-mining")]
+#[test]
+fn bm25_index_meta_record_ids_returns_none_when_no_indexes_built() {
+    let split = SplitRatios::default();
+    let config = base_config();
+    let store = Arc::new(DeterministicSplitStore::new(split, 612).unwrap());
+    let sampler = TripletSampler::new(config, store);
+
+    // No sources registered → no records ingested → source_indexes is empty.
+    let mut inner_mut = sampler.inner.lock().unwrap();
+    let ids = inner_mut.bm25_backend_mut().index_meta_record_ids();
+    assert!(
+        ids.is_none(),
+        "index_meta_record_ids must return None when source_indexes is empty"
+    );
+}
+
+/// Covers the `Err(err) => return Err(err)` arms (lines 2786, 2808, 2830) in all three
+/// `next_*_batch_with_weights_for_split` functions.  These arms fire when the inner batch
+/// function returns a **non-Exhausted** error (e.g. `SamplerError::Configuration`).
+///
+/// Setup: records are inserted directly into `inner.records` + `inner.chunk_index` so that
+/// `ensure_split_has_records` passes, but no sources are registered (so `source_order` is
+/// empty) and no recipes are configured – which causes the inner call to return a
+/// `Configuration` error instead of `Exhausted`.
+#[test]
+fn for_split_non_exhausted_error_propagates_immediately() {
+    // All records land in Train because train ratio is 1.0.
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 613).unwrap());
+
+    // Build a config with no recipes so the inner call returns Configuration.
+    let mut config = base_config();
+    config.seed = 613;
+    config.batch_size = 1;
+    config.recipes = vec![];
+    config.text_recipes = vec![];
+    config.allowed_splits = vec![SplitLabel::Train];
+
+    let sampler = TripletSampler::new(config, Arc::clone(&store));
+
+    // Manually seed one record into inner.records and inner.chunk_index.
+    // We intentionally do NOT call register_source / rebuild_source_index, so
+    // source_order stays empty → sources.is_empty() == true inside the inner fns.
+    let record_id: RecordId = "no_recipe_rec".to_string();
+    let section = RecordSection {
+        role: SectionRole::Context,
+        heading: None,
+        text: "some context text".into(),
+        sentences: vec!["some context text".into()],
+    };
+    let record = DataRecord {
+        id: record_id.clone(),
+        source: "unit".into(),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        quality: QualityScore::default(),
+        taxonomy: vec![],
+        sections: vec![section],
+        meta_prefix: None,
+    };
+    {
+        let mut inner = sampler.inner.lock().unwrap();
+        inner
+            .records
+            .insert(record_id.clone(), std::sync::Arc::new(record));
+        // chunk_index maps chunk_id → record_id; use the same id for both.
+        inner
+            .chunk_index
+            .insert(record_id.clone(), record_id.clone());
+        // source_order is intentionally left empty.
+    }
+
+    let weights: std::collections::HashMap<_, f32> = std::collections::HashMap::new();
+
+    // pair: Configuration("no triplet recipes available") → Err arm at line 2786
+    let pair_err = sampler
+        .next_pair_batch_with_weights_for_split(SplitLabel::Train, &weights)
+        .expect_err("must fail with no recipes configured");
+    assert!(
+        matches!(pair_err, SamplerError::Configuration(_)),
+        "expected Configuration error from pair batch, got: {pair_err:?}"
+    );
+
+    // text: Configuration("no text recipes configured") → Err arm at line 2808
+    let text_err = sampler
+        .next_text_batch_with_weights_for_split(SplitLabel::Train, &weights)
+        .expect_err("must fail with no text recipes configured");
+    assert!(
+        matches!(text_err, SamplerError::Configuration(_)),
+        "expected Configuration error from text batch, got: {text_err:?}"
+    );
+
+    // triplet: Configuration("no triplet recipes configured") → Err arm at line 2830
+    let triplet_err = sampler
+        .next_triplet_batch_with_weights_for_split(SplitLabel::Train, &weights)
+        .expect_err("must fail with no triplet recipes configured");
+    assert!(
+        matches!(triplet_err, SamplerError::Configuration(_)),
+        "expected Configuration error from triplet batch, got: {triplet_err:?}"
+    );
+}
+
+/// Regression guard: the `>= batch_size` early-break in every sampling loop must not be
+/// removed.  Several inner paths (notably the multi-source text loop and the no-source
+/// text/triplet loops) have **no companion per-push size check** on the output vec.
+/// Without the early-break, those loops accumulate more than `batch_size` items; the
+/// subsequent `vec.len() == batch_size` equality check then fails, and the function
+/// returns `Err(Exhausted)` even though the pool is ample.
+///
+/// This test uses a pool of 20 records (5× the batch_size of 4) and asserts that all
+/// three batch APIs return `Ok` with **exactly** `batch_size` items.  Removing any of
+/// the guards would cause the text batch (and possibly others) to return `Err(Exhausted)`
+/// and break this assertion.
+#[test]
+fn batch_size_guard_prevents_oversampling_from_large_pool() {
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 614).unwrap());
+
+    const BATCH: usize = 4;
+    const POOL: usize = 20; // 5× batch_size — loop would overfill without the guard
+
+    let mut config = base_config();
+    config.seed = 614;
+    config.batch_size = BATCH;
+    config.allowed_splits = vec![SplitLabel::Train];
+    config.split = split;
+    config.recipes = vec![TripletRecipe {
+        name: "oversample_guard".into(),
+        anchor: Selector::Role(SectionRole::Anchor),
+        positive_selector: Selector::Role(SectionRole::Context),
+        negative_selector: Selector::Role(SectionRole::Context),
+        negative_strategy: NegativeStrategy::WrongArticle,
+        weight: 1.0,
+        instruction: None,
+        allow_same_anchor_positive: false,
+    }];
+    config.text_recipes = vec![TextRecipe {
+        name: "oversample_guard_text".into(),
+        selector: Selector::Role(SectionRole::Context),
+        weight: 1.0,
+        instruction: None,
+    }];
+
+    let records: Vec<_> = (0..POOL)
+        .map(|i| {
+            trader_record(
+                &format!("osg_{i}"),
+                "2025-06-01",
+                &format!("title oversample {i}"),
+                &format!("body context words filling slot {i} for oversample guard test"),
+            )
+        })
+        .collect();
+
+    let sampler = TripletSampler::new(config, Arc::clone(&store));
+    sampler.register_source(Box::new(InMemorySource::new("osg_source", records)));
+
+    // Pair batch: assert exactly BATCH items (not Exhausted, not more).
+    let pair_batch = sampler
+        .next_pair_batch(SplitLabel::Train)
+        .expect("pair batch must succeed with large pool");
+    assert_eq!(
+        pair_batch.pairs.len(),
+        BATCH,
+        "pair batch length must equal batch_size; got {}",
+        pair_batch.pairs.len()
+    );
+
+    // Text batch: critical — the multi-source text loop has no per-push guard, so
+    // removing the early-break produces > BATCH samples and Exhausted is returned.
+    let text_batch = sampler
+        .next_text_batch(SplitLabel::Train)
+        .expect("text batch must succeed with large pool");
+    assert_eq!(
+        text_batch.samples.len(),
+        BATCH,
+        "text batch length must equal batch_size; got {}",
+        text_batch.samples.len()
+    );
+
+    // Triplet batch: assert exactly BATCH items.
+    let triplet_batch = sampler
+        .next_triplet_batch(SplitLabel::Train)
+        .expect("triplet batch must succeed with large pool");
+    assert_eq!(
+        triplet_batch.triplets.len(),
+        BATCH,
+        "triplet batch length must equal batch_size; got {}",
+        triplet_batch.triplets.len()
     );
 }

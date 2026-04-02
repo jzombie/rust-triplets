@@ -40,8 +40,10 @@ fn build_qa_record(
     }))
 }
 
-fn ids_from_root(root: &Path, source_id: &SourceId) -> Vec<RecordId> {
-    let index = FileCorpusIndex::new(root, source_id.clone()).with_sampler_seed(123);
+fn ids_from_root(root: &Path, source_id: &SourceId, index_dir: &Path) -> Vec<RecordId> {
+    let index = FileCorpusIndex::new(root, source_id.clone())
+        .with_sampler_seed(123)
+        .with_index_dir(index_dir);
     let snapshot = index
         .refresh_indexable(None, None, |path| build_qa_record(root, source_id, path))
         .unwrap();
@@ -95,6 +97,7 @@ fn build_config(batch_size: usize, split: SplitRatios) -> SamplerConfig {
 fn file_based_split_assignments_remain_stable_across_growth() {
     // Arrange: create initial QA files in a temp root.
     let temp = tempfile::tempdir().unwrap();
+    let index_temp = tempfile::tempdir().unwrap();
     let root = temp.path();
 
     write_qa_file(
@@ -135,7 +138,7 @@ fn file_based_split_assignments_remain_stable_across_growth() {
 
     let (initial_ids, labels_initial) = {
         // First pass: index files and assign splits.
-        let initial_ids = ids_from_root(root, &source_id);
+        let initial_ids = ids_from_root(root, &source_id, index_temp.path());
         assert_eq!(initial_ids.len(), 6);
 
         let store = FileSplitStore::open(&store_path, split, 123).unwrap();
@@ -163,12 +166,13 @@ fn file_based_split_assignments_remain_stable_across_growth() {
     );
     write_qa_file(root, "What_is_phi.txt", "Phi is not a common option Greek.");
     // Force the per-process file index to rebuild so the new files are visible.
-    let index_path = FileCorpusIndex::file_index_store_path(root, &source_id);
+    let index_path =
+        FileCorpusIndex::index_store_path_for(Some(index_temp.path()), root, &source_id);
     let _ = fs::remove_file(index_path);
 
     {
         // Second pass: re-index/store and ensure split stability.
-        let all_ids = ids_from_root(root, &source_id);
+        let all_ids = ids_from_root(root, &source_id, index_temp.path());
         assert_eq!(all_ids.len(), 8);
 
         let store = FileSplitStore::open(&store_path, split, 123).unwrap();

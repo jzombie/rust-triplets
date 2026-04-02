@@ -1,7 +1,7 @@
 use crate::metadata::MetadataKey;
 use crate::splits::SplitLabel;
 
-/// Environment variable names read at runtime to override default behaviour.
+/// Environment variable names read at runtime to override default behavior.
 ///
 /// Keeping the strings here ensures every call site references the same name
 /// and makes the full set of supported overrides easy to discover.
@@ -80,24 +80,40 @@ pub mod sampler {
         "auto_injected_long_section_chunk_pair_wrong_article";
     /// Denominator used for the anchor/positive swap coin-flip (swap when `rng & mask == 0`).
     ///
-    /// A value of `1` means the least-significant bit is tested, giving a uniform 50 % swap
+    /// A value of `1` means the least-significant bit is tested, giving a uniform 50% swap
     /// rate. This eliminates positional shortcuts — e.g. a model cannot learn to always treat
     /// the first slot as the "short" anchor — which is especially important for InfoNCE and
     /// similar contrastive objectives.
     pub const ANCHOR_POSITIVE_SWAP_MASK: u64 = 1;
     /// Number of highest-ranked BM25 hard negatives rotated per anchor before repeating.
     ///
-    /// Effective selection window per draw is:
+    /// Effective selection window per draw:
     /// - `top_k = min(BM25_HARD_NEGATIVE_ROTATION_TOP_K, ranked_pool.len())`
     /// - draws cycle over indices `0..top_k` in order.
     ///
-    /// Example with `top_k = 3`:
-    /// draw sequence is rank-1, rank-2, rank-3, rank-1, rank-2, ...
-    ///
-    /// This preserves lexical hardness (always from BM25 top ranks) while preventing
-    /// collapse to the single top document on repeated draws for the same anchor.
+    /// Rotating through the top-K preserves lexical hardness while preventing
+    /// collapse to the single top-ranked document on repeated draws for the same anchor.
     #[cfg(feature = "bm25-mining")]
     pub const BM25_HARD_NEGATIVE_ROTATION_TOP_K: usize = 3;
+
+    /// Number of top-ranked BM25 results to retrieve per anchor query.
+    ///
+    /// Must be large enough that, after split filtering, at least
+    /// `BM25_HARD_NEGATIVE_ROTATION_TOP_K` same-split candidates remain.
+    /// Raise this value if you use a heavily imbalanced split or a very small per-source pool.
+    #[cfg(feature = "bm25-mining")]
+    pub const BM25_SEARCH_TOP_K: usize = 32;
+
+    /// Maximum number of whitespace-delimited tokens taken from the anchor
+    /// window text when used as a BM25 query.
+    ///
+    /// BM25 search cost scales with the number of unique query tokens — each
+    /// token triggers an inverted-index lookup and score accumulation over its
+    /// posting list. Capping the query token count keeps per-search latency
+    /// predictable without meaningful quality loss: the leading tokens of a
+    /// domain-specific window are typically the most distinctive.
+    #[cfg(feature = "bm25-mining")]
+    pub const BM25_QUERY_TOKEN_LIMIT: usize = 64;
 }
 
 /// Constants used by split-store persistence and wire encoding.

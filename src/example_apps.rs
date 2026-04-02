@@ -5,7 +5,11 @@ use std::error::Error;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Once;
+#[cfg(test)]
+use std::sync::OnceLock;
 use std::time::Instant;
+#[cfg(test)]
+use tempfile::TempDir;
 
 use cache_manager::CacheRoot;
 use clap::{Parser, ValueEnum, error::ErrorKind};
@@ -36,16 +40,36 @@ type MetricEntry = (f32, f32, f32, f32, f32);
 type SourceMetricsMap = HashMap<String, Vec<MetricEntry>>;
 
 fn managed_demo_split_store_path() -> Result<PathBuf, String> {
-    let cache_root = CacheRoot::from_discovery()
-        .map_err(|err| format!("failed discovering managed cache root: {err}"))?;
-    let group = PathBuf::from(MULTI_SOURCE_DEMO_GROUP);
-    let dir = cache_root.ensure_group(&group).map_err(|err| {
-        format!(
-            "failed creating managed demo cache group '{}': {err}",
-            group.display()
-        )
-    })?;
-    Ok(dir.join(MULTI_SOURCE_DEMO_STORE_FILENAME))
+    #[cfg(test)]
+    {
+        static TEST_CACHE_ROOT: OnceLock<TempDir> = OnceLock::new();
+        let root = TEST_CACHE_ROOT.get_or_init(|| {
+            TempDir::new().expect("failed to create test demo split-store cache root")
+        });
+        let cache_root = CacheRoot::from_root(root.path());
+        let group = PathBuf::from(MULTI_SOURCE_DEMO_GROUP);
+        let dir = cache_root.ensure_group(&group).map_err(|err| {
+            format!(
+                "failed creating managed demo cache group '{}': {err}",
+                group.display()
+            )
+        })?;
+        Ok(dir.join(MULTI_SOURCE_DEMO_STORE_FILENAME))
+    }
+
+    #[cfg(not(test))]
+    {
+        let cache_root = CacheRoot::from_discovery()
+            .map_err(|err| format!("failed discovering managed cache root: {err}"))?;
+        let group = PathBuf::from(MULTI_SOURCE_DEMO_GROUP);
+        let dir = cache_root.ensure_group(&group).map_err(|err| {
+            format!(
+                "failed creating managed demo cache group '{}': {err}",
+                group.display()
+            )
+        })?;
+        Ok(dir.join(MULTI_SOURCE_DEMO_STORE_FILENAME))
+    }
 }
 
 fn init_example_tracing() {
