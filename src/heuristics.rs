@@ -2,7 +2,6 @@ use crate::config::{SamplerConfig, TextRecipe, TripletRecipe};
 pub use crate::constants::heuristics::{
     EFFECTIVE_NEGATIVES_PER_ANCHOR, EFFECTIVE_POSITIVES_PER_ANCHOR,
 };
-use crate::constants::sampler::MIN_RECIPE_WEIGHT;
 use crate::splits::{SplitLabel, SplitRatios};
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -105,19 +104,19 @@ pub fn build_derived_text_recipes(recipes: &[TripletRecipe]) -> Vec<TextRecipe> 
         derived.push(TextRecipe {
             name: format!("{base}_anchor").into(),
             selector: recipe.anchor.clone(),
-            weight: recipe.weight.max(MIN_RECIPE_WEIGHT),
+            weight: recipe.weight,
             instruction: None,
         });
         derived.push(TextRecipe {
             name: format!("{base}_positive").into(),
             selector: recipe.positive_selector.clone(),
-            weight: recipe.weight.max(MIN_RECIPE_WEIGHT),
+            weight: recipe.weight,
             instruction: None,
         });
         derived.push(TextRecipe {
             name: format!("{base}_negative").into(),
             selector: recipe.negative_selector.clone(),
-            weight: recipe.weight.max(MIN_RECIPE_WEIGHT),
+            weight: recipe.weight,
             instruction: None,
         });
     }

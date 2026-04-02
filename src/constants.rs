@@ -78,12 +78,6 @@ pub mod sampler {
     /// regardless of whether custom triplet recipes are configured.
     pub const AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME: &str =
         "auto_injected_long_section_chunk_pair_wrong_article";
-    /// Minimum weight clamped onto derived text-recipe entries to avoid zero-weight slots.
-    ///
-    /// Applied as `recipe.weight.max(MIN_RECIPE_WEIGHT)` whenever anchor, positive, and
-    /// negative text recipes are derived from a triplet recipe.  Prevents a recipe with a
-    /// user-supplied weight of `0.0` from being silently excluded from weighted sampling.
-    pub const MIN_RECIPE_WEIGHT: f32 = 0.0001;
     /// Denominator used for the anchor/positive swap coin-flip (swap when `rng & mask == 0`).
     ///
     /// A value of `1` means the least-significant bit is tested, giving a uniform 50% swap
