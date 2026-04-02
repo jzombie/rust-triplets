@@ -1,3 +1,5 @@
+/// Column-mapped CSV file source implementation.
+pub mod csv_source;
 /// Generic configurable filesystem-backed source implementation.
 pub mod file_source;
 

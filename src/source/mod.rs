@@ -21,6 +21,7 @@ use crate::types::SourceId;
 pub mod backends;
 /// Utility helpers used by source implementations.
 pub mod indexing;
+pub use backends::csv_source::{CsvSource, CsvSourceConfig};
 pub use backends::file_source::{
     FileSource, FileSourceConfig, SectionBuilder, TaxonomyBuilder, anchor_context_sections,
     taxonomy_from_path,

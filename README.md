@@ -11,7 +11,7 @@ Generate an effectively unlimited stream of [training triplets](https://en.wikip
 In metric learning and language model training, a **triplet** consists of an **anchor**, a **positive** example (similar to the anchor), and a **negative** example (dissimilar to the anchor).
 
 `triplets` provides a high-throughput streaming pipeline to:
-1. **Ingest** data from local files, Hugging Face, or custom backends.
+1. **Ingest** data from local text/CSV files, Hugging Face, or custom backends.
 2. **Mix** sources with configurable weights to balance your training data.
 3. **Split** data deterministically into train, validation, and test sets.
 4. **Sample** triplets or pairs using rule-based "recipes".
@@ -61,29 +61,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Configuring Sources
 
-### Local File Source
-Recursively indexes text files from a directory. Ideal for local datasets and exported corpora.
-
-```rust
-use std::sync::Arc;
-use triplets::{SamplerConfig, TripletSampler, SplitRatios, DeterministicSplitStore};
-use triplets::source::{FileSource, FileSourceConfig};
-
-let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
-let store = Arc::new(DeterministicSplitStore::new(ratios, 42).unwrap());
-let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
-// Create a source named "docs" targeting a local directory.
-let config = FileSourceConfig::new("docs", "./data/corpus")
-    .with_text_files_only(true)
-    .with_trust(0.9); // Assign a quality score to this source
-
-let source = FileSource::new(config);
-sampler.register_source(Box::new(source));
-```
-
-
 ### Hugging Face Source
-Streams rows directly from the Hugging Face Hub without requiring a full dataset download.
+Streams rows directly from the Hugging Face Hub without requiring a full dataset download. Map dataset columns to anchor, positive, or plain-text roles the same way as the CSV source.
 
 ```rust,no_run
 #[cfg(feature = "huggingface")]
@@ -115,7 +94,59 @@ Streams rows directly from the Hugging Face Hub without requiring a full dataset
 }
 ```
 
-### Custom Data Source
+### CSV Source
+Load rows from a CSV file with explicit column mappings. The file **must have a named header row** — columns are always selected by name. Supports two modes:
+
+- **Role mode** — map separate columns to anchor and positive (context) roles.
+- **Text mode** — map a single column for SimCSE-style contrastive pre-training.
+
+```rust,no_run
+use std::sync::Arc;
+use triplets::{SamplerConfig, TripletSampler, SplitRatios, DeterministicSplitStore};
+use triplets::source::{CsvSource, CsvSourceConfig};
+
+let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
+let store = Arc::new(DeterministicSplitStore::new(ratios, 42).unwrap());
+let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
+
+// Role mode: map "question" → anchor, "answer" → positive.
+let config = CsvSourceConfig::new("qna", "data/qna.csv")
+    .with_anchor_column("question")
+    .with_positive_column("answer")
+    .with_trust(0.9);
+let source = CsvSource::new(config).unwrap();
+sampler.register_source(Box::new(source));
+
+// Text mode (SimCSE): single column used for both anchor and context.
+let config2 = CsvSourceConfig::new("corpus", "data/corpus.csv")
+    .with_text_column("text");
+let source2 = CsvSource::new(config2).unwrap();
+sampler.register_source(Box::new(source2));
+```
+
+Rows with empty required fields are skipped. Column name matching is case-insensitive.
+
+### Text File Source
+Recursively indexes plain-text files from a directory. Each file's stem (filename without extension) becomes the **anchor** and its body content becomes the **context**. Useful for local corpora where files are already titled meaningfully.
+
+```rust
+use std::sync::Arc;
+use triplets::{SamplerConfig, TripletSampler, SplitRatios, DeterministicSplitStore};
+use triplets::source::{FileSource, FileSourceConfig};
+
+let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
+let store = Arc::new(DeterministicSplitStore::new(ratios, 42).unwrap());
+let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
+// Point at a directory; all text files are indexed recursively.
+// The filename stem is the anchor; the file body is the context.
+let config = FileSourceConfig::new("docs", "./data/corpus")
+    .with_text_files_only(true)
+    .with_trust(0.9); // Assign a quality score to this source
+
+let source = FileSource::new(config);
+sampler.register_source(Box::new(source));
+```
+
 Implement the `IndexableSource` trait to integrate any backend that can fetch records by a stable integer index.
 
 ```rust
