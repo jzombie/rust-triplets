@@ -7,6 +7,26 @@ use std::path::Path;
 use crate::data::{RecordSection, SectionRole};
 use crate::types::Sentence;
 
+/// Split `text` into whitespace-delimited tokens.
+///
+/// This is the single canonical tokenizer used across chunking, sampling, and
+/// BM25 indexing.  The implementation deliberately stays simple — a
+/// `split_whitespace` scan — because:
+///
+/// * Latency is O(n) in text length and fast enough for all current call sites
+///   (chunking, decoration, BM25 query truncation).
+/// * An LRU cache would add memory pressure and synchronisation overhead that
+///   outweighs any benefits at these text sizes; the allocation itself is
+///   cheaper than a cache lookup + contention on most inputs.
+pub fn tokenize(text: &str) -> Vec<&str> {
+    text.split_whitespace().collect()
+}
+
+/// Count whitespace-delimited tokens in `text` without allocating.
+pub fn token_count(text: &str) -> usize {
+    text.split_whitespace().count()
+}
+
 /// Collapse repeated whitespace in-place while preserving single spaces.
 /// Collapse runs of whitespace into single spaces and trim.
 pub fn normalize_inline_whitespace<T: AsRef<str>>(text: T) -> String {
