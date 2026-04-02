@@ -259,9 +259,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Threading Model
 Concurrency is handled at multiple levels to ensure high throughput:
-- **Prefetching**: A `Rayon`-managed thread pool pre-samples batches into a bounded queue.
-- **Parallel Ingestion**: Multiple sources can be refreshed in parallel.
-- **Synchronous API**: The public sampling API is synchronous at its boundaries for ease of integration into training loops.
+- **Prefetching**: `BatchPrefetcher` runs a dedicated background worker thread and fills a bounded queue.
+- **Parallel Ingestion**: Source refresh runs concurrently across registered sources during ingestion cycles.
+- **Synchronous API**: Sampling calls are synchronous at the API boundary for easy training-loop integration.
+- **Thread-Safe Shared Use**: `TripletSampler` is safe to share across threads (for example via `Arc`); concurrent calls are internally synchronized with a mutex, so one sampler instance is safely callable from multiple threads without data races.
 
 ### Chunking and Windows
 Long documents are automatically handled via a pluggable `ChunkingAlgorithm`. The default `SlidingWindowChunker` breaks sections into windows of a fixed token size with a configurable overlap, ensuring full coverage of long texts.
