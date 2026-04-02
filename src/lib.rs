@@ -31,6 +31,8 @@ pub mod source;
 /// Split stores and persistence helpers.
 pub mod splits;
 
+/// Structural text tokenizer trait and whitespace implementation.
+pub mod tokenizer;
 /// Shared type aliases.
 pub mod types;
 /// Text normalization helpers.

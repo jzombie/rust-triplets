@@ -915,7 +915,9 @@ fn print_triplet_batch(
         println!("recipe       : {}", triplet.recipe);
         println!("sample_weight: {:.4}", triplet.weight);
         if let Some(instr) = &triplet.instruction {
-            println!("instruction shown to model:\n{}\n", instr);
+            println!("instruction shown to model:");
+            println!("{instr}");
+            println!();
         }
         let pos_proximity = chunk_proximity_score(&triplet.anchor, &triplet.positive);
         let pos_distance = window_chunk_distance(&triplet.anchor, &triplet.positive);
@@ -986,7 +988,9 @@ fn print_text_batch(strategy: &ChunkingStrategy, batch: &TextBatch, split_store:
         println!("recipe       : {}", sample.recipe);
         println!("sample_weight: {:.4}", sample.weight);
         if let Some(instr) = &sample.instruction {
-            println!("instruction shown to model:\n{}\n", instr);
+            println!("instruction shown to model:");
+            println!("{instr}");
+            println!();
         }
         print_chunk_block(
             "TEXT",
@@ -1308,10 +1312,10 @@ fn print_chunk_block(
         println!("jaccard(↔a)  : {:.4}  byte-cos(↔a): {:.4}", j, c);
     }
     println!("model_input (exact text sent to the model):");
-    println!(
-        "<<< BEGIN MODEL TEXT >>>\n{}\n<<< END MODEL TEXT >>>\n",
-        chunk.text
-    );
+    println!("<<< BEGIN MODEL TEXT >>>");
+    println!("{}", chunk.text);
+    println!("<<< END MODEL TEXT >>>");
+    println!();
 }
 
 fn print_source_summary<'a, I>(label: &str, ids: I)

@@ -1,11 +1,17 @@
 //! Text normalization helpers shared by source implementations.
 
 use chrono::{DateTime, Utc};
+use line_ending::LineEnding;
 use std::fs;
 use std::path::Path;
 
 use crate::data::{RecordSection, SectionRole};
 use crate::types::Sentence;
+
+/// Returns the newline string for the current platform (`"\n"` on Unix, `"\r\n"` on Windows).
+pub fn platform_newline() -> &'static str {
+    LineEnding::from_current_platform().as_str()
+}
 
 /// Collapse repeated whitespace in-place while preserving single spaces.
 /// Collapse runs of whitespace into single spaces and trim.
@@ -30,8 +36,9 @@ pub fn normalize_inline_whitespace<T: AsRef<str>>(text: T) -> String {
 /// Heuristic sentence splitter with tokenizer-friendly rules.
 pub fn sentences(text: &str) -> Vec<Sentence> {
     let mut results = Vec::new();
-
-    for block in text.split("\n\n") {
+    let normalized = LineEnding::normalize(text);
+    let paragraph_sep = LineEnding::LF.as_str().repeat(2);
+    for block in normalized.split(&paragraph_sep) {
         if block.trim().is_empty() {
             continue;
         }
@@ -157,14 +164,15 @@ mod tests {
 
     #[test]
     fn normalize_inline_whitespace_collapses_runs() {
-        let input = "Alpha\n\n  Beta\tGamma";
-        assert_eq!(normalize_inline_whitespace(input), "Alpha Beta Gamma");
+        let nl = platform_newline();
+        let input = format!("Alpha{nl}{nl}  Beta\tGamma");
+        assert_eq!(normalize_inline_whitespace(&input), "Alpha Beta Gamma");
     }
 
     #[test]
     fn sentences_falls_back_to_full_text_when_needed() {
-        let text = "   \n";
-        let result = sentences(text);
+        let text = format!("   {}", platform_newline());
+        let result = sentences(&text);
         assert!(result.is_empty());
 
         let text2 = "Single block without punctuation";
@@ -216,8 +224,9 @@ mod tests {
 
     #[test]
     fn sentences_treat_blank_line_as_boundary() {
-        let text = "First line without punctuation\n\nSecond line with more context.";
-        let result = sentences(text);
+        let nl = platform_newline();
+        let text = format!("First line without punctuation{nl}{nl}Second line with more context.");
+        let result = sentences(&text);
         assert_eq!(
             result,
             vec![

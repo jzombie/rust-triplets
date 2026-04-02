@@ -3,7 +3,6 @@ mod backends;
 use crate::chunking::{ChunkingAlgorithm, SlidingWindowChunker};
 use chrono::Duration;
 use indexmap::IndexMap;
-use line_ending::LineEnding;
 use rand::prelude::*;
 use rayon::prelude::*;
 use std::borrow::Cow;
@@ -38,7 +37,9 @@ use crate::source::DataSource;
 use crate::splits::{
     EpochStateStore, PersistedSamplerState, SamplerStateStore, SplitLabel, SplitStore,
 };
+use crate::tokenizer::{Tokenizer, WhitespaceTokenizer};
 use crate::types::{RecipeKey, RecordId, SourceId};
+use crate::utils::platform_newline;
 
 // AUTO-RECIPE HANDLING OVERVIEW (end-to-end):
 // Stage A: Source-level injection eligibility ("should this source even get the recipe?")
@@ -1463,8 +1464,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         if let Some(spec) = record.meta_prefix.as_ref()
             && let Some(prefix) = spec.sample(rng)
         {
-            let body_tokens: Vec<&str> = chunk.text.split_whitespace().collect();
-            let prefix_tokens: Vec<&str> = prefix.split_whitespace().collect();
+            let body_tokens: Vec<&str> = WhitespaceTokenizer.tokenize(&chunk.text);
+            let prefix_tokens: Vec<&str> = WhitespaceTokenizer.tokenize(&prefix);
             let total_tokens = prefix_tokens.len() + body_tokens.len();
             let max_window = self.config.chunking.max_window_tokens;
             if max_window > 0 && total_tokens > max_window {
@@ -1570,8 +1571,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         if let Some(spec) = record.meta_prefix.as_ref()
             && let Some(prefix) = spec.sample(rng)
         {
-            let body_tokens: Vec<&str> = chunk.text.split_whitespace().collect();
-            let prefix_tokens: Vec<&str> = prefix.split_whitespace().collect();
+            let body_tokens: Vec<&str> = WhitespaceTokenizer.tokenize(&chunk.text);
+            let prefix_tokens: Vec<&str> = WhitespaceTokenizer.tokenize(&prefix);
             let total_tokens = prefix_tokens.len() + body_tokens.len();
             let max_window = self.config.chunking.max_window_tokens;
             if max_window > 0 && total_tokens > max_window {
@@ -1784,7 +1785,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         }
         record.sections.iter().any(|section| {
             matches!(section.role, SectionRole::Anchor | SectionRole::Context)
-                && section.text.split_whitespace().count() > window
+                && WhitespaceTokenizer.token_count(&section.text) > window
         })
     }
 
@@ -2991,10 +2992,6 @@ fn role_label(role: &SectionRole) -> String {
 
 fn taxonomy_value(record: &DataRecord, field: MetadataKey) -> Option<&str> {
     record.taxonomy.iter().find_map(|entry| field.strip(entry))
-}
-
-fn platform_newline() -> &'static str {
-    LineEnding::from_current_platform().as_str()
 }
 
 fn strategy_reason(strategy: &NegativeStrategy) -> &'static str {

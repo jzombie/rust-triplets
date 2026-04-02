@@ -10,6 +10,7 @@ use triplets::constants::sampler::AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_N
 use triplets::source::backends::huggingface_source::{
     HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE, load_hf_sources_from_list,
 };
+use triplets::utils::platform_newline;
 use triplets::{
     ChunkingStrategy, DataSource, DeterministicSplitStore, HfListRoots, HfSourceEntry,
     HuggingFaceRowSource, HuggingFaceRowsConfig, Sampler, SamplerConfig, SplitLabel, SplitRatios,
@@ -28,8 +29,9 @@ fn seeded_config(seed: u64) -> SamplerConfig {
 }
 
 fn write_lines(path: &std::path::Path, lines: &[&str]) {
-    let mut body = lines.join("\n");
-    body.push('\n');
+    let nl = platform_newline();
+    let mut body = lines.join(nl);
+    body.push_str(nl);
     fs::write(path, body).expect("failed writing snapshot shard");
 }
 
@@ -404,11 +406,10 @@ fn huggingface_parses_source_list_with_explicit_mappings() {
     let temp = tempfile::tempdir().expect("failed creating tempdir");
     let list_path = temp.path().join("hf_sources.txt");
 
+    let nl = platform_newline();
     fs::write(
         &list_path,
-        "# demo list\n\n"
-            .to_string()
-            + "hf://org/dataset/default/train anchor=title positive=text context=ctx1,ctx2 text=text\n",
+        format!("# demo list{nl}{nl}hf://org/dataset/default/train anchor=title positive=text context=ctx1,ctx2 text=text{nl}"),
     )
     .expect("failed writing source list");
 
@@ -474,7 +475,8 @@ fn huggingface_helper_parsers_cover_success_and_error_paths() {
 fn huggingface_list_root_and_builder_helpers_cover_invalid_inputs() {
     let temp = tempfile::tempdir().expect("failed creating tempdir");
     let list_path = temp.path().join("hf_sources_invalid.txt");
-    fs::write(&list_path, "# no sources\n\n").expect("failed writing list file");
+    let nl = platform_newline();
+    fs::write(&list_path, format!("# no sources{nl}{nl}")).expect("failed writing list file");
 
     let err = resolve_hf_list_roots(list_path.to_str().expect("utf8 path").to_string())
         .expect_err("empty list should fail");
@@ -1569,12 +1571,15 @@ fn huggingface_source_list_file_parses_trust_and_source_id() {
     let temp = tempfile::tempdir().expect("failed creating tempdir");
     let list_path = temp.path().join("hf_sources_trust.txt");
 
+    let nl = platform_newline();
     fs::write(
         &list_path,
-        "# sources with trust and source_id overrides\n\
-         hf://org/dataset-a/default/train anchor=title positive=text trust=0.9 source_id=dataset-a-train\n\
-         hf://org/dataset-b/default/train text=body trust=0.3\n\
-         hf://org/dataset-c/default/train text=content source_id=my-corpus\n",
+        format!(
+            "# sources with trust and source_id overrides{nl}\
+             hf://org/dataset-a/default/train anchor=title positive=text trust=0.9 source_id=dataset-a-train{nl}\
+             hf://org/dataset-b/default/train text=body trust=0.3{nl}\
+             hf://org/dataset-c/default/train text=content source_id=my-corpus{nl}"
+        ),
     )
     .expect("failed writing source list");
 

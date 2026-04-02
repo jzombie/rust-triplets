@@ -1,6 +1,7 @@
 use super::algorithm::ChunkingAlgorithm;
 use crate::config::ChunkingStrategy;
 use crate::data::{ChunkView, DataRecord, RecordChunk, RecordSection};
+use crate::tokenizer::{Tokenizer, WhitespaceTokenizer};
 
 /// Default sliding-window chunking algorithm.
 #[derive(Clone, Copy, Debug, Default)]
@@ -15,7 +16,7 @@ impl ChunkingAlgorithm for SlidingWindowChunker {
         section: &RecordSection,
     ) -> Vec<RecordChunk> {
         let text = section.text.as_str();
-        let tokens: Vec<&str> = text.split_whitespace().collect();
+        let tokens: Vec<&str> = WhitespaceTokenizer.tokenize(text);
         if tokens.is_empty() {
             return Vec::new();
         }
