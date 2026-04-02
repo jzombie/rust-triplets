@@ -10313,3 +10313,97 @@ fn for_split_non_exhausted_error_propagates_immediately() {
         "expected Configuration error from triplet batch, got: {triplet_err:?}"
     );
 }
+
+/// Regression guard: the `>= batch_size` early-break in every sampling loop must not be
+/// removed.  Several inner paths (notably the multi-source text loop and the no-source
+/// text/triplet loops) have **no companion per-push size check** on the output vec.
+/// Without the early-break, those loops accumulate more than `batch_size` items; the
+/// subsequent `vec.len() == batch_size` equality check then fails, and the function
+/// returns `Err(Exhausted)` even though the pool is ample.
+///
+/// This test uses a pool of 20 records (5× the batch_size of 4) and asserts that all
+/// three batch APIs return `Ok` with **exactly** `batch_size` items.  Removing any of
+/// the guards would cause the text batch (and possibly others) to return `Err(Exhausted)`
+/// and break this assertion.
+#[test]
+fn batch_size_guard_prevents_oversampling_from_large_pool() {
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 614).unwrap());
+
+    const BATCH: usize = 4;
+    const POOL: usize = 20; // 5× batch_size — loop would overfill without the guard
+
+    let mut config = base_config();
+    config.seed = 614;
+    config.batch_size = BATCH;
+    config.allowed_splits = vec![SplitLabel::Train];
+    config.split = split;
+    config.recipes = vec![TripletRecipe {
+        name: "oversample_guard".into(),
+        anchor: Selector::Role(SectionRole::Anchor),
+        positive_selector: Selector::Role(SectionRole::Context),
+        negative_selector: Selector::Role(SectionRole::Context),
+        negative_strategy: NegativeStrategy::WrongArticle,
+        weight: 1.0,
+        instruction: None,
+        allow_same_anchor_positive: false,
+    }];
+    config.text_recipes = vec![TextRecipe {
+        name: "oversample_guard_text".into(),
+        selector: Selector::Role(SectionRole::Context),
+        weight: 1.0,
+        instruction: None,
+    }];
+
+    let records: Vec<_> = (0..POOL)
+        .map(|i| {
+            trader_record(
+                &format!("osg_{i}"),
+                "2025-06-01",
+                &format!("title oversample {i}"),
+                &format!("body context words filling slot {i} for oversample guard test"),
+            )
+        })
+        .collect();
+
+    let sampler = TripletSampler::new(config, Arc::clone(&store));
+    sampler.register_source(Box::new(InMemorySource::new("osg_source", records)));
+
+    // Pair batch: assert exactly BATCH items (not Exhausted, not more).
+    let pair_batch = sampler
+        .next_pair_batch(SplitLabel::Train)
+        .expect("pair batch must succeed with large pool");
+    assert_eq!(
+        pair_batch.pairs.len(),
+        BATCH,
+        "pair batch length must equal batch_size; got {}",
+        pair_batch.pairs.len()
+    );
+
+    // Text batch: critical — the multi-source text loop has no per-push guard, so
+    // removing the early-break produces > BATCH samples and Exhausted is returned.
+    let text_batch = sampler
+        .next_text_batch(SplitLabel::Train)
+        .expect("text batch must succeed with large pool");
+    assert_eq!(
+        text_batch.samples.len(),
+        BATCH,
+        "text batch length must equal batch_size; got {}",
+        text_batch.samples.len()
+    );
+
+    // Triplet batch: assert exactly BATCH items.
+    let triplet_batch = sampler
+        .next_triplet_batch(SplitLabel::Train)
+        .expect("triplet batch must succeed with large pool");
+    assert_eq!(
+        triplet_batch.triplets.len(),
+        BATCH,
+        "triplet batch length must equal batch_size; got {}",
+        triplet_batch.triplets.len()
+    );
+}
