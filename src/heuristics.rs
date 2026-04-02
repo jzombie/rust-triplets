@@ -104,19 +104,19 @@ pub fn build_derived_text_recipes(recipes: &[TripletRecipe]) -> Vec<TextRecipe> 
         derived.push(TextRecipe {
             name: format!("{base}_anchor").into(),
             selector: recipe.anchor.clone(),
-            weight: recipe.weight.max(0.0001),
+            weight: recipe.weight,
             instruction: None,
         });
         derived.push(TextRecipe {
             name: format!("{base}_positive").into(),
             selector: recipe.positive_selector.clone(),
-            weight: recipe.weight.max(0.0001),
+            weight: recipe.weight,
             instruction: None,
         });
         derived.push(TextRecipe {
             name: format!("{base}_negative").into(),
             selector: recipe.negative_selector.clone(),
-            weight: recipe.weight.max(0.0001),
+            weight: recipe.weight,
             instruction: None,
         });
     }

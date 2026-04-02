@@ -66,7 +66,16 @@ pub struct TripletRecipe {
     pub negative_selector: Selector,
     /// Strategy used to pick negatives.
     pub negative_strategy: NegativeStrategy,
-    /// Relative weight used when sampling among recipes.
+    /// Relative weight controlling how often this recipe is selected versus other recipes.
+    ///
+    /// Each recipe with a positive weight receives a number of slots in the shuffled selection
+    /// order proportional to `weight / min_positive_weight` across all active recipes, so a
+    /// recipe with `weight = 2.0` is drawn approximately twice as often as one with `weight =
+    /// 1.0`.  The weight also scales the `weight` field on every [`crate::SampleTriplet`]
+    /// returned by this recipe, which the caller's training loop can use for loss weighting.
+    ///
+    /// Recipes with `weight <= 0.0` are excluded from selection entirely and no samples
+    /// are produced for them.
     pub weight: f32,
     /// Optional instruction text attached to samples from this recipe.
     pub instruction: Option<Cow<'static, str>>,
@@ -123,7 +132,16 @@ pub struct TextRecipe {
     pub name: Cow<'static, str>,
     /// Selector used for text chunks.
     pub selector: Selector,
-    /// Relative weight used when sampling among text recipes.
+    /// Relative weight controlling how often this recipe is selected versus other recipes.
+    ///
+    /// Each recipe with a positive weight receives a number of slots in the shuffled selection
+    /// order proportional to `weight / min_positive_weight` across all active recipes, so a
+    /// recipe with `weight = 2.0` is drawn approximately twice as often as one with `weight =
+    /// 1.0`.  The weight also scales the `weight` field on every [`crate::TextSample`]
+    /// returned by this recipe, which the caller's training loop can use for loss weighting.
+    ///
+    /// Recipes with `weight <= 0.0` are excluded from selection entirely and no samples
+    /// are produced for them.
     pub weight: f32,
     /// Optional instruction text attached to samples from this recipe.
     pub instruction: Option<Cow<'static, str>>,

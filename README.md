@@ -208,8 +208,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### Recipe Selection Weights
+
+The `weight` field on `TripletRecipe` controls **how often a recipe is selected** relative to other active recipes. The sampler expands each recipe into a proportional number of selection slots, shuffles them, and cycles through — so a recipe with `weight = 3.0` is drawn approximately three times as often as one with `weight = 1.0`.
+
+| `weight` value | Effect |
+| -------------- | ------ |
+| Equal across all recipes (e.g. all `1.0`) | Uniform round-robin — each recipe is selected equally often (default behavior). |
+| `2.0` vs `1.0` | The `2.0` recipe is tried ~2× as often per batch. |
+| `0.0` or negative | Recipe is **excluded entirely** — useful for disabling a recipe without removing it from configuration. |
+
+```rust,no_run
+use triplets::{SamplerConfig, TripletRecipe, NegativeStrategy, Selector, SectionRole};
+
+let config = SamplerConfig {
+    recipes: vec![
+        // High-signal structured pairs: tried 3× as often as the fallback.
+        TripletRecipe {
+            name: "structured".into(),
+            anchor: Selector::Role(SectionRole::Anchor),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Random,
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 3.0,
+            instruction: None,
+            allow_same_anchor_positive: false,
+        },
+        // Fallback recipe with random chunk selection.
+        TripletRecipe {
+            name: "random_fallback".into(),
+            anchor: Selector::Random,
+            positive_selector: Selector::Random,
+            negative_selector: Selector::Random,
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 1.0,
+            instruction: None,
+            allow_same_anchor_positive: false,
+        },
+        // Disabled recipe — excluded from sampling until weight is set above zero.
+        TripletRecipe {
+            name: "experimental".into(),
+            anchor: Selector::Random,
+            positive_selector: Selector::Random,
+            negative_selector: Selector::Random,
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 0.0,
+            instruction: None,
+            allow_same_anchor_positive: false,
+        },
+    ],
+    ..SamplerConfig::default()
+};
+```
+
+> **Sampling frequency vs. output score**: `TripletRecipe::weight` controls how often the recipe is *selected*. It is also one factor in the output `SampleTriplet::weight`, but the two serve different roles — see [Output Format](#output-format) below.
+
 ### Output Format
-The sampler produces `SampleTriplet` values containing sampled text and associated metadata.
+
+Each `SampleTriplet` contains the sampled text and a computed training score.
 
 ```rust,no_run
 use std::sync::Arc;
@@ -223,12 +279,198 @@ for triplet in batch.triplets {
     let anchor_text = &triplet.anchor.text;
     let pos_text    = &triplet.positive.text;
     let neg_text    = &triplet.negative.text;
-    
+
     // Metadata
-    let recipe      = &triplet.recipe;      // which recipe was used
-    let weight      = triplet.weight;       // training weight
-    let instruction = triplet.instruction;  // optional instruction string
+    let recipe      = &triplet.recipe;      // which recipe produced this triplet
+    let weight      = triplet.weight;       // training score — see below
+    let instruction = triplet.instruction;  // optional task instruction string
 }
+```
+
+#### What `triplet.weight` means and how it is calculated
+
+`SampleTriplet::weight` is a **per-triplet training score** in the range `(0.0, recipe.weight]`. Use it to scale each triplet's contribution to the loss — triplets that are more structurally coherent or come from higher-trust sources receive a higher score.
+
+The value is computed as `triplet.weight = recipe.weight × chunk_quality`, where `chunk_quality` is the average of three per-slot signals (one per chunk: anchor, positive, negative). Each signal is the product of two independent factors:
+
+| Factor | What it measures | How it is set |
+| ------ | ---------------- | ------------- |
+| **Window position score** | `1 / (window_index + 1)` — earlier chunks in a section score higher (1.0 at index 0, 0.5 at index 1, 0.25 at index 3, …). | Automatic. |
+| **Source trust** | Configured quality signal for the originating source (clamped to `[0, 1]`). | Set via `.with_trust(0.9)` on the source config. |
+
+The resulting raw signal is clamped to `[chunk_weight_floor, 1.0]` (default floor: `0.1`) before averaging.
+
+The anchor/positive pair additionally has a **proximity multiplier** applied: chunks that are closer together within the same section receive a higher multiplier (two adjacent windows score 1.0; the score decreases as window distance grows). This rewards pairs that share local context.
+
+A practical reading: a triplet from a high-trust source where all three chunks come from the opening windows of their sections will have `chunk_quality ≈ 1.0`, so `triplet.weight ≈ recipe.weight`. A triplet with chunks deep in long documents from a lower-trust source will have a noticeably smaller score.
+
+In a training loop pass the weight straight into your criterion:
+
+```rust,no_run
+use std::sync::Arc;
+use triplets::{SamplerConfig, TripletSampler, SplitRatios, DeterministicSplitStore, SplitLabel, Sampler};
+let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
+let store = Arc::new(DeterministicSplitStore::new(ratios, 42).unwrap());
+let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
+let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
+// Example: accumulate weighted loss over a batch.
+let _weighted_loss: f32 = batch.triplets.iter().map(|t| {
+    let triplet_loss = 0.0_f32; // replace with your model's per-triplet loss
+    triplet_loss * t.weight
+}).sum();
+```
+
+### Source Within a Source
+
+Each `TripletRecipe` is an **independent code path** over the sections of a record. Two recipes registered against the same source can express completely different training hypotheses about the same underlying data — no second source registration needed.
+
+The mechanism is straightforward:
+
+- Populate each `DataRecord::sections` with as many `RecordSection` entries as your data has natural views.
+- Assign each section a `SectionRole` (or let position carry the meaning with `Selector::Paragraph(n)`).
+- Write one `TripletRecipe` per hypothesis; each recipe independently specifies which sections fill the anchor, positive, and negative slots.
+- Sources declare their own recipes via `default_triplet_recipes()` so callers need no recipe configuration at all.
+
+**Sparse sections — optional data in the same record pool**
+
+Not every record needs to have all sections. If a recipe targets `Selector::Paragraph(2)` (the third section) and a record only has two sections, the sampler simply skips that record *for that recipe only* — the record continues to serve all other recipes normally. This lets you mix densely-covered and sparsely-covered training hypotheses in a single source without any record filtering logic in your data pipeline.
+
+**Example — financial data source with two recipe strategies**
+
+Imagine each record represents one publicly-traded company with up to three sections:
+
+| Index | Role | Content | Always present? |
+| ----- | ---- | ------- | --------------- |
+| 0 | `Anchor` | Linearized financial metrics — view A (a random tag subset) | Yes |
+| 1 | `Context` | Linearized financial metrics — view B (a disjoint tag subset) | Yes |
+| 2 | *(positional)* | Earnings-call transcript for the same period | No — only when a transcript was found |
+
+Two recipes target different aspects of the same records:
+
+```rust,no_run
+use triplets::config::{NegativeStrategy, Selector, TripletRecipe};
+use triplets::data::SectionRole;
+
+/// Cross-view recipe: both metric views are always present, so every record
+/// participates. Teaches the model that two different linearized views of the
+/// same company are semantically closer than any view of a different company.
+fn metrics_cross_view_recipe() -> TripletRecipe {
+    TripletRecipe {
+        name: "metrics_cross_view".into(),
+        // Anchor: metric view A.
+        anchor: Selector::Role(SectionRole::Anchor),
+        // Positive: metric view B — disjoint tags, same company and period.
+        positive_selector: Selector::Role(SectionRole::Context),
+        // Negative: metric view A of a different company.
+        negative_selector: Selector::Role(SectionRole::Anchor),
+        negative_strategy: NegativeStrategy::WrongArticle,
+        weight: 1.0,
+        instruction: None,
+        allow_same_anchor_positive: false,
+    }
+}
+
+/// Transcript recipe: targets an optional third section (index 2).
+/// Records without a transcript are skipped for *this recipe only* —
+/// they still serve the metrics_cross_view recipe above without any
+/// record filtering logic in the data pipeline.
+///
+/// Lower weight reflects partial coverage: fewer records satisfy this
+/// recipe, so letting it drive the same number of gradient steps as the
+/// dense recipe would over-represent the companies with transcripts.
+fn metrics_to_transcript_recipe() -> TripletRecipe {
+    TripletRecipe {
+        name: "metrics_to_transcript".into(),
+        // Anchor: metric view A.
+        anchor: Selector::Role(SectionRole::Anchor),
+        // Positive: earnings-call transcript at section index 2.
+        // Records that lack this section are skipped for this recipe.
+        positive_selector: Selector::Paragraph(2),
+        // Negative: metric view A of a different company.
+        negative_selector: Selector::Role(SectionRole::Anchor),
+        negative_strategy: NegativeStrategy::WrongArticle,
+        // Half the weight of the dense recipe; adjust as transcript coverage grows.
+        weight: 0.5,
+        instruction: None,
+        allow_same_anchor_positive: false,
+    }
+}
+```
+
+The source returns both recipes from `default_triplet_recipes()` so that no recipe configuration is needed at the call site:
+
+```rust,no_run
+use triplets::config::TripletRecipe;
+use triplets::source::{DataSource, IndexablePager, IndexableSource, SourceCursor, SourceSnapshot};
+use triplets::{DataRecord, SamplerConfig, SamplerError};
+
+# use triplets::config::{NegativeStrategy, Selector};
+# use triplets::data::SectionRole;
+# fn metrics_cross_view_recipe() -> TripletRecipe { TripletRecipe { name: "".into(), anchor: Selector::Random, positive_selector: Selector::Random, negative_selector: Selector::Random, negative_strategy: NegativeStrategy::WrongArticle, weight: 1.0, instruction: None, allow_same_anchor_positive: false } }
+# fn metrics_to_transcript_recipe() -> TripletRecipe { metrics_cross_view_recipe() }
+struct FinancialReportsSource { /* store handle, symbol index, … */ }
+
+impl IndexableSource for FinancialReportsSource {
+    fn id(&self) -> &str { "financial_reports" }
+    fn len_hint(&self) -> Option<usize> { Some(5000) }
+
+    fn record_at(&self, _idx: usize) -> Result<Option<DataRecord>, SamplerError> {
+        // Build a record with 2 or 3 sections depending on transcript availability.
+        // Sparse records (None returns) are skipped entirely by the pager.
+        Ok(None) // replace with real record construction
+    }
+}
+
+impl DataSource for FinancialReportsSource {
+    fn id(&self) -> &str { "financial_reports" }
+
+    fn refresh(
+        &self,
+        _config: &SamplerConfig,
+        cursor: Option<&SourceCursor>,
+        limit: Option<usize>,
+    ) -> Result<SourceSnapshot, SamplerError> {
+        IndexablePager::new(DataSource::id(self)).refresh(self, cursor, limit)
+    }
+
+    fn reported_record_count(&self, _config: &SamplerConfig) -> Result<u128, SamplerError> {
+        Ok(5000)
+    }
+
+    /// Source declares its own recipes — no recipe config required at call site.
+    fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {
+        vec![
+            metrics_cross_view_recipe(),      // dense: all records, weight 1.0
+            metrics_to_transcript_recipe(),   // sparse: records with transcripts, weight 0.5
+        ]
+    }
+}
+```
+
+When the sampler processes a record that has only two sections, it attempts each recipe in weighted order: `metrics_cross_view` succeeds (both `Role(Anchor)` and `Role(Context)` sections are present), while `metrics_to_transcript` returns no candidate for that slot (section index 2 is absent). The sampler moves on without any special handling in the data pipeline.
+
+The same single `register_source` call enables both training hypotheses:
+
+```rust,no_run
+use std::sync::Arc;
+use triplets::{SamplerConfig, TripletSampler, SplitRatios, DeterministicSplitStore, SplitLabel, Sampler};
+
+# struct FinancialReportsSource;
+# impl triplets::source::DataSource for FinancialReportsSource {
+#   fn id(&self) -> &str { "financial_reports" }
+#   fn refresh(&self, _: &SamplerConfig, _: Option<&triplets::source::SourceCursor>, _: Option<usize>) -> Result<triplets::source::SourceSnapshot, triplets::SamplerError> { unimplemented!() }
+#   fn reported_record_count(&self, _: &SamplerConfig) -> Result<u128, triplets::SamplerError> { Ok(0) }
+# }
+let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
+let store = Arc::new(DeterministicSplitStore::new(ratios, 42).unwrap());
+let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
+
+// One registration — the source provides both recipes.
+sampler.register_source(Box::new(FinancialReportsSource { /* … */ }));
+
+let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
+// batch.triplets is a mix of "metrics_cross_view" and "metrics_to_transcript"
+// samples, proportional to their configured weights and record coverage.
 ```
 
 ## Epochs and Determinism
