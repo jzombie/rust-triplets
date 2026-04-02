@@ -2,7 +2,7 @@
 
 [![made-with-rust][rust-logo]][rust-src-page] [![crates.io][crates-badge]][crates-page] [![MIT licensed][mit-license-badge]][mit-license-page] [![Apache 2.0 licensed][apache-2.0-license-badge]][apache-2.0-license-page]
 
-Compose an effectively unlimited supply of [training triplets](https://en.wikipedia.org/wiki/Triplet_loss), pairs, or plaintext samples from your existing corpus. This crate handles ingestion, mixing multiple sources, deterministic train/validation/test splitting, and optional BM25 hard-negative mining.
+Compose an effectively unlimited supply of [training triplets](https://en.wikipedia.org/wiki/Triplet_loss), pairs, or plaintext samples from your existing corpus. This crate handles ingestion, mixing multiple sources, deterministic train/validation/test splitting, and optional [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) hard-negative mining.
 
 ## Overview
 
@@ -51,11 +51,11 @@ let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
 
 ## Features
 
-| Feature | What it enables | Default |
-|---|---|---|
-| `huggingface` | Streaming from Hugging Face dataset repositories. | No |
-| `bm25-mining` | BM25 hard-negative ranking within strategy-defined pools. | No |
-| `extended-metrics` | Additional per-triplet diagnostics for debugging. | No |
+| Feature            | What it enables                                           | Default |
+| ------------------ | --------------------------------------------------------- | ------- |
+| `huggingface`      | Streaming from Hugging Face dataset repositories.         | No      |
+| `bm25-mining`      | BM25 hard-negative ranking within strategy-defined pools. | No      |
+| `extended-metrics` | Additional per-triplet diagnostics for debugging.         | No      |
 
 ## Configuring Sources
 
@@ -272,14 +272,14 @@ The sampler delegates negative selection to a pluggable backend.
 
 ## Capabilities
 
-| Capability | Description |
-|---|---|
-| **Source Agnostic** | Implement `DataSource` or `IndexableSource` for any DB or API. |
-| **Weighted Sampling** | Tune source and recipe frequencies to handle class imbalance. |
-| **Epoch Shuffling** | Deterministic pseudo-random shuffling that re-permutes per epoch. |
-| **Instruction Tuning** | Attach task-specific prompts (e.g., "Summarize this...") to specific recipes. |
-| **Metadata Decorators** | Inject structured prefixes into sampled text via `KvpPrefixSampler`. |
-| **Anti-Shortcut** | Includes anchor/positive swapping to avoid asymmetric slot bias. |
+| Capability              | Description                                                                   |
+| ----------------------- | ----------------------------------------------------------------------------- |
+| **Source Agnostic**     | Implement `DataSource` or `IndexableSource` for any DB or API.                |
+| **Weighted Sampling**   | Tune source and recipe frequencies to handle class imbalance.                 |
+| **Epoch Shuffling**     | Deterministic pseudo-random shuffling that re-permutes per epoch.             |
+| **Instruction Tuning**  | Attach task-specific prompts (e.g., "Summarize this...") to specific recipes. |
+| **Metadata Decorators** | Inject structured prefixes into sampled text via `KvpPrefixSampler`.          |
+| **Anti-Shortcut**       | Includes anchor/positive swapping to avoid asymmetric slot bias.              |
 
 ## License
 
