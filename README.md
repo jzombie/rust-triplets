@@ -61,6 +61,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Configuring Sources
 
+### Hugging Face Source
+Streams rows directly from the Hugging Face Hub without requiring a full dataset download. Map dataset columns to anchor, positive, or plain-text roles the same way as the CSV source.
+
+```rust,no_run
+#[cfg(feature = "huggingface")]
+{
+    use std::sync::Arc;
+    use triplets::{SamplerConfig, TripletSampler, SplitRatios, DeterministicSplitStore, Sampler};
+    use triplets::{HuggingFaceRowSource, HuggingFaceRowsConfig};
+
+    fn main() -> Result<(), Box<dyn std::error::Error>> {
+        let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
+        let store = Arc::new(DeterministicSplitStore::new(ratios, 42)?);
+        let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
+        // Configure the source to pull the "train" split of a dataset.
+        // Note: While we specify "train" here as the ingestion source, the crate
+        // automatically handles its own deterministic split assignments (train/val/test)
+        // at the record level across all loaded data.
+        let config = HuggingFaceRowsConfig::new(
+            "hf_finance",          // Source identifier
+            "financial_phrasebank", // HF Dataset name
+            "default",             // Dataset config
+            "train",               // Dataset split
+            "cache/hf_snapshots"   // Local cache for downloaded shards
+        );
+
+        let source = HuggingFaceRowSource::new(config)?;
+        sampler.register_source(Box::new(source));
+        Ok(())
+    }
+}
+```
+
 ### CSV Source
 Load rows from a CSV file with explicit column mappings. Supports two modes:
 
@@ -93,8 +126,8 @@ sampler.register_source(Box::new(source2));
 
 Rows with empty required fields are skipped. Column name matching is case-insensitive.
 
-### Local File Source
-Recursively indexes text files from a directory. Ideal for local datasets and exported corpora.
+### Text File Source
+Recursively indexes plain-text files from a directory. Each file's stem (filename without extension) becomes the **anchor** and its body content becomes the **context**. Useful for local corpora where files are already titled meaningfully.
 
 ```rust
 use std::sync::Arc;
@@ -104,7 +137,8 @@ use triplets::source::{FileSource, FileSourceConfig};
 let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
 let store = Arc::new(DeterministicSplitStore::new(ratios, 42).unwrap());
 let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
-// Create a source named "docs" targeting a local directory.
+// Point at a directory; all text files are indexed recursively.
+// The filename stem is the anchor; the file body is the context.
 let config = FileSourceConfig::new("docs", "./data/corpus")
     .with_text_files_only(true)
     .with_trust(0.9); // Assign a quality score to this source
@@ -113,41 +147,6 @@ let source = FileSource::new(config);
 sampler.register_source(Box::new(source));
 ```
 
-
-### Hugging Face Source
-Streams rows directly from the Hugging Face Hub without requiring a full dataset download.
-
-```rust,no_run
-#[cfg(feature = "huggingface")]
-{
-    use std::sync::Arc;
-    use triplets::{SamplerConfig, TripletSampler, SplitRatios, DeterministicSplitStore, Sampler};
-    use triplets::{HuggingFaceRowSource, HuggingFaceRowsConfig};
-
-    fn main() -> Result<(), Box<dyn std::error::Error>> {
-        let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
-        let store = Arc::new(DeterministicSplitStore::new(ratios, 42)?);
-        let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
-        // Configure the source to pull the "train" split of a dataset.
-        // Note: While we specify "train" here as the ingestion source, the crate
-        // automatically handles its own deterministic split assignments (train/val/test)
-        // at the record level across all loaded data.
-        let config = HuggingFaceRowsConfig::new(
-            "hf_finance",          // Source identifier
-            "financial_phrasebank", // HF Dataset name
-            "default",             // Dataset config
-            "train",               // Dataset split
-            "cache/hf_snapshots"   // Local cache for downloaded shards
-        );
-
-        let source = HuggingFaceRowSource::new(config)?;
-        sampler.register_source(Box::new(source));
-        Ok(())
-    }
-}
-```
-
-### Custom Data Source
 Implement the `IndexableSource` trait to integrate any backend that can fetch records by a stable integer index.
 
 ```rust
