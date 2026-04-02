@@ -61,6 +61,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Configuring Sources
 
+### CSV Source
+Load rows from a CSV file with explicit column mappings. Supports two modes:
+
+- **Role mode** — map separate columns to anchor and positive (context) roles.
+- **Text mode** — map a single column for SimCSE-style contrastive pre-training.
+
+```rust,no_run
+use std::sync::Arc;
+use triplets::{SamplerConfig, TripletSampler, SplitRatios, DeterministicSplitStore};
+use triplets::source::{CsvSource, CsvSourceConfig};
+
+let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
+let store = Arc::new(DeterministicSplitStore::new(ratios, 42).unwrap());
+let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
+
+// Role mode: map "question" → anchor, "answer" → positive.
+let config = CsvSourceConfig::new("qna", "data/qna.csv")
+    .with_anchor_column("question")
+    .with_positive_column("answer")
+    .with_trust(0.9);
+let source = CsvSource::new(config).unwrap();
+sampler.register_source(Box::new(source));
+
+// Text mode (SimCSE): single column used for both anchor and context.
+let config2 = CsvSourceConfig::new("corpus", "data/corpus.csv")
+    .with_text_column("text");
+let source2 = CsvSource::new(config2).unwrap();
+sampler.register_source(Box::new(source2));
+```
+
+Rows with empty required fields are skipped. Column name matching is case-insensitive.
+
 ### Local File Source
 Recursively indexes text files from a directory. Ideal for local datasets and exported corpora.
 
