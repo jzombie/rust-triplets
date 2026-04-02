@@ -61,6 +61,7 @@ pub struct FileCorpusIndex {
     text_files_only: bool,
     group_by_directory: bool,
     group_window_divisor: usize,
+    index_dir: Option<PathBuf>,
 }
 
 impl FileCorpusIndex {
@@ -74,7 +75,18 @@ impl FileCorpusIndex {
             text_files_only: true,
             group_by_directory: false,
             group_window_divisor: 8,
+            index_dir: None,
         }
+    }
+
+    /// Override the directory used to store the on-disk file index.
+    ///
+    /// By default the index is written to the managed cache root discovered
+    /// from the current working directory. Use this when you need the index
+    /// placed in a specific directory (e.g. a temporary directory in tests).
+    pub fn with_index_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.index_dir = Some(dir.into());
+        self
     }
 
     /// Control whether symlinks are followed while walking the root.
@@ -275,14 +287,36 @@ impl FileCorpusIndex {
         file_index_root_dir().join(format!("{source_id}-{root_hash:x}.bin"))
     }
 
+    fn index_store_path(&self) -> PathBuf {
+        let root_hash = stable_hash_path(0, &self.root);
+        let file_name = format!("{}-{root_hash:x}.bin", self.source_id);
+        match &self.index_dir {
+            Some(dir) => dir.join(&file_name),
+            None => file_index_root_dir().join(&file_name),
+        }
+    }
+
+    /// Same as [`Self::file_index_store_path`] but respects a custom index directory
+    /// set via [`Self::with_index_dir`].
+    pub fn index_store_path_for(
+        index_dir: Option<&Path>,
+        root: &Path,
+        source_id: &SourceId,
+    ) -> PathBuf {
+        let root_hash = stable_hash_path(0, root);
+        let file_name = format!("{source_id}-{root_hash:x}.bin");
+        match index_dir {
+            Some(dir) => dir.join(&file_name),
+            None => file_index_root_dir().join(&file_name),
+        }
+    }
+
     /// Open the index store and return the meta if it matches this source.
     /// Otherwise, rebuild the index entries and return the new meta.
     fn load_or_build_index_meta(&self) -> Result<(DataStore, FileIndexMeta), SamplerError> {
         let store = self.open_index_store()?;
         if let Some(meta) = self.read_index_meta(&store)? {
-            if let Ok(metadata) =
-                fs::metadata(Self::file_index_store_path(&self.root, &self.source_id))
-            {
+            if let Ok(metadata) = fs::metadata(self.index_store_path()) {
                 debug!(
                     source_id = %self.source_id,
                     bytes = metadata.len(),
@@ -292,7 +326,7 @@ impl FileCorpusIndex {
             }
             return Ok((store, meta));
         }
-        let index_path = Self::file_index_store_path(&self.root, &self.source_id);
+        let index_path = self.index_store_path();
         let _ = fs::remove_file(&index_path);
         let store = self.open_index_store()?;
         let mut candidates: Vec<PathBuf> = Vec::new();
@@ -325,7 +359,7 @@ impl FileCorpusIndex {
 
     /// Open the simd-r-drive store for this source.
     fn open_index_store(&self) -> Result<DataStore, SamplerError> {
-        let path = Self::file_index_store_path(&self.root, &self.source_id);
+        let path = self.index_store_path();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -387,13 +421,8 @@ impl FileCorpusIndex {
             })?;
         let encoded_bytes: u64 = raw_path_bytes + meta_bytes.len() as u64;
         let path_count = paths.len() as u64;
-        let bytes_per_path = if path_count == 0 {
-            0
-        } else {
-            raw_path_bytes / path_count
-        };
-        if let Ok(metadata) = fs::metadata(Self::file_index_store_path(&self.root, &self.source_id))
-        {
+        let bytes_per_path = raw_path_bytes.checked_div(path_count).unwrap_or(0);
+        if let Ok(metadata) = fs::metadata(self.index_store_path()) {
             let overhead_bytes = metadata.len().saturating_sub(encoded_bytes);
             debug!(
                 source_id = %self.source_id,
@@ -448,7 +477,7 @@ impl FileCorpusIndex {
                     source_id: self.source_id.clone(),
                     reason: format!("file index store read failed: {err}"),
                 })?;
-        for (idx, entry) in indices.iter().zip(entries.into_iter()) {
+        for (idx, entry) in indices.iter().zip(entries) {
             if let Some(max) = max
                 && records.len() >= max
             {
@@ -640,7 +669,7 @@ impl FileCorpusIndex {
                     source_id: self.source_id.clone(),
                     reason: format!("file index store read failed: {err}"),
                 })?;
-        for (idx, entry) in indices.iter().zip(entries.into_iter()) {
+        for (idx, entry) in indices.iter().zip(entries) {
             let entry = entry.ok_or_else(|| SamplerError::SourceInconsistent {
                 source_id: self.source_id.clone(),
                 details: format!("file index missing entry {idx}"),

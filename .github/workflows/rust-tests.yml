@@ -76,6 +76,15 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-features --lib --bins --tests --examples -- --include-ignored
 
+      - name: Ensure .cache was not created by tests
+        shell: bash
+        run: |
+          if [ -e ".cache" ]; then
+            echo "ERROR: .cache directory was created during tests" >&2
+            find .cache -mindepth 1 >&2
+            exit 1
+          fi
+
   test:
     name: test
     runs-on: ubuntu-latest

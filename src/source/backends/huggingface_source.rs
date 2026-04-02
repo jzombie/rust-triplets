@@ -4059,10 +4059,7 @@ impl HuggingFaceRowSource {
                     })?;
 
                     unresolved_targets.clear();
-                    for (position, entry) in requested_positions
-                        .into_iter()
-                        .zip(store_entries.into_iter())
-                    {
+                    for (position, entry) in requested_positions.into_iter().zip(store_entries) {
                         let Some(indices_for_position) = targets.get(&position).cloned() else {
                             continue;
                         };
