@@ -34,19 +34,19 @@ use triplets::{
     DeterministicSplitStore, SplitLabel, Sampler
 };
 
-# fn main() -> Result<(), Box<dyn std::error::Error>> {
-// 1. Define your train/validation/test ratios (e.g., 80/10/10).
-let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Define your train/validation/test ratios (e.g., 80/10/10).
+    let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
 
-// 2. Initialize a deterministic split store. 
-// The seed ensures record IDs are always assigned to the same split.
-let seed = 42;
-let store = Arc::new(DeterministicSplitStore::new(ratios, seed)?);
+    // 2. Initialize a deterministic split store.
+    // The seed ensures record IDs are always assigned to the same split.
+    let seed = 42;
+    let store = Arc::new(DeterministicSplitStore::new(ratios, seed)?);
 
-// 3. Create the sampler.
-let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
-# Ok(())
-# }
+    // 3. Create the sampler.
+    let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
+    Ok(())
+}
 ```
 
 ## Features
@@ -63,13 +63,13 @@ let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
 Recursively indexes text files from a directory. Ideal for local datasets or exported corpora.
 
 ```rust
-# use std::sync::Arc;
-# use triplets::{SamplerConfig, TripletSampler, SplitRatios, DeterministicSplitStore};
+use std::sync::Arc;
+use triplets::{SamplerConfig, TripletSampler, SplitRatios, DeterministicSplitStore};
 use triplets::source::{FileSource, FileSourceConfig};
 
-# let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
-# let store = Arc::new(DeterministicSplitStore::new(ratios, 42).unwrap());
-# let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
+let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
+let store = Arc::new(DeterministicSplitStore::new(ratios, 42).unwrap());
+let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
 // Create a source named "docs" targeting a local directory.
 let config = FileSourceConfig::new("docs", "./data/corpus")
     .with_text_files_only(true)
@@ -84,41 +84,41 @@ sampler.register_source(Box::new(source));
 Streams rows directly from the Hugging Face Hub without requiring full dataset downloads.
 
 ```rust,no_run
-# #[cfg(feature = "huggingface")]
-# {
-# use std::sync::Arc;
-# use triplets::{SamplerConfig, TripletSampler, SplitRatios, DeterministicSplitStore, Sampler};
-use triplets::{HuggingFaceRowSource, HuggingFaceRowsConfig};
+#[cfg(feature = "huggingface")]
+{
+    use std::sync::Arc;
+    use triplets::{SamplerConfig, TripletSampler, SplitRatios, DeterministicSplitStore, Sampler};
+    use triplets::{HuggingFaceRowSource, HuggingFaceRowsConfig};
 
-# fn main() -> Result<(), Box<dyn std::error::Error>> {
-# let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
-# let store = Arc::new(DeterministicSplitStore::new(ratios, 42)?);
-# let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
-// Configure the source to pull the "train" split of a dataset.
-// Note: While we specify "train" here as the ingestion source, the crate 
-// automatically handles its own deterministic split assignments (train/val/test) 
-// at the record level across all loaded data.
-let config = HuggingFaceRowsConfig::new(
-    "hf_finance",          // Source identifier
-    "financial_phrasebank", // HF Dataset name
-    "default",             // Dataset config
-    "train",               // Dataset split
-    "cache/hf_snapshots"   // Local cache for downloaded shards
-);
+    fn main() -> Result<(), Box<dyn std::error::Error>> {
+        let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
+        let store = Arc::new(DeterministicSplitStore::new(ratios, 42)?);
+        let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
+        // Configure the source to pull the "train" split of a dataset.
+        // Note: While we specify "train" here as the ingestion source, the crate
+        // automatically handles its own deterministic split assignments (train/val/test)
+        // at the record level across all loaded data.
+        let config = HuggingFaceRowsConfig::new(
+            "hf_finance",          // Source identifier
+            "financial_phrasebank", // HF Dataset name
+            "default",             // Dataset config
+            "train",               // Dataset split
+            "cache/hf_snapshots"   // Local cache for downloaded shards
+        );
 
-let source = HuggingFaceRowSource::new(config)?;
-sampler.register_source(Box::new(source));
-# Ok(())
-# }
-# }
+        let source = HuggingFaceRowSource::new(config)?;
+        sampler.register_source(Box::new(source));
+        Ok(())
+    }
+}
 ```
 
 ### Custom Data Source
 Implement the `IndexableSource` trait to integrate any backend that can fetch records by a stable integer index.
 
 ```rust
-# use std::sync::Arc;
-# use triplets::{SamplerConfig, TripletSampler, SplitRatios, DeterministicSplitStore};
+use std::sync::Arc;
+use triplets::{SamplerConfig, TripletSampler, SplitRatios, DeterministicSplitStore};
 use chrono::Utc;
 use triplets::{DataRecord, SamplerError};
 use triplets::source::{IndexableSource, IndexableAdapter};
@@ -143,9 +143,9 @@ impl IndexableSource for MyApiSource {
     }
 }
 
-# let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
-# let store = Arc::new(DeterministicSplitStore::new(ratios, 42).unwrap());
-# let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
+let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
+let store = Arc::new(DeterministicSplitStore::new(ratios, 42).unwrap());
+let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
 let adapter = IndexableAdapter::new(MyApiSource);
 sampler.register_source(Box::new(adapter));
 ```
@@ -157,34 +157,34 @@ sampler.register_source(Box::new(adapter));
 Adjust the relative frequency of each source to handle class imbalance or dataset quality.
 
 ```rust,no_run
-# use std::sync::Arc;
-# use triplets::{SamplerConfig, TripletSampler, SplitRatios, DeterministicSplitStore, SplitLabel, Sampler};
+use std::sync::Arc;
+use triplets::{SamplerConfig, TripletSampler, SplitRatios, DeterministicSplitStore, SplitLabel, Sampler};
 use std::collections::HashMap;
 
-# fn main() -> Result<(), Box<dyn std::error::Error>> {
-# let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
-# let store = Arc::new(DeterministicSplitStore::new(ratios, 42)?);
-# let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
-// Pull from HF 70% of the time and local files 30% of the time.
-let mut weights = HashMap::new();
-weights.insert("hf_finance".to_string(), 0.7);
-weights.insert("docs".to_string(), 0.3);
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
+    let store = Arc::new(DeterministicSplitStore::new(ratios, 42)?);
+    let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
+    // Pull from HF 70% of the time and local files 30% of the time.
+    let mut weights = HashMap::new();
+    weights.insert("hf_finance".to_string(), 0.7);
+    weights.insert("docs".to_string(), 0.3);
 
-let batch = sampler.next_triplet_batch_with_weights(SplitLabel::Train, &weights)?;
-# Ok(())
-# }
+    let batch = sampler.next_triplet_batch_with_weights(SplitLabel::Train, &weights)?;
+    Ok(())
+}
 ```
 
 ### Output Format
 The sampler produces `SampleTriplet` objects containing the sampled text and associated metadata.
 
 ```rust,no_run
-# use std::sync::Arc;
-# use triplets::{SamplerConfig, TripletSampler, SplitRatios, DeterministicSplitStore, SplitLabel, Sampler};
-# let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
-# let store = Arc::new(DeterministicSplitStore::new(ratios, 42).unwrap());
-# let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
-# let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
+use std::sync::Arc;
+use triplets::{SamplerConfig, TripletSampler, SplitRatios, DeterministicSplitStore, SplitLabel, Sampler};
+let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
+let store = Arc::new(DeterministicSplitStore::new(ratios, 42).unwrap());
+let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
+let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
 for triplet in batch.triplets {
     // Primary content
     let anchor_text = &triplet.anchor.text;
@@ -204,32 +204,33 @@ for triplet in batch.triplets {
 In a typical training loop, you notify the sampler of a new epoch to reset its cursors and reshuffle sources.
 
 ```rust,no_run
-# use std::sync::Arc;
-# use triplets::{SamplerConfig, TripletSampler, SplitRatios, DeterministicSplitStore, SplitLabel, Sampler};
-# fn main() -> Result<(), Box<dyn std::error::Error>> {
-# let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
-# let store = Arc::new(DeterministicSplitStore::new(ratios, 42)?);
-# let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
-# let mut batches_left = 1;
-# let mut training_not_finished = || {
-#     let ret = batches_left > 0;
-#     batches_left -= 1;
-#     ret
-# };
-// In your training loop:
-for epoch in 0..10 {
-    sampler.set_epoch(epoch)?;
+use std::sync::Arc;
+use triplets::{SamplerConfig, TripletSampler, SplitRatios, DeterministicSplitStore, SplitLabel, Sampler};
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
+    let store = Arc::new(DeterministicSplitStore::new(ratios, 42)?);
+    let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
+    let mut batches_left = 1;
+    let mut training_not_finished = || {
+        let ret = batches_left > 0;
+        batches_left -= 1;
+        ret
+    };
+    // In your training loop:
+    for epoch in 0..10 {
+        sampler.set_epoch(epoch)?;
 
-    while training_not_finished() {
-        let batch = sampler.next_triplet_batch(SplitLabel::Train)?;
-        // ... pass batch to your model ...
+        while training_not_finished() {
+            let batch = sampler.next_triplet_batch(SplitLabel::Train)?;
+            // ... pass batch to your model ...
+        }
+
+        // Save state at the end of each epoch to allow resuming if training is interrupted.
+        sampler.save_sampler_state(None)?;
     }
 
-    // Save state at the end of each epoch to allow resuming if training is interrupted.
-    sampler.save_sampler_state(None)?;
+    Ok(())
 }
-# Ok(())
-# }
 ```
 
 ### Deterministic Resuming
@@ -239,17 +240,17 @@ To resume training, initialize a `FileSplitStore` at the same path. The sampler 
 use std::sync::Arc;
 use triplets::{SamplerConfig, TripletSampler, FileSplitStore, SplitRatios, Sampler};
 
-# fn main() -> Result<(), Box<dyn std::error::Error>> {
-let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
-let seed = 42;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
+    let seed = 42;
 
-// Opening an existing FileSplitStore automatically loads its persisted state.
-let store = Arc::new(FileSplitStore::open("checkpoints/splits.bin", ratios, seed)?);
+    // Opening an existing FileSplitStore automatically loads its persisted state.
+    let store = Arc::new(FileSplitStore::open("checkpoints/splits.bin", ratios, seed)?);
 
-// The sampler will resume from the exact record and recipe it was on.
-let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
-# Ok(())
-# }
+    // The sampler will resume from the exact record and recipe it was on.
+    let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
+    Ok(())
+}
 ```
 
 > **Note**: The sampler state is designed to be extremely lightweight. It only persists source identifiers, integer record cursors, and small RNG state vectors, rather than the data records themselves. This makes it efficient to checkpoint frequently during long-running training jobs.
