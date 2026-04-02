@@ -293,7 +293,9 @@ for triplet in batch.triplets {
 
 The value is computed as:
 
-$$\text{triplet.weight} = \text{recipe.weight} \times \text{chunk\_quality}$$
+```math
+triplet.weight = recipe.weight × chunk_quality
+```
 
 `chunk_quality` is the average of three per-slot signals — one each for the anchor, positive, and negative chunks. Each signal is the product of two independent factors:
 
