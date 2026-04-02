@@ -20,8 +20,8 @@ use crate::constants::sampler::AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME
 use crate::constants::sampler::{
     ANCHOR_POSITIVE_SWAP_MASK, EPOCH_SEED_OFFSET, EXHAUSTION_RETRY_LIMIT, NEG_REASON_WRONG_ARTICLE,
     NEG_REASON_WRONG_DATE, NEG_REASON_WRONG_QA, PREFETCHER_SOURCE_ID, PREFETCHER_STOPPED_REASON,
-    RECIPE_LABEL_TEXT, RECIPE_LABEL_TRIPLETS, ROLE_LABEL_ANCHOR, ROLE_LABEL_CONTEXT,
-    SAME_SELECTOR_PAIR_RETRY_LIMIT,
+    RECIPE_LABEL_TEXT, RECIPE_LABEL_TRIPLETS, RECIPE_ORDER_MAX_WEIGHT_MULTIPLIER,
+    ROLE_LABEL_ANCHOR, ROLE_LABEL_CONTEXT, SAME_SELECTOR_PAIR_RETRY_LIMIT,
 };
 use crate::data::{
     ChunkView, DataRecord, PairLabel, RecordChunk, RecordSection, SampleBatch, SamplePair,
@@ -742,22 +742,36 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             .unwrap_or(&[])
     }
 
-    fn recipe_order_shuffled(&mut self, count: usize, rng: &mut DeterministicRng) -> Vec<usize> {
-        if count == 0 {
-            return Vec::new();
-        }
-        let mut order: Vec<usize> = (0..count).collect();
-        order.shuffle(rng);
-        order
+    /// Build a weighted, shuffled selection order from a slice of recipe weights.
+    ///
+    /// Each recipe with `weight > 0.0` receives a number of slots proportional to its weight
+    /// relative to the smallest positive weight, capped at
+    /// [`RECIPE_ORDER_MAX_WEIGHT_MULTIPLIER`].  The slot list is then shuffled so that
+    /// deterministic round-robin cycling naturally draws recipes at the requested frequency:
+    ///
+    /// * `weight = [1.0, 1.0, 1.0]` → one slot each — identical to uniform round-robin.
+    /// * `weight = [3.0, 1.0]`       → three slots for recipe 0, one for recipe 1.
+    /// * `weight = [1.0, 0.0]`       → recipe 1 is excluded entirely (zero slots).
+    fn recipe_order_weighted_shuffled(
+        &mut self,
+        weights: &[f32],
+        rng: &mut DeterministicRng,
+    ) -> Vec<usize> {
+        weighted_recipe_order(weights, rng)
     }
 
-    fn recipe_order_cycled(
+    /// Weighted shuffle rotated by `rr_idx` for deterministic round-robin cycling.
+    ///
+    /// Calls [`Self::recipe_order_weighted_shuffled`] and rotates the result by
+    /// `rr_idx % order.len()` so successive batches start from different recipes,
+    /// preserving both the proportional frequency and the cross-batch cycling.
+    fn recipe_order_weighted_cycled(
         &mut self,
-        count: usize,
+        weights: &[f32],
         rr_idx: usize,
         rng: &mut DeterministicRng,
     ) -> Vec<usize> {
-        let base = self.recipe_order_shuffled(count, rng);
+        let base = self.recipe_order_weighted_shuffled(weights, rng);
         if base.is_empty() {
             return base;
         }
@@ -768,26 +782,24 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         order
     }
 
-    fn text_recipe_order_shuffled(
+    /// Weighted shuffled selection order for text recipes — same algorithm as
+    /// [`Self::recipe_order_weighted_shuffled`], kept separate so the text and triplet
+    /// round-robin counters can advance independently.
+    fn text_recipe_order_weighted_shuffled(
         &mut self,
-        count: usize,
+        weights: &[f32],
         rng: &mut DeterministicRng,
     ) -> Vec<usize> {
-        if count == 0 {
-            return Vec::new();
-        }
-        let mut order: Vec<usize> = (0..count).collect();
-        order.shuffle(rng);
-        order
+        weighted_recipe_order(weights, rng)
     }
 
-    fn text_recipe_order_cycled(
+    fn text_recipe_order_weighted_cycled(
         &mut self,
-        count: usize,
+        weights: &[f32],
         rr_idx: usize,
         rng: &mut DeterministicRng,
     ) -> Vec<usize> {
-        let base = self.text_recipe_order_shuffled(count, rng);
+        let base = self.text_recipe_order_weighted_shuffled(weights, rng);
         if base.is_empty() {
             return base;
         }
@@ -1956,7 +1968,9 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             return (None, 0);
         }
         if !recipe_orders.contains_key(source) {
-            let order = self.recipe_order_cycled(recipes.len(), self.triplet_recipe_rr_idx, rng);
+            let recipe_weights: Vec<f32> = recipes.iter().map(|r| r.weight).collect();
+            let order =
+                self.recipe_order_weighted_cycled(&recipe_weights, self.triplet_recipe_rr_idx, rng);
             recipe_orders.insert(source.to_string(), order);
         }
         let order = recipe_orders
@@ -2003,8 +2017,9 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 ));
             }
             let mut rng = std::mem::replace(&mut self.rng, DeterministicRng::new(0));
-            let recipe_order = self.recipe_order_cycled(
-                self.triplet_recipes.len(),
+            let recipe_weights: Vec<f32> = self.triplet_recipes.iter().map(|r| r.weight).collect();
+            let recipe_order = self.recipe_order_weighted_cycled(
+                &recipe_weights,
                 self.triplet_recipe_rr_idx,
                 &mut rng,
             );
@@ -2201,8 +2216,9 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 ));
             }
             let mut rng = std::mem::replace(&mut self.rng, DeterministicRng::new(0));
-            let recipe_order = self.text_recipe_order_cycled(
-                self.text_recipes.len(),
+            let recipe_weights: Vec<f32> = self.text_recipes.iter().map(|r| r.weight).collect();
+            let recipe_order = self.text_recipe_order_weighted_cycled(
+                &recipe_weights,
                 self.text_recipe_rr_idx,
                 &mut rng,
             );
@@ -2279,8 +2295,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 continue;
             }
             if !recipe_orders.contains_key(source) {
-                let order =
-                    self.text_recipe_order_cycled(recipes.len(), self.text_recipe_rr_idx, &mut rng);
+                let recipe_weights: Vec<f32> = recipes.iter().map(|r| r.weight).collect();
+                let order = self.text_recipe_order_weighted_cycled(
+                    &recipe_weights,
+                    self.text_recipe_rr_idx,
+                    &mut rng,
+                );
                 recipe_orders.insert(source.to_string(), order);
             }
             let order = recipe_orders
@@ -2352,8 +2372,9 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 ));
             }
             let mut rng = std::mem::replace(&mut self.rng, DeterministicRng::new(0));
-            let recipe_order = self.recipe_order_cycled(
-                self.triplet_recipes.len(),
+            let recipe_weights: Vec<f32> = self.triplet_recipes.iter().map(|r| r.weight).collect();
+            let recipe_order = self.recipe_order_weighted_cycled(
+                &recipe_weights,
                 self.triplet_recipe_rr_idx,
                 &mut rng,
             );
@@ -2481,9 +2502,10 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             .enumerate()
             .map(|(slot_idx, plan)| {
                 let mut fork_rng = DeterministicRng::new(plan.fork_seed);
-                // Shuffle recipe order within this slot for variety.
-                let mut order: Vec<usize> = (0..plan.recipes.len()).collect();
-                order.shuffle(&mut fork_rng);
+                // Use weighted shuffle so recipes with higher weight are tried more
+                // often and zero-weight recipes are excluded entirely.
+                let weights: Vec<f32> = plan.recipes.iter().map(|r| r.weight).collect();
+                let order = weighted_recipe_order(&weights, &mut fork_rng);
                 let mut candidate = None;
                 for &idx in &order {
                     let recipe = &plan.recipes[idx];
@@ -2607,38 +2629,46 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             .expect("bm25_backend_mut: negative_backend is Bm25Backend when bm25-mining feature is active")
     }
 
-    /// Test shim: `recipe_order_shuffled` using the inner rng.
+    /// Test shim: `recipe_order_weighted_shuffled` using the inner rng.
     #[cfg(test)]
-    fn recipe_order_shuffled_seeded(&mut self, count: usize) -> Vec<usize> {
+    fn recipe_order_weighted_shuffled_seeded(&mut self, weights: &[f32]) -> Vec<usize> {
         let mut rng = std::mem::replace(&mut self.rng, DeterministicRng::new(0));
-        let result = self.recipe_order_shuffled(count, &mut rng);
+        let result = self.recipe_order_weighted_shuffled(weights, &mut rng);
         self.rng = rng;
         result
     }
 
-    /// Test shim: `recipe_order_cycled` using the inner rng.
+    /// Test shim: `recipe_order_weighted_cycled` using the inner rng.
     #[cfg(test)]
-    fn recipe_order_cycled_seeded(&mut self, count: usize, rr_idx: usize) -> Vec<usize> {
+    fn recipe_order_weighted_cycled_seeded(
+        &mut self,
+        weights: &[f32],
+        rr_idx: usize,
+    ) -> Vec<usize> {
         let mut rng = std::mem::replace(&mut self.rng, DeterministicRng::new(0));
-        let result = self.recipe_order_cycled(count, rr_idx, &mut rng);
+        let result = self.recipe_order_weighted_cycled(weights, rr_idx, &mut rng);
         self.rng = rng;
         result
     }
 
-    /// Test shim: `text_recipe_order_shuffled` using the inner rng.
+    /// Test shim: `text_recipe_order_weighted_shuffled` using the inner rng.
     #[cfg(test)]
-    fn text_recipe_order_shuffled_seeded(&mut self, count: usize) -> Vec<usize> {
+    fn text_recipe_order_weighted_shuffled_seeded(&mut self, weights: &[f32]) -> Vec<usize> {
         let mut rng = std::mem::replace(&mut self.rng, DeterministicRng::new(0));
-        let result = self.text_recipe_order_shuffled(count, &mut rng);
+        let result = self.text_recipe_order_weighted_shuffled(weights, &mut rng);
         self.rng = rng;
         result
     }
 
-    /// Test shim: `text_recipe_order_cycled` using the inner rng.
+    /// Test shim: `text_recipe_order_weighted_cycled` using the inner rng.
     #[cfg(test)]
-    fn text_recipe_order_cycled_seeded(&mut self, count: usize, rr_idx: usize) -> Vec<usize> {
+    fn text_recipe_order_weighted_cycled_seeded(
+        &mut self,
+        weights: &[f32],
+        rr_idx: usize,
+    ) -> Vec<usize> {
         let mut rng = std::mem::replace(&mut self.rng, DeterministicRng::new(0));
-        let result = self.text_recipe_order_cycled(count, rr_idx, &mut rng);
+        let result = self.text_recipe_order_weighted_cycled(weights, rr_idx, &mut rng);
         self.rng = rng;
         result
     }
@@ -2706,6 +2736,41 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             .expect("bm25_ranked_candidates: Bm25Backend")
             .ranked_candidates_pub(anchor, split)
     }
+}
+
+/// Build a shuffled selection order from a slice of recipe weights.
+///
+/// Each recipe with `weight > 0.0` receives a number of slots proportional to its weight
+/// relative to the smallest positive weight, capped at
+/// [`RECIPE_ORDER_MAX_WEIGHT_MULTIPLIER`].  The resulting expanded slot list is then
+/// shuffled, giving each recipe approximately the requested frequency in round-robin
+/// cycling.
+///
+/// This is a free function (no `self`) so it can be called from rayon parallel closures as
+/// well as from within the `TripletSamplerInner` instance methods.
+fn weighted_recipe_order(weights: &[f32], rng: &mut DeterministicRng) -> Vec<usize> {
+    let nonzero: Vec<(usize, f32)> = weights
+        .iter()
+        .enumerate()
+        .filter(|(_, w)| **w > 0.0)
+        .map(|(i, &w)| (i, w))
+        .collect();
+    if nonzero.is_empty() {
+        return Vec::new();
+    }
+    let w_min = nonzero
+        .iter()
+        .map(|(_, w)| *w)
+        .fold(f32::INFINITY, f32::min);
+    let mut order: Vec<usize> = Vec::new();
+    for (recipe_idx, w) in &nonzero {
+        let tickets = ((w / w_min).round() as usize).clamp(1, RECIPE_ORDER_MAX_WEIGHT_MULTIPLIER);
+        for _ in 0..tickets {
+            order.push(*recipe_idx);
+        }
+    }
+    order.shuffle(rng);
+    order
 }
 
 fn same_selector_pair_is_valid(

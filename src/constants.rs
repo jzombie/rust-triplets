@@ -78,6 +78,15 @@ pub mod sampler {
     /// regardless of whether custom triplet recipes are configured.
     pub const AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME: &str =
         "auto_injected_long_section_chunk_pair_wrong_article";
+    /// Maximum slot multiplier applied to the highest-weighted recipe when building the
+    /// shuffled selection order.
+    ///
+    /// When recipe weights differ, each recipe receives a number of slots in the shuffled
+    /// order proportional to `w / w_min`, where `w_min` is the smallest positive weight.
+    /// This value caps that multiplier to keep the order list bounded regardless of how
+    /// extreme the weight ratios are.  A recipe 17× heavier than the lightest one is
+    /// treated as 16× — close enough for practical use and prevents pathological list sizes.
+    pub const RECIPE_ORDER_MAX_WEIGHT_MULTIPLIER: usize = 16;
     /// Denominator used for the anchor/positive swap coin-flip (swap when `rng & mask == 0`).
     ///
     /// A value of `1` means the least-significant bit is tested, giving a uniform 50% swap

@@ -189,8 +189,12 @@ fn recipe_order_cycled_and_text_recipe_order_cycled_return_empty_for_zero_count(
     let store = Arc::new(DeterministicSplitStore::new(split, 18).unwrap());
     let mut inner = TripletSamplerInner::new(base_config(), store);
 
-    assert!(inner.recipe_order_cycled_seeded(0, 3).is_empty());
-    assert!(inner.text_recipe_order_cycled_seeded(0, 5).is_empty());
+    assert!(inner.recipe_order_weighted_cycled_seeded(&[], 3).is_empty());
+    assert!(
+        inner
+            .text_recipe_order_weighted_cycled_seeded(&[], 5)
+            .is_empty()
+    );
 }
 
 #[test]
@@ -4374,22 +4378,26 @@ fn recipe_order_helpers_cover_empty_and_rotated_cases() {
     let store = Arc::new(DeterministicSplitStore::new(split, 59).unwrap());
 
     let mut shuffled_inner = TripletSamplerInner::new(base_config(), Arc::clone(&store));
-    assert!(shuffled_inner.recipe_order_shuffled_seeded(0).is_empty());
     assert!(
         shuffled_inner
-            .text_recipe_order_shuffled_seeded(0)
+            .recipe_order_weighted_shuffled_seeded(&[])
+            .is_empty()
+    );
+    assert!(
+        shuffled_inner
+            .text_recipe_order_weighted_shuffled_seeded(&[])
             .is_empty()
     );
 
     let mut base_inner = TripletSamplerInner::new(base_config(), Arc::clone(&store));
-    let base_triplet = base_inner.recipe_order_shuffled_seeded(4);
+    let base_triplet = base_inner.recipe_order_weighted_shuffled_seeded(&[1.0, 1.0, 1.0, 1.0]);
     assert_eq!(base_triplet.len(), 4);
     let mut sorted_triplet = base_triplet.clone();
     sorted_triplet.sort_unstable();
     assert_eq!(sorted_triplet, vec![0, 1, 2, 3]);
 
     let mut cycled_inner = TripletSamplerInner::new(base_config(), Arc::clone(&store));
-    let cycled_triplet = cycled_inner.recipe_order_cycled_seeded(4, 5);
+    let cycled_triplet = cycled_inner.recipe_order_weighted_cycled_seeded(&[1.0, 1.0, 1.0, 1.0], 5);
     assert_eq!(
         cycled_triplet,
         vec![
@@ -4401,17 +4409,283 @@ fn recipe_order_helpers_cover_empty_and_rotated_cases() {
     );
 
     let mut base_text_inner = TripletSamplerInner::new(base_config(), Arc::clone(&store));
-    let base_text = base_text_inner.text_recipe_order_shuffled_seeded(4);
+    let base_text =
+        base_text_inner.text_recipe_order_weighted_shuffled_seeded(&[1.0, 1.0, 1.0, 1.0]);
     assert_eq!(base_text.len(), 4);
     let mut sorted_text = base_text.clone();
     sorted_text.sort_unstable();
     assert_eq!(sorted_text, vec![0, 1, 2, 3]);
 
     let mut cycled_text_inner = TripletSamplerInner::new(base_config(), store);
-    let cycled_text = cycled_text_inner.text_recipe_order_cycled_seeded(4, 6);
+    let cycled_text =
+        cycled_text_inner.text_recipe_order_weighted_cycled_seeded(&[1.0, 1.0, 1.0, 1.0], 6);
     assert_eq!(
         cycled_text,
         vec![base_text[2], base_text[3], base_text[0], base_text[1]]
+    );
+}
+
+// ── weighted recipe order unit tests ─────────────────────────────────────────
+
+#[test]
+fn weighted_recipe_order_zero_weight_recipes_are_excluded() {
+    let store = Arc::new(DeterministicSplitStore::new(SplitRatios::default(), 200).unwrap());
+    let mut inner = TripletSamplerInner::new(base_config(), store);
+
+    // Recipe at index 1 has zero weight — must never appear in the selection order.
+    let weights = [1.0_f32, 0.0, 1.0];
+    for _ in 0..20 {
+        let order = inner.recipe_order_weighted_shuffled_seeded(&weights);
+        assert!(
+            !order.contains(&1),
+            "zero-weight recipe 1 appeared in order: {order:?}"
+        );
+        assert_eq!(order.len(), 2); // only recipes 0 and 2 get slots
+    }
+
+    // All-zero → empty order.
+    assert!(
+        inner
+            .recipe_order_weighted_shuffled_seeded(&[0.0, 0.0])
+            .is_empty()
+    );
+}
+
+#[test]
+fn weighted_recipe_order_proportional_slot_count() {
+    let store = Arc::new(DeterministicSplitStore::new(SplitRatios::default(), 201).unwrap());
+    let mut inner = TripletSamplerInner::new(base_config(), store);
+
+    // 3:1 ratio → recipe 0 gets 3 slots, recipe 1 gets 1 slot.
+    let order = inner.recipe_order_weighted_shuffled_seeded(&[3.0_f32, 1.0]);
+    assert_eq!(order.len(), 4);
+    assert_eq!(order.iter().filter(|&&i| i == 0).count(), 3);
+    assert_eq!(order.iter().filter(|&&i| i == 1).count(), 1);
+
+    // 2:1 ratio.
+    let order2 = inner.recipe_order_weighted_shuffled_seeded(&[2.0_f32, 1.0]);
+    assert_eq!(order2.len(), 3);
+    assert_eq!(order2.iter().filter(|&&i| i == 0).count(), 2);
+    assert_eq!(order2.iter().filter(|&&i| i == 1).count(), 1);
+
+    // Equal weights (1:1) → single slot each — same as legacy uniform behaviour.
+    let order3 = inner.recipe_order_weighted_shuffled_seeded(&[1.0_f32, 1.0, 1.0, 1.0]);
+    assert_eq!(order3.len(), 4);
+    let mut sorted = order3.clone();
+    sorted.sort_unstable();
+    assert_eq!(sorted, vec![0, 1, 2, 3]);
+}
+
+#[test]
+fn weighted_recipe_order_cycled_preserves_multiset_across_rotations() {
+    let store = Arc::new(DeterministicSplitStore::new(SplitRatios::default(), 202).unwrap());
+    let mut inner = TripletSamplerInner::new(base_config(), store);
+
+    let weights = [3.0_f32, 1.0];
+    // Regardless of rotation offset, the multiset of recipe indices is always {0:3, 1:1}.
+    for rr_idx in [0, 1, 2, 3, 7, 11] {
+        let order = inner.recipe_order_weighted_cycled_seeded(&weights, rr_idx);
+        assert_eq!(order.len(), 4, "rr_idx={rr_idx}");
+        assert_eq!(
+            order.iter().filter(|&&i| i == 0).count(),
+            3,
+            "rr_idx={rr_idx}"
+        );
+        assert_eq!(
+            order.iter().filter(|&&i| i == 1).count(),
+            1,
+            "rr_idx={rr_idx}"
+        );
+    }
+}
+
+#[test]
+fn weighted_recipe_order_same_for_text_and_triplet_variants() {
+    let store = Arc::new(DeterministicSplitStore::new(SplitRatios::default(), 203).unwrap());
+    let mut inner = TripletSamplerInner::new(base_config(), store);
+
+    // Both variants use identical logic — proportions should match.
+    let weights = [4.0_f32, 2.0, 1.0];
+    let triplet = inner.recipe_order_weighted_shuffled_seeded(&weights);
+    let text = inner.text_recipe_order_weighted_shuffled_seeded(&weights);
+
+    // Slot count: min weight=1.0 → recipe 0 gets 4 slots, recipe 1 gets 2, recipe 2 gets 1.
+    let expected_len = 7;
+    assert_eq!(triplet.len(), expected_len);
+    assert_eq!(text.len(), expected_len);
+    assert_eq!(triplet.iter().filter(|&&i| i == 0).count(), 4);
+    assert_eq!(triplet.iter().filter(|&&i| i == 1).count(), 2);
+    assert_eq!(triplet.iter().filter(|&&i| i == 2).count(), 1);
+    assert_eq!(text.iter().filter(|&&i| i == 0).count(), 4);
+    assert_eq!(text.iter().filter(|&&i| i == 1).count(), 2);
+    assert_eq!(text.iter().filter(|&&i| i == 2).count(), 1);
+}
+
+#[test]
+fn weighted_recipe_selection_zero_weight_recipe_never_appears_in_batch() {
+    // End-to-end: a recipe with weight=0.0 should produce zero samples in batch output.
+    let split = SplitRatios {
+        train: 0.7,
+        validation: 0.2,
+        test: 0.1,
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 204).unwrap());
+    let find_train_id = |prefix: &str| -> String {
+        (0u32..)
+            .find_map(|i| {
+                let id = format!("{prefix}_{i}");
+                (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+            })
+            .unwrap()
+    };
+    let id_a = find_train_id("w0a");
+    let id_b = find_train_id("w0b");
+    let id_c = find_train_id("w0c");
+
+    let mut config = base_config();
+    config.seed = 1001;
+    config.batch_size = 4;
+    config.ingestion_max_records = 8;
+    config.allowed_splits = vec![SplitLabel::Train];
+    config.split = split;
+    config.recipes = vec![
+        TripletRecipe {
+            name: "active".into(),
+            anchor: Selector::Role(SectionRole::Anchor),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 1.0,
+            instruction: None,
+            allow_same_anchor_positive: false,
+        },
+        TripletRecipe {
+            name: "excluded".into(),
+            anchor: Selector::Role(SectionRole::Anchor),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 0.0, // must never be selected
+            instruction: None,
+            allow_same_anchor_positive: false,
+        },
+    ];
+
+    let records = vec![
+        trader_record(&id_a, "2025-01-01", "A", "Body A long enough to chunk"),
+        trader_record(&id_b, "2025-01-02", "B", "Body B long enough to chunk"),
+        trader_record(&id_c, "2025-01-03", "C", "Body C long enough to chunk"),
+    ];
+    let sampler = TripletSampler::new(config, store);
+    sampler.register_source(Box::new(InMemorySource::new(PRIMARY_SOURCE_ID, records)));
+
+    for _ in 0..20 {
+        if let Ok(batch) = sampler.next_triplet_batch(SplitLabel::Train) {
+            for triplet in &batch.triplets {
+                assert_ne!(
+                    triplet.recipe.as_str(),
+                    "excluded",
+                    "zero-weight recipe appeared in batch: {}",
+                    triplet.recipe
+                );
+                // recipe name may be "active" or "active_fallback_same_split"
+                assert!(
+                    triplet.recipe.starts_with("active"),
+                    "unexpected recipe name: {}",
+                    triplet.recipe
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn weighted_recipe_selection_frequency_matches_weight_ratio() {
+    // End-to-end: recipe with weight=3.0 should appear ~3× as often as weight=1.0.
+    let split = SplitRatios {
+        train: 0.7,
+        validation: 0.2,
+        test: 0.1,
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 205).unwrap());
+    let find_train_id = |prefix: &str| -> String {
+        (0u32..)
+            .find_map(|i| {
+                let id = format!("{prefix}_{i}");
+                (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+            })
+            .unwrap()
+    };
+    let id_a = find_train_id("wfa");
+    let id_b = find_train_id("wfb");
+    let id_c = find_train_id("wfc");
+    let id_d = find_train_id("wfd");
+
+    let mut config = base_config();
+    config.seed = 2002;
+    config.batch_size = 4;
+    config.ingestion_max_records = 16;
+    config.allowed_splits = vec![SplitLabel::Train];
+    config.split = split;
+    config.recipes = vec![
+        TripletRecipe {
+            name: "heavy".into(),
+            anchor: Selector::Role(SectionRole::Anchor),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 3.0,
+            instruction: None,
+            allow_same_anchor_positive: false,
+        },
+        TripletRecipe {
+            name: "light".into(),
+            anchor: Selector::Role(SectionRole::Anchor),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 1.0,
+            instruction: None,
+            allow_same_anchor_positive: false,
+        },
+    ];
+
+    let records = vec![
+        trader_record(&id_a, "2025-01-01", "A", "Body A long enough to chunk"),
+        trader_record(&id_b, "2025-01-02", "B", "Body B long enough to chunk"),
+        trader_record(&id_c, "2025-01-03", "C", "Body C long enough to chunk"),
+        trader_record(&id_d, "2025-01-04", "D", "Body D long enough to chunk"),
+    ];
+    let sampler = TripletSampler::new(config, store);
+    sampler.register_source(Box::new(InMemorySource::new(PRIMARY_SOURCE_ID, records)));
+
+    let mut heavy_count = 0usize;
+    let mut light_count = 0usize;
+    for _ in 0..50 {
+        if let Ok(batch) = sampler.next_triplet_batch(SplitLabel::Train) {
+            for triplet in &batch.triplets {
+                if triplet.recipe.starts_with("heavy") {
+                    heavy_count += 1;
+                } else if triplet.recipe.starts_with("light") {
+                    light_count += 1;
+                }
+            }
+        }
+    }
+
+    let total = heavy_count + light_count;
+    assert!(total > 0, "no samples produced");
+    let heavy_fraction = heavy_count as f64 / total as f64;
+    // Expected ~75% heavy (3/4). Allow ±20% margin for RNG and fallback variation.
+    assert!(
+        (0.55..=0.95).contains(&heavy_fraction),
+        "heavy recipe fraction {heavy_fraction:.2} outside expected range [0.55, 0.95] \
+         (heavy={heavy_count}, light={light_count})"
+    );
+    // heavy must appear more often than light — the core invariant.
+    assert!(
+        heavy_count > light_count,
+        "heavy recipe ({heavy_count}) should appear more often than light ({light_count})"
     );
 }
 
