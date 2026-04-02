@@ -296,8 +296,8 @@ impl FileCorpusIndex {
         }
     }
 
-    /// Same as [`file_index_store_path`] but respects a custom index directory
-    /// set via [`with_index_dir`].
+    /// Same as [`Self::file_index_store_path`] but respects a custom index directory
+    /// set via [`Self::with_index_dir`].
     pub fn index_store_path_for(
         index_dir: Option<&Path>,
         root: &Path,
