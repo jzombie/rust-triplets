@@ -1477,16 +1477,9 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                     chunk.tokens_estimate = max_window;
                 } else {
                     let remaining = max_window - prefix_tokens.len();
-                    let truncated_body = body_tokens
-                        .into_iter()
-                        .take(remaining)
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    chunk.text = if truncated_body.is_empty() {
-                        prefix
-                    } else {
-                        format!("{}{}{}", prefix, platform_newline(), truncated_body)
-                    };
+                    let trimmed_body: Vec<&str> = body_tokens.into_iter().take(remaining).collect();
+                    chunk.text =
+                        format!("{}{}{}", prefix, platform_newline(), trimmed_body.join(" "));
                     chunk.tokens_estimate = max_window;
                 }
             } else {
@@ -2784,8 +2777,10 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         for attempt in 0..=EXHAUSTION_RETRY_LIMIT {
             match inner.next_pair_batch_inner_with_weights(split, Some(weights)) {
                 Ok(batch) => return Ok(batch),
-                Err(SamplerError::Exhausted(_)) if attempt < EXHAUSTION_RETRY_LIMIT => {
-                    inner.force_ingest_refresh_with_weights_for_split(split, weights)?;
+                Err(SamplerError::Exhausted(_)) => {
+                    if attempt < EXHAUSTION_RETRY_LIMIT {
+                        inner.force_ingest_refresh_with_weights_for_split(split, weights)?;
+                    }
                 }
                 Err(err) => return Err(err),
             }
@@ -2804,8 +2799,10 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         for attempt in 0..=EXHAUSTION_RETRY_LIMIT {
             match inner.next_text_batch_inner_with_weights(split, Some(weights)) {
                 Ok(batch) => return Ok(batch),
-                Err(SamplerError::Exhausted(_)) if attempt < EXHAUSTION_RETRY_LIMIT => {
-                    inner.force_ingest_refresh_with_weights_for_split(split, weights)?;
+                Err(SamplerError::Exhausted(_)) => {
+                    if attempt < EXHAUSTION_RETRY_LIMIT {
+                        inner.force_ingest_refresh_with_weights_for_split(split, weights)?;
+                    }
                 }
                 Err(err) => return Err(err),
             }
@@ -2824,8 +2821,10 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         for attempt in 0..=EXHAUSTION_RETRY_LIMIT {
             match inner.next_triplet_batch_inner_with_weights(split, Some(weights)) {
                 Ok(batch) => return Ok(batch),
-                Err(SamplerError::Exhausted(_)) if attempt < EXHAUSTION_RETRY_LIMIT => {
-                    inner.force_ingest_refresh_with_weights_for_split(split, weights)?;
+                Err(SamplerError::Exhausted(_)) => {
+                    if attempt < EXHAUSTION_RETRY_LIMIT {
+                        inner.force_ingest_refresh_with_weights_for_split(split, weights)?;
+                    }
                 }
                 Err(err) => return Err(err),
             }
