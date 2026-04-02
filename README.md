@@ -291,13 +291,7 @@ for triplet in batch.triplets {
 
 `SampleTriplet::weight` is a **per-triplet training score** in the range `(0.0, recipe.weight]`. Use it to scale each triplet's contribution to the loss — triplets that are more structurally coherent or come from higher-trust sources receive a higher score.
 
-The value is computed as:
-
-```math
-triplet.weight = recipe.weight × chunk_quality
-```
-
-`chunk_quality` is the average of three per-slot signals — one each for the anchor, positive, and negative chunks. Each signal is the product of two independent factors:
+The value is computed as `triplet.weight = recipe.weight × chunk_quality`, where `chunk_quality` is the average of three per-slot signals (one per chunk: anchor, positive, negative). Each signal is the product of two independent factors:
 
 | Factor | What it measures | How it is set |
 | ------ | ---------------- | ------------- |
