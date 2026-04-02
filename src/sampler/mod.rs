@@ -38,8 +38,8 @@ use crate::source::DataSource;
 use crate::splits::{
     EpochStateStore, PersistedSamplerState, SamplerStateStore, SplitLabel, SplitStore,
 };
+use crate::tokenizer::{Tokenizer, WhitespaceTokenizer};
 use crate::types::{RecipeKey, RecordId, SourceId};
-use crate::utils::{token_count, tokenize};
 
 // AUTO-RECIPE HANDLING OVERVIEW (end-to-end):
 // Stage A: Source-level injection eligibility ("should this source even get the recipe?")
@@ -1464,8 +1464,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         if let Some(spec) = record.meta_prefix.as_ref()
             && let Some(prefix) = spec.sample(rng)
         {
-            let body_tokens: Vec<&str> = tokenize(&chunk.text);
-            let prefix_tokens: Vec<&str> = tokenize(&prefix);
+            let body_tokens: Vec<&str> = WhitespaceTokenizer.tokenize(&chunk.text);
+            let prefix_tokens: Vec<&str> = WhitespaceTokenizer.tokenize(&prefix);
             let total_tokens = prefix_tokens.len() + body_tokens.len();
             let max_window = self.config.chunking.max_window_tokens;
             if max_window > 0 && total_tokens > max_window {
@@ -1571,8 +1571,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         if let Some(spec) = record.meta_prefix.as_ref()
             && let Some(prefix) = spec.sample(rng)
         {
-            let body_tokens: Vec<&str> = tokenize(&chunk.text);
-            let prefix_tokens: Vec<&str> = tokenize(&prefix);
+            let body_tokens: Vec<&str> = WhitespaceTokenizer.tokenize(&chunk.text);
+            let prefix_tokens: Vec<&str> = WhitespaceTokenizer.tokenize(&prefix);
             let total_tokens = prefix_tokens.len() + body_tokens.len();
             let max_window = self.config.chunking.max_window_tokens;
             if max_window > 0 && total_tokens > max_window {
@@ -1785,7 +1785,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         }
         record.sections.iter().any(|section| {
             matches!(section.role, SectionRole::Anchor | SectionRole::Context)
-                && token_count(&section.text) > window
+                && WhitespaceTokenizer.token_count(&section.text) > window
         })
     }
 

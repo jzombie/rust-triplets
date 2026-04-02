@@ -7,56 +7,6 @@ use std::path::Path;
 use crate::data::{RecordSection, SectionRole};
 use crate::types::Sentence;
 
-/// Split `text` into whitespace-delimited tokens.
-///
-/// # What this tokenizer is — and is not
-///
-/// This is a **Unicode-scalar whitespace tokenizer** (equivalent to what NLP
-/// literature calls a *space tokenizer* or *word tokenizer*).  It splits on
-/// any sequence of Unicode whitespace and discards empty spans, matching the
-/// semantics of [`str::split_whitespace`].
-///
-/// **This is not the subword tokenizer used by any of the models this library
-/// serves data to.**  Embedding and language models typically use one of:
-///
-/// * **BPE** (Byte-Pair Encoding) — GPT-series, RoBERTa, most OpenAI encoders.
-/// * **WordPiece** — BERT-family models.
-/// * **SentencePiece / Unigram** — T5, LLaMA, Mistral, and most instruction-tuned LLMs.
-///
-/// Subword tokenizers operate on a learned vocabulary and routinely split a
-/// single English word into multiple tokens (e.g. `"tokenization"` → 3–4
-/// subword units in most BPE vocabularies).  As a result, the count returned
-/// here is a *structural estimate*, not the exact token count a model would
-/// produce.  In practice, whitespace token counts run roughly 0.75–1.3× the
-/// equivalent BPE token count depending on vocabulary and language.
-///
-/// The whitespace granularity is intentional for **structural purposes** —
-/// window sizing, prefix-budget arithmetic, BM25 term-frequency scoring — where
-/// exact model token counts are unnecessary and prohibitively expensive to
-/// compute without a loaded tokenizer binary.
-///
-/// # Performance
-///
-/// The implementation is a single O(n) scan with no heap allocation beyond the
-/// returned `Vec`.  An LRU cache would add memory pressure and synchronisation
-/// overhead that outweighs any benefit for these input sizes; the scan itself
-/// is cheaper than a cache lookup under contention.
-///
-/// If the tokenization strategy ever needs to vary (e.g. to plug in a real BPE
-/// encoder), introduce a `Tokenizer` trait at that point rather than
-/// generalising prematurely here.
-pub fn tokenize(text: &str) -> Vec<&str> {
-    text.split_whitespace().collect()
-}
-
-/// Count whitespace-delimited tokens in `text` without allocating.
-///
-/// See [`tokenize`] for a full discussion of what this count represents and
-/// how it relates to the subword token counts produced by downstream models.
-pub fn token_count(text: &str) -> usize {
-    text.split_whitespace().count()
-}
-
 /// Collapse repeated whitespace in-place while preserving single spaces.
 /// Collapse runs of whitespace into single spaces and trim.
 pub fn normalize_inline_whitespace<T: AsRef<str>>(text: T) -> String {

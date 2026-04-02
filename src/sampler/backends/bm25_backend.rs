@@ -19,8 +19,8 @@ use crate::constants::sampler::BM25_QUERY_TOKEN_LIMIT;
 use crate::constants::sampler::BM25_SEARCH_TOP_K;
 use crate::data::DataRecord;
 use crate::splits::SplitLabel;
+use crate::tokenizer::{Tokenizer, WhitespaceTokenizer};
 use crate::types::{RecordId, SourceId};
-use crate::utils::tokenize;
 
 use super::super::platform_newline;
 use super::NegativeBackend;
@@ -216,7 +216,7 @@ impl Bm25Backend {
             // removal, making each search ~170 ms.  Capping at 64 tokens
             // reduces that to ~10 ms with no loss in hard-negative quality —
             // the leading tokens of a financial window are the most specific.
-            let tokens: Vec<&str> = tokenize(text);
+            let tokens: Vec<&str> = WhitespaceTokenizer.tokenize(text);
             if tokens.len() <= BM25_QUERY_TOKEN_LIMIT {
                 text
             } else {
@@ -520,7 +520,7 @@ pub(in crate::sampler) fn record_bm25_text(record: &DataRecord, max_tokens: usiz
     if max_tokens == 0 {
         return out;
     }
-    let tokens: Vec<&str> = tokenize(&out);
+    let tokens: Vec<&str> = WhitespaceTokenizer.tokenize(&out);
     if tokens.len() <= max_tokens {
         return out;
     }
