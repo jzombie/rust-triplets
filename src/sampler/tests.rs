@@ -25,10 +25,10 @@ pub const FULL_SEQUENCE_LEN: usize = 45;
 pub const TEXT_BATCH_SEQUENCE_HASH: u64 = 5827731891827072441;
 /// Expected hash for deterministic triplet batch sequence.
 #[cfg(not(feature = "bm25-mining"))]
-pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 4185203987705106104;
+pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 6137236445130287036;
 /// Expected hash for deterministic triplet batch sequence when bm25-mining is enabled.
 #[cfg(feature = "bm25-mining")]
-pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 2471541713911738564;
+pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 3567297114780411140;
 /// Expected hash for deterministic pair batch sequence.
 #[cfg(not(feature = "bm25-mining"))]
 pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 1325935229386486484;
@@ -39,10 +39,10 @@ pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 9645472812115896860;
 pub const PREFETCH_TEXT_BATCH_SEQUENCE_HASH: u64 = 5061724971919995465;
 /// Expected hash for deterministic prefetch triplet batch sequence.
 #[cfg(not(feature = "bm25-mining"))]
-pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 9256290040294854440;
+pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 13549723595682255368;
 /// Expected hash for deterministic prefetch triplet batch sequence when bm25-mining is enabled.
 #[cfg(feature = "bm25-mining")]
-pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 6038679518446907700;
+pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 17421456775178077384;
 /// Expected hash for deterministic prefetch pair batch sequence.
 #[cfg(not(feature = "bm25-mining"))]
 pub const PREFETCH_PAIR_BATCH_SEQUENCE_HASH: u64 = 2535655529758418680;
@@ -189,8 +189,8 @@ fn recipe_order_cycled_and_text_recipe_order_cycled_return_empty_for_zero_count(
     let store = Arc::new(DeterministicSplitStore::new(split, 18).unwrap());
     let mut inner = TripletSamplerInner::new(base_config(), store);
 
-    assert!(inner.recipe_order_cycled(0, 3).is_empty());
-    assert!(inner.text_recipe_order_cycled(0, 5).is_empty());
+    assert!(inner.recipe_order_cycled_seeded(0, 3).is_empty());
+    assert!(inner.text_recipe_order_cycled_seeded(0, 5).is_empty());
 }
 
 #[test]
@@ -582,7 +582,7 @@ fn decorate_chunk_truncates_and_updates_tokens_estimate() {
     // initial estimate should reflect original short section
     assert_eq!(chunk.tokens_estimate, 3);
 
-    inner.decorate_chunk(&record, &mut chunk);
+    inner.decorate_chunk_seeded(&record, &mut chunk);
 
     let tokens_after = chunk.text.split_whitespace().count();
     assert_eq!(tokens_after, 5);
@@ -609,7 +609,7 @@ fn decorate_chunk_preserves_newline_after_meta_when_truncated() {
     assert!(!chunks.is_empty());
     let mut chunk = chunks.remove(0);
 
-    inner.decorate_chunk(&record, &mut chunk);
+    inner.decorate_chunk_seeded(&record, &mut chunk);
 
     let expected_prefix = format!("meta: source=unit{}", platform_newline());
     assert!(
@@ -2455,14 +2455,14 @@ fn split_order_is_train_val_test_for_triplet_batches() {
         record_ids,
         vec![
             "source_c::record_02".to_string(),
-            "source_b::record_04".to_string(),
-            "source_a::record_07".to_string(),
-            "source_b::record_00".to_string(),
             "source_c::record_04".to_string(),
             "source_a::record_02".to_string(),
-            "source_b::record_04".to_string(),
+            "source_b::record_00".to_string(),
             "source_c::record_02".to_string(),
-            "source_a::record_10".to_string()
+            "source_b::record_04".to_string(),
+            "source_c::record_04".to_string(),
+            "source_a::record_06".to_string(),
+            "source_a::record_02".to_string()
         ]
     );
 }
@@ -2531,14 +2531,14 @@ fn prefetch_triplet_batches_preserve_split_order() {
         record_ids,
         vec![
             "source_b::record_01".to_string(),
+            "source_b::record_01".to_string(),
+            "source_c::record_03".to_string(),
             "source_a::record_04".to_string(),
+            "source_a::record_00".to_string(),
             "source_c::record_02".to_string(),
+            "source_c::record_03".to_string(),
             "source_c::record_00".to_string(),
-            "source_b::record_01".to_string(),
-            "source_a::record_04".to_string(),
-            "source_a::record_12".to_string(),
-            "source_b::record_01".to_string(),
-            "source_c::record_03".to_string()
+            "source_b::record_01".to_string()
         ]
     );
 }
@@ -2838,9 +2838,9 @@ fn readable_triplet_examples_by_mode() {
         let mut negatives = Vec::new();
         for _ in 0..8 {
             let (negative, _fallback_used) = inner
-                .select_negative_record(&anchor, &NegativeStrategy::WrongArticle, None)
+                .select_negative_record_seeded(&anchor, &NegativeStrategy::WrongArticle, None)
                 .expect("expected readable negative sample");
-            negatives.push(negative.id);
+            negatives.push(negative.id.clone());
         }
 
         let actual_titles: Vec<String> =
@@ -2856,9 +2856,9 @@ fn readable_triplet_examples_by_mode() {
         let mut negatives = Vec::new();
         for _ in 0..8 {
             let (negative, _fallback_used) = inner
-                .select_negative_record(&anchor, &NegativeStrategy::WrongArticle, None)
+                .select_negative_record_seeded(&anchor, &NegativeStrategy::WrongArticle, None)
                 .expect("expected BM25 negative selection");
-            negatives.push(negative.id);
+            negatives.push(negative.id.clone());
         }
 
         let negative_titles: Vec<String> =
@@ -2973,9 +2973,9 @@ fn bm25_not_rng_only_when_only_anchor_text_changes() {
         let mut negatives = Vec::new();
         for _ in 0..8 {
             let (negative, _fallback_used) = inner
-                .select_negative_record(&anchor, &NegativeStrategy::WrongArticle, None)
+                .select_negative_record_seeded(&anchor, &NegativeStrategy::WrongArticle, None)
                 .expect("expected BM25 negative selection");
-            negatives.push(negative.id);
+            negatives.push(negative.id.clone());
         }
         negatives
     };
@@ -4374,18 +4374,22 @@ fn recipe_order_helpers_cover_empty_and_rotated_cases() {
     let store = Arc::new(DeterministicSplitStore::new(split, 59).unwrap());
 
     let mut shuffled_inner = TripletSamplerInner::new(base_config(), Arc::clone(&store));
-    assert!(shuffled_inner.recipe_order_shuffled(0).is_empty());
-    assert!(shuffled_inner.text_recipe_order_shuffled(0).is_empty());
+    assert!(shuffled_inner.recipe_order_shuffled_seeded(0).is_empty());
+    assert!(
+        shuffled_inner
+            .text_recipe_order_shuffled_seeded(0)
+            .is_empty()
+    );
 
     let mut base_inner = TripletSamplerInner::new(base_config(), Arc::clone(&store));
-    let base_triplet = base_inner.recipe_order_shuffled(4);
+    let base_triplet = base_inner.recipe_order_shuffled_seeded(4);
     assert_eq!(base_triplet.len(), 4);
     let mut sorted_triplet = base_triplet.clone();
     sorted_triplet.sort_unstable();
     assert_eq!(sorted_triplet, vec![0, 1, 2, 3]);
 
     let mut cycled_inner = TripletSamplerInner::new(base_config(), Arc::clone(&store));
-    let cycled_triplet = cycled_inner.recipe_order_cycled(4, 5);
+    let cycled_triplet = cycled_inner.recipe_order_cycled_seeded(4, 5);
     assert_eq!(
         cycled_triplet,
         vec![
@@ -4397,14 +4401,14 @@ fn recipe_order_helpers_cover_empty_and_rotated_cases() {
     );
 
     let mut base_text_inner = TripletSamplerInner::new(base_config(), Arc::clone(&store));
-    let base_text = base_text_inner.text_recipe_order_shuffled(4);
+    let base_text = base_text_inner.text_recipe_order_shuffled_seeded(4);
     assert_eq!(base_text.len(), 4);
     let mut sorted_text = base_text.clone();
     sorted_text.sort_unstable();
     assert_eq!(sorted_text, vec![0, 1, 2, 3]);
 
     let mut cycled_text_inner = TripletSamplerInner::new(base_config(), store);
-    let cycled_text = cycled_text_inner.text_recipe_order_cycled(4, 6);
+    let cycled_text = cycled_text_inner.text_recipe_order_cycled_seeded(4, 6);
     assert_eq!(
         cycled_text,
         vec![base_text[2], base_text[3], base_text[0], base_text[1]]
@@ -4542,8 +4546,12 @@ fn selector_edge_cases_cover_internal_branches() {
     store
         .upsert(neighbor.id.clone(), SplitLabel::Train)
         .unwrap();
-    inner.records.insert(record.id.clone(), record.clone());
-    inner.records.insert(neighbor.id.clone(), neighbor.clone());
+    inner
+        .records
+        .insert(record.id.clone(), Arc::new(record.clone()));
+    inner
+        .records
+        .insert(neighbor.id.clone(), Arc::new(neighbor.clone()));
 
     let temporal_chunk = inner
         .select_chunk(&record, &Selector::TemporalOffset(1))
@@ -4564,7 +4572,9 @@ fn empty_recipe_configs_error_when_sampling_without_sources() {
     let mut inner = TripletSamplerInner::new(config, Arc::clone(&store));
     let record = sample_record();
     store.upsert(record.id.clone(), SplitLabel::Train).unwrap();
-    inner.records.insert(record.id.clone(), record.clone());
+    inner
+        .records
+        .insert(record.id.clone(), Arc::new(record.clone()));
     inner
         .chunk_index
         .insert(record.id.clone(), record.id.clone());
@@ -4644,7 +4654,7 @@ fn source_less_batch_builders_sample_from_primed_epoch_tracker() {
             inner
                 .chunk_index
                 .insert(record.id.clone(), record.id.clone());
-            inner.records.insert(record.id.clone(), record);
+            inner.records.insert(record.id.clone(), Arc::new(record));
         }
         inner.epoch_tracker.ensure_loaded().unwrap();
         let records_by_split = inner.records_by_split().unwrap();
@@ -4735,7 +4745,7 @@ fn source_less_batch_builders_report_last_recipe_when_sampling_exhausts() {
         inner
             .chunk_index
             .insert(record.id.clone(), record.id.clone());
-        inner.records.insert(record.id.clone(), record);
+        inner.records.insert(record.id.clone(), Arc::new(record));
         inner.epoch_tracker.ensure_loaded().unwrap();
         let records_by_split = inner.records_by_split().unwrap();
         inner
@@ -4886,7 +4896,9 @@ fn records_by_split_and_anchor_selection_cover_edge_cases() {
     let mut inner = TripletSamplerInner::new(base_config(), Arc::clone(&store));
 
     let record = trader_record("source_a::record_a", "2025-01-01", "Alpha", "Body alpha");
-    inner.records.insert(record.id.clone(), record.clone());
+    inner
+        .records
+        .insert(record.id.clone(), Arc::new(record.clone()));
     inner
         .chunk_index
         .insert(record.id.clone(), record.id.clone());
@@ -4919,7 +4931,7 @@ fn records_by_split_and_anchor_selection_cover_edge_cases() {
         .unwrap();
     inner
         .records
-        .insert(validation_record.id.clone(), validation_record);
+        .insert(validation_record.id.clone(), Arc::new(validation_record));
     inner
         .source_record_indices
         .insert("source_b".into(), vec![1]);
@@ -4963,8 +4975,12 @@ fn temporal_neighbor_auto_pair_and_weighted_retry_paths_are_covered() {
     store
         .upsert(neighbor.id.clone(), SplitLabel::Train)
         .unwrap();
-    inner.records.insert(anchor.id.clone(), anchor.clone());
-    inner.records.insert(neighbor.id.clone(), neighbor.clone());
+    inner
+        .records
+        .insert(anchor.id.clone(), Arc::new(anchor.clone()));
+    inner
+        .records
+        .insert(neighbor.id.clone(), Arc::new(neighbor.clone()));
 
     let selected = inner
         .select_temporal_neighbor(&anchor, 1)
@@ -5092,7 +5108,7 @@ fn wrong_article_falls_back_within_same_split() {
     for anchor_id in anchor_ids {
         let anchor = inner.records.get(&anchor_id).cloned().expect("anchor");
         let (negative, _fallback) = inner
-            .select_negative_record(&anchor, &NegativeStrategy::WrongArticle, None)
+            .select_negative_record_seeded(&anchor, &NegativeStrategy::WrongArticle, None)
             .expect("negative");
         assert_ne!(negative.id, anchor.id);
         let anchor_label = inner.split_store.label_for(&anchor.id).unwrap();
@@ -5166,7 +5182,7 @@ fn bm25_hard_negative_respects_same_source_split_pool() {
 
     let mut inner = sampler.inner.lock().unwrap();
     let (negative, fallback_used) = inner
-        .select_negative_record(&anchor, &NegativeStrategy::WrongArticle, None)
+        .select_negative_record_seeded(&anchor, &NegativeStrategy::WrongArticle, None)
         .expect("expected bm25-ranked negative via WrongArticle strategy");
 
     let _ = fallback_used;
@@ -5246,14 +5262,14 @@ fn bm25_negative_is_lexically_closer_than_uniform_pool_baseline() {
         .cloned()
         .expect("anchor must be present in ingested records");
     let (_selected_negative, _fallback) = inner
-        .select_negative_record(&ingested_anchor, &NegativeStrategy::WrongArticle, None)
+        .select_negative_record_seeded(&ingested_anchor, &NegativeStrategy::WrongArticle, None)
         .expect("expected bm25-ranked negative");
 
     let anchor_text = record_bm25_text(&ingested_anchor, inner.config.chunking.max_window_tokens);
 
     // Control baseline for non-BM25 behavior: uniform random choice over the
     // same strategy pool used by WrongArticle (same source, same split).
-    let pool: Vec<DataRecord> = inner
+    let pool: Vec<Arc<DataRecord>> = inner
         .records
         .values()
         .filter(|candidate| {
@@ -5473,7 +5489,7 @@ fn bm25_ranked_candidates_never_cross_split_boundaries() {
     for anchor_id in anchors {
         let anchor = inner.records.get(&anchor_id).cloned().expect("anchor");
         let (negative, _fallback) = inner
-            .select_negative_record(&anchor, &NegativeStrategy::WrongArticle, None)
+            .select_negative_record_seeded(&anchor, &NegativeStrategy::WrongArticle, None)
             .expect("negative should exist");
 
         let anchor_label = inner
@@ -5940,7 +5956,7 @@ fn wrong_publication_date_falls_back_within_same_split() {
     for anchor_id in anchor_ids {
         let anchor = inner.records.get(&anchor_id).cloned().expect("anchor");
         let (negative, _fallback) = inner
-            .select_negative_record(&anchor, &NegativeStrategy::WrongPublicationDate, None)
+            .select_negative_record_seeded(&anchor, &NegativeStrategy::WrongPublicationDate, None)
             .expect("negative");
         assert_ne!(negative.id, anchor.id);
         let anchor_label = inner.split_store.label_for(&anchor.id).unwrap();
@@ -6022,7 +6038,7 @@ fn qa_mismatch_falls_back_within_same_split() {
     for anchor_id in anchor_ids {
         let anchor = inner.records.get(&anchor_id).cloned().expect("anchor");
         let (negative, _fallback) = inner
-            .select_negative_record(&anchor, &NegativeStrategy::QuestionAnswerMismatch, None)
+            .select_negative_record_seeded(&anchor, &NegativeStrategy::QuestionAnswerMismatch, None)
             .expect("negative");
         assert_ne!(negative.id, anchor.id);
         let anchor_label = inner.split_store.label_for(&anchor.id).unwrap();
@@ -6083,7 +6099,8 @@ fn negative_selection_never_falls_back_across_splits() {
         .unwrap();
 
     let mut inner = sampler.inner.lock().unwrap();
-    let selected = inner.select_negative_record(&anchor, &NegativeStrategy::WrongArticle, None);
+    let selected =
+        inner.select_negative_record_seeded(&anchor, &NegativeStrategy::WrongArticle, None);
     assert!(
         selected.is_none(),
         "cross-split fallback must be disallowed when same-split candidates are unavailable"
@@ -8147,8 +8164,12 @@ fn same_selector_triplet_returns_none_when_only_one_chunk_exists() {
         meta_prefix: None,
     };
 
-    inner.records.insert(anchor.id.clone(), anchor.clone());
-    inner.records.insert(negative.id.clone(), negative.clone());
+    inner
+        .records
+        .insert(anchor.id.clone(), Arc::new(anchor.clone()));
+    inner
+        .records
+        .insert(negative.id.clone(), Arc::new(negative.clone()));
     inner.rebuild_chunk_index();
 
     let recipe = TripletRecipe {
@@ -8162,7 +8183,7 @@ fn same_selector_triplet_returns_none_when_only_one_chunk_exists() {
         allow_same_anchor_positive: false,
     };
 
-    let triplet = inner.make_triplet_with_anchor(&recipe, &anchor);
+    let triplet = inner.make_triplet_with_anchor_seeded(&recipe, &anchor);
     assert!(triplet.is_none());
 }
 
@@ -8779,7 +8800,7 @@ fn wrong_publication_date_covers_some_none_branch_with_undated_candidates() {
     let anchor = inner.records.get(&anchor_id).cloned().expect("anchor");
     // cand_no_date is eligible (Some, None); cand_same is excluded (same date).
     let (neg, _) = inner
-        .select_negative_record(&anchor, &NegativeStrategy::WrongPublicationDate, None)
+        .select_negative_record_seeded(&anchor, &NegativeStrategy::WrongPublicationDate, None)
         .expect("should find undated candidate as negative");
     assert_eq!(neg.id, no_date_id);
 }
@@ -8849,7 +8870,7 @@ fn wrong_publication_date_covers_none_some_and_none_none_branches() {
     // Only cand_dated is eligible: (None, Some) => true.
     // cand_no_date is excluded: (None, None) => false.
     let (neg, _) = inner
-        .select_negative_record(&anchor, &NegativeStrategy::WrongPublicationDate, None)
+        .select_negative_record_seeded(&anchor, &NegativeStrategy::WrongPublicationDate, None)
         .expect("undated anchor should match dated candidate");
     assert_eq!(neg.id, dated_id);
 }
@@ -9354,7 +9375,7 @@ fn bm25_fallback_counter_increments_when_no_bm25_candidates_match() {
     // BM25 returns no results → fallback is taken.
     let novel_query = "xyzzy_zyxqnv_mnbvcx_qwfpgjluy_no_such_term";
     let result = inner
-        .select_negative_record(&anchor, &NegativeStrategy::WrongArticle, Some(novel_query))
+        .select_negative_record_seeded(&anchor, &NegativeStrategy::WrongArticle, Some(novel_query))
         .expect("fallback must still return a negative");
     assert_eq!(
         result.0.id, peer_id,
@@ -9372,7 +9393,7 @@ fn bm25_fallback_counter_increments_when_no_bm25_candidates_match() {
     // BM25 can rank the peer → the ranked path is taken, fallback count stays.
     let shared_query = "revenue profit margin guidance outlook fiscal year";
     let result2 = inner
-        .select_negative_record(&anchor, &NegativeStrategy::WrongArticle, Some(shared_query))
+        .select_negative_record_seeded(&anchor, &NegativeStrategy::WrongArticle, Some(shared_query))
         .expect("bm25 ranked path must return a negative");
     assert_eq!(result2.0.id, peer_id);
 
@@ -9462,7 +9483,7 @@ fn bm25_query_uses_raw_chunk_text_not_decorated_text() {
 
     // Call with the raw body text (no prefix) — correct behaviour.
     let (selected_raw, _) = inner
-        .select_negative_record(
+        .select_negative_record_seeded(
             &anchor_rec,
             &NegativeStrategy::WrongArticle,
             Some(raw_token),
@@ -9479,7 +9500,7 @@ fn bm25_query_uses_raw_chunk_text_not_decorated_text() {
     // Also confirm the symmetry: querying with the prefix token surfaces the
     // prefix_peer, proving the two situations are distinguishable.
     let (selected_prefix, _) = inner
-        .select_negative_record(
+        .select_negative_record_seeded(
             &anchor_rec,
             &NegativeStrategy::WrongArticle,
             Some(prefix_token),

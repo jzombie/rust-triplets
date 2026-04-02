@@ -5,6 +5,7 @@ use chrono::Duration;
 use indexmap::IndexMap;
 use line_ending::LineEnding;
 use rand::prelude::*;
+use rayon::prelude::*;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -262,7 +263,7 @@ struct TripletSamplerInner<S: SplitStore + EpochStateStore + SamplerStateStore +
     /// On-demand ingestion manager that fills the batch-sized buffer.
     ingestion: IngestionManager,
     /// Current in-memory record pool keyed by record id.
-    records: IndexMap<RecordId, DataRecord>,
+    records: IndexMap<RecordId, Arc<DataRecord>>,
     /// Deterministic RNG for per-batch shuffles and sampling.
     rng: DeterministicRng,
     /// Config-level triplet recipes used when sources do not supply their own.
@@ -740,17 +741,22 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             .unwrap_or(&[])
     }
 
-    fn recipe_order_shuffled(&mut self, count: usize) -> Vec<usize> {
+    fn recipe_order_shuffled(&mut self, count: usize, rng: &mut DeterministicRng) -> Vec<usize> {
         if count == 0 {
             return Vec::new();
         }
         let mut order: Vec<usize> = (0..count).collect();
-        order.shuffle(&mut self.rng);
+        order.shuffle(rng);
         order
     }
 
-    fn recipe_order_cycled(&mut self, count: usize, rr_idx: usize) -> Vec<usize> {
-        let base = self.recipe_order_shuffled(count);
+    fn recipe_order_cycled(
+        &mut self,
+        count: usize,
+        rr_idx: usize,
+        rng: &mut DeterministicRng,
+    ) -> Vec<usize> {
+        let base = self.recipe_order_shuffled(count, rng);
         if base.is_empty() {
             return base;
         }
@@ -761,17 +767,26 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         order
     }
 
-    fn text_recipe_order_shuffled(&mut self, count: usize) -> Vec<usize> {
+    fn text_recipe_order_shuffled(
+        &mut self,
+        count: usize,
+        rng: &mut DeterministicRng,
+    ) -> Vec<usize> {
         if count == 0 {
             return Vec::new();
         }
         let mut order: Vec<usize> = (0..count).collect();
-        order.shuffle(&mut self.rng);
+        order.shuffle(rng);
         order
     }
 
-    fn text_recipe_order_cycled(&mut self, count: usize, rr_idx: usize) -> Vec<usize> {
-        let base = self.text_recipe_order_shuffled(count);
+    fn text_recipe_order_cycled(
+        &mut self,
+        count: usize,
+        rr_idx: usize,
+        rng: &mut DeterministicRng,
+    ) -> Vec<usize> {
+        let base = self.text_recipe_order_shuffled(count, rng);
         if base.is_empty() {
             return base;
         }
@@ -841,7 +856,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         &mut self,
         source: Option<&str>,
         split: SplitLabel,
-    ) -> Option<DataRecord> {
+    ) -> Option<Arc<DataRecord>> {
         if let Some(source) = source {
             let indices = self.source_record_indices.get(source)?;
             if indices.is_empty() {
@@ -852,7 +867,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             let offset_seed = self.epoch_seed() ^ (cycle as u64);
             let offset = (stable_hash_str(offset_seed, source) as usize) % indices.len();
             let mut wrapped = false;
-            let mut selected: Option<DataRecord> = None;
+            let mut selected: Option<Arc<DataRecord>> = None;
             for _ in 0..indices.len() {
                 let pos = (cursor % indices.len()).saturating_add(offset) % indices.len();
                 let idx = indices[pos];
@@ -864,7 +879,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                     if self.split_store.label_for(&record.id) != Some(split) {
                         continue;
                     }
-                    selected = Some(record.clone());
+                    selected = Some(Arc::clone(record));
                     break;
                 }
             }
@@ -879,7 +894,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             if let Some(record_id) = self.chunk_index.get(&chunk_id)
                 && let Some(record) = self.records.get(record_id)
             {
-                return Some(record.clone());
+                return Some(Arc::clone(record));
             }
         }
         None
@@ -923,7 +938,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         &'_ self,
         record: &DataRecord,
         offset_days: i32,
-    ) -> Option<DataRecord> {
+    ) -> Option<Arc<DataRecord>> {
         let target = record.created_at + Duration::days(offset_days.into());
         let key = record.taxonomy.first().cloned();
         let record_split = self.split_store.label_for(&record.id)?;
@@ -948,11 +963,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     }
 
     fn select_negative_record(
-        &mut self,
+        &self,
         anchor_record: &DataRecord,
         strategy: &NegativeStrategy,
         anchor_query_text: Option<&str>,
-    ) -> Option<(DataRecord, bool)> {
+        rng: &mut dyn rand::RngCore,
+    ) -> Option<(Arc<DataRecord>, bool)> {
         let anchor_split = self.split_store.label_for(&anchor_record.id)?;
 
         let in_anchor_split = |candidate: &DataRecord| {
@@ -966,7 +982,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             NegativeStrategy::WrongArticle => {
                 let anchor_date =
                     taxonomy_value(anchor_record, META_FIELD_DATE).map(|d| d.to_string());
-                let mut same_date: Vec<DataRecord> = self
+                let mut same_date: Vec<Arc<DataRecord>> = self
                     .records
                     .values()
                     .filter(|candidate| {
@@ -1002,7 +1018,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                         same_date,
                         false,
                         anchor_query_text,
-                        &mut self.rng,
+                        rng,
                     );
                 }
                 let pool = self
@@ -1019,13 +1035,13 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                     pool,
                     true,
                     anchor_query_text,
-                    &mut self.rng,
+                    rng,
                 )
             }
             NegativeStrategy::WrongPublicationDate => {
                 let anchor_date =
                     taxonomy_value(anchor_record, META_FIELD_DATE).map(|d| d.to_string());
-                let pool: Vec<DataRecord> = self
+                let pool: Vec<Arc<DataRecord>> = self
                     .records
                     .values()
                     .filter(|candidate| {
@@ -1064,7 +1080,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                         fallback_pool,
                         true,
                         anchor_query_text,
-                        &mut self.rng,
+                        rng,
                     );
                 }
 
@@ -1074,11 +1090,11 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                     pool,
                     false,
                     anchor_query_text,
-                    &mut self.rng,
+                    rng,
                 )
             }
             NegativeStrategy::QuestionAnswerMismatch => {
-                let pool: Vec<DataRecord> = self
+                let pool: Vec<Arc<DataRecord>> = self
                     .records
                     .values()
                     .filter(|candidate| {
@@ -1106,7 +1122,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                         fallback_pool,
                         true,
                         anchor_query_text,
-                        &mut self.rng,
+                        rng,
                     );
                 }
 
@@ -1116,7 +1132,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                     pool,
                     false,
                     anchor_query_text,
-                    &mut self.rng,
+                    rng,
                 )
             }
         }
@@ -1232,6 +1248,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         recipe: &TripletRecipe,
         record: &DataRecord,
         enforce_window_pair: bool,
+        rng: &mut DeterministicRng,
     ) -> Option<SampleTriplet> {
         let (mut anchor_chunk, mut positive_chunk) = self.select_anchor_positive_pair(
             record,
@@ -1240,8 +1257,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             enforce_window_pair,
         )?;
         let anchor_raw_text = anchor_chunk.text.clone();
-        self.decorate_chunk(record, &mut anchor_chunk);
-        self.decorate_chunk(record, &mut positive_chunk);
+        self.decorate_chunk(record, &mut anchor_chunk, rng);
+        self.decorate_chunk(record, &mut positive_chunk, rng);
         // Snapshot the raw anchor text for BM25 querying before decoration
         // added the metadata prefix — prefix tokens are absent from the index.
         self.finalize_triplet_with_negative(
@@ -1250,6 +1267,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             anchor_chunk,
             positive_chunk,
             &anchor_raw_text,
+            rng,
         )
     }
 
@@ -1266,6 +1284,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         &mut self,
         recipe: &TripletRecipe,
         record: &DataRecord,
+        rng: &mut DeterministicRng,
     ) -> Option<SampleTriplet> {
         if !self.record_has_at_least_two_window_chunks_for_selector(record, &recipe.anchor) {
             return None;
@@ -1273,14 +1292,15 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         let (mut anchor_chunk, mut positive_chunk) =
             self.select_distinct_window_pair_for_auto_recipe(recipe, record)?;
         let anchor_raw_text = anchor_chunk.text.clone();
-        self.decorate_chunk(record, &mut anchor_chunk);
-        self.decorate_chunk(record, &mut positive_chunk);
+        self.decorate_chunk(record, &mut anchor_chunk, rng);
+        self.decorate_chunk(record, &mut positive_chunk, rng);
         self.finalize_triplet_with_negative(
             recipe,
             record,
             anchor_chunk,
             positive_chunk,
             &anchor_raw_text,
+            rng,
         )
     }
 
@@ -1288,8 +1308,9 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         &mut self,
         recipe: &TripletRecipe,
         record: &DataRecord,
+        rng: &mut DeterministicRng,
     ) -> Option<SampleTriplet> {
-        self.build_triplet_with_selector_pair_policy(recipe, record, false)
+        self.build_triplet_with_selector_pair_policy(recipe, record, false, rng)
     }
 
     /// Finalize a triplet by selecting a negative and applying a deterministic 50 % coin-flip
@@ -1317,15 +1338,19 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         anchor_chunk: RecordChunk,
         positive_chunk: RecordChunk,
         anchor_raw_text: &str,
+        rng: &mut DeterministicRng,
     ) -> Option<SampleTriplet> {
-        let (negative_record, fallback_used) =
-            self.select_negative_record(record, &recipe.negative_strategy, Some(anchor_raw_text))?;
+        let (negative_record, fallback_used) = self.select_negative_record(
+            record,
+            &recipe.negative_strategy,
+            Some(anchor_raw_text),
+            rng,
+        )?;
         let mut negative_chunk = self.select_chunk(&negative_record, &recipe.negative_selector)?;
-        self.decorate_chunk(&negative_record, &mut negative_chunk);
+        self.decorate_chunk(&negative_record, &mut negative_chunk, rng);
 
         // 50 % coin-flip: swap anchor and positive to prevent positional shortcuts.
-        let (anchor_chunk, positive_chunk) = if self.rng.next_u64() & ANCHOR_POSITIVE_SWAP_MASK == 0
-        {
+        let (anchor_chunk, positive_chunk) = if rng.next_u64() & ANCHOR_POSITIVE_SWAP_MASK == 0 {
             (positive_chunk, anchor_chunk)
         } else {
             (anchor_chunk, positive_chunk)
@@ -1370,14 +1395,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         &mut self,
         recipe: &TripletRecipe,
         record: &DataRecord,
+        rng: &mut DeterministicRng,
     ) -> Option<SampleTriplet> {
-        // Stage B branch point:
-        // auto recipe path enforces record-level window eligibility,
-        // standard path skips that specialized gate.
         if Self::is_auto_chunk_pair_recipe(recipe) {
-            return self.make_auto_chunk_pair_triplet_with_anchor(recipe, record);
+            return self.make_auto_chunk_pair_triplet_with_anchor(recipe, record, rng);
         }
-        self.make_standard_triplet_with_anchor(recipe, record)
+        self.make_standard_triplet_with_anchor(recipe, record, rng)
     }
 
     fn make_text_sample_for_split(
@@ -1385,10 +1408,11 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         recipe: &TextRecipe,
         source: Option<&str>,
         split: SplitLabel,
+        rng: &mut DeterministicRng,
     ) -> Option<TextSample> {
         let record = self.choose_anchor_record(source, split)?;
         let mut chunk = self.select_chunk(&record, &recipe.selector)?;
-        self.decorate_chunk(&record, &mut chunk);
+        self.decorate_chunk(&record, &mut chunk, rng);
         let weight = recipe.weight * self.chunk_weight(&chunk);
         Some(TextSample {
             recipe: recipe.name.to_string(),
@@ -1430,9 +1454,14 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         (anchor_weight + positive_weight + negative_weight) / 3.0
     }
 
-    fn decorate_chunk(&mut self, record: &DataRecord, chunk: &mut RecordChunk) {
+    fn decorate_chunk(
+        &mut self,
+        record: &DataRecord,
+        chunk: &mut RecordChunk,
+        rng: &mut DeterministicRng,
+    ) {
         if let Some(spec) = record.meta_prefix.as_ref()
-            && let Some(prefix) = spec.sample(&mut self.rng)
+            && let Some(prefix) = spec.sample(rng)
         {
             let body_tokens: Vec<&str> = chunk.text.split_whitespace().collect();
             let prefix_tokens: Vec<&str> = prefix.split_whitespace().collect();
@@ -1465,6 +1494,185 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 chunk.tokens_estimate = total_tokens;
             }
         }
+    }
+
+    // ── parallel-batch helpers (&self, rng-based, no cursor maps) ────────────
+
+    /// Select a chunk using rng instead of cursor maps (for parallel execution).
+    fn select_chunk_parallel(
+        &self,
+        record: &DataRecord,
+        selector: &Selector,
+        rng: &mut DeterministicRng,
+    ) -> Option<RecordChunk> {
+        match selector {
+            Selector::Role(role) => self.select_role_parallel(record, role, rng),
+            Selector::Paragraph(idx) => record.sections.get(*idx).and_then(|section| {
+                let pool = self.materialize_chunks(record, *idx, section);
+                if pool.is_empty() {
+                    return None;
+                }
+                let i = rng.random_range(0..pool.len());
+                pool.into_iter().nth(i)
+            }),
+            Selector::TemporalOffset(offset) => self
+                .select_temporal_neighbor(record, *offset)
+                .and_then(|neighbor| {
+                    self.select_role_parallel(&neighbor, &SectionRole::Context, rng)
+                }),
+            Selector::Random => {
+                if record.sections.is_empty() {
+                    return None;
+                }
+                let idx = rng.random_range(0..record.sections.len());
+                record.sections.get(idx).and_then(|section| {
+                    let pool = self.materialize_chunks(record, idx, section);
+                    if pool.is_empty() {
+                        return None;
+                    }
+                    let i = rng.random_range(0..pool.len());
+                    pool.into_iter().nth(i)
+                })
+            }
+        }
+    }
+
+    /// Select a chunk by role using rng (parallel path — no role_cursors written).
+    fn select_role_parallel(
+        &self,
+        record: &DataRecord,
+        role: &SectionRole,
+        rng: &mut DeterministicRng,
+    ) -> Option<RecordChunk> {
+        let indices: Vec<usize> = record
+            .sections
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| roles_match(role, &s.role))
+            .map(|(i, _)| i)
+            .collect();
+        if indices.is_empty() {
+            return None;
+        }
+        let start = rng.random_range(0..indices.len());
+        for offset in 0..indices.len() {
+            let section_idx = indices[(start + offset) % indices.len()];
+            let section = &record.sections[section_idx];
+            let pool = self.materialize_chunks(record, section_idx, section);
+            if !pool.is_empty() {
+                let i = rng.random_range(0..pool.len());
+                return pool.into_iter().nth(i);
+            }
+        }
+        None
+    }
+
+    /// Decorate a chunk using a provided rng (parallel-safe, &self).
+    fn decorate_chunk_parallel(
+        &self,
+        record: &DataRecord,
+        chunk: &mut RecordChunk,
+        rng: &mut DeterministicRng,
+    ) {
+        if let Some(spec) = record.meta_prefix.as_ref()
+            && let Some(prefix) = spec.sample(rng)
+        {
+            let body_tokens: Vec<&str> = chunk.text.split_whitespace().collect();
+            let prefix_tokens: Vec<&str> = prefix.split_whitespace().collect();
+            let total_tokens = prefix_tokens.len() + body_tokens.len();
+            let max_window = self.config.chunking.max_window_tokens;
+            if max_window > 0 && total_tokens > max_window {
+                if prefix_tokens.len() >= max_window {
+                    chunk.text = prefix_tokens
+                        .into_iter()
+                        .take(max_window)
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    chunk.tokens_estimate = max_window;
+                } else {
+                    let remaining = max_window - prefix_tokens.len();
+                    let trimmed_body: Vec<&str> = body_tokens.into_iter().take(remaining).collect();
+                    chunk.text =
+                        format!("{}{}{}", prefix, platform_newline(), trimmed_body.join(" "));
+                    chunk.tokens_estimate = max_window;
+                }
+            } else {
+                chunk.text = format!("{}{}{}", prefix, platform_newline(), chunk.text);
+                chunk.tokens_estimate = total_tokens;
+            }
+        }
+    }
+
+    /// Select an anchor/positive pair for the parallel path (rng-based).
+    fn select_anchor_positive_parallel(
+        &self,
+        record: &DataRecord,
+        anchor_selector: &Selector,
+        positive_selector: &Selector,
+        enforce_window_pair: bool,
+        rng: &mut DeterministicRng,
+    ) -> Option<(RecordChunk, RecordChunk)> {
+        let anchor_chunk = self.select_chunk_parallel(record, anchor_selector, rng)?;
+        let mut positive_chunk = self.select_chunk_parallel(record, positive_selector, rng)?;
+        if anchor_selector == positive_selector {
+            let mut retries = 0usize;
+            while !same_selector_pair_is_valid(&anchor_chunk, &positive_chunk, enforce_window_pair)
+                && retries < SAME_SELECTOR_PAIR_RETRY_LIMIT
+            {
+                positive_chunk = self.select_chunk_parallel(record, positive_selector, rng)?;
+                retries += 1;
+            }
+            if !same_selector_pair_is_valid(&anchor_chunk, &positive_chunk, enforce_window_pair) {
+                return None;
+            }
+        }
+        // No swap here — finalize_triplet_parallel applies the coin-flip swap.
+        Some((anchor_chunk, positive_chunk))
+    }
+
+    /// Select (anchor_chunk, positive_chunk, anchor_raw_text) for a recipe — parallel-safe.
+    /// Does NOT select a negative; that happens sequentially in Phase 3.
+    fn select_anchor_positive_for_recipe(
+        &self,
+        recipe: &TripletRecipe,
+        anchor_record: &DataRecord,
+        rng: &mut DeterministicRng,
+    ) -> Option<(RecordChunk, RecordChunk, String)> {
+        if Self::is_auto_chunk_pair_recipe(recipe) {
+            if !self
+                .record_has_at_least_two_window_chunks_for_selector(anchor_record, &recipe.anchor)
+            {
+                return None;
+            }
+            let mut anchor_chunk =
+                self.select_chunk_parallel(anchor_record, &recipe.anchor, rng)?;
+            let mut positive_chunk =
+                self.select_chunk_parallel(anchor_record, &recipe.anchor, rng)?;
+            let mut tries = 0usize;
+            while !same_selector_pair_is_valid(&anchor_chunk, &positive_chunk, true) {
+                tries += 1;
+                if tries >= SAME_SELECTOR_PAIR_RETRY_LIMIT {
+                    return None;
+                }
+                anchor_chunk = self.select_chunk_parallel(anchor_record, &recipe.anchor, rng)?;
+                positive_chunk = self.select_chunk_parallel(anchor_record, &recipe.anchor, rng)?;
+            }
+            let anchor_raw_text = anchor_chunk.text.clone();
+            self.decorate_chunk_parallel(anchor_record, &mut anchor_chunk, rng);
+            self.decorate_chunk_parallel(anchor_record, &mut positive_chunk, rng);
+            return Some((anchor_chunk, positive_chunk, anchor_raw_text));
+        }
+        let (mut anchor_chunk, mut positive_chunk) = self.select_anchor_positive_parallel(
+            anchor_record,
+            &recipe.anchor,
+            &recipe.positive_selector,
+            false,
+            rng,
+        )?;
+        let anchor_raw_text = anchor_chunk.text.clone();
+        self.decorate_chunk_parallel(anchor_record, &mut anchor_chunk, rng);
+        self.decorate_chunk_parallel(anchor_record, &mut positive_chunk, rng);
+        Some((anchor_chunk, positive_chunk, anchor_raw_text))
     }
 
     fn select_chunk(&mut self, record: &DataRecord, selector: &Selector) -> Option<RecordChunk> {
@@ -1603,7 +1811,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 self.sources_with_long_sections
                     .insert(record.source.clone());
             }
-            self.records.insert(record.id.clone(), record);
+            self.records.insert(record.id.clone(), Arc::new(record));
         }
         self.prune_cursor_state();
         self.rebuild_chunk_index();
@@ -1745,6 +1953,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         target_split: SplitLabel,
         recipe_orders: &mut HashMap<RecipeKey, Vec<usize>>,
         recipe_positions: &mut HashMap<RecipeKey, usize>,
+        rng: &mut DeterministicRng,
     ) -> (Option<(TripletRecipe, SampleTriplet)>, usize) {
         // Stage A (source-level injection): resolve effective recipe pool,
         // including auto-injected long-section recipe when source is eligible.
@@ -1753,7 +1962,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             return (None, 0);
         }
         if !recipe_orders.contains_key(source) {
-            let order = self.recipe_order_cycled(recipes.len(), self.triplet_recipe_rr_idx);
+            let order = self.recipe_order_cycled(recipes.len(), self.triplet_recipe_rr_idx, rng);
             recipe_orders.insert(source.to_string(), order);
         }
         let order = recipe_orders
@@ -1772,7 +1981,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             // Stage B/C happen inside `make_triplet_with_anchor`:
             // - Stage B: record-level auto-recipe eligibility gate,
             // - Stage C: chunk window materialization/selection.
-            if let Some(sample) = self.make_triplet_with_anchor(&recipe, &anchor) {
+            if let Some(sample) = self.make_triplet_with_anchor(&recipe, &anchor, rng) {
                 *pos = (*pos + offset + 1) % order.len();
                 return (Some((recipe, sample)), attempts);
             }
@@ -1799,8 +2008,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                     "no triplet recipes available".into(),
                 ));
             }
-            let recipe_order =
-                self.recipe_order_cycled(self.triplet_recipes.len(), self.triplet_recipe_rr_idx);
+            let mut rng = std::mem::replace(&mut self.rng, DeterministicRng::new(0));
+            let recipe_order = self.recipe_order_cycled(
+                self.triplet_recipes.len(),
+                self.triplet_recipe_rr_idx,
+                &mut rng,
+            );
             let mut pairs = Vec::new();
             let mut seen = HashSet::new();
             let mut last_recipe_name = None;
@@ -1820,7 +2033,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                     recipe_steps = recipe_steps.saturating_add(1);
                     let recipe = self.triplet_recipes[idx].clone();
                     last_recipe_name = Some(recipe.name.clone());
-                    if let Some(sample) = self.make_triplet_with_anchor(&recipe, &anchor) {
+                    if let Some(sample) = self.make_triplet_with_anchor(&recipe, &anchor, &mut rng)
+                    {
                         triplet = Some((recipe, sample));
                         recipe_pos = (recipe_pos + offset + 1) % recipe_order.len();
                         break;
@@ -1872,6 +2086,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 self.triplet_recipe_rr_idx =
                     self.triplet_recipe_rr_idx.saturating_add(recipe_steps);
             }
+            self.rng = rng;
             pad_with_reuse(&mut pairs, self.config.batch_size);
             if pairs.len() == self.config.batch_size {
                 return Ok(SampleBatch { pairs });
@@ -1899,6 +2114,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             .unwrap_or(1)
             .max(1);
         let attempts = self.config.batch_size * 4 * sources.len() * max_recipe_len;
+        let mut rng = std::mem::replace(&mut self.rng, DeterministicRng::new(0));
         for _ in 0..attempts {
             if pairs.len() >= self.config.batch_size {
                 break;
@@ -1909,6 +2125,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 target_split,
                 &mut recipe_orders,
                 &mut recipe_positions,
+                &mut rng,
             );
             recipe_steps = recipe_steps.saturating_add(attempts_used);
             if let Some((recipe, triplet)) = triplet {
@@ -1961,6 +2178,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         if recipe_steps > 0 {
             self.triplet_recipe_rr_idx = self.triplet_recipe_rr_idx.saturating_add(recipe_steps);
         }
+        self.rng = rng;
         pad_with_reuse(&mut pairs, self.config.batch_size);
         if pairs.len() == self.config.batch_size {
             self.source_cycle_idx = self.source_cycle_idx.saturating_add(source_steps);
@@ -1988,8 +2206,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                     "no text recipes configured".into(),
                 ));
             }
-            let recipe_order =
-                self.text_recipe_order_cycled(self.text_recipes.len(), self.text_recipe_rr_idx);
+            let mut rng = std::mem::replace(&mut self.rng, DeterministicRng::new(0));
+            let recipe_order = self.text_recipe_order_cycled(
+                self.text_recipes.len(),
+                self.text_recipe_rr_idx,
+                &mut rng,
+            );
             let mut samples = Vec::new();
             let mut seen = HashSet::new();
             let mut last_recipe_name = None;
@@ -2005,7 +2227,9 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 recipe_steps = recipe_steps.saturating_add(1);
                 let recipe = self.text_recipes[recipe_idx].clone();
                 last_recipe_name = Some(recipe.name.clone());
-                if let Some(sample) = self.make_text_sample_for_split(&recipe, None, target_split) {
+                if let Some(sample) =
+                    self.make_text_sample_for_split(&recipe, None, target_split, &mut rng)
+                {
                     let key = chunk_key(&sample.chunk);
                     if seen.insert(key) {
                         samples.push(sample);
@@ -2015,6 +2239,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             if recipe_steps > 0 {
                 self.text_recipe_rr_idx = self.text_recipe_rr_idx.saturating_add(recipe_steps);
             }
+            self.rng = rng;
             pad_with_reuse(&mut samples, self.config.batch_size);
             if samples.len() == self.config.batch_size {
                 return Ok(TextBatch { samples });
@@ -2042,6 +2267,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             .unwrap_or(1)
             .max(1);
         let attempts = self.config.batch_size * 4 * sources.len() * max_recipe_len;
+        let mut rng = std::mem::replace(&mut self.rng, DeterministicRng::new(0));
         for _ in 0..attempts {
             if samples.len() >= self.config.batch_size {
                 break;
@@ -2059,7 +2285,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 continue;
             }
             if !recipe_orders.contains_key(source) {
-                let order = self.text_recipe_order_cycled(recipes.len(), self.text_recipe_rr_idx);
+                let order =
+                    self.text_recipe_order_cycled(recipes.len(), self.text_recipe_rr_idx, &mut rng);
                 recipe_orders.insert(source.to_string(), order);
             }
             let order = recipe_orders
@@ -2071,7 +2298,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 let recipe_idx = order[(*pos + offset) % order.len()];
                 let recipe = recipes[recipe_idx].clone();
                 if let Some(item) =
-                    self.make_text_sample_for_split(&recipe, Some(source), target_split)
+                    self.make_text_sample_for_split(&recipe, Some(source), target_split, &mut rng)
                 {
                     recipe_steps = recipe_steps.saturating_add(offset + 1);
                     *pos = (*pos + offset + 1) % order.len();
@@ -2100,8 +2327,10 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             pad_with_reuse(&mut samples, self.config.batch_size);
         }
         if samples.len() != self.config.batch_size {
+            self.rng = rng;
             return Err(SamplerError::Exhausted(RECIPE_LABEL_TEXT.into()));
         }
+        self.rng = rng;
         self.source_cycle_idx = self.source_cycle_idx.saturating_add(source_steps);
         self.source_state_dirty = sources.len() > 1;
         if recipe_steps > 0 {
@@ -2128,8 +2357,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                     "no triplet recipes configured".into(),
                 ));
             }
-            let recipe_order =
-                self.recipe_order_cycled(self.triplet_recipes.len(), self.triplet_recipe_rr_idx);
+            let mut rng = std::mem::replace(&mut self.rng, DeterministicRng::new(0));
+            let recipe_order = self.recipe_order_cycled(
+                self.triplet_recipes.len(),
+                self.triplet_recipe_rr_idx,
+                &mut rng,
+            );
             let mut triplets = Vec::new();
             let mut seen = HashSet::new();
             let mut last_recipe_name = None;
@@ -2149,7 +2382,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                     recipe_steps = recipe_steps.saturating_add(1);
                     let recipe = self.triplet_recipes[idx].clone();
                     last_recipe_name = Some(recipe.name.clone());
-                    if let Some(sample) = self.make_triplet_with_anchor(&recipe, &anchor) {
+                    if let Some(sample) = self.make_triplet_with_anchor(&recipe, &anchor, &mut rng)
+                    {
                         triplet = Some(sample);
                         recipe_pos = (recipe_pos + offset + 1) % recipe_order.len();
                         break;
@@ -2170,6 +2404,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 self.triplet_recipe_rr_idx =
                     self.triplet_recipe_rr_idx.saturating_add(recipe_steps);
             }
+            self.rng = rng;
             pad_with_reuse(&mut triplets, self.config.batch_size);
             if triplets.len() == self.config.batch_size {
                 return Ok(TripletBatch { triplets });
@@ -2181,42 +2416,49 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             ));
         }
 
-        let mut triplets = Vec::new();
-        let mut seen = HashSet::new();
+        // ── Declarations for multi-source parallel path ────────────────────────
+        let mut triplets: Vec<SampleTriplet> = Vec::new();
+        let mut seen: HashSet<(RecordId, RecordId, RecordId)> = HashSet::new();
         let mut source_steps = 0usize;
         let mut cycle = (self.source_cycle_idx / sources.len()) as u64;
         let mut source_idx = self.source_cycle_idx % sources.len();
         let mut cycle_sources = self.shuffled_source_cycle(cycle);
-        let mut recipe_orders: HashMap<RecipeKey, Vec<usize>> = HashMap::new();
-        let mut recipe_positions: HashMap<RecipeKey, usize> = HashMap::new();
         let mut recipe_steps = 0usize;
         let max_recipe_len = sources
             .iter()
-            .map(|source| self.triplet_recipe_count_for_source(source))
+            .map(|source| self.triplet_recipe_count_for_source(source.as_str()))
             .max()
             .unwrap_or(1)
             .max(1);
-        let attempts = self.config.batch_size * 4 * sources.len() * max_recipe_len;
-        for _ in 0..attempts {
-            if triplets.len() >= self.config.batch_size {
+        let mut rng = std::mem::replace(&mut self.rng, DeterministicRng::new(0));
+
+        // ── Phase 1: sequential anchor pre-assignment ──────────────────────────
+        // Advance cursors and pick anchors deterministically. Capture a fork seed
+        // for each slot so that Phase 2 can reconstruct independent rngs in
+        // deterministic order.
+        struct SlotPlan {
+            anchor: Arc<DataRecord>,
+            recipes: Vec<TripletRecipe>,
+            fork_seed: u64,
+        }
+        let target_slots = self.config.batch_size * 4 * max_recipe_len;
+        let mut slot_plans: Vec<SlotPlan> = Vec::with_capacity(target_slots);
+
+        for _ in 0..target_slots {
+            if slot_plans.len() >= target_slots {
                 break;
             }
             let source = cycle_sources[source_idx].as_str();
-            let (triplet, attempts_used) = self.sample_source_triplet_candidate(
-                source,
-                target_split,
-                &mut recipe_orders,
-                &mut recipe_positions,
-            );
-            recipe_steps = recipe_steps.saturating_add(attempts_used);
-            if let Some((_recipe, triplet)) = triplet {
-                let key = (
-                    triplet.anchor.record_id.clone(),
-                    triplet.positive.record_id.clone(),
-                    triplet.negative.record_id.clone(),
-                );
-                if seen.insert(key) {
-                    triplets.push(triplet);
+            let (recipes, _) = self.resolve_source_triplet_plan(source);
+            if !recipes.is_empty() {
+                let fork_seed = rng.next_u64();
+                if let Some(anchor) = self.choose_anchor_record(Some(source), target_split) {
+                    slot_plans.push(SlotPlan {
+                        anchor,
+                        recipes,
+                        fork_seed,
+                    });
+                    recipe_steps = recipe_steps.saturating_add(1);
                 }
             }
             source_idx += 1;
@@ -2227,6 +2469,123 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 cycle_sources = self.shuffled_source_cycle(cycle);
             }
         }
+        self.rng = rng;
+
+        // ── Phase 2: parallel anchor+positive selection ────────────────────────
+        // Only chunk selection runs in parallel; negative selection and the
+        // coin-flip swap remain sequential in Phase 3 so that the BM25 cursor
+        // rotation (shared RwLock state) is deterministic across runs.
+        struct SlotCandidate {
+            recipe: TripletRecipe,
+            anchor: Arc<DataRecord>,
+            anchor_chunk: RecordChunk,
+            positive_chunk: RecordChunk,
+            anchor_raw_text: String,
+        }
+        let mut raw_candidates: Vec<(usize, Option<SlotCandidate>)> = slot_plans
+            .par_iter()
+            .enumerate()
+            .map(|(slot_idx, plan)| {
+                let mut fork_rng = DeterministicRng::new(plan.fork_seed);
+                // Shuffle recipe order within this slot for variety.
+                let mut order: Vec<usize> = (0..plan.recipes.len()).collect();
+                order.shuffle(&mut fork_rng);
+                let mut candidate = None;
+                for &idx in &order {
+                    let recipe = &plan.recipes[idx];
+                    if let Some((ac, pc, raw)) =
+                        self.select_anchor_positive_for_recipe(recipe, &plan.anchor, &mut fork_rng)
+                    {
+                        candidate = Some(SlotCandidate {
+                            recipe: recipe.clone(),
+                            anchor: Arc::clone(&plan.anchor),
+                            anchor_chunk: ac,
+                            positive_chunk: pc,
+                            anchor_raw_text: raw,
+                        });
+                        break;
+                    }
+                }
+                (slot_idx, candidate)
+            })
+            .collect();
+
+        // ── Phase 3: sequential finalization (negative selection + coin-flip) ───
+        // Sort by slot_idx to restore deterministic ordering, then finalize each
+        // candidate sequentially so that BM25 cursor rotation advances in a fixed
+        // order regardless of rayon's thread scheduling.
+        raw_candidates.sort_unstable_by_key(|(i, _)| *i);
+        let mut rng = std::mem::replace(&mut self.rng, DeterministicRng::new(0));
+        for (_, candidate) in raw_candidates {
+            if triplets.len() >= self.config.batch_size {
+                break;
+            }
+            let Some(sc) = candidate else { continue };
+            let (negative_record, fallback_used) = match self.select_negative_record(
+                &sc.anchor,
+                &sc.recipe.negative_strategy,
+                Some(&sc.anchor_raw_text),
+                &mut rng,
+            ) {
+                Some(pair) => pair,
+                None => continue,
+            };
+            let mut negative_chunk = match self.select_chunk_parallel(
+                &negative_record,
+                &sc.recipe.negative_selector,
+                &mut rng,
+            ) {
+                Some(c) => c,
+                None => continue,
+            };
+            self.decorate_chunk_parallel(&negative_record, &mut negative_chunk, &mut rng);
+
+            // 50 % coin-flip swap using the pre-sampled per-slot seed + main rng.
+            let (anchor_chunk, positive_chunk) = if rng.next_u64() & ANCHOR_POSITIVE_SWAP_MASK == 0
+            {
+                (sc.positive_chunk, sc.anchor_chunk)
+            } else {
+                (sc.anchor_chunk, sc.positive_chunk)
+            };
+
+            if (!sc.recipe.allow_same_anchor_positive && anchor_chunk.text == positive_chunk.text)
+                || negative_chunk.text == positive_chunk.text
+                || negative_chunk.text == anchor_chunk.text
+            {
+                continue;
+            }
+
+            let chunk_weight = self.triplet_chunk_weight(
+                &sc.recipe,
+                &anchor_chunk,
+                &positive_chunk,
+                &negative_chunk,
+            );
+            let weight = sc.recipe.weight * chunk_weight;
+            let recipe_name = if fallback_used {
+                format!("{}_fallback_same_split", sc.recipe.name)
+            } else {
+                sc.recipe.name.to_string()
+            };
+            let triplet = SampleTriplet {
+                recipe: recipe_name,
+                anchor: anchor_chunk,
+                positive: positive_chunk,
+                negative: negative_chunk,
+                weight,
+                instruction: sc.recipe.instruction.as_ref().map(|s| s.to_string()),
+            };
+            let key = (
+                triplet.anchor.record_id.clone(),
+                triplet.positive.record_id.clone(),
+                triplet.negative.record_id.clone(),
+            );
+            if seen.insert(key) && triplets.len() < self.config.batch_size {
+                triplets.push(triplet);
+            }
+        }
+        self.rng = rng;
+
         if recipe_steps > 0 {
             self.triplet_recipe_rr_idx = self.triplet_recipe_rr_idx.saturating_add(recipe_steps);
         }
@@ -2252,6 +2611,78 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             .as_any_mut()
             .downcast_mut::<backends::Bm25Backend>()
             .expect("bm25_backend_mut: negative_backend is Bm25Backend when bm25-mining feature is active")
+    }
+
+    /// Test shim: `recipe_order_shuffled` using the inner rng.
+    #[cfg(test)]
+    fn recipe_order_shuffled_seeded(&mut self, count: usize) -> Vec<usize> {
+        let mut rng = std::mem::replace(&mut self.rng, DeterministicRng::new(0));
+        let result = self.recipe_order_shuffled(count, &mut rng);
+        self.rng = rng;
+        result
+    }
+
+    /// Test shim: `recipe_order_cycled` using the inner rng.
+    #[cfg(test)]
+    fn recipe_order_cycled_seeded(&mut self, count: usize, rr_idx: usize) -> Vec<usize> {
+        let mut rng = std::mem::replace(&mut self.rng, DeterministicRng::new(0));
+        let result = self.recipe_order_cycled(count, rr_idx, &mut rng);
+        self.rng = rng;
+        result
+    }
+
+    /// Test shim: `text_recipe_order_shuffled` using the inner rng.
+    #[cfg(test)]
+    fn text_recipe_order_shuffled_seeded(&mut self, count: usize) -> Vec<usize> {
+        let mut rng = std::mem::replace(&mut self.rng, DeterministicRng::new(0));
+        let result = self.text_recipe_order_shuffled(count, &mut rng);
+        self.rng = rng;
+        result
+    }
+
+    /// Test shim: `text_recipe_order_cycled` using the inner rng.
+    #[cfg(test)]
+    fn text_recipe_order_cycled_seeded(&mut self, count: usize, rr_idx: usize) -> Vec<usize> {
+        let mut rng = std::mem::replace(&mut self.rng, DeterministicRng::new(0));
+        let result = self.text_recipe_order_cycled(count, rr_idx, &mut rng);
+        self.rng = rng;
+        result
+    }
+
+    /// Test shim: `select_negative_record` using the inner rng.
+    #[cfg(test)]
+    fn select_negative_record_seeded(
+        &mut self,
+        anchor_record: &DataRecord,
+        strategy: &NegativeStrategy,
+        anchor_query_text: Option<&str>,
+    ) -> Option<(Arc<DataRecord>, bool)> {
+        let mut rng = std::mem::replace(&mut self.rng, DeterministicRng::new(0));
+        let result =
+            self.select_negative_record(anchor_record, strategy, anchor_query_text, &mut rng);
+        self.rng = rng;
+        result
+    }
+
+    /// Test shim: `make_triplet_with_anchor` using the inner rng.
+    #[cfg(test)]
+    fn make_triplet_with_anchor_seeded(
+        &mut self,
+        recipe: &TripletRecipe,
+        anchor: &DataRecord,
+    ) -> Option<SampleTriplet> {
+        let mut rng = std::mem::replace(&mut self.rng, DeterministicRng::new(0));
+        let result = self.make_triplet_with_anchor(recipe, anchor, &mut rng);
+        self.rng = rng;
+        result
+    }
+
+    /// Test shim: `decorate_chunk` using the inner rng.
+    #[cfg(test)]
+    fn decorate_chunk_seeded(&mut self, record: &DataRecord, chunk: &mut RecordChunk) {
+        let mut rng = std::mem::replace(&mut self.rng, DeterministicRng::new(0));
+        self.decorate_chunk(record, chunk, &mut rng);
+        self.rng = rng;
     }
 
     // ── extended-metrics helpers ───────────────────────────────────────────────
