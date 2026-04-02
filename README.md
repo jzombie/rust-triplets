@@ -2,13 +2,13 @@
 
 [![made-with-rust][rust-logo]][rust-src-page] [![crates.io][crates-badge]][crates-page] [![MIT licensed][mit-license-badge]][mit-license-page] [![Apache 2.0 licensed][apache-2.0-license-badge]][apache-2.0-license-page]
 
-Compose an effectively unlimited supply of [training triplets](https://en.wikipedia.org/wiki/Triplet_loss), pairs, or plaintext samples from your existing corpus. This crate handles ingestion, mixing multiple sources, deterministic train/validation/test splitting, and optional [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) hard-negative mining.
+Generate an effectively unlimited stream of [training triplets](https://en.wikipedia.org/wiki/Triplet_loss), pairs, or plaintext samples from your existing corpus. This crate handles ingestion, multi-source mixing, deterministic train/validation/test splitting, and optional [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) hard-negative mining.
 
 ## Overview
 
 In metric learning and language model training, a **triplet** consists of an **anchor**, a **positive** example (similar to the anchor), and a **negative** example (dissimilar to the anchor).
 
-`triplets` provides a high-performance, streaming pipeline to:
+`triplets` provides a high-throughput streaming pipeline to:
 1. **Ingest** data from local files, Hugging Face, or custom backends.
 2. **Mix** sources with configurable weights to balance your training data.
 3. **Split** data deterministically into train, validation, and test sets.
@@ -25,7 +25,7 @@ In metric learning and language model training, a **triplet** consists of an **a
 
 ## Getting Started
 
-A `TripletSampler` requires a `SplitStore` to manage record-to-split assignments and a `SamplerConfig` for its operational parameters.
+A `TripletSampler` needs a `SplitStore` for record-to-split assignments and a `SamplerConfig` for runtime behavior.
 
 ```rust
 use std::sync::Arc;
@@ -60,7 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## Configuring Sources
 
 ### Local File Source
-Recursively indexes text files from a directory. Ideal for local datasets or exported corpora.
+Recursively indexes text files from a directory. Ideal for local datasets and exported corpora.
 
 ```rust
 use std::sync::Arc;
@@ -81,7 +81,7 @@ sampler.register_source(Box::new(source));
 
 
 ### Hugging Face Source
-Streams rows directly from the Hugging Face Hub without requiring full dataset downloads.
+Streams rows directly from the Hugging Face Hub without requiring a full dataset download.
 
 ```rust,no_run
 #[cfg(feature = "huggingface")]
@@ -154,7 +154,7 @@ sampler.register_source(Box::new(adapter));
 ## Sampling and Mixing
 
 ### Weighted Sampling
-Adjust the relative frequency of each source to handle class imbalance or dataset quality.
+Adjust per-source sampling frequency to handle class imbalance or dataset quality differences.
 
 ```rust,no_run
 use std::sync::Arc;
@@ -176,7 +176,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 ### Output Format
-The sampler produces `SampleTriplet` objects containing the sampled text and associated metadata.
+The sampler produces `SampleTriplet` values containing sampled text and associated metadata.
 
 ```rust,no_run
 use std::sync::Arc;
@@ -201,7 +201,7 @@ for triplet in batch.triplets {
 ## Epochs and Determinism
 
 ### Iterating Epochs
-In a typical training loop, you notify the sampler of a new epoch to reset its cursors and reshuffle sources.
+In a typical training loop, signal a new epoch so the sampler can reset cursors and reshuffle sources.
 
 ```rust,no_run
 use std::sync::Arc;
@@ -234,7 +234,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 ### Deterministic Resuming
-To resume training, initialize a `FileSplitStore` at the same path. The sampler automatically restores its cursors, RNG state, and epoch progress from the store.
+To resume training, initialize a `FileSplitStore` at the same path. The sampler automatically restores cursors, RNG state, and epoch progress from that store.
 
 ```rust,no_run
 use std::sync::Arc;
@@ -253,24 +253,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-> **Note**: The sampler state is designed to be extremely lightweight. It only persists source identifiers, integer record cursors, and small RNG state vectors, rather than the data records themselves. This makes it efficient to checkpoint frequently during long-running training jobs.
+> **Note**: Sampler state is intentionally lightweight. It persists source identifiers, integer record cursors, and compact RNG state vectors, not full data records. This keeps frequent checkpointing practical in long-running training jobs.
 
 ## Technical Details
 
 ### Threading Model
-Concurrency is handled at multiple levels to ensure high throughput:
-- **Prefetching**: `BatchPrefetcher` runs a dedicated background worker thread and fills a bounded queue.
-- **Parallel Ingestion**: Source refresh runs concurrently across registered sources during ingestion cycles.
-- **Synchronous API**: Sampling calls are synchronous at the API boundary for easy training-loop integration.
-- **Thread-Safe Shared Use**: `TripletSampler` is safe to share across threads (for example via `Arc`); concurrent calls are internally synchronized with a mutex, so one sampler instance is safely callable from multiple threads without data races.
+Concurrency is handled at multiple levels for high throughput:
+- **Prefetching**: `BatchPrefetcher` runs a dedicated background worker thread that fills a bounded queue.
+- **Parallel Ingestion**: Source refresh executes concurrently across registered sources during ingestion cycles.
+- **Synchronous API**: Sampling calls are synchronous at the API boundary for straightforward training-loop integration.
+- **Thread-Safe Shared Use**: `TripletSampler` is safe to share across threads (for example via `Arc`); concurrent calls are internally synchronized with a mutex, so a single sampler instance is callable from multiple threads without data races.
 
 ### Chunking and Windows
-Long documents are automatically handled via a pluggable `ChunkingAlgorithm`. The default `SlidingWindowChunker` breaks sections into windows of a fixed token size with a configurable overlap, ensuring full coverage of long texts.
+Long documents are handled through a pluggable `ChunkingAlgorithm`. The default `SlidingWindowChunker` splits sections into fixed-size token windows with configurable overlap, preserving full coverage of long text.
 
 ### Negative Mining
-The sampler delegates negative selection to a pluggable backend.
-- **DefaultBackend**: Uniform-random selection from the candidate pool.
-- **Bm25Backend**: (Requires `bm25-mining` feature) Ranks candidates by lexical overlap with the anchor to provide "harder" training examples.
+Negative selection is delegated to a pluggable backend.
+- **DefaultBackend**: Uniform random selection from the candidate pool.
+- **Bm25Backend**: (Requires `bm25-mining`) Ranks candidates by lexical overlap with the anchor to provide harder training examples.
 
 ## Capabilities
 
@@ -285,7 +285,7 @@ The sampler delegates negative selection to a pluggable backend.
 
 ## License
 
-`triplets` is distributed under the terms of both the MIT license and the Apache License (Version 2.0).
+`triplets` is distributed under both the MIT license and the Apache License (Version 2.0).
 
 See [LICENSE-APACHE](LICENSE-APACHE) and [LICENSE-MIT](LICENSE-MIT) for details.
 
