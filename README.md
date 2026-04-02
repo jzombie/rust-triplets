@@ -11,7 +11,7 @@ Generate an effectively unlimited stream of [training triplets](https://en.wikip
 In metric learning and language model training, a **triplet** consists of an **anchor**, a **positive** example (similar to the anchor), and a **negative** example (dissimilar to the anchor).
 
 `triplets` provides a high-throughput streaming pipeline to:
-1. **Ingest** data from local files, Hugging Face, or custom backends.
+1. **Ingest** data from local text/CSV files, Hugging Face, or custom backends.
 2. **Mix** sources with configurable weights to balance your training data.
 3. **Split** data deterministically into train, validation, and test sets.
 4. **Sample** triplets or pairs using rule-based "recipes".
