@@ -3,7 +3,6 @@ mod backends;
 use crate::chunking::{ChunkingAlgorithm, SlidingWindowChunker};
 use chrono::Duration;
 use indexmap::IndexMap;
-use line_ending::LineEnding;
 use rand::prelude::*;
 use rayon::prelude::*;
 use std::borrow::Cow;
@@ -40,6 +39,7 @@ use crate::splits::{
 };
 use crate::tokenizer::{Tokenizer, WhitespaceTokenizer};
 use crate::types::{RecipeKey, RecordId, SourceId};
+use crate::utils::platform_newline;
 
 // AUTO-RECIPE HANDLING OVERVIEW (end-to-end):
 // Stage A: Source-level injection eligibility ("should this source even get the recipe?")
@@ -2992,10 +2992,6 @@ fn role_label(role: &SectionRole) -> String {
 
 fn taxonomy_value(record: &DataRecord, field: MetadataKey) -> Option<&str> {
     record.taxonomy.iter().find_map(|entry| field.strip(entry))
-}
-
-fn platform_newline() -> &'static str {
-    LineEnding::from_current_platform().as_str()
 }
 
 fn strategy_reason(strategy: &NegativeStrategy) -> &'static str {

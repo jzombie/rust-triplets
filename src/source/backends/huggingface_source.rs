@@ -4531,6 +4531,7 @@ impl DataSource for HuggingFaceRowSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::platform_newline;
     use parquet::data_type::{ByteArray, ByteArrayType};
     use parquet::file::properties::WriterProperties;
     use parquet::file::writer::SerializedFileWriter;
@@ -4853,9 +4854,10 @@ mod tests {
     #[test]
     fn managed_snapshot_helpers_create_cache_dirs_under_discovered_root() {
         let dir = tempdir().unwrap();
+        let nl = platform_newline();
         fs::write(
             dir.path().join("Cargo.toml"),
-            "[package]\nname='tmp'\nversion='0.0.0'\n",
+            format!("[package]{nl}name='tmp'{nl}version='0.0.0'{nl}"),
         )
         .unwrap();
 
@@ -4881,9 +4883,10 @@ mod tests {
     #[test]
     fn managed_snapshot_dirs_use_all_splits_dir_for_empty_split() {
         let dir = tempdir().unwrap();
+        let nl = platform_newline();
         fs::write(
             dir.path().join("Cargo.toml"),
-            "[package]\nname='tmp'\nversion='0.0.0'\n",
+            format!("[package]{nl}name='tmp'{nl}version='0.0.0'{nl}"),
         )
         .unwrap();
 
@@ -4922,21 +4925,26 @@ mod tests {
     #[test]
     fn load_and_resolve_hf_source_list_reports_invalid_and_empty_inputs() {
         let dir = tempdir().unwrap();
+        let nl = platform_newline();
 
         let invalid_list = dir.path().join("invalid_sources.txt");
-        fs::write(&invalid_list, "hf://org/dataset/default/train badtoken\n").unwrap();
+        fs::write(
+            &invalid_list,
+            format!("hf://org/dataset/default/train badtoken{nl}"),
+        )
+        .unwrap();
         let invalid = load_hf_sources_from_list(invalid_list.to_str().unwrap()).unwrap_err();
         assert!(invalid.contains("invalid source-list entry"));
 
         let empty_list = dir.path().join("empty_sources.txt");
-        fs::write(&empty_list, "# comment only\n\n").unwrap();
+        fs::write(&empty_list, format!("# comment only{nl}{nl}")).unwrap();
         let resolved = resolve_hf_list_roots(empty_list.to_string_lossy().to_string()).unwrap_err();
         assert!(resolved.contains("no hf:// entries found"));
 
         let good_list = dir.path().join("good_sources.txt");
         fs::write(
             &good_list,
-            "hf://org/dataset/default/train anchor=title positive=body\n",
+            format!("hf://org/dataset/default/train anchor=title positive=body{nl}"),
         )
         .unwrap();
         let roots = resolve_hf_list_roots(good_list.to_string_lossy().to_string()).unwrap();
@@ -5004,9 +5012,10 @@ mod tests {
         };
 
         let temp_root = tempdir().unwrap();
+        let nl = platform_newline();
         fs::write(
             temp_root.path().join("Cargo.toml"),
-            "[package]\nname='tmp'\nversion='0.0.0'\n",
+            format!("[package]{nl}name='tmp'{nl}version='0.0.0'{nl}"),
         )
         .unwrap();
         fs::write(temp_root.path().join(".cache"), b"blocking-file").unwrap();
@@ -5052,9 +5061,10 @@ mod tests {
         };
 
         let temp_root = tempdir().unwrap();
+        let nl = platform_newline();
         fs::write(
             temp_root.path().join("Cargo.toml"),
-            "[package]\nname='tmp'\nversion='0.0.0'\n",
+            format!("[package]{nl}name='tmp'{nl}version='0.0.0'{nl}"),
         )
         .unwrap();
 
@@ -8649,7 +8659,10 @@ mod tests {
         let path = dir.path().join("rows.jsonl");
         let mut payload = String::new();
         for idx in 0..12 {
-            payload.push_str(&format!("{{\"id\":\"r{idx}\",\"text\":\"v{idx}\"}}\n"));
+            payload.push_str(&format!(
+                "{{\"id\":\"r{idx}\",\"text\":\"v{idx}\"}}{}",
+                platform_newline()
+            ));
         }
         fs::write(&path, payload).unwrap();
 

@@ -21,8 +21,8 @@ use crate::data::DataRecord;
 use crate::splits::SplitLabel;
 use crate::tokenizer::{Tokenizer, WhitespaceTokenizer};
 use crate::types::{RecordId, SourceId};
+use crate::utils::platform_newline;
 
-use super::super::platform_newline;
 use super::NegativeBackend;
 
 // ── internal structures ───────────────────────────────────────────────────────
