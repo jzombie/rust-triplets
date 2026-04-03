@@ -2,13 +2,13 @@
 
 [![made-with-rust][rust-logo]][rust-src-page] [![crates.io][crates-badge]][crates-page] [![MIT licensed][mit-license-badge]][mit-license-page] [![Apache 2.0 licensed][apache-2.0-license-badge]][apache-2.0-license-page]
 
-**Work in progress.**
-
 Generate an effectively unlimited stream of [training triplets](https://en.wikipedia.org/wiki/Triplet_loss), pairs, or plaintext samples from your existing corpus. This crate handles ingestion, multi-source mixing, deterministic train/validation/test splitting, and optional [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) hard-negative mining.
 
 **Designed as a data-pipeline layer for a training loop.**
 
 > A training loop has two halves: the *data side* and the *model side*. `triplets` owns the data side — deterministic and reproducible train/validation/test splitting, seeded shuffling across epochs, weighted multi-source mixing, BM25 hard-negative mining, and static per-record KVP metadata for input conditioning. What it intentionally does *not* include is the model side: forward passes, loss computation, and optimizer steps. The design goal is that you plug this crate's output stream directly into your training framework (crates like [Candle](https://github.com/huggingface/candle), [burn](https://crates.io/crates/burn), [tch](https://crates.io/crates/tch), [PyO3](https://crates.io/crates/pyo3)) and it already handles the parts of the data pipeline that are hardest to get right — correctness, reproducibility, and scale.
+
+**Work in progress.**
 
 ## Overview
 
