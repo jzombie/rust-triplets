@@ -2261,9 +2261,12 @@ mod tests {
             text: "anchor text".to_string(),
             tokens_estimate: 8,
             quality: crate::data::QualityScore { trust: 0.9 },
-            kvp_meta: [("date".to_string(), vec!["2025-01-01".to_string(), "Jan 1, 2025".to_string()])]
-                .into_iter()
-                .collect(),
+            kvp_meta: [(
+                "date".to_string(),
+                vec!["2025-01-01".to_string(), "Jan 1, 2025".to_string()],
+            )]
+            .into_iter()
+            .collect(),
         };
         let positive = RecordChunk {
             record_id: "source_a::rec2".to_string(),
