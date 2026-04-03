@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use crate::kvp::KvpPrefixSampler;
 
@@ -80,6 +81,15 @@ pub struct RecordChunk {
     pub tokens_estimate: usize,
     /// Trust/quality inherited from the parent record.
     pub quality: QualityScore,
+    /// All KVP metadata defined on the source record's `meta_prefix`, exposed for
+    /// downstream inspection and debugging. Contains every key with all its possible
+    /// values across all variants — unaffected by presence probability, dropout, or
+    /// which variant was sampled into this chunk's text.
+    ///
+    /// Populated unconditionally by the sampler during chunk decoration. Empty when the
+    /// record has no `meta_prefix` configured.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub kvp_meta: HashMap<String, Vec<String>>,
 }
 
 /// Chunk view metadata (window or summary).
@@ -219,6 +229,7 @@ mod tests {
             text: "text".to_string(),
             tokens_estimate: 4,
             quality: QualityScore::default(),
+            kvp_meta: Default::default(),
         }
     }
 

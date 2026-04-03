@@ -473,10 +473,108 @@ let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
 // samples, proportional to their configured weights and record coverage.
 ```
 
+## Metadata Prefixes and Tag Dropout
+
+`KvpPrefixSampler` attaches structured key-value metadata to a record. When a chunk is selected for training, the sampler may prepend a `meta:` line to the chunk text before it reaches the model. What that line looks like varies per sample — a variant is selected at random, each field picks one value from its declared list, and the field order within the line is shuffled:
+
+```text
+meta: source=daily-update | date=2025-01-01
+<actual chunk content begins here>
+
+# same record, different sample — different value, different field order:
+meta: date=Jan 1, 2025 | source=daily-update
+<actual chunk content begins here>
+```
+
+### Tag dropout
+
+The `dropout` parameter controls how often the prefix is included at all:
+
+| `dropout` | Effect |
+| --------- | ------ |
+| `1.0` | Prefix is **always** prepended. |
+| `0.5` | Prefix is prepended ~half the time; the rest of the time the model sees plain text. |
+| `0.0` | Prefix is **never** prepended. |
+
+Training with `dropout < 1.0` teaches the model to handle both cases — chunks with metadata context and chunks without. This prevents the model from becoming dependent on the tags being present at inference time.
+
+Individual fields also have their own **presence probability** controlled by `.with_presence(p)`. A field with `presence = 0.7` is omitted from a given prefix 30% of the time, independently of the sampler-level dropout.
+
+```rust
+use triplets::kvp::{KvpField, KvpPrefixSampler};
+
+// dropout=0.8: 80% of chunks get a prefix, 20% see plain text.
+let mut sampler = KvpPrefixSampler::new(0.8);
+
+sampler.add_variant_fields([
+    // "date" appears in every emitted prefix (presence=1.0 is the default).
+    KvpField::many("date", ["2025-01-01", "Jan 1, 2025"]),
+    // "source" is omitted from ~30% of emitted prefixes.
+    KvpField::one("source", "daily-update").with_presence(0.7),
+]);
+```
+
+The two value options for `date` are chosen at random each time the prefix is rendered, and — when a variant has more than one field — the order the fields appear in the line is also shuffled. The model therefore never sees a consistent positional signal for any individual tag.
+
+You can call `add_variant` / `add_variant_fields` multiple times to register alternative field sets. One set is selected uniformly at random per sample — useful when you want to teach the model different metadata "views" of the same record:
+
+```rust
+use triplets::kvp::{KvpField, KvpPrefixSampler};
+
+let mut sampler = KvpPrefixSampler::new(1.0);
+// Variant A: structural tags
+sampler.add_variant([("type", "earnings-call"), ("quarter", "Q1-2025")]);
+// Variant B: temporal tags
+sampler.add_variant_fields([KvpField::many("date", ["2025-01-15", "Jan 15, 2025"])]);
+```
+
+### Attaching a sampler to a record
+
+Set `DataRecord::meta_prefix` on any record before registering it with a source:
+
+```rust
+use chrono::Utc;
+use triplets::DataRecord;
+use triplets::kvp::{KvpField, KvpPrefixSampler};
+
+let mut sampler = KvpPrefixSampler::new(0.9);
+sampler.add_variant_fields([
+    KvpField::many("date", ["2025-01-01", "Jan 1, 2025"]),
+    KvpField::one("source", "daily-update").with_presence(0.7),
+]);
+
+let record = DataRecord {
+    id: "rec-001".into(),
+    source: "news".into(),
+    created_at: Utc::now(),
+    updated_at: Utc::now(),
+    quality: Default::default(),
+    taxonomy: vec![],
+    sections: vec![],
+    meta_prefix: Some(sampler),
+};
+```
+
+### Inspecting metadata on output chunks
+
+Every `RecordChunk` carries a `kvp_meta: HashMap<String, Vec<String>>` field containing **all** declared keys and every possible value across all variants. This is populated unconditionally — even when dropout suppresses the prefix text for that particular chunk:
+
+```rust,no_run
+use std::sync::Arc;
+use triplets::{SamplerConfig, TripletSampler, SplitRatios, DeterministicSplitStore, SplitLabel, Sampler};
+let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
+let store = Arc::new(DeterministicSplitStore::new(ratios, 42).unwrap());
+let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
+let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
+for triplet in &batch.triplets {
+    // All declared keys and values are here regardless of dropout.
+    println!("{:?}", triplet.anchor.kvp_meta);
+}
+```
+
 ## Epochs and Determinism
 
 ### Iterating Epochs
-In a typical training loop, signal a new epoch so the sampler can reset cursors and reshuffle sources.
 
 ```rust,no_run
 use std::sync::Arc;

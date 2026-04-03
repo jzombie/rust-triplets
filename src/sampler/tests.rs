@@ -135,6 +135,7 @@ fn strategy_reason_and_chunk_key_cover_all_variants() {
         text: "window".into(),
         tokens_estimate: 8,
         quality: QualityScore { trust: 1.0 },
+        kvp_meta: Default::default(),
     };
     let key_window = chunk_key(&base);
     assert!(key_window.contains("|w|2"));
@@ -621,6 +622,62 @@ fn decorate_chunk_preserves_newline_after_meta_when_truncated() {
         "meta prefix should remain on its own line after truncation"
     );
     assert_eq!(chunk.tokens_estimate, 4);
+}
+
+#[test]
+fn kvp_meta_populated_unconditionally_even_when_dropout_suppresses_prefix() {
+    // dropout=0.0 means sample() always returns None, so no prefix text is
+    // prepended. kvp_meta must still be populated with all declared fields.
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 42).unwrap());
+    let sampler = TripletSampler::new(base_config(), store);
+
+    let mut record = sample_record();
+    let mut kvp = KvpPrefixSampler::new(0.0); // dropout off — prefix never rendered
+    kvp.add_variant_fields([
+        KvpField::many("date", ["2025-01-01", "Jan 1, 2025"]),
+        KvpField::one("source", "daily-report"),
+    ]);
+    record.meta_prefix = Some(kvp);
+
+    let mut inner = sampler.inner.lock().unwrap();
+    let mut chunks = inner.materialize_chunks(&record, 0, &record.sections[0]);
+    assert!(!chunks.is_empty());
+    let mut chunk = chunks.remove(0);
+    inner.decorate_chunk_seeded(&record, &mut chunk);
+
+    // No prefix in text because dropout=0.0
+    assert!(
+        !chunk.text.starts_with("meta:"),
+        "dropout=0.0 should suppress prefix text"
+    );
+
+    // But kvp_meta must contain all declared keys and values
+    assert_eq!(chunk.kvp_meta.len(), 2, "expected two keys in kvp_meta");
+    let mut dates = chunk.kvp_meta["date"].clone();
+    dates.sort();
+    assert_eq!(dates, vec!["2025-01-01", "Jan 1, 2025"]);
+    assert_eq!(chunk.kvp_meta["source"], vec!["daily-report"]);
+}
+
+#[test]
+fn kvp_meta_empty_when_record_has_no_meta_prefix() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 42).unwrap());
+    let sampler = TripletSampler::new(base_config(), store);
+
+    let record = sample_record(); // meta_prefix: None
+
+    let mut inner = sampler.inner.lock().unwrap();
+    let mut chunks = inner.materialize_chunks(&record, 0, &record.sections[0]);
+    assert!(!chunks.is_empty());
+    let mut chunk = chunks.remove(0);
+    inner.decorate_chunk_seeded(&record, &mut chunk);
+
+    assert!(
+        chunk.kvp_meta.is_empty(),
+        "kvp_meta should be empty when the record has no meta_prefix"
+    );
 }
 
 #[test]
@@ -1277,6 +1334,7 @@ impl ChunkingAlgorithm for FixedChunker {
             text: "fixed-chunk".into(),
             tokens_estimate: 1,
             quality: record.quality,
+            kvp_meta: Default::default(),
         }]
     }
 }
@@ -1303,6 +1361,7 @@ impl ChunkingAlgorithm for MarkerChunker {
                 text: format!("custom::{}::{}::w0", record.id, section_idx),
                 tokens_estimate: 2,
                 quality: record.quality,
+                kvp_meta: Default::default(),
             },
             RecordChunk {
                 record_id: record.id.clone(),
@@ -1315,6 +1374,7 @@ impl ChunkingAlgorithm for MarkerChunker {
                 text: format!("custom::{}::{}::w1", record.id, section_idx),
                 tokens_estimate: 2,
                 quality: record.quality,
+                kvp_meta: Default::default(),
             },
         ]
     }
@@ -1471,6 +1531,7 @@ fn chunk_weight_windows_use_trust_and_floor() {
         text: "dummy".into(),
         tokens_estimate: 10,
         quality: QualityScore { trust: 1.0 },
+        kvp_meta: Default::default(),
     };
     assert_eq!(
         sampler.inner.lock().unwrap().chunk_weight(&base_chunk),
@@ -1507,6 +1568,7 @@ fn summary_fallback_weight_is_clamped() {
         text: "summary".into(),
         tokens_estimate: 10,
         quality: QualityScore::default(),
+        kvp_meta: Default::default(),
     };
     assert_eq!(
         sampler.inner.lock().unwrap().chunk_weight(&summary_chunk),
@@ -1533,6 +1595,7 @@ fn chunk_weight_applies_trust_scaling() {
         text: "dummy".into(),
         tokens_estimate: 10,
         quality: QualityScore { trust: 0.5 },
+        kvp_meta: Default::default(),
     };
 
     let weight = sampler.inner.lock().unwrap().chunk_weight(&trusted_chunk);
@@ -1569,6 +1632,7 @@ fn triplet_weight_averages_chunk_weights() {
         text: "a".into(),
         tokens_estimate: 10,
         quality: QualityScore::default(),
+        kvp_meta: Default::default(),
     };
     let positive = RecordChunk {
         record_id: "b".into(),
@@ -1581,6 +1645,7 @@ fn triplet_weight_averages_chunk_weights() {
         text: "b".into(),
         tokens_estimate: 10,
         quality: QualityScore::default(),
+        kvp_meta: Default::default(),
     };
     let negative = RecordChunk {
         record_id: "c".into(),
@@ -1593,6 +1658,7 @@ fn triplet_weight_averages_chunk_weights() {
         text: "c".into(),
         tokens_estimate: 10,
         quality: QualityScore::default(),
+        kvp_meta: Default::default(),
     };
 
     let avg = sampler
@@ -1635,6 +1701,7 @@ fn non_auto_triplet_negative_weight_uses_trust_only() {
         text: "a".into(),
         tokens_estimate: 10,
         quality: QualityScore::default(),
+        kvp_meta: Default::default(),
     };
     let positive = RecordChunk {
         record_id: "b".into(),
@@ -1647,6 +1714,7 @@ fn non_auto_triplet_negative_weight_uses_trust_only() {
         text: "b".into(),
         tokens_estimate: 10,
         quality: QualityScore::default(),
+        kvp_meta: Default::default(),
     };
     let negative = RecordChunk {
         record_id: "c".into(),
@@ -1659,6 +1727,7 @@ fn non_auto_triplet_negative_weight_uses_trust_only() {
         text: "c".into(),
         tokens_estimate: 10,
         quality: QualityScore::default(),
+        kvp_meta: Default::default(),
     };
 
     let avg = sampler
@@ -1701,6 +1770,7 @@ fn non_auto_triplet_weight_applies_anchor_positive_proximity() {
         text: "a".into(),
         tokens_estimate: 10,
         quality: QualityScore::default(),
+        kvp_meta: Default::default(),
     };
     let positive = RecordChunk {
         record_id: "r".into(),
@@ -1713,6 +1783,7 @@ fn non_auto_triplet_weight_applies_anchor_positive_proximity() {
         text: "b".into(),
         tokens_estimate: 10,
         quality: QualityScore::default(),
+        kvp_meta: Default::default(),
     };
     let negative = RecordChunk {
         record_id: "n".into(),
@@ -1725,6 +1796,7 @@ fn non_auto_triplet_weight_applies_anchor_positive_proximity() {
         text: "c".into(),
         tokens_estimate: 10,
         quality: QualityScore::default(),
+        kvp_meta: Default::default(),
     };
 
     let avg = sampler
@@ -1772,6 +1844,7 @@ fn non_auto_triplet_weight_tracks_positive_window_index() {
         text: "a".into(),
         tokens_estimate: 10,
         quality: QualityScore::default(),
+        kvp_meta: Default::default(),
     };
     let negative = RecordChunk {
         record_id: "n".into(),
@@ -1784,6 +1857,7 @@ fn non_auto_triplet_weight_tracks_positive_window_index() {
         text: "c".into(),
         tokens_estimate: 10,
         quality: QualityScore::default(),
+        kvp_meta: Default::default(),
     };
 
     // [(positive_index, expected_proximity, expected_weight)]
@@ -1807,6 +1881,7 @@ fn non_auto_triplet_weight_tracks_positive_window_index() {
             text: "b".into(),
             tokens_estimate: 10,
             quality: QualityScore::default(),
+            kvp_meta: Default::default(),
         };
 
         let proximity = chunk_proximity_score(&anchor, &positive);
@@ -1865,6 +1940,7 @@ fn auto_chunk_pair_triplet_weight_uses_proximity_inside_chunk_weight() {
         text: "a".into(),
         tokens_estimate: 10,
         quality: QualityScore::default(),
+        kvp_meta: Default::default(),
     };
     let positive = RecordChunk {
         record_id: "r".into(),
@@ -1877,6 +1953,7 @@ fn auto_chunk_pair_triplet_weight_uses_proximity_inside_chunk_weight() {
         text: "b".into(),
         tokens_estimate: 10,
         quality: QualityScore::default(),
+        kvp_meta: Default::default(),
     };
 
     let negative = RecordChunk {
@@ -1890,6 +1967,7 @@ fn auto_chunk_pair_triplet_weight_uses_proximity_inside_chunk_weight() {
         text: "c".into(),
         tokens_estimate: 10,
         quality: QualityScore::default(),
+        kvp_meta: Default::default(),
     };
 
     let weight = sampler.inner.lock().unwrap().triplet_chunk_weight(
@@ -3383,6 +3461,7 @@ fn reentry_same_epoch_restarts_from_same_chunk_offset() {
         text: text.to_string(),
         tokens_estimate: 2,
         quality: QualityScore::default(),
+        kvp_meta: Default::default(),
     };
     let pool = vec![mk_chunk(0, "zero"), mk_chunk(1, "one"), mk_chunk(2, "two")];
 
@@ -3430,6 +3509,7 @@ fn reentry_after_epoch_change_can_restart_from_different_chunk_offset() {
         text: text.to_string(),
         tokens_estimate: 2,
         quality: QualityScore::default(),
+        kvp_meta: Default::default(),
     };
     let pool = vec![mk_chunk(0, "zero"), mk_chunk(1, "one"), mk_chunk(2, "two")];
 
@@ -10221,6 +10301,7 @@ fn decorate_chunk_no_truncation_when_window_is_zero() {
         text: "body token one two three".to_string(),
         tokens_estimate: 5,
         quality: QualityScore::default(),
+        kvp_meta: Default::default(),
     };
 
     inner.decorate_chunk_seeded(&record, &mut chunk);

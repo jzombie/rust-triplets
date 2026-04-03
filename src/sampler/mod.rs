@@ -1473,6 +1473,11 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         chunk: &mut RecordChunk,
         rng: &mut DeterministicRng,
     ) {
+        chunk.kvp_meta = record
+            .meta_prefix
+            .as_ref()
+            .map(|s| s.all_metadata())
+            .unwrap_or_default();
         if let Some(spec) = record.meta_prefix.as_ref()
             && let Some(prefix) = spec.sample(rng)
         {
@@ -1580,6 +1585,11 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         chunk: &mut RecordChunk,
         rng: &mut DeterministicRng,
     ) {
+        chunk.kvp_meta = record
+            .meta_prefix
+            .as_ref()
+            .map(|s| s.all_metadata())
+            .unwrap_or_default();
         if let Some(spec) = record.meta_prefix.as_ref()
             && let Some(prefix) = spec.sample(rng)
         {

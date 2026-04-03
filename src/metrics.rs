@@ -206,6 +206,7 @@ mod tests {
             text: "x".to_string(),
             tokens_estimate: 1,
             quality: crate::data::QualityScore::default(),
+            kvp_meta: Default::default(),
         }
     }
 

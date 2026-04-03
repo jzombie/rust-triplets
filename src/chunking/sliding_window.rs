@@ -37,6 +37,7 @@ impl ChunkingAlgorithm for SlidingWindowChunker {
                 text,
                 tokens_estimate: span,
                 quality: record.quality,
+                kvp_meta: Default::default(),
             });
             return chunks;
         }
@@ -59,6 +60,7 @@ impl ChunkingAlgorithm for SlidingWindowChunker {
                     text: window,
                     tokens_estimate: end - start,
                     quality: record.quality,
+                    kvp_meta: Default::default(),
                 });
                 if end == tokens.len() {
                     break;
@@ -90,6 +92,7 @@ impl ChunkingAlgorithm for SlidingWindowChunker {
                 text: summary_tokens,
                 tokens_estimate: fallback_len,
                 quality: record.quality,
+                kvp_meta: Default::default(),
             });
         }
 
