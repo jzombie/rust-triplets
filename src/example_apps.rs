@@ -1314,11 +1314,16 @@ fn print_chunk_block(
     if !chunk.kvp_meta.is_empty() {
         let mut kvp_keys: Vec<&String> = chunk.kvp_meta.keys().collect();
         kvp_keys.sort();
-        let kvp_str: Vec<String> = kvp_keys
-            .into_iter()
-            .map(|k| format!("{}: [{}]", k, chunk.kvp_meta[k].join(", ")))
-            .collect();
-        println!("kvp_meta     : {}", kvp_str.join(" | "));
+        println!("kvp_meta     :");
+        for k in kvp_keys {
+            let vals = &chunk.kvp_meta[k];
+            let display = if vals.len() > 1 {
+                format!("{} ({} variations)", vals[0], vals.len())
+            } else {
+                vals[0].clone()
+            };
+            println!("\t{}: {}", k, display);
+        }
     }
     println!("model_input (exact text sent to the model):");
     println!("<<< BEGIN MODEL TEXT >>>");
