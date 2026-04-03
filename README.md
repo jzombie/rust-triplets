@@ -191,14 +191,33 @@ Adjust per-source sampling frequency to handle class imbalance or dataset qualit
 
 ```rust,no_run
 use std::sync::Arc;
-use triplets::{SamplerConfig, TripletSampler, SplitRatios, DeterministicSplitStore, SplitLabel, Sampler};
 use std::collections::HashMap;
+use triplets::{SamplerConfig, TripletSampler, SplitRatios, DeterministicSplitStore, SplitLabel, Sampler};
+use triplets::source::{CsvSource, CsvSourceConfig, FileSource, FileSourceConfig};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
     let store = Arc::new(DeterministicSplitStore::new(ratios, 42)?);
     let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
-    // Pull from HF 70% of the time and local files 30% of the time.
+
+    // Source 1: structured Q&A pairs from a CSV file.
+    // Each row maps a "question" column → anchor, "answer" column → positive.
+    let csv_config = CsvSourceConfig::new("hf_finance", "data/finance_qa.csv")
+        .with_anchor_column("question")
+        .with_positive_column("answer")
+        .with_trust(0.9);
+    sampler.register_source(Box::new(CsvSource::new(csv_config)?));
+
+    // Source 2: local plain-text corpus of internal documentation.
+    // Files are indexed recursively; filename stem → anchor, body → context.
+    let file_config = FileSourceConfig::new("docs", "./data/internal_docs")
+        .with_text_files_only(true)
+        .with_trust(0.7); // lower trust — unreviewed internal docs
+    sampler.register_source(Box::new(FileSource::new(file_config)));
+
+    // Override the mixing ratio for this batch: pull from the high-quality
+    // CSV source 70% of the time and the local docs 30% of the time.
+    // Sources not listed here fall back to uniform sampling.
     let mut weights = HashMap::new();
     weights.insert("hf_finance".to_string(), 0.7);
     weights.insert("docs".to_string(), 0.3);
