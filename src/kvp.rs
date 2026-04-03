@@ -1,7 +1,7 @@
 use rand::Rng;
 use rand::seq::{IndexedRandom, SliceRandom};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::metadata::{METADATA_DELIMITER, MetadataKey};
 use crate::types::KvpValue;
@@ -126,6 +126,26 @@ impl KvpPrefixSampler {
         self.variants
             .choose(rng)
             .and_then(|variant| format_variant(variant, rng))
+    }
+
+    /// Returns all metadata keys and all their possible values across every variant.
+    ///
+    /// This method does **not** involve any RNG, presence rolls, or dropout — it simply
+    /// collects every key and every value defined on the sampler. Use the result to
+    /// populate `RecordChunk::kvp_meta` for downstream inspection/debugging.
+    pub fn all_metadata(&self) -> HashMap<String, Vec<String>> {
+        let mut map: HashMap<String, Vec<String>> = HashMap::new();
+        for variant in &self.variants {
+            for field in variant {
+                let entry = map.entry(field.key.clone()).or_default();
+                for value in &field.values {
+                    if !entry.contains(value) {
+                        entry.push(value.clone());
+                    }
+                }
+            }
+        }
+        map
     }
 }
 
@@ -392,5 +412,76 @@ mod tests {
         let field = spec.build(&());
         let mut rng = StdRng::from_seed([42_u8; 32]);
         assert!(field.render(&mut rng).is_some());
+    }
+
+    // ── all_metadata tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn all_metadata_empty_when_no_variants() {
+        let sampler = KvpPrefixSampler::new(1.0);
+        assert!(sampler.all_metadata().is_empty());
+    }
+
+    #[test]
+    fn all_metadata_collects_all_keys_and_values_regardless_of_dropout() {
+        // dropout=0.0 means sample() always returns None, but all_metadata must
+        // still expose every declared key and value.
+        let mut sampler = KvpPrefixSampler::new(0.0);
+        sampler.add_variant_fields([
+            KvpField::many("date", ["2025-01-01", "Jan 1, 2025"]),
+            KvpField::one("source", "daily-report"),
+        ]);
+
+        let meta = sampler.all_metadata();
+        assert_eq!(meta.len(), 2);
+
+        let dates = &meta["date"];
+        assert_eq!(dates.len(), 2);
+        assert!(dates.contains(&"2025-01-01".to_string()));
+        assert!(dates.contains(&"Jan 1, 2025".to_string()));
+
+        assert_eq!(meta["source"], vec!["daily-report"]);
+    }
+
+    #[test]
+    fn all_metadata_collects_keys_across_variants_and_deduplicates_values() {
+        // Two variants share the "date" key. all_metadata must merge both variants'
+        // values under the same key without duplicates.
+        let mut sampler = KvpPrefixSampler::new(1.0);
+        sampler.add_variant_fields([
+            KvpField::many("date", ["2025-01-01", "Jan 1, 2025"]),
+            KvpField::one("source", "variant-a"),
+        ]);
+        sampler.add_variant_fields([
+            KvpField::many("date", ["2025-01-01", "01/01/2025"]), // "2025-01-01" already seen
+            KvpField::one("source", "variant-b"),
+        ]);
+
+        let meta = sampler.all_metadata();
+
+        // "date" values from both variants, deduped
+        let mut dates = meta["date"].clone();
+        dates.sort();
+        assert_eq!(dates, vec!["01/01/2025", "2025-01-01", "Jan 1, 2025"]);
+
+        // "source" values from both variants
+        let mut sources = meta["source"].clone();
+        sources.sort();
+        assert_eq!(sources, vec!["variant-a", "variant-b"]);
+    }
+
+    #[test]
+    fn all_metadata_ignores_field_presence_probability() {
+        // Fields with presence=0.0 are never sampled, but all_metadata should
+        // still include their values.
+        let mut sampler = KvpPrefixSampler::new(1.0);
+        sampler.add_variant_fields([
+            KvpField::one("always", "yes").with_presence(1.0),
+            KvpField::one("never", "hidden").with_presence(0.0),
+        ]);
+
+        let meta = sampler.all_metadata();
+        assert_eq!(meta["always"], vec!["yes"]);
+        assert_eq!(meta["never"], vec!["hidden"]);
     }
 }

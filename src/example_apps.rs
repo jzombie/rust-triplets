@@ -1311,6 +1311,20 @@ fn print_chunk_block(
     if let Some((j, c)) = anchor_sim {
         println!("jaccard(↔a)  : {:.4}  byte-cos(↔a): {:.4}", j, c);
     }
+    if !chunk.kvp_meta.is_empty() {
+        let mut kvp_keys: Vec<&String> = chunk.kvp_meta.keys().collect();
+        kvp_keys.sort();
+        println!("kvp_meta     :");
+        for k in kvp_keys {
+            let vals = &chunk.kvp_meta[k];
+            let display = if vals.len() > 1 {
+                format!("{} ({} variations)", vals[0], vals.len())
+            } else {
+                vals[0].clone()
+            };
+            println!("\t{}: {}", k, display);
+        }
+    }
     println!("model_input (exact text sent to the model):");
     println!("<<< BEGIN MODEL TEXT >>>");
     println!("{}", chunk.text);
@@ -2252,6 +2266,12 @@ mod tests {
             text: "anchor text".to_string(),
             tokens_estimate: 8,
             quality: crate::data::QualityScore { trust: 0.9 },
+            kvp_meta: [(
+                "date".to_string(),
+                vec!["2025-01-01".to_string(), "Jan 1, 2025".to_string()],
+            )]
+            .into_iter()
+            .collect(),
         };
         let positive = RecordChunk {
             record_id: "source_a::rec2".to_string(),
@@ -2263,6 +2283,7 @@ mod tests {
             text: "positive text".to_string(),
             tokens_estimate: 6,
             quality: crate::data::QualityScore { trust: 0.8 },
+            kvp_meta: Default::default(),
         };
         let negative = RecordChunk {
             record_id: "source_b::rec3".to_string(),
@@ -2275,6 +2296,7 @@ mod tests {
             text: "negative text".to_string(),
             tokens_estimate: 7,
             quality: crate::data::QualityScore { trust: 0.5 },
+            kvp_meta: Default::default(),
         };
 
         let triplet_batch = TripletBatch {

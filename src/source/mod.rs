@@ -188,7 +188,7 @@ impl IndexablePager {
         let refresh_start = Instant::now();
         if should_report {
             eprintln!(
-                "[triplets:source] refresh start source='{}' total={} target={}",
+                "[triplets:source] refresh start source='{}' source_records={} ingestion_limit={}",
                 self.source_id, total, max
             );
         }
@@ -227,7 +227,7 @@ impl IndexablePager {
 
         if should_report {
             eprintln!(
-                "[triplets:source] refresh done source='{}' attempted={} fetched={} elapsed={:.2}s",
+                "[triplets:source] refresh done source='{}' source_records={} ingested={} elapsed={:.2}s",
                 self.source_id,
                 total,
                 records.len(),
