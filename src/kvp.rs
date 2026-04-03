@@ -132,7 +132,7 @@ impl KvpPrefixSampler {
     ///
     /// This method does **not** involve any RNG, presence rolls, or dropout — it simply
     /// collects every key and every value defined on the sampler. Use the result to
-    /// populate [`RecordChunk::kvp_meta`] for downstream inspection/debugging.
+    /// populate `RecordChunk::kvp_meta` for downstream inspection/debugging.
     pub fn all_metadata(&self) -> HashMap<String, Vec<String>> {
         let mut map: HashMap<String, Vec<String>> = HashMap::new();
         for variant in &self.variants {
