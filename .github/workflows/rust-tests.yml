@@ -19,6 +19,7 @@ jobs:
   test_matrix:
     name: test (OS=${{ matrix.os }}, Features=${{ matrix.name }})
     runs-on: ${{ matrix.os }}
+    environment: CI
 
     strategy:
       fail-fast: false
@@ -113,6 +114,7 @@ jobs:
   coverage:
     name: coverage (cargo-llvm-cov)
     runs-on: ubuntu-latest
+    environment: CI
     needs: test_matrix
     outputs:
       line_coverage: ${{ steps.cov-summary.outputs.line_percent }}
