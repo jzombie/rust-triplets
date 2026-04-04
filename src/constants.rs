@@ -266,7 +266,7 @@ pub mod huggingface {
     /// returns `200 OK`; an invalid or expired token yields `401 Unauthorized`.
     /// Used by `HuggingFaceRowSource::new()` to fail fast when an `HF_TOKEN`
     /// is provided but cannot authenticate.
-    pub const HF_WHOAMI_ENDPOINT: &str = "https://huggingface.co/api/whoami";
+    pub const HF_WHOAMI_ENDPOINT: &str = "https://huggingface.co/api/whoami-v2";
 }
 
 /// Constants used for managed cache-root groups.
