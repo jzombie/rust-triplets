@@ -1614,3 +1614,171 @@ fn huggingface_source_list_file_parses_trust_and_source_id() {
     assert_eq!(e2.source_id, Some("my-corpus".to_string()));
     assert!(e2.trust.is_none(), "entry 2 trust should be None");
 }
+
+// ── Live network test: private dataset authentication ─────────────────────────
+//
+// This test requires *both* of the following environment variables to be set:
+//
+//   HF_TOKEN                       — a Hugging Face API token with read scope.
+//   TRIPLETS_HF_TOKEN_TEST_DATASET — the dataset repo to access, e.g.
+//                                    "my-org/my-private-test-dataset".
+//
+// If either variable is absent the test *fails* — this is intentional so that
+// the test is not accidentally omitted from a run that is expected to exercise
+// live credentials.  To opt out explicitly (e.g. in a base CI job that has no
+// HF credentials), set TRIPLETS_SKIP_LIVE_TESTS=1; the test will then be
+// skipped silently rather than failing.
+//
+// ── Reproducing this test ─────────────────────────────────────────────────────
+//
+// 1. Create a private Hugging Face dataset with a Parquet shard that has at
+//    least two string columns named `a` and `b`.  A minimal example using the
+//    Python `datasets` library:
+//
+//      from datasets import Dataset
+//      import pandas as pd
+//
+//      df = pd.DataFrame({
+//          "a": ["hello world", "foo bar"],
+//          "b": ["baz qux",    "quux corge"],
+//      })
+//      ds = Dataset.from_pandas(df)
+//      ds.push_to_hub("my-org/my-private-test-dataset", private=True)
+//
+// 2. Generate a read-scoped token at https://huggingface.co/settings/tokens.
+//
+// 3. Set the environment variables and run the test:
+//
+//    macOS / Linux:
+//      export HF_TOKEN="hf_..."
+//      export TRIPLETS_HF_TOKEN_TEST_DATASET="my-org/my-private-test-dataset"
+//      cargo test --features huggingface hf_token_private_dataset_access -- --nocapture
+//
+//    Windows PowerShell:
+//      $env:HF_TOKEN = "hf_..."
+//      $env:TRIPLETS_HF_TOKEN_TEST_DATASET = "my-org/my-private-test-dataset"
+//      cargo test --features huggingface hf_token_private_dataset_access -- --nocapture
+//
+// To suppress the test in a CI environment that has no HF credentials, set:
+//      TRIPLETS_SKIP_LIVE_TESTS=1
+// The test will skip silently instead of failing.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Env var name for the dataset repo used in the live token integration test.
+///
+/// Format: `"org/dataset-name"` — the same string you would use in an
+/// `hf://org/dataset-name` source URI.  Not stored in `constants.rs`
+/// because it only exists to support this test, not the library itself.
+const TRIPLETS_HF_TOKEN_TEST_DATASET: &str = "TRIPLETS_HF_TOKEN_TEST_DATASET";
+
+#[test]
+fn hf_token_private_dataset_access() {
+    // ── Guard: require env vars (or explicit opt-out) ────────────────────────
+    //
+    // If TRIPLETS_SKIP_LIVE_TESTS is set to any non-empty value, missing
+    // credentials produce a silent skip.  Otherwise missing credentials are a
+    // hard failure so the test cannot be accidentally omitted.
+
+    let skip_live = std::env::var("TRIPLETS_SKIP_LIVE_TESTS")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+
+    let token = match std::env::var("HF_TOKEN") {
+        Ok(t) if !t.trim().is_empty() => t,
+        _ => {
+            if skip_live {
+                eprintln!(
+                    "[skip] HF_TOKEN not set and TRIPLETS_SKIP_LIVE_TESTS is active — \
+                     skipping private dataset integration test."
+                );
+                return;
+            }
+            panic!(
+                "HF_TOKEN is not set. This test requires a valid Hugging Face API token. \
+                 Set HF_TOKEN to run it, or set TRIPLETS_SKIP_LIVE_TESTS=1 to skip it. \
+                 See the comment above this test for setup instructions."
+            );
+        }
+    };
+
+    let dataset = match std::env::var(TRIPLETS_HF_TOKEN_TEST_DATASET) {
+        Ok(d) if !d.trim().is_empty() => d,
+        _ => {
+            if skip_live {
+                eprintln!(
+                    "[skip] {} not set and TRIPLETS_SKIP_LIVE_TESTS is active — \
+                     skipping private dataset integration test.",
+                    TRIPLETS_HF_TOKEN_TEST_DATASET
+                );
+                return;
+            }
+            panic!(
+                "{} is not set. This test requires a private HF dataset repo. \
+                 Set it to run the test, or set TRIPLETS_SKIP_LIVE_TESTS=1 to skip it. \
+                 See the comment above this test for setup instructions.",
+                TRIPLETS_HF_TOKEN_TEST_DATASET
+            );
+        }
+    };
+
+    // ── Build configuration ───────────────────────────────────────────────────
+    //
+    // Use text mode: coalesce column "a" first, then fall back to "b".
+    // Leave the split empty so all HF splits are discovered automatically.
+
+    let temp = tempfile::tempdir().expect("failed creating tempdir");
+
+    let mut config = HuggingFaceRowsConfig::new(
+        "hf_token_test",
+        dataset.trim(),
+        "default",
+        "", // empty → discover all splits
+        temp.path(),
+    );
+    config.text_columns = vec!["a".to_string(), "b".to_string()];
+    // Supply the token explicitly so this test is self-contained regardless of
+    // whether HF_TOKEN was already picked up by the constructor.
+    config.hf_token = Some(token);
+
+    // ── Construction: validates token immediately ─────────────────────────────
+    //
+    // `new()` calls the HF whoami endpoint before any data work.  A bad token
+    // returns Err here, making the failure obvious rather than silent.
+
+    let source = HuggingFaceRowSource::new(config).expect(
+        "HuggingFaceRowSource::new should succeed with a valid token and accessible dataset",
+    );
+
+    // ── Data access ───────────────────────────────────────────────────────────
+
+    let sampler_cfg = seeded_config(42);
+
+    let count = source
+        .reported_record_count(&sampler_cfg)
+        .expect("reported_record_count should succeed for an accessible private dataset");
+    assert!(
+        count > 0,
+        "expected at least one record from the test dataset, got {count}"
+    );
+
+    let snapshot = source
+        .refresh(&sampler_cfg, None, Some(count.min(16) as usize))
+        .expect("refresh should succeed for an accessible private dataset");
+    assert!(
+        !snapshot.records.is_empty(),
+        "expected a non-empty snapshot from the test dataset"
+    );
+
+    // At least one record must have non-empty text in column a or b.
+    let has_content = snapshot.records.iter().any(|record| {
+        record
+            .sections
+            .iter()
+            .any(|section| !section.text.trim().is_empty())
+    });
+    assert!(
+        has_content,
+        "expected at least one record with non-empty text content from columns a or b"
+    );
+}
