@@ -2037,22 +2037,21 @@ impl HuggingFaceRowSource {
             .connect_timeout(Duration::from_secs(15))
             .timeout(Duration::from_secs(300));
         if let Some(token) = &config.hf_token {
-            let header_value = reqwest::header::HeaderValue::from_str(
-                &format!("Bearer {token}"),
-            )
-            .map_err(|_| SamplerError::SourceUnavailable {
+            let header_value = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
+                .map_err(|_| SamplerError::SourceUnavailable {
                 source_id: config.source_id.clone(),
-                reason: "HF_TOKEN contains characters invalid for an HTTP header value"
-                    .to_string(),
+                reason: "HF_TOKEN contains characters invalid for an HTTP header value".to_string(),
             })?;
             let mut headers = reqwest::header::HeaderMap::new();
             headers.insert(reqwest::header::AUTHORIZATION, header_value);
             builder = builder.default_headers(headers);
         }
-        builder.build().map_err(|err| SamplerError::SourceUnavailable {
-            source_id: config.source_id.clone(),
-            reason: format!("failed building reqwest client: {err}"),
-        })
+        builder
+            .build()
+            .map_err(|err| SamplerError::SourceUnavailable {
+                source_id: config.source_id.clone(),
+                reason: format!("failed building reqwest client: {err}"),
+            })
     }
 
     async fn fetch_http_body_text(
@@ -4615,6 +4614,9 @@ mod tests {
     fn test_config(snapshot_dir: PathBuf) -> HuggingFaceRowsConfig {
         let mut config =
             HuggingFaceRowsConfig::new("hf_test", "org/dataset", "default", "train", snapshot_dir);
+        // Unit tests should be deterministic and fully mock-driven; ignore any
+        // process-level HF_TOKEN that CI might inject.
+        config.hf_token = None;
         config.cache_capacity = 10;
         config.remote_expansion_headroom_multiplier = 3;
         config
@@ -5091,9 +5093,11 @@ mod tests {
         let (size_base_url, size_server) = spawn_one_shot_http(size_payload);
 
         with_current_dir(temp_root.path(), || {
-            with_env_var(
-                TRIPLETS_HF_SIZE_ENDPOINT,
-                &format!("{size_base_url}/size"),
+            with_env_vars(
+                &[
+                    (TRIPLETS_HF_SIZE_ENDPOINT, &format!("{size_base_url}/size")),
+                    (HF_TOKEN, ""),
+                ],
                 || {
                     let built = build_hf_sources(&roots);
                     assert_eq!(built.len(), 1);
@@ -5147,9 +5151,14 @@ mod tests {
         let _ = size_base_url_b; // second URL not needed since we assert on IDs, not rows
 
         with_current_dir(temp_root.path(), || {
-            with_env_var(
-                TRIPLETS_HF_SIZE_ENDPOINT,
-                &format!("{size_base_url_a}/size"),
+            with_env_vars(
+                &[
+                    (
+                        TRIPLETS_HF_SIZE_ENDPOINT,
+                        &format!("{size_base_url_a}/size"),
+                    ),
+                    (HF_TOKEN, ""),
+                ],
                 || {
                     let built = build_hf_sources(&roots);
                     assert_eq!(built.len(), 2, "both duplicate sources should be built");
