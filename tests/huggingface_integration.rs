@@ -28,6 +28,29 @@ fn seeded_config(seed: u64) -> SamplerConfig {
     }
 }
 
+/// Create a `HuggingFaceRowsConfig` with token auth explicitly disabled.
+///
+/// Integration tests that use local or public datasets must call this instead
+/// of `HuggingFaceRowsConfig::new()` directly, so that an ambient `HF_TOKEN`
+/// environment variable (present in CI when the private-dataset job runs) does
+/// not trigger the whoami token-validation request against the live API and
+/// cause every unrelated test to fail.
+///
+/// The `hf_token_private_dataset_access` test is the sole exception: it sets
+/// `config.hf_token = Some(token)` explicitly after construction, which
+/// overrides the `None` set here and restores the intended behaviour.
+fn config_no_auth(
+    source_id: &str,
+    dataset: &str,
+    config_name: &str,
+    split: &str,
+    snapshot_dir: impl Into<std::path::PathBuf>,
+) -> HuggingFaceRowsConfig {
+    let mut c = HuggingFaceRowsConfig::new(source_id, dataset, config_name, split, snapshot_dir);
+    c.hf_token = None;
+    c
+}
+
 fn write_lines(path: &std::path::Path, lines: &[&str]) {
     let nl = platform_newline();
     let mut body = lines.join(nl);
@@ -92,7 +115,7 @@ fn huggingface_reads_local_jsonl_snapshot() {
         ],
     );
 
-    let mut config = HuggingFaceRowsConfig::new(
+    let mut config = config_no_auth(
         "hf_local_jsonl",
         "local/test-dataset",
         "default",
@@ -142,7 +165,7 @@ fn huggingface_reads_local_ndjson_snapshot() {
         ],
     );
 
-    let mut config = HuggingFaceRowsConfig::new(
+    let mut config = config_no_auth(
         "hf_local_ndjson",
         "local/test-dataset",
         "default",
@@ -187,7 +210,7 @@ fn huggingface_text_mode_triplets_can_use_different_anchor_positive_windows() {
         ],
     );
 
-    let mut source_config = HuggingFaceRowsConfig::new(
+    let mut source_config = config_no_auth(
         "hf_text_windows",
         "local/test-dataset",
         "default",
@@ -281,7 +304,7 @@ fn huggingface_reads_local_text_lines_snapshot() {
 
     write_lines(&shard_path, &["plain text row one", "plain text row two"]);
 
-    let mut config = HuggingFaceRowsConfig::new(
+    let mut config = config_no_auth(
         "hf_local_text",
         "local/test-dataset",
         "default",
@@ -319,7 +342,7 @@ fn huggingface_role_columns_mode_and_synthetic_ids_work() {
         ],
     );
 
-    let mut config = HuggingFaceRowsConfig::new(
+    let mut config = config_no_auth(
         "hf_role_columns",
         "local/test-dataset",
         "default",
@@ -374,7 +397,7 @@ fn huggingface_role_columns_mode_skips_missing_rows_and_keeps_valid() {
         ],
     );
 
-    let mut config = HuggingFaceRowsConfig::new(
+    let mut config = config_no_auth(
         "hf_role_columns_skip",
         "local/test-dataset",
         "default",
@@ -512,7 +535,7 @@ fn huggingface_refresh_cursor_wraps_and_limit_none_reads_all() {
         ],
     );
 
-    let mut config = HuggingFaceRowsConfig::new(
+    let mut config = config_no_auth(
         "hf_cursor_wrap",
         "local/test-dataset",
         "default",
@@ -549,7 +572,7 @@ fn huggingface_refresh_surfaces_invalid_json_rows_as_errors() {
     let shard_path = temp.path().join("part-00003.ndjson");
     write_lines(&shard_path, &["{not-json"]);
 
-    let mut config = HuggingFaceRowsConfig::new(
+    let mut config = config_no_auth(
         "hf_invalid_json",
         "local/test-dataset",
         "default",
@@ -582,7 +605,7 @@ fn huggingface_reported_count_returns_file_count() {
         ],
     );
 
-    let mut config = HuggingFaceRowsConfig::new(
+    let mut config = config_no_auth(
         "hf_count_cap",
         "local/test-dataset",
         "default",
@@ -613,7 +636,7 @@ fn huggingface_reads_local_parquet_snapshot() {
         ],
     );
 
-    let mut config = HuggingFaceRowsConfig::new(
+    let mut config = config_no_auth(
         "hf_local_parquet",
         "local/test-dataset",
         "default",
@@ -647,7 +670,7 @@ fn huggingface_role_columns_mode_skips_when_context_missing() {
         &[r#"{"anchor":"headline only","positive":"summary only"}"#],
     );
 
-    let mut config = HuggingFaceRowsConfig::new(
+    let mut config = config_no_auth(
         "hf_role_columns_error",
         "local/test-dataset",
         "default",
@@ -677,7 +700,7 @@ fn huggingface_text_columns_mode_skips_when_all_candidates_missing() {
         &[r#"{"id":"t1","other":"irrelevant content"}"#],
     );
 
-    let mut config = HuggingFaceRowsConfig::new(
+    let mut config = config_no_auth(
         "hf_text_columns_skip",
         "local/test-dataset",
         "default",
@@ -709,7 +732,7 @@ fn huggingface_text_columns_coalesces_to_first_nonempty_candidate() {
         ],
     );
 
-    let mut config = HuggingFaceRowsConfig::new(
+    let mut config = config_no_auth(
         "hf_text_coalesce",
         "local/test-dataset",
         "default",
@@ -762,7 +785,7 @@ fn huggingface_positive_columns_coalesces_to_first_nonempty_candidate() {
         ],
     );
 
-    let mut config = HuggingFaceRowsConfig::new(
+    let mut config = config_no_auth(
         "hf_positive_coalesce",
         "local/test-dataset",
         "default",
@@ -808,7 +831,7 @@ fn huggingface_parquet_role_columns_skip_missing_context_without_error() {
     let shard_path = temp.path().join("part-00008.simdr");
     write_simdr_fixture(&shard_path, &[("p1", "parquet body")]);
 
-    let mut config = HuggingFaceRowsConfig::new(
+    let mut config = config_no_auth(
         "hf_parquet_role_skip",
         "local/test-dataset",
         "default",
@@ -844,7 +867,7 @@ fn huggingface_record_ids_are_stable_across_independent_source_instances() {
     );
 
     let make_source = || {
-        let mut config = HuggingFaceRowsConfig::new(
+        let mut config = config_no_auth(
             "hf_stable_ids",
             "local/test-dataset",
             "default",
@@ -889,7 +912,7 @@ fn huggingface_cursor_advances_between_refreshes() {
         ],
     );
 
-    let mut config = HuggingFaceRowsConfig::new(
+    let mut config = config_no_auth(
         "hf_cursor_advance",
         "local/test-dataset",
         "default",
@@ -934,7 +957,7 @@ fn huggingface_refresh_limit_is_strictly_respected() {
         ],
     );
 
-    let mut config = HuggingFaceRowsConfig::new(
+    let mut config = config_no_auth(
         "hf_limit",
         "local/test-dataset",
         "default",
@@ -977,7 +1000,7 @@ fn huggingface_both_local_shards_are_sampled() {
         ],
     );
 
-    let mut config = HuggingFaceRowsConfig::new(
+    let mut config = config_no_auth(
         "hf_two_shards",
         "local/test-dataset",
         "default",
@@ -1020,7 +1043,7 @@ fn huggingface_refresh_wraps_correctly_after_all_rows_consumed() {
         ],
     );
 
-    let mut config = HuggingFaceRowsConfig::new(
+    let mut config = config_no_auth(
         "hf_wrap_after_exhaustion",
         "local/test-dataset",
         "default",
@@ -1080,7 +1103,7 @@ fn huggingface_different_epoch_seeds_produce_different_record_orderings() {
     let row_refs: Vec<&str> = rows.iter().map(|s| s.as_str()).collect();
     write_lines(&temp.path().join("part-00000.ndjson"), &row_refs);
 
-    let mut config = HuggingFaceRowsConfig::new(
+    let mut config = config_no_auth(
         "hf_epoch_order",
         "local/test-dataset",
         "default",
@@ -1204,7 +1227,7 @@ fn huggingface_empty_split_discovers_all_splits() {
     );
 
     // Empty split string = all-splits mode.
-    let mut config = HuggingFaceRowsConfig::new(
+    let mut config = config_no_auth(
         "hf_empty_split",
         "local/test-dataset",
         "default",
@@ -1245,7 +1268,7 @@ fn huggingface_empty_split_discovers_all_splits() {
 fn huggingface_reads_live_remote_dataset() {
     let temp = tempfile::tempdir().expect("failed creating tempdir");
 
-    let mut config = HuggingFaceRowsConfig::new(
+    let mut config = config_no_auth(
         "hf_live_rotten_tomatoes",
         "cornell-movie-review-data/rotten_tomatoes",
         "default",
@@ -1284,7 +1307,7 @@ fn huggingface_live_size_endpoint_reports_dataset_row_count() {
     // the library's own managed cache directory.
     let temp = tempfile::tempdir().expect("failed creating tempdir");
 
-    let mut config = HuggingFaceRowsConfig::new(
+    let mut config = config_no_auth(
         "hf_live_size_endpoint",
         "cornell-movie-review-data/rotten_tomatoes",
         "default",
@@ -1332,7 +1355,7 @@ fn huggingface_live_classlabel_resolution_maps_integers_to_label_strings() {
     // snapshot_dir is a fresh tempdir — no shared cache is used.
     let temp = tempfile::tempdir().expect("failed creating tempdir");
 
-    let mut config = HuggingFaceRowsConfig::new(
+    let mut config = config_no_auth(
         "hf_live_classlabel",
         "TimKoornstra/financial-tweets-sentiment",
         "default",
@@ -1508,7 +1531,7 @@ fn huggingface_rows_config_trust_override_propagates_to_records() {
         ],
     );
 
-    let mut config = HuggingFaceRowsConfig::new(
+    let mut config = config_no_auth(
         "hf_trust_override",
         "local/test-dataset",
         "default",
@@ -1541,7 +1564,7 @@ fn huggingface_rows_config_without_trust_override_uses_default_trust() {
     let shard_path = temp.path().join("part-00000.ndjson");
     write_lines(&shard_path, &[r#"{"id":"u1","text":"content"}"#]);
 
-    let mut config = HuggingFaceRowsConfig::new(
+    let mut config = config_no_auth(
         "hf_default_trust",
         "local/test-dataset",
         "default",
@@ -1729,7 +1752,7 @@ fn hf_token_private_dataset_access() {
 
     let temp = tempfile::tempdir().expect("failed creating tempdir");
 
-    let mut config = HuggingFaceRowsConfig::new(
+    let mut config = config_no_auth(
         "hf_token_test",
         dataset.trim(),
         "default",
