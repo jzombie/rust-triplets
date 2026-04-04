@@ -98,6 +98,51 @@ Streams rows directly from the Hugging Face Hub without requiring a full dataset
 }
 ```
 
+#### Authenticating with Private Datasets
+
+To access private or gated datasets set the `HF_TOKEN` environment variable to a valid
+Hugging Face API token. Tokens with at least **read** scope are sufficient and can be
+generated at <https://huggingface.co/settings/tokens>.
+
+When `HF_TOKEN` is set to a non-empty value, `HuggingFaceRowsConfig::new()` picks it up
+automatically and sends it as a `Bearer` credential on every API request and shard
+download. If the token is invalid or expired, `HuggingFaceRowSource::new()` returns an
+error immediately rather than silently degrading later.
+
+| Platform | Command |
+| -------- | ------- |
+| macOS / Linux | `export HF_TOKEN="hf_..."` |
+| Windows — Command Prompt | `set HF_TOKEN=hf_...` |
+| Windows — PowerShell | `$env:HF_TOKEN = "hf_..."` |
+| Windows — persistent | *System Properties → Advanced → Environment Variables* |
+
+The token can also be set programmatically on the config struct if you prefer not to rely on
+the process environment:
+
+```rust,no_run
+#[cfg(feature = "huggingface")]
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    use triplets::{HuggingFaceRowSource, HuggingFaceRowsConfig};
+
+    let mut config = HuggingFaceRowsConfig::new(
+        "private_dataset",
+        "my-org/private-dataset",
+        "default",
+        "train",
+        "cache/hf_snapshots",
+    );
+    // Override after construction (or set HF_TOKEN env var before calling new()).
+    config.hf_token = Some("hf_...".to_string());
+    // new() validates the token immediately; an invalid token returns an error.
+    let source = HuggingFaceRowSource::new(config)?;
+    let _ = source;
+    Ok(())
+}
+```
+
+> **Security**: never commit tokens to source control. Use environment variables, a secrets
+> manager, or a credential file listed in `.gitignore`.
+
 ### CSV Source
 Load rows from a CSV file with explicit column mappings. The file **must have a named header row** — columns are always selected by name. Supports two modes:
 
@@ -186,7 +231,6 @@ let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
 let adapter = IndexableAdapter::new(MyApiSource);
 sampler.register_source(Box::new(adapter));
 ```
-
 
 ## Sampling and Mixing
 

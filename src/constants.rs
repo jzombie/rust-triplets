@@ -26,6 +26,16 @@ pub mod env_vars {
     /// of the default `https://datasets-server.huggingface.co/info`.
     /// Useful for test doubles and air-gapped / on-premises deployments.
     pub const TRIPLETS_HF_INFO_ENDPOINT: &str = "TRIPLETS_HF_INFO_ENDPOINT";
+
+    /// Hugging Face API token for authenticating with private datasets.
+    ///
+    /// When set to a non-blank value, this token is sent as a `Bearer` credential
+    /// on every request to the Hugging Face datasets-server API and on every
+    /// `hf-hub` shard download.  Use a token with at least `read` scope.
+    ///
+    /// This is the standard environment variable used by the Hugging Face
+    /// ecosystem (`huggingface_hub`, `datasets`, `hf-hub`, etc.).
+    pub const HF_TOKEN: &str = "HF_TOKEN";
 }
 
 /// Constants used by capacity estimation heuristics.
@@ -250,6 +260,13 @@ pub mod huggingface {
     pub const HF_JSON_KEY_LABEL_NAMES: &str = "names";
     /// Feature type string that identifies a ClassLabel column.
     pub const HF_CLASSLABEL_TYPE: &str = "ClassLabel";
+    /// Endpoint used to validate a Hugging Face API token.
+    ///
+    /// A GET to this URL with a valid `Authorization: Bearer <token>` header
+    /// returns `200 OK`; an invalid or expired token yields `401 Unauthorized`.
+    /// Used by `HuggingFaceRowSource::new()` to fail fast when an `HF_TOKEN`
+    /// is provided but cannot authenticate.
+    pub const HF_WHOAMI_ENDPOINT: &str = "https://huggingface.co/api/whoami";
 }
 
 /// Constants used for managed cache-root groups.

@@ -35,7 +35,7 @@ use crate::SamplerError;
 use crate::config::{NegativeStrategy, SamplerConfig, Selector, TripletRecipe};
 use crate::constants::cache::HUGGINGFACE_GROUP;
 use crate::constants::env_vars::{
-    TRIPLETS_HF_INFO_ENDPOINT, TRIPLETS_HF_PARQUET_ENDPOINT, TRIPLETS_HF_SIZE_ENDPOINT,
+    HF_TOKEN, TRIPLETS_HF_INFO_ENDPOINT, TRIPLETS_HF_PARQUET_ENDPOINT, TRIPLETS_HF_SIZE_ENDPOINT,
 };
 use crate::constants::huggingface::{
     ALL_SPLITS_DIR, HF_CLASSLABEL_TYPE, HF_JSON_KEY_CONFIG, HF_JSON_KEY_CONFIG_NAME,
@@ -44,8 +44,9 @@ use crate::constants::huggingface::{
     HF_JSON_KEY_SIZE, HF_JSON_KEY_SPLIT, HF_JSON_KEY_SPLIT_NAME, HF_JSON_KEY_SPLITS,
     HF_JSON_KEY_URL, HF_RESOLVE_UNKNOWN_FALLBACK_PATH, HF_RESOLVE_URL_SEPARATOR,
     HF_SHARD_CANDIDATE_SEED_TAG, HF_SHARD_STORE_EXTENSION, HF_SHARD_STORE_META_ROWS_KEY,
-    HF_SHARD_STORE_ROW_PREFIX, HUGGINGFACE_REFRESH_BATCH_MULTIPLIER, PARQUET_MANIFEST_DIR,
-    REMOTE_BOOTSTRAP_SHARDS, REMOTE_EXPANSION_HEADROOM_MULTIPLIER, REMOTE_URL_PREFIX,
+    HF_SHARD_STORE_ROW_PREFIX, HF_WHOAMI_ENDPOINT, HUGGINGFACE_REFRESH_BATCH_MULTIPLIER,
+    PARQUET_MANIFEST_DIR, REMOTE_BOOTSTRAP_SHARDS, REMOTE_EXPANSION_HEADROOM_MULTIPLIER,
+    REMOTE_URL_PREFIX,
 };
 use crate::data::{DataRecord, QualityScore, SectionRole};
 use crate::utils::make_section;
@@ -624,6 +625,13 @@ pub struct HuggingFaceRowsConfig {
     /// continue to contain raw integer strings until their shard is evicted
     /// and re-transcoded.
     pub label_maps: HashMap<String, Vec<String>>,
+    /// Optional Hugging Face API token for authenticating private dataset access.
+    ///
+    /// When set, sent as `Authorization: Bearer <token>` on datasets-server API
+    /// requests and forwarded to `hf-hub` for shard downloads.  Populated
+    /// automatically from the `HF_TOKEN` environment variable at construction
+    /// time; callers may also set this field directly.
+    pub hf_token: Option<String>,
 }
 
 impl HuggingFaceRowsConfig {
@@ -660,6 +668,9 @@ impl HuggingFaceRowsConfig {
             context_columns: Vec::new(),
             trust_override: None,
             label_maps: HashMap::new(),
+            hf_token: std::env::var(HF_TOKEN)
+                .ok()
+                .filter(|t| !t.trim().is_empty()),
         }
     }
 
@@ -957,6 +968,12 @@ impl HuggingFaceRowSource {
                 "huggingface source requires explicit field mapping (anchor/positive/context/text_columns)"
                     .to_string(),
             ));
+        }
+
+        // Validate the token up-front so callers get a clear error immediately
+        // rather than silent degradation on later API calls.
+        if config.hf_token.is_some() {
+            Self::validate_token_with_runtime(&config, &http_runtime)?;
         }
 
         // Auto-resolve ClassLabel columns from the datasets-server /info endpoint.
@@ -1816,7 +1833,7 @@ impl HuggingFaceRowSource {
         let info = Self::block_on_http_with_runtime(runtime, config, async {
             let api = ApiBuilder::new()
                 .with_progress(true)
-                .with_token(None)
+                .with_token(config.hf_token.clone())
                 .build()
                 .map_err(|err| SamplerError::SourceUnavailable {
                     source_id: config.source_id.clone(),
@@ -1981,15 +1998,61 @@ impl HuggingFaceRowSource {
         runtime.block_on(future)
     }
 
+    /// Validate a configured `hf_token` against the Hugging Face whoami endpoint.
+    ///
+    /// Called once during [`HuggingFaceRowSource::new`] when `config.hf_token` is
+    /// `Some`.  Returns `Err(SamplerError::SourceUnavailable)` for any non-2xx
+    /// response (including 401 Unauthorized for invalid/expired tokens) so that
+    /// callers get a clear error at construction time rather than silent failures
+    /// on later API calls.
+    fn validate_token_with_runtime(
+        config: &HuggingFaceRowsConfig,
+        runtime: &tokio::runtime::Runtime,
+    ) -> Result<(), SamplerError> {
+        runtime.block_on(async {
+            let client = Self::http_client(config)?;
+            client
+                .get(HF_WHOAMI_ENDPOINT)
+                .send()
+                .await
+                .map_err(|err| SamplerError::SourceUnavailable {
+                    source_id: config.source_id.clone(),
+                    reason: format!("HF_TOKEN validation request failed: {err}"),
+                })?
+                .error_for_status()
+                .map_err(|err| SamplerError::SourceUnavailable {
+                    source_id: config.source_id.clone(),
+                    reason: format!(
+                        "HF_TOKEN is invalid or expired — \
+                        the Hugging Face API rejected the credential ({err}). \
+                        Generate a new token at https://huggingface.co/settings/tokens"
+                    ),
+                })?;
+            Ok(())
+        })
+    }
+
     fn http_client(config: &HuggingFaceRowsConfig) -> Result<reqwest::Client, SamplerError> {
-        reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(15))
-            .timeout(Duration::from_secs(300))
-            .build()
-            .map_err(|err| SamplerError::SourceUnavailable {
+            .timeout(Duration::from_secs(300));
+        if let Some(token) = &config.hf_token {
+            let header_value = reqwest::header::HeaderValue::from_str(
+                &format!("Bearer {token}"),
+            )
+            .map_err(|_| SamplerError::SourceUnavailable {
                 source_id: config.source_id.clone(),
-                reason: format!("failed building reqwest client: {err}"),
-            })
+                reason: "HF_TOKEN contains characters invalid for an HTTP header value"
+                    .to_string(),
+            })?;
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(reqwest::header::AUTHORIZATION, header_value);
+            builder = builder.default_headers(headers);
+        }
+        builder.build().map_err(|err| SamplerError::SourceUnavailable {
+            source_id: config.source_id.clone(),
+            reason: format!("failed building reqwest client: {err}"),
+        })
     }
 
     async fn fetch_http_body_text(
@@ -2752,7 +2815,7 @@ impl HuggingFaceRowSource {
         let mut local_cached = Self::block_on_http_with_runtime(runtime, config, async {
             let api = ApiBuilder::new()
                 .with_progress(true)
-                .with_token(None)
+                .with_token(config.hf_token.clone())
                 .build()
                 .map_err(|err| SamplerError::SourceUnavailable {
                     source_id: config.source_id.clone(),
@@ -2774,7 +2837,7 @@ impl HuggingFaceRowSource {
                 local_cached = Self::block_on_http_with_runtime(runtime, config, async {
                     let api = ApiBuilder::new()
                         .with_progress(true)
-                        .with_token(None)
+                        .with_token(config.hf_token.clone())
                         .build()
                         .map_err(|err| SamplerError::SourceUnavailable {
                             source_id: config.source_id.clone(),
