@@ -9498,8 +9498,7 @@ mod tests {
         let body =
             br#"{"error":"Not supported: dataset viewer is disabled in org/dataset configuration."}"#
                 .to_vec();
-        let (base_url, server) =
-            spawn_one_shot_http_with_status(501, body);
+        let (base_url, server) = spawn_one_shot_http_with_status(501, body);
 
         let result = with_env_var(TRIPLETS_HF_SIZE_ENDPOINT, &base_url, || {
             HuggingFaceRowSource::fetch_global_row_count(&config)
