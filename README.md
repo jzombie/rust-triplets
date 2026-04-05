@@ -14,6 +14,7 @@
     <a href="https://crates.io/crates/triplets"><img src="https://img.shields.io/crates/v/triplets.svg" alt="crates.io"></a>
     <a href="https://github.com/jzombie/rust-triplets/blob/main/LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT licensed"></a>
     <a href="https://github.com/jzombie/rust-triplets/blob/main/LICENSE-APACHE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="Apache 2.0 licensed"></a>
+    <a href="https://coveralls.io/github/jzombie/rust-triplets?branch=main"><img src="https://coveralls.io/repos/github/jzombie/rust-triplets/badge.svg?branch=main" alt="Coverage Status"></a>
     <br><sub><em>Tested on macOS, Linux, and Windows.</em></sub>
   </p>
 </p>
@@ -779,6 +780,4 @@ Negative selection is delegated to a pluggable backend.
 
 `triplets` is distributed under both the MIT license and the Apache License (Version 2.0).
 
-See [LICENSE-APACHE](LICENSE-APACHE) and [LICENSE-MIT](LICENSE-MIT) for details.
-
-
+See [LICENSE-APACHE](https://github.com/jzombie/rust-triplets/blob/main/LICENSE-APACHE) and [LICENSE-MIT](https://github.com/jzombie/rust-triplets/blob/main/LICENSE-MIT) for details.
