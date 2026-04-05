@@ -679,7 +679,7 @@ sampler.add_variant([("type", "earnings-call"), ("quarter", "Q1-2025")]);
 sampler.add_variant_fields([KvpField::many("date", ["2025-01-15", "Jan 15, 2025"])]);
 ```
 
-### Attaching a sampler to a record
+### Attaching a prefix to a record
 
 Set `DataRecord::meta_prefix` on any record before registering it with a source:
 
@@ -688,8 +688,8 @@ use chrono::Utc;
 use triplets::DataRecord;
 use triplets::kvp::{KvpField, KvpPrefixSampler};
 
-let mut sampler = KvpPrefixSampler::new(0.9);
-sampler.add_variant_fields([
+let mut prefix = KvpPrefixSampler::new(0.9);
+prefix.add_variant_fields([
     KvpField::many("date", ["2025-01-01", "Jan 1, 2025"]),
     KvpField::one("source", "daily-update").with_presence(0.7),
 ]);
@@ -702,7 +702,7 @@ let record = DataRecord {
     quality: Default::default(),
     taxonomy: vec![],
     sections: vec![],
-    meta_prefix: Some(sampler),
+    meta_prefix: Some(prefix),
 };
 ```
 
