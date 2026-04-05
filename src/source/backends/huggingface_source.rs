@@ -1009,19 +1009,19 @@ impl HuggingFaceRowSource {
         }
 
         let materialized_rows = discovered;
-        let total_rows = match Self::fetch_global_row_count_with_runtime(
-            &config,
-            Some(http_runtime.as_ref()),
-        ) {
-            Ok(value) => value,
-            Err(err) => {
-                warn!(
-                    "[triplets:hf] {} global row count request failed; continuing with discovered rows only: {}",
-                    config.source_id, err
-                );
-                None
-            }
-        };
+        let total_rows =
+            match Self::fetch_global_row_count_with_runtime(&config, Some(http_runtime.as_ref())) {
+                Ok(value) => value,
+                Err(err) => {
+                    warn!(
+                        "[triplets:hf] {} global row count unavailable (datasets viewer may be \
+                     disabled for this dataset); shard download is unaffected but expansion \
+                     paging will be driven by local shard discovery only: {}",
+                        config.source_id, err
+                    );
+                    None
+                }
+            };
 
         if let Some(global_total) = total_rows {
             info!(
@@ -1829,28 +1829,48 @@ impl HuggingFaceRowSource {
         config: &HuggingFaceRowsConfig,
         runtime: Option<&tokio::runtime::Runtime>,
     ) -> Result<(Vec<String>, HashMap<String, u64>), SamplerError> {
-        if let Ok((candidates, candidate_sizes, matched_manifest_entries)) =
-            Self::list_remote_candidates_from_parquet_manifest_with_runtime(config, runtime)
-            && matched_manifest_entries > 0
-        {
-            // Parquet manifest exists for this dataset.  Return the full candidate
-            // list — including already-cached shards — so the seed-derived order is
-            // always built from the complete HF manifest, independent of what has
-            // been downloaded.  Never fall through to the hf-hub siblings listing,
-            // which returns every language config in the repository, not just the
-            // one requested.
-            info!(
-                "[triplets:hf] remote parquet manifest: {} shard(s) for dataset='{}' \
-                     config='{}' split='{}'",
-                candidates.len(),
-                config.dataset,
-                config.config,
-                config.split
-            );
-            return Ok((candidates, candidate_sizes));
-
-            // matched_manifest_entries == 0: parquet manifest does not cover this
-            // dataset/config.  Fall through to the hf-hub siblings listing.
+        let manifest_result =
+            Self::list_remote_candidates_from_parquet_manifest_with_runtime(config, runtime);
+        match &manifest_result {
+            Ok((candidates, candidate_sizes, matched_manifest_entries))
+                if *matched_manifest_entries > 0 =>
+            {
+                // Parquet manifest exists for this dataset.  Return the full candidate
+                // list — including already-cached shards — so the seed-derived order is
+                // always built from the complete HF manifest, independent of what has
+                // been downloaded.  Never fall through to the hf-hub siblings listing,
+                // which returns every language config in the repository, not just the
+                // one requested.
+                info!(
+                    "[triplets:hf] remote parquet manifest: {} shard(s) for dataset='{}' \
+                         config='{}' split='{}'",
+                    candidates.len(),
+                    config.dataset,
+                    config.config,
+                    config.split
+                );
+                return Ok((candidates.clone(), candidate_sizes.clone()));
+            }
+            Ok(_) => {
+                // matched_manifest_entries == 0: parquet manifest does not cover this
+                // dataset/config.  Fall through to the hf-hub siblings listing.
+                info!(
+                    "[triplets:hf] datasets-server parquet manifest has no entries for \
+                     dataset='{}' config='{}' split='{}'; falling back to hf-hub \
+                     repository listing",
+                    config.dataset, config.config, config.split
+                );
+            }
+            Err(err) => {
+                // Parquet manifest endpoint unavailable (e.g. datasets viewer disabled).
+                // Fall through to hf-hub repository listing which works independently.
+                info!(
+                    "[triplets:hf] datasets-server parquet manifest unavailable for \
+                     dataset='{}' (datasets viewer may be disabled); falling back to \
+                     hf-hub repository listing: {}",
+                    config.dataset, err
+                );
+            }
         }
 
         info!(
@@ -2157,7 +2177,8 @@ impl HuggingFaceRowSource {
             Ok(body) => body,
             Err(err) => {
                 warn!(
-                    "[triplets:hf] {} could not fetch dataset info for ClassLabel resolution: {}",
+                    "[triplets:hf] {} dataset info unavailable (datasets viewer may be \
+                     disabled); ClassLabel columns will surface as raw integers: {}",
                     config.source_id, err
                 );
                 return HashMap::new();
@@ -5140,17 +5161,25 @@ mod tests {
     #[test]
     fn new_validates_hf_token_when_set() {
         // When hf_token is Some and the mock whoami returns 200, new() succeeds.
-        // The info and size endpoints are pointed at a port that refuses connections
-        // so they degrade gracefully without making real network calls.
+        // The info and size endpoints are served by one-shot 501 mocks so they
+        // degrade gracefully (viewer-disabled path) without any real network
+        // calls or relying on connection-refused behaviour which is unreliable
+        // across platforms (e.g. privileged port 1 on macOS GitHub Actions
+        // does not guarantee an immediate ECONNREFUSED and can instead block
+        // for the full 15 s connect timeout, causing spurious test failures).
         let temp = tempdir().unwrap();
         let mut config = test_config(temp.path().to_path_buf());
         config.hf_token = Some("test-token-for-new".to_string());
+        let viewer_disabled = br#"{"error":"Not supported: dataset viewer is disabled."}"#.to_vec();
         let (whoami_url, whoami_server) = spawn_one_shot_http(b"{}".to_vec());
+        // /info is called before /size inside new(); each needs its own one-shot server.
+        let (info_url, info_server) = spawn_one_shot_http_with_status(501, viewer_disabled.clone());
+        let (size_url, size_server) = spawn_one_shot_http_with_status(501, viewer_disabled);
         with_env_vars(
             &[
                 (TRIPLETS_HF_WHOAMI_ENDPOINT, &whoami_url),
-                (TRIPLETS_HF_SIZE_ENDPOINT, "http://127.0.0.1:1/size"),
-                (TRIPLETS_HF_INFO_ENDPOINT, "http://127.0.0.1:1/info"),
+                (TRIPLETS_HF_INFO_ENDPOINT, &info_url),
+                (TRIPLETS_HF_SIZE_ENDPOINT, &size_url),
             ],
             || {
                 let result = HuggingFaceRowSource::new(config.clone());
@@ -5161,6 +5190,8 @@ mod tests {
             },
         );
         whoami_server.join().unwrap();
+        info_server.join().unwrap();
+        size_server.join().unwrap();
     }
 
     #[test]
@@ -9448,6 +9479,93 @@ mod tests {
             manifest_counter.load(AtomicOrdering::SeqCst),
             1,
             "parquet manifest must not be re-fetched on subsequent ensure_row_available calls"
+        );
+    }
+
+    // --- datasets viewer disabled (501) scenario ---
+    //
+    // Some HF datasets have the datasets viewer disabled.  In that case the
+    // /size, /info, and /parquet datasets-server endpoints all return HTTP 501
+    // with {"error":"Not supported: dataset viewer is disabled ..."}.
+    //
+    // The expected behaviour:
+    //   * /size   → fetch_global_row_count returns Ok(None), not Err.
+    //   * /info   → fetch_classlabel_maps returns an empty map, not an error.
+    //   * /parquet → list_remote_candidates_from_parquet_manifest returns Err,
+    //                which causes list_remote_candidates_with_runtime to fall
+    //                through to the hf-hub repository listing path.
+
+    #[test]
+    fn fetch_global_row_count_returns_ok_none_on_501() {
+        // A 501 from /size means "viewer disabled"; the error is intentionally
+        // swallowed at the call-site and Ok(None) is what the caller receives from
+        // fetch_global_row_count itself (the Err propagates up, but the
+        // new() constructor converts it to None with a warn!).  Verify that
+        // fetch_global_row_count propagates the Err (so the caller can log it)
+        // rather than panicking or returning a spurious row count.
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let body =
+            br#"{"error":"Not supported: dataset viewer is disabled in org/dataset configuration."}"#
+                .to_vec();
+        let (base_url, server) = spawn_one_shot_http_with_status(501, body);
+
+        let result = with_env_var(TRIPLETS_HF_SIZE_ENDPOINT, &base_url, || {
+            HuggingFaceRowSource::fetch_global_row_count(&config)
+        });
+        server.join().unwrap();
+
+        // The 501 surfaces as an Err so the caller (new()) can emit a warning;
+        // it must not be silently swallowed as Ok(Some(0)) or similar.
+        assert!(
+            result.is_err(),
+            "expected Err from 501 /size response, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn fetch_classlabel_maps_returns_empty_on_501() {
+        // A 501 from /info means "viewer disabled"; ClassLabel resolution must
+        // gracefully degrade to an empty map so raw integers are used instead.
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let body =
+            br#"{"error":"Not supported: dataset viewer is disabled in org/dataset configuration."}"#
+                .to_vec();
+        let (base_url, server) = spawn_one_shot_http_with_status(501, body);
+
+        let maps = with_env_var(TRIPLETS_HF_INFO_ENDPOINT, &base_url, || {
+            HuggingFaceRowSource::fetch_classlabel_maps(&config)
+        });
+        server.join().unwrap();
+
+        assert!(
+            maps.is_empty(),
+            "expected empty ClassLabel map on 501 /info response, got {maps:?}"
+        );
+    }
+
+    #[test]
+    fn list_remote_candidates_from_parquet_manifest_errors_on_501() {
+        // A 501 from /parquet causes the manifest path to return Err, which
+        // triggers the fallback to hf-hub repository listing inside
+        // list_remote_candidates_with_runtime.  Verify the error is returned
+        // (not swallowed as an empty manifest) so the caller can branch on it.
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let body =
+            br#"{"error":"Not supported: dataset viewer is disabled in org/dataset configuration."}"#
+                .to_vec();
+        let (base_url, server) = spawn_one_shot_http_with_status(501, body);
+
+        let result = with_env_var(TRIPLETS_HF_PARQUET_ENDPOINT, &base_url, || {
+            HuggingFaceRowSource::list_remote_candidates_from_parquet_manifest(&config)
+        });
+        server.join().unwrap();
+
+        assert!(
+            result.is_err(),
+            "expected Err from 501 /parquet response so caller falls back to hf-hub listing, got {result:?}"
         );
     }
 }
