@@ -1608,9 +1608,21 @@ impl HuggingFaceRowSource {
         siblings: &[String],
         accepted: &[String],
         respect_split: bool,
-    ) -> (Vec<String>, bool) {
+    ) -> (Vec<String>, bool, bool) {
         let mut saw_parquet = false;
         let mut candidates = Vec::new();
+        // Tracks whether the split filter + extension check matched at least one remote
+        // file, before the on-disk existence check is applied.  Drives two decisions in
+        // `resolve_remote_candidates_from_siblings`:
+        //
+        //  • false → no accepted file in the sibling list matched this split at all.
+        //            Trigger the all-splits fallback scan (the split name may simply
+        //            not appear in any sibling path, so relaxing the filter is correct).
+        //
+        //  • true  → at least one accepted file matched the split, but it is already
+        //            cached on disk, so candidates is empty.  Do NOT trigger the
+        //            fallback — queuing other splits' uncached files would be wrong.
+        let mut split_matched_any_accepted = false;
         for remote_path in siblings {
             if respect_split && !config.split.is_empty() {
                 let split_tag = format!("{}/", config.split);
@@ -1649,6 +1661,9 @@ impl HuggingFaceRowSource {
                 .as_deref()
                 .is_some_and(|ext| accepted.iter().any(|allowed| allowed == ext))
             {
+                // Mark that the split filter matched at least one accepted file
+                // before checking whether it is already on disk.
+                split_matched_any_accepted = true;
                 let target = Self::candidate_target_path(config, remote_path);
                 let store_target = Self::shard_store_path_for(&target);
                 if target.exists() || store_target.exists() {
@@ -1657,7 +1672,7 @@ impl HuggingFaceRowSource {
                 candidates.push(remote_path.clone());
             }
         }
-        (candidates, saw_parquet)
+        (candidates, saw_parquet, split_matched_any_accepted)
     }
 
     fn resolve_remote_candidates_from_siblings(
@@ -1665,10 +1680,15 @@ impl HuggingFaceRowSource {
         siblings: &[String],
         accepted: &[String],
     ) -> Result<(Vec<String>, HashMap<String, u64>), SamplerError> {
-        let (mut candidates, mut saw_parquet) =
+        let (mut candidates, mut saw_parquet, split_matched_any_accepted) =
             Self::collect_candidates_from_siblings(config, siblings, accepted, true);
-        if candidates.is_empty() && !config.split.is_empty() {
-            let (fallback_candidates, fallback_saw_parquet) =
+        // Only fall back to the extension-only scan when the split filter genuinely
+        // matched no accepted remote files.  Do NOT fall back when all split-matching
+        // files are already on disk — that would cause all other undownloaded splits'
+        // files to be queued on resume (e.g. after stock_news.simdr is already cached,
+        // a fallback would start downloading stock_prices.parquet, etc.).
+        if candidates.is_empty() && !config.split.is_empty() && !split_matched_any_accepted {
+            let (fallback_candidates, fallback_saw_parquet, _) =
                 Self::collect_candidates_from_siblings(config, siblings, accepted, false);
             if !fallback_candidates.is_empty() {
                 warn!(
@@ -1688,7 +1708,12 @@ impl HuggingFaceRowSource {
             candidates.len()
         );
         if candidates.is_empty() {
-            if saw_parquet {
+            // When the split filter matched accepted files that are all already on disk
+            // (`split_matched_any_accepted`), return empty gracefully — the source is
+            // fully cached with no further downloads needed.  The "parquet-only" error
+            // only applies when the sibling list has parquet files but no accepted split
+            // match was ever found (e.g. `shard_extensions` is missing "parquet").
+            if saw_parquet && !split_matched_any_accepted {
                 return Err(SamplerError::SourceUnavailable {
                     source_id: config.source_id.clone(),
                     reason: format!(
@@ -5631,7 +5656,7 @@ mod tests {
             "train-z.txt".to_string(),
         ];
 
-        let (candidates, saw_parquet) = HuggingFaceRowSource::collect_candidates_from_siblings(
+        let (candidates, saw_parquet, _) = HuggingFaceRowSource::collect_candidates_from_siblings(
             &config, &siblings, &accepted, true,
         );
 
@@ -5653,7 +5678,7 @@ mod tests {
         fs::write(&existing_target, b"x\n").unwrap();
 
         let siblings = vec![existing, "train/new.ndjson".to_string()];
-        let (candidates, _) = HuggingFaceRowSource::collect_candidates_from_siblings(
+        let (candidates, _, _) = HuggingFaceRowSource::collect_candidates_from_siblings(
             &config, &siblings, &accepted, true,
         );
         assert_eq!(candidates, vec!["train/new.ndjson".to_string()]);
@@ -5675,7 +5700,7 @@ mod tests {
             "data/daily_treasury_yield.parquet".to_string(),
         ];
 
-        let (candidates, saw_parquet) = HuggingFaceRowSource::collect_candidates_from_siblings(
+        let (candidates, saw_parquet, _) = HuggingFaceRowSource::collect_candidates_from_siblings(
             &config, &siblings, &accepted, true,
         );
 
@@ -5699,7 +5724,7 @@ mod tests {
             "validation/shard-00000.parquet".to_string(), // ✗ different split
         ];
 
-        let (candidates, _) = HuggingFaceRowSource::collect_candidates_from_siblings(
+        let (candidates, _, _) = HuggingFaceRowSource::collect_candidates_from_siblings(
             &config, &siblings, &accepted, true,
         );
 
@@ -7099,6 +7124,46 @@ mod tests {
 
         assert!(sizes.is_empty());
         assert_eq!(candidates.len(), 2);
+    }
+
+    #[test]
+    fn resolve_remote_candidates_from_siblings_does_not_fall_back_when_split_files_already_cached()
+    {
+        // Regression test for the resume bug: when `hf://org/ds/default/stock_news` has
+        // already downloaded `data/stock_news.parquet` (converting it to a `.simdr` store),
+        // a subsequent `list_remote_candidates` call must return an empty list — NOT fall
+        // back to an extension-only scan that would queue unrelated splits' parquets.
+        let dir = tempdir().unwrap();
+        let mut config =
+            HuggingFaceRowsConfig::new("s", "org/ds", "default", "stock_news", dir.path());
+        config.cache_capacity = 4;
+        let accepted = HuggingFaceRowSource::normalized_shard_extensions(&config);
+
+        // Simulate the stock_news shard already downloaded and converted to .simdr.
+        let sibling = "data/stock_news.parquet".to_string();
+        let target = HuggingFaceRowSource::candidate_target_path(&config, &sibling);
+        let store_target = HuggingFaceRowSource::shard_store_path_for(&target);
+        fs::create_dir_all(store_target.parent().unwrap()).unwrap();
+        fs::write(&store_target, b"placeholder").unwrap();
+
+        let siblings = vec![
+            sibling,
+            "data/stock_prices.parquet".to_string(),
+            "data/daily_treasury_yield.parquet".to_string(),
+        ];
+
+        let (candidates, sizes) = HuggingFaceRowSource::resolve_remote_candidates_from_siblings(
+            &config, &siblings, &accepted,
+        )
+        .unwrap();
+
+        // The split-matched file is already on disk, so no new downloads are needed.
+        // The fallback must NOT fire and pollute the candidate list with other splits.
+        assert!(
+            candidates.is_empty(),
+            "expected no new candidates when split-target is already cached; got: {candidates:?}"
+        );
+        assert!(sizes.is_empty());
     }
 
     #[test]
