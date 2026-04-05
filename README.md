@@ -251,6 +251,7 @@ use std::sync::Arc;
 use triplets::{SamplerConfig, TripletSampler, SplitRatios, DeterministicSplitStore};
 use chrono::Utc;
 use triplets::{DataRecord, SamplerError};
+use triplets::data::{RecordSection, SectionRole};
 use triplets::source::{IndexableSource, IndexableAdapter};
 
 struct MyApiSource;
@@ -260,14 +261,38 @@ impl IndexableSource for MyApiSource {
     fn len_hint(&self) -> Option<usize> { Some(1000) }
     fn record_at(&self, idx: usize) -> Result<Option<DataRecord>, SamplerError> {
         // Fetch record 'idx' from your database or API.
+        // Return Ok(None) to skip a record (e.g. deleted rows or filtered entries).
         Ok(Some(DataRecord {
             id: format!("api_{idx}"),
             source: self.id().into(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
             quality: Default::default(),
-            taxonomy: vec![],
-            sections: vec![], // Add text content here
+            // Optional free-form tags for filtering or recipe targeting.
+            // Examples: domain labels, year strings, content-type markers.
+            taxonomy: vec!["finance".into(), "2025".into()],
+            // Each section represents one logical view of the record's content.
+            // SectionRole::Anchor  — the primary subject text (e.g. a question, title, or key passage).
+            // SectionRole::Context — supporting or related text (e.g. an answer, body, or description).
+            // Recipes select sections by role: Selector::Role(SectionRole::Anchor / Context).
+            //
+            // `sentences` is an optional pre-split list of individual sentences within `text`.
+            // Providing it gives the chunker more accurate boundaries when creating token windows.
+            // Leave it as vec![] and the chunker will split `text` automatically.
+            sections: vec![
+                RecordSection {
+                    role: SectionRole::Anchor,
+                    heading: Some("Title".into()),
+                    text: format!("Primary content for record {idx}."),
+                    sentences: vec![], // or: vec!["Sentence one.".into(), "Sentence two.".into()]
+                },
+                RecordSection {
+                    role: SectionRole::Context,
+                    heading: None,
+                    text: format!("Supporting context for record {idx}."),
+                    sentences: vec![],
+                },
+            ],
             meta_prefix: None,
         }))
     }
