@@ -6,7 +6,9 @@ use simd_r_drive::storage_engine::traits::DataStoreWriter;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
-use triplets::constants::env_vars::{HF_TOKEN, TRIPLETS_HF_TOKEN_TEST_DATASET, TRIPLETS_SKIP_LIVE_TESTS};
+use triplets::constants::env_vars::{
+    HF_TOKEN, TRIPLETS_HF_TOKEN_TEST_DATASET, TRIPLETS_SKIP_LIVE_TESTS,
+};
 use triplets::constants::sampler::AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME;
 use triplets::source::backends::huggingface_source::{
     HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE, load_hf_sources_from_list,

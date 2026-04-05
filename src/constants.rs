@@ -283,8 +283,7 @@ pub mod huggingface {
     ///
     /// Can be overridden at runtime with the `TRIPLETS_HF_PARQUET_ENDPOINT`
     /// environment variable (useful for test doubles or on-premises deployments).
-    pub const HF_PARQUET_DEFAULT_ENDPOINT: &str =
-        "https://datasets-server.huggingface.co/parquet";
+    pub const HF_PARQUET_DEFAULT_ENDPOINT: &str = "https://datasets-server.huggingface.co/parquet";
 
     /// Default base URL for the datasets-server size endpoint.
     ///

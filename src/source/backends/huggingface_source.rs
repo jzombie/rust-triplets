@@ -39,14 +39,14 @@ use crate::constants::env_vars::{
     TRIPLETS_HF_WHOAMI_ENDPOINT,
 };
 use crate::constants::huggingface::{
-    ALL_SPLITS_DIR, HF_CLASSLABEL_TYPE, HF_JSON_KEY_CONFIG, HF_JSON_KEY_CONFIG_NAME,
-    HF_JSON_KEY_CONFIGS, HF_JSON_KEY_DATASET, HF_JSON_KEY_DATASET_INFO, HF_JSON_KEY_FEATURE_TYPE,
-    HF_JSON_KEY_FEATURES, HF_JSON_KEY_LABEL_NAMES, HF_JSON_KEY_NUM_ROWS, HF_JSON_KEY_PARQUET_FILES,
-    HF_JSON_KEY_SIZE, HF_JSON_KEY_SPLIT, HF_JSON_KEY_SPLIT_NAME, HF_JSON_KEY_SPLITS,
-    HF_JSON_KEY_URL, HF_RESOLVE_UNKNOWN_FALLBACK_PATH, HF_RESOLVE_URL_SEPARATOR,
-    HF_SHARD_CANDIDATE_SEED_TAG, HF_SHARD_STORE_EXTENSION, HF_SHARD_STORE_META_ROWS_KEY,
-    HF_INFO_DEFAULT_ENDPOINT, HF_PARQUET_DEFAULT_ENDPOINT, HF_SIZE_DEFAULT_ENDPOINT,
-    HF_SHARD_STORE_ROW_PREFIX, HF_WHOAMI_ENDPOINT, HUGGINGFACE_REFRESH_BATCH_MULTIPLIER,
+    ALL_SPLITS_DIR, HF_CLASSLABEL_TYPE, HF_INFO_DEFAULT_ENDPOINT, HF_JSON_KEY_CONFIG,
+    HF_JSON_KEY_CONFIG_NAME, HF_JSON_KEY_CONFIGS, HF_JSON_KEY_DATASET, HF_JSON_KEY_DATASET_INFO,
+    HF_JSON_KEY_FEATURE_TYPE, HF_JSON_KEY_FEATURES, HF_JSON_KEY_LABEL_NAMES, HF_JSON_KEY_NUM_ROWS,
+    HF_JSON_KEY_PARQUET_FILES, HF_JSON_KEY_SIZE, HF_JSON_KEY_SPLIT, HF_JSON_KEY_SPLIT_NAME,
+    HF_JSON_KEY_SPLITS, HF_JSON_KEY_URL, HF_PARQUET_DEFAULT_ENDPOINT,
+    HF_RESOLVE_UNKNOWN_FALLBACK_PATH, HF_RESOLVE_URL_SEPARATOR, HF_SHARD_CANDIDATE_SEED_TAG,
+    HF_SHARD_STORE_EXTENSION, HF_SHARD_STORE_META_ROWS_KEY, HF_SHARD_STORE_ROW_PREFIX,
+    HF_SIZE_DEFAULT_ENDPOINT, HF_WHOAMI_ENDPOINT, HUGGINGFACE_REFRESH_BATCH_MULTIPLIER,
     PARQUET_MANIFEST_DIR, REMOTE_BOOTSTRAP_SHARDS, REMOTE_EXPANSION_HEADROOM_MULTIPLIER,
     REMOTE_URL_PREFIX,
 };
@@ -5069,7 +5069,10 @@ mod tests {
         let mut config = test_config(temp.path().to_path_buf());
         config.hf_token = Some("test-bearer-token".to_string());
         let result = HuggingFaceRowSource::http_client(&config);
-        assert!(result.is_ok(), "http_client should succeed with a well-formed token string");
+        assert!(
+            result.is_ok(),
+            "http_client should succeed with a well-formed token string"
+        );
     }
 
     #[test]
@@ -5080,8 +5083,7 @@ mod tests {
         let (base_url, server) = spawn_one_shot_http(b"{\"name\":\"testuser\"}".to_vec());
         with_env_var(TRIPLETS_HF_WHOAMI_ENDPOINT, &base_url, || {
             let runtime = HuggingFaceRowSource::build_http_runtime(&config).unwrap();
-            let result =
-                HuggingFaceRowSource::validate_token_with_runtime(&config, &runtime);
+            let result = HuggingFaceRowSource::validate_token_with_runtime(&config, &runtime);
             assert!(result.is_ok(), "200 response should pass token validation");
         });
         server.join().unwrap();
@@ -5092,12 +5094,10 @@ mod tests {
         let temp = tempdir().unwrap();
         let mut config = test_config(temp.path().to_path_buf());
         config.hf_token = Some("invalid-test-token".to_string());
-        let (base_url, server) =
-            spawn_one_shot_http_with_status(401, b"Unauthorized".to_vec());
+        let (base_url, server) = spawn_one_shot_http_with_status(401, b"Unauthorized".to_vec());
         with_env_var(TRIPLETS_HF_WHOAMI_ENDPOINT, &base_url, || {
             let runtime = HuggingFaceRowSource::build_http_runtime(&config).unwrap();
-            let result =
-                HuggingFaceRowSource::validate_token_with_runtime(&config, &runtime);
+            let result = HuggingFaceRowSource::validate_token_with_runtime(&config, &runtime);
             assert!(result.is_err(), "401 response should fail token validation");
             match result {
                 Err(SamplerError::SourceUnavailable { reason, .. }) => {
