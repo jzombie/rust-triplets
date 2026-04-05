@@ -382,7 +382,7 @@ let config = SamplerConfig {
             negative_selector: Selector::Random,
             negative_strategy: NegativeStrategy::WrongArticle,
             weight: 3.0,
-            instruction: None,
+            instruction: None, // See the Instruction Tuning section to attach a task prompt.
             allow_same_anchor_positive: false,
         },
         // Fallback recipe with random chunk selection.
@@ -414,6 +414,74 @@ let config = SamplerConfig {
 
 > **Sampling frequency vs. output score**: `TripletRecipe::weight` controls how often the recipe is *selected*. It is also one factor in the output `SampleTriplet::weight`, but the two serve different roles — see [Output Format](#output-format) below.
 
+### Instruction Tuning
+
+The `instruction` field on `TripletRecipe` attaches a static task prompt to every triplet, pair, or text sample produced by that recipe. It is copied verbatim into `SampleTriplet::instruction` (and the equivalent field on `SamplePair` / `TextSample`) so your training loop can prepend it to the anchor text before passing it to the model.
+
+This lets different recipes express different task hypotheses over the same underlying data — for example, a retrieval recipe and a similarity recipe can share the same source but carry different prompts:
+
+```rust,no_run
+use triplets::{SamplerConfig, TripletRecipe, NegativeStrategy, Selector, SectionRole};
+
+let config = SamplerConfig {
+    recipes: vec![
+        // Retrieval recipe: every triplet from this recipe carries a task prompt.
+        TripletRecipe {
+            name: "retrieval".into(),
+            anchor: Selector::Role(SectionRole::Anchor),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Random,
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 1.0,
+            instruction: Some("Retrieve a passage that answers the question:".into()),
+            allow_same_anchor_positive: false,
+        },
+        // Plain contrastive recipe: no prompt — model sees bare chunk text.
+        TripletRecipe {
+            name: "similarity".into(),
+            anchor: Selector::Role(SectionRole::Context),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Random,
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 1.0,
+            instruction: None,
+            allow_same_anchor_positive: false,
+        },
+    ],
+    ..SamplerConfig::default()
+};
+```
+
+In your training loop, prepend the instruction to the anchor when present:
+
+```rust,no_run
+use std::sync::Arc;
+use triplets::{SamplerConfig, TripletSampler, SplitRatios, DeterministicSplitStore, SplitLabel, Sampler};
+let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
+let store = Arc::new(DeterministicSplitStore::new(ratios, 42).unwrap());
+let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
+let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
+for triplet in batch.triplets {
+    // Prepend the task instruction to the anchor when the recipe specifies one.
+    // Recipes without an instruction pass the anchor text through unchanged.
+    //
+    // With instruction:    "Retrieve a passage that answers the question:\nWhat is X?"
+    // Without instruction: "What is X?"
+    let anchor_input = match &triplet.instruction {
+        Some(instr) => format!("{instr}\n{}", triplet.anchor.text),
+        None => triplet.anchor.text.clone(),
+    };
+
+    // The positive and negative slots are never prefixed with the instruction —
+    // only the anchor carries the task prompt.
+    let positive_input = triplet.positive.text.clone();
+    let negative_input = triplet.negative.text.clone();
+
+    // Pass all three to your model's embedding function and compute triplet loss.
+    // let loss = model.triplet_loss(&anchor_input, &positive_input, &negative_input);
+}
+```
+
 ### Output Format
 
 Each `SampleTriplet` contains the sampled text and a computed training score.
@@ -434,7 +502,7 @@ for triplet in batch.triplets {
     // Metadata
     let recipe      = &triplet.recipe;      // which recipe produced this triplet
     let weight      = triplet.weight;       // training score — see below
-    let instruction = triplet.instruction;  // optional task instruction string
+    let instruction = triplet.instruction;  // task prompt set on the recipe, if any — see Instruction Tuning
 }
 ```
 
