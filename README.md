@@ -68,6 +68,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Create the sampler.
     let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
+
+    // 4. Register one or more sources (CSV, text files, Hugging Face, or custom).
+    //    See the [Configuring Sources](#configuring-sources) section for full examples.
+    //    sampler.register_source(Box::new(my_source));
+
+    // 5. Sample a batch from the training split.
+    let batch = sampler.next_triplet_batch(SplitLabel::Train)?;
+    for triplet in batch.triplets {
+        println!("anchor:   {}", triplet.anchor.text);
+        println!("positive: {}", triplet.positive.text);
+        println!("negative: {}", triplet.negative.text);
+    }
+
     Ok(())
 }
 ```
