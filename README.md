@@ -3,7 +3,7 @@
   <p align="center"><strong>Composable data sampling primitives for deterministic multi-source ML/AI training-data orchestration.</strong></p>
   <p align="center">
     <a href="#getting-started">Getting Started</a> &middot;
-    <a href="#features">Features</a> &middot;
+    <a href="#cargo-features">Cargo Features</a> &middot;
     <a href="#configuring-sources">Sources</a> &middot;
     <a href="#sampling-and-mixing">Sampling &amp; Mixing</a> &middot;
     <a href="#epochs-and-determinism">Epochs</a> &middot;
@@ -72,17 +72,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## Features
+## Cargo Features
 
-| Feature            | What it enables                                           | Default |
-| ------------------ | --------------------------------------------------------- | ------- |
-| `huggingface`      | Streaming from Hugging Face dataset repositories.         | No      |
-| `bm25-mining`      | BM25 hard-negative ranking within strategy-defined pools. | No      |
-| `extended-metrics` | Additional per-triplet diagnostics for debugging.         | No      |
+| Feature            | What it enables                                                               | Default |
+| ------------------ | ----------------------------------------------------------------------------- | ------- |
+| `huggingface`      | [Streaming from Hugging Face dataset repositories.](#hugging-face-source)     | No      |
+| `bm25-mining`      | [BM25 hard-negative ranking within strategy-defined pools.](#negative-mining) | No      |
+| `extended-metrics` | Additional per-triplet diagnostics for debugging.                             | No      |
+
+> _[CSV](#csv-source), [text file](#text-file-source), and [custom source](#custom-source) support are enabled in all builds._
 
 ## Configuring Sources
 
 ### Hugging Face Source
+
 Streams rows directly from the Hugging Face Hub without requiring a full dataset download. Map dataset columns to anchor, positive, or plain-text roles the same way as the CSV source.
 
 ```rust,no_run
@@ -161,6 +164,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 > manager, or a credential file listed in `.gitignore`.
 
 ### CSV Source
+
 Load rows from a CSV file with explicit column mappings. The file **must have a named header row** — columns are always selected by name. Supports two modes:
 
 - **Role mode** — map separate columns to anchor and positive (context) roles.
@@ -193,6 +197,7 @@ sampler.register_source(Box::new(source2));
 Rows with empty required fields are skipped. Column name matching is case-insensitive.
 
 ### Text File Source
+
 Recursively indexes plain-text files from a directory. Each file's stem (filename without extension) becomes the **anchor** and its body content becomes the **context**. Useful for local corpora where files are already titled meaningfully.
 
 ```rust
@@ -212,6 +217,8 @@ let config = FileSourceConfig::new("docs", "./data/corpus")
 let source = FileSource::new(config);
 sampler.register_source(Box::new(source));
 ```
+
+### Custom Source
 
 Implement the `IndexableSource` trait to integrate any backend that can fetch records by a stable integer index.
 
@@ -252,6 +259,7 @@ sampler.register_source(Box::new(adapter));
 ## Sampling and Mixing
 
 ### Weighted Sampling
+
 Adjust per-source sampling frequency to handle class imbalance or dataset quality differences.
 
 ```rust,no_run
@@ -691,6 +699,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 ### Deterministic Resuming
+
 To resume training, initialize a `FileSplitStore` at the same path. The sampler automatically restores cursors, RNG state, and epoch progress from that store.
 
 ```rust,no_run
@@ -715,6 +724,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## Technical Details
 
 ### Threading Model
+
 Concurrency is handled at multiple levels for high throughput:
 - **Prefetching**: `BatchPrefetcher` runs a dedicated background worker thread that fills a bounded queue.
 - **Parallel Ingestion**: Source refresh executes concurrently across registered sources during ingestion cycles.
@@ -722,9 +732,11 @@ Concurrency is handled at multiple levels for high throughput:
 - **Thread-Safe Shared Use**: `TripletSampler` is safe to share across threads (for example via `Arc`); concurrent calls are internally synchronized with a mutex, so a single sampler instance is callable from multiple threads without data races.
 
 ### Chunking and Windows
+
 Long documents are handled through a pluggable `ChunkingAlgorithm`. The default `SlidingWindowChunker` splits sections into fixed-size token windows with configurable overlap, preserving full coverage of long text.
 
 ### Negative Mining
+
 Negative selection is delegated to a pluggable backend.
 - **DefaultBackend**: Uniform random selection from the candidate pool.
 - **Bm25Backend**: (Requires `bm25-mining`) Ranks candidates by lexical overlap with the anchor to provide harder training examples.
