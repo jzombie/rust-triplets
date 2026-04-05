@@ -1,6 +1,23 @@
-# triplets
+<p align="center">
+  <h1 align="center">triplets</h1>
+  <p align="center"><strong>Composable data sampling primitives for deterministic multi-source ML/AI training-data orchestration.</strong></p>
+  <p align="center">
+    <a href="#getting-started">Getting Started</a> &middot;
+    <a href="#features">Features</a> &middot;
+    <a href="#configuring-sources">Sources</a> &middot;
+    <a href="#sampling-and-mixing">Sampling &amp; Mixing</a> &middot;
+    <a href="#epochs-and-determinism">Epochs</a> &middot;
+    <a href="#license">License</a>
+  </p>
+  <p align="center">
+    <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Made%20with-Rust-black" alt="Made with Rust"></a>
+    <a href="https://crates.io/crates/triplets"><img src="https://img.shields.io/crates/v/triplets.svg" alt="crates.io"></a>
+    <a href="https://github.com/jzombie/rust-triplets/blob/main/LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT licensed"></a>
+    <a href="https://github.com/jzombie/rust-triplets/blob/main/LICENSE-APACHE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="Apache 2.0 licensed"></a>
+  </p>
+</p>
 
-[![made-with-rust][rust-logo]][rust-src-page] [![crates.io][crates-badge]][crates-page] [![MIT licensed][mit-license-badge]][mit-license-page] [![Apache 2.0 licensed][apache-2.0-license-badge]][apache-2.0-license-page]
+---
 
 Generate an effectively unlimited stream of [training triplets](https://en.wikipedia.org/wiki/Triplet_loss), pairs, or plaintext samples from your existing corpus. This crate handles ingestion, multi-source mixing, deterministic train/validation/test splitting, and optional [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) hard-negative mining.
 
@@ -109,12 +126,12 @@ automatically and sends it as a `Bearer` credential on every API request and sha
 download. If the token is invalid or expired, `HuggingFaceRowSource::new()` returns an
 error immediately rather than silently degrading later.
 
-| Platform | Command |
-| -------- | ------- |
-| macOS / Linux | `export HF_TOKEN="hf_..."` |
-| Windows — Command Prompt | `set HF_TOKEN=hf_...` |
-| Windows — PowerShell | `$env:HF_TOKEN = "hf_..."` |
-| Windows — persistent | *System Properties → Advanced → Environment Variables* |
+| Platform                 | Command                                                |
+| ------------------------ | ------------------------------------------------------ |
+| macOS / Linux            | `export HF_TOKEN="hf_..."`                             |
+| Windows — Command Prompt | `set HF_TOKEN=hf_...`                                  |
+| Windows — PowerShell     | `$env:HF_TOKEN = "hf_..."`                             |
+| Windows — persistent     | *System Properties → Advanced → Environment Variables* |
 
 The token can also be set programmatically on the config struct if you prefer not to rely on
 the process environment:
@@ -279,11 +296,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 The `weight` field on `TripletRecipe` controls **how often a recipe is selected** relative to other active recipes. The sampler expands each recipe into a proportional number of selection slots, shuffles them, and cycles through — so a recipe with `weight = 3.0` is drawn approximately three times as often as one with `weight = 1.0`.
 
-| `weight` value | Effect |
-| -------------- | ------ |
-| Equal across all recipes (e.g. all `1.0`) | Uniform round-robin — each recipe is selected equally often (default behavior). |
-| `2.0` vs `1.0` | The `2.0` recipe is tried ~2× as often per batch. |
-| `0.0` or negative | Recipe is **excluded entirely** — useful for disabling a recipe without removing it from configuration. |
+| `weight` value                            | Effect                                                                                                  |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| Equal across all recipes (e.g. all `1.0`) | Uniform round-robin — each recipe is selected equally often (default behavior).                         |
+| `2.0` vs `1.0`                            | The `2.0` recipe is tried ~2× as often per batch.                                                       |
+| `0.0` or negative                         | Recipe is **excluded entirely** — useful for disabling a recipe without removing it from configuration. |
 
 ```rust,no_run
 use triplets::{SamplerConfig, TripletRecipe, NegativeStrategy, Selector, SectionRole};
@@ -360,10 +377,10 @@ for triplet in batch.triplets {
 
 The value is computed as `triplet.weight = recipe.weight × chunk_quality`, where `chunk_quality` is the average of three per-slot signals (one per chunk: anchor, positive, negative). Each signal is the product of two independent factors:
 
-| Factor | What it measures | How it is set |
-| ------ | ---------------- | ------------- |
-| **Window position score** | `1 / (window_index + 1)` — earlier chunks in a section score higher (1.0 at index 0, 0.5 at index 1, 0.25 at index 3, …). | Automatic. |
-| **Source trust** | Configured quality signal for the originating source (clamped to `[0, 1]`). | Set via `.with_trust(0.9)` on the source config. |
+| Factor                    | What it measures                                                                                                          | How it is set                                    |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| **Window position score** | `1 / (window_index + 1)` — earlier chunks in a section score higher (1.0 at index 0, 0.5 at index 1, 0.25 at index 3, …). | Automatic.                                       |
+| **Source trust**          | Configured quality signal for the originating source (clamped to `[0, 1]`).                                               | Set via `.with_trust(0.9)` on the source config. |
 
 The resulting raw signal is clamped to `[chunk_weight_floor, 1.0]` (default floor: `0.1`) before averaging.
 
@@ -406,11 +423,11 @@ Not every record needs to have all sections. If a recipe targets `Selector::Para
 
 Imagine each record represents one publicly-traded company with up to three sections:
 
-| Index | Role | Content | Always present? |
-| ----- | ---- | ------- | --------------- |
-| 0 | `Anchor` | Linearized financial metrics — view A (a random tag subset) | Yes |
-| 1 | `Context` | Linearized financial metrics — view B (a disjoint tag subset) | Yes |
-| 2 | *(positional)* | Earnings-call transcript for the same period | No — only when a transcript was found |
+| Index | Role           | Content                                                       | Always present?                       |
+| ----- | -------------- | ------------------------------------------------------------- | ------------------------------------- |
+| 0     | `Anchor`       | Linearized financial metrics — view A (a random tag subset)   | Yes                                   |
+| 1     | `Context`      | Linearized financial metrics — view B (a disjoint tag subset) | Yes                                   |
+| 2     | *(positional)* | Earnings-call transcript for the same period                  | No — only when a transcript was found |
 
 Two recipes target different aspects of the same records:
 
@@ -557,11 +574,11 @@ meta: date=Jan 1, 2025 | source=daily-update
 
 The `dropout` parameter controls how often the prefix is included at all:
 
-| `dropout` | Effect |
-| --------- | ------ |
-| `1.0` | Prefix is **always** prepended. |
-| `0.5` | Prefix is prepended ~half the time; the rest of the time the model sees plain text. |
-| `0.0` | Prefix is **never** prepended. |
+| `dropout` | Effect                                                                              |
+| --------- | ----------------------------------------------------------------------------------- |
+| `1.0`     | Prefix is **always** prepended.                                                     |
+| `0.5`     | Prefix is prepended ~half the time; the rest of the time the model sees plain text. |
+| `0.0`     | Prefix is **never** prepended.                                                      |
 
 Training with `dropout < 1.0` teaches the model to handle both cases — chunks with metadata context and chunks without. This prevents the model from becoming dependent on the tags being present at inference time.
 
@@ -729,11 +746,4 @@ Negative selection is delegated to a pluggable backend.
 
 See [LICENSE-APACHE](LICENSE-APACHE) and [LICENSE-MIT](LICENSE-MIT) for details.
 
-[rust-src-page]: https://www.rust-lang.org/
-[rust-logo]: https://img.shields.io/badge/Made%20with-Rust-black
-[crates-page]: https://crates.io/crates/triplets
-[crates-badge]: https://img.shields.io/crates/v/triplets.svg
-[mit-license-page]: https://github.com/jzombie/rust-triplets/blob/main/LICENSE-MIT
-[mit-license-badge]: https://img.shields.io/badge/license-MIT-blue.svg
-[apache-2.0-license-page]: https://github.com/jzombie/rust-triplets/blob/main/LICENSE-APACHE
-[apache-2.0-license-badge]: https://img.shields.io/badge/license-Apache%202.0-blue.svg
+
