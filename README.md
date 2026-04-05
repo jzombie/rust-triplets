@@ -53,8 +53,8 @@ A `TripletSampler` needs a `SplitStore` for record-to-split assignments and a `S
 ```rust
 use std::sync::Arc;
 use triplets::{
-    SamplerConfig, TripletSampler, SplitRatios, 
-    DeterministicSplitStore, SplitLabel, Sampler
+    BatchPrefetcher, SamplerConfig, TripletSampler, TripletBatch,
+    SplitRatios, DeterministicSplitStore, SplitLabel,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -66,20 +66,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let seed = 42;
     let store = Arc::new(DeterministicSplitStore::new(ratios, seed)?);
 
-    // 3. Create the sampler.
-    let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
+    // 3. Create the sampler wrapped in Arc — required for prefetching.
+    let sampler = Arc::new(TripletSampler::new(SamplerConfig::default(), store));
 
     // 4. Register one or more sources (CSV, text files, Hugging Face, or custom).
     //    See the [Configuring Sources](#configuring-sources) section for full examples.
     //    sampler.register_source(Box::new(my_source));
 
-    // 5. Sample a batch from the training split.
-    let batch = sampler.next_triplet_batch(SplitLabel::Train)?;
-    for triplet in batch.triplets {
-        println!("anchor:   {}", triplet.anchor.text);
-        println!("positive: {}", triplet.positive.text);
-        println!("negative: {}", triplet.negative.text);
+    // 5. Spawn a background prefetcher with a queue depth of 4.
+    //    The worker thread starts filling the queue immediately; your training
+    //    loop calls prefetcher.next() and blocks only when the queue is empty.
+    let prefetcher: BatchPrefetcher<TripletBatch> =
+        Arc::clone(&sampler).prefetch_triplet_batches(SplitLabel::Train, 4);
+
+    // 6. Pull batches in your training loop.
+    for _step in 0..10 {
+        let batch = prefetcher.next()?;
+        for triplet in batch.triplets {
+            println!("anchor:   {}", triplet.anchor.text);
+            println!("positive: {}", triplet.positive.text);
+            println!("negative: {}", triplet.negative.text);
+        }
     }
+    // The prefetcher's background thread shuts down automatically when dropped.
 
     Ok(())
 }
