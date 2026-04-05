@@ -15,6 +15,7 @@
     <a href="https://github.com/jzombie/rust-triplets/blob/main/LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT licensed"></a>
     <a href="https://github.com/jzombie/rust-triplets/blob/main/LICENSE-APACHE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="Apache 2.0 licensed"></a>
   </p>
+  <p align="center"><em>Tested on macOS, Linux, and Windows.</em></p>
 </p>
 
 ---
