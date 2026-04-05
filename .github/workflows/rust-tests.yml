@@ -19,6 +19,7 @@ jobs:
   test_matrix:
     name: test (OS=${{ matrix.os }}, Features=${{ matrix.name }})
     runs-on: ${{ matrix.os }}
+    environment: CI
 
     strategy:
       fail-fast: false
@@ -74,6 +75,16 @@ jobs:
             ${{ runner.os }}-cargo-${{ steps.rustc.outputs.hash }}-${{ steps.lockfile.outputs.hash }}-
 
       - name: Test
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          TRIPLETS_HF_TOKEN_TEST_DATASET: ${{ secrets.TRIPLETS_HF_TOKEN_TEST_DATASET }}
+          
+          # Skip live network tests automatically when credentials are absent
+          # (e.g. pull requests from forks where secrets are not injected).
+          #
+          # If wanting to auto-skip live network tests, uncomment the following line:
+          # TRIPLETS_SKIP_LIVE_TESTS: ${{ secrets.HF_TOKEN == '' && '1' || '' }}
+
         run: cargo test --workspace --all-features --lib --bins --tests --examples -- --include-ignored
 
       - name: Ensure .cache was not created by tests
@@ -103,6 +114,7 @@ jobs:
   coverage:
     name: coverage (cargo-llvm-cov)
     runs-on: ubuntu-latest
+    environment: CI
     needs: test_matrix
     outputs:
       line_coverage: ${{ steps.cov-summary.outputs.line_percent }}
@@ -156,6 +168,10 @@ jobs:
             cov-${{ runner.os }}-${{ steps.rustc-cov.outputs.hash }}-
 
       - name: Generate coverage data
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          TRIPLETS_HF_TOKEN_TEST_DATASET: ${{ secrets.TRIPLETS_HF_TOKEN_TEST_DATASET }}
+          TRIPLETS_SKIP_LIVE_TESTS: ${{ secrets.HF_TOKEN == '' && '1' || '' }}
         shell: bash
         run: |
           set -euo pipefail
