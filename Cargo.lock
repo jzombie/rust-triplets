@@ -2369,7 +2369,7 @@ dependencies = [
 
 [[package]]
 name = "triplets"
-version = "0.17.0-alpha"
+version = "0.17.1-alpha"
 dependencies = [
  "bitcode",
  "bm25",
