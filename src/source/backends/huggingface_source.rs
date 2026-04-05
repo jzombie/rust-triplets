@@ -5170,12 +5170,10 @@ mod tests {
         let temp = tempdir().unwrap();
         let mut config = test_config(temp.path().to_path_buf());
         config.hf_token = Some("test-token-for-new".to_string());
-        let viewer_disabled =
-            br#"{"error":"Not supported: dataset viewer is disabled."}"#.to_vec();
+        let viewer_disabled = br#"{"error":"Not supported: dataset viewer is disabled."}"#.to_vec();
         let (whoami_url, whoami_server) = spawn_one_shot_http(b"{}".to_vec());
         // /info is called before /size inside new(); each needs its own one-shot server.
-        let (info_url, info_server) =
-            spawn_one_shot_http_with_status(501, viewer_disabled.clone());
+        let (info_url, info_server) = spawn_one_shot_http_with_status(501, viewer_disabled.clone());
         let (size_url, size_server) = spawn_one_shot_http_with_status(501, viewer_disabled);
         with_env_vars(
             &[
