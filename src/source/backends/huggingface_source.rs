@@ -5161,17 +5161,27 @@ mod tests {
     #[test]
     fn new_validates_hf_token_when_set() {
         // When hf_token is Some and the mock whoami returns 200, new() succeeds.
-        // The info and size endpoints are pointed at a port that refuses connections
-        // so they degrade gracefully without making real network calls.
+        // The info and size endpoints are served by one-shot 501 mocks so they
+        // degrade gracefully (viewer-disabled path) without any real network
+        // calls or relying on connection-refused behaviour which is unreliable
+        // across platforms (e.g. privileged port 1 on macOS GitHub Actions
+        // does not guarantee an immediate ECONNREFUSED and can instead block
+        // for the full 15 s connect timeout, causing spurious test failures).
         let temp = tempdir().unwrap();
         let mut config = test_config(temp.path().to_path_buf());
         config.hf_token = Some("test-token-for-new".to_string());
+        let viewer_disabled =
+            br#"{"error":"Not supported: dataset viewer is disabled."}"#.to_vec();
         let (whoami_url, whoami_server) = spawn_one_shot_http(b"{}".to_vec());
+        // /info is called before /size inside new(); each needs its own one-shot server.
+        let (info_url, info_server) =
+            spawn_one_shot_http_with_status(501, viewer_disabled.clone());
+        let (size_url, size_server) = spawn_one_shot_http_with_status(501, viewer_disabled);
         with_env_vars(
             &[
                 (TRIPLETS_HF_WHOAMI_ENDPOINT, &whoami_url),
-                (TRIPLETS_HF_SIZE_ENDPOINT, "http://127.0.0.1:1/size"),
-                (TRIPLETS_HF_INFO_ENDPOINT, "http://127.0.0.1:1/info"),
+                (TRIPLETS_HF_INFO_ENDPOINT, &info_url),
+                (TRIPLETS_HF_SIZE_ENDPOINT, &size_url),
             ],
             || {
                 let result = HuggingFaceRowSource::new(config.clone());
@@ -5182,6 +5192,8 @@ mod tests {
             },
         );
         whoami_server.join().unwrap();
+        info_server.join().unwrap();
+        size_server.join().unwrap();
     }
 
     #[test]
