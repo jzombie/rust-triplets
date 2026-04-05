@@ -36,6 +36,18 @@ pub mod env_vars {
     /// This is the standard environment variable used by the Hugging Face
     /// ecosystem (`huggingface_hub`, `datasets`, `hf-hub`, etc.).
     pub const HF_TOKEN: &str = "HF_TOKEN";
+
+    /// When set to any non-empty value, live network tests that require HF
+    /// credentials will skip silently rather than panicking.  Intended for
+    /// CI jobs that run without secrets (e.g. fork pull requests).
+    pub const TRIPLETS_SKIP_LIVE_TESTS: &str = "TRIPLETS_SKIP_LIVE_TESTS";
+
+    /// Dataset repo used by the live private-dataset integration test.
+    ///
+    /// Format: `"org/dataset-name"` — identical to the repo path in an
+    /// `hf://org/dataset-name` source URI.  Must be a private repo to
+    /// exercise the token authentication path end-to-end.
+    pub const TRIPLETS_HF_TOKEN_TEST_DATASET: &str = "TRIPLETS_HF_TOKEN_TEST_DATASET";
 }
 
 /// Constants used by capacity estimation heuristics.
@@ -260,6 +272,25 @@ pub mod huggingface {
     pub const HF_JSON_KEY_LABEL_NAMES: &str = "names";
     /// Feature type string that identifies a ClassLabel column.
     pub const HF_CLASSLABEL_TYPE: &str = "ClassLabel";
+    /// Default base URL for the datasets-server parquet-manifest endpoint.
+    ///
+    /// Can be overridden at runtime with the `TRIPLETS_HF_PARQUET_ENDPOINT`
+    /// environment variable (useful for test doubles or on-premises deployments).
+    pub const HF_PARQUET_DEFAULT_ENDPOINT: &str =
+        "https://datasets-server.huggingface.co/parquet";
+
+    /// Default base URL for the datasets-server size endpoint.
+    ///
+    /// Can be overridden at runtime with the `TRIPLETS_HF_SIZE_ENDPOINT`
+    /// environment variable.
+    pub const HF_SIZE_DEFAULT_ENDPOINT: &str = "https://datasets-server.huggingface.co/size";
+
+    /// Default base URL for the datasets-server info endpoint.
+    ///
+    /// Can be overridden at runtime with the `TRIPLETS_HF_INFO_ENDPOINT`
+    /// environment variable.
+    pub const HF_INFO_DEFAULT_ENDPOINT: &str = "https://datasets-server.huggingface.co/info";
+
     /// Endpoint used to validate a Hugging Face API token.
     ///
     /// A GET to this URL with a valid `Authorization: Bearer <token>` header

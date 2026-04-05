@@ -44,6 +44,7 @@ use crate::constants::huggingface::{
     HF_JSON_KEY_SIZE, HF_JSON_KEY_SPLIT, HF_JSON_KEY_SPLIT_NAME, HF_JSON_KEY_SPLITS,
     HF_JSON_KEY_URL, HF_RESOLVE_UNKNOWN_FALLBACK_PATH, HF_RESOLVE_URL_SEPARATOR,
     HF_SHARD_CANDIDATE_SEED_TAG, HF_SHARD_STORE_EXTENSION, HF_SHARD_STORE_META_ROWS_KEY,
+    HF_INFO_DEFAULT_ENDPOINT, HF_PARQUET_DEFAULT_ENDPOINT, HF_SIZE_DEFAULT_ENDPOINT,
     HF_SHARD_STORE_ROW_PREFIX, HF_WHOAMI_ENDPOINT, HUGGINGFACE_REFRESH_BATCH_MULTIPLIER,
     PARQUET_MANIFEST_DIR, REMOTE_BOOTSTRAP_SHARDS, REMOTE_EXPANSION_HEADROOM_MULTIPLIER,
     REMOTE_URL_PREFIX,
@@ -1953,7 +1954,7 @@ impl HuggingFaceRowSource {
         {
             return value;
         }
-        "https://datasets-server.huggingface.co/parquet".to_string()
+        HF_PARQUET_DEFAULT_ENDPOINT.to_string()
     }
 
     fn size_endpoint() -> String {
@@ -1962,7 +1963,7 @@ impl HuggingFaceRowSource {
         {
             return value;
         }
-        "https://datasets-server.huggingface.co/size".to_string()
+        HF_SIZE_DEFAULT_ENDPOINT.to_string()
     }
 
     fn info_endpoint() -> String {
@@ -1971,7 +1972,7 @@ impl HuggingFaceRowSource {
         {
             return value;
         }
-        "https://datasets-server.huggingface.co/info".to_string()
+        HF_INFO_DEFAULT_ENDPOINT.to_string()
     }
 
     fn build_http_runtime(

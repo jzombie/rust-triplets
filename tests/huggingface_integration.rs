@@ -6,6 +6,7 @@ use simd_r_drive::storage_engine::traits::DataStoreWriter;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
+use triplets::constants::env_vars::{HF_TOKEN, TRIPLETS_HF_TOKEN_TEST_DATASET, TRIPLETS_SKIP_LIVE_TESTS};
 use triplets::constants::sampler::AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME;
 use triplets::source::backends::huggingface_source::{
     HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE, load_hf_sources_from_list,
@@ -1688,13 +1689,6 @@ fn huggingface_source_list_file_parses_trust_and_source_id() {
 //
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Env var name for the dataset repo used in the live token integration test.
-///
-/// Format: `"org/dataset-name"` — the same string you would use in an
-/// `hf://org/dataset-name` source URI.  Not stored in `constants.rs`
-/// because it only exists to support this test, not the library itself.
-const TRIPLETS_HF_TOKEN_TEST_DATASET: &str = "TRIPLETS_HF_TOKEN_TEST_DATASET";
-
 #[test]
 fn hf_token_private_dataset_access() {
     // ── Guard: require env vars (or explicit opt-out) ────────────────────────
@@ -1703,11 +1697,11 @@ fn hf_token_private_dataset_access() {
     // credentials produce a silent skip.  Otherwise missing credentials are a
     // hard failure so the test cannot be accidentally omitted.
 
-    let skip_live = std::env::var("TRIPLETS_SKIP_LIVE_TESTS")
+    let skip_live = std::env::var(TRIPLETS_SKIP_LIVE_TESTS)
         .map(|v| !v.trim().is_empty())
         .unwrap_or(false);
 
-    let token = match std::env::var("HF_TOKEN") {
+    let token = match std::env::var(HF_TOKEN) {
         Ok(t) if !t.trim().is_empty() => t,
         _ => {
             if skip_live {
