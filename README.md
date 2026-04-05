@@ -293,6 +293,16 @@ impl IndexableSource for MyApiSource {
                     sentences: vec![],
                 },
             ],
+            // Optional: attach a KvpPrefixSampler to inject structured key-value
+            // metadata into sampled chunk text at training time. For example:
+            //
+            //   meta: source=api | date=2025-01-01
+            //   <actual chunk text>
+            //
+            // The sampler controls dropout (how often the prefix appears) and
+            // per-field presence probability, so the model learns to handle both
+            // prefixed and plain chunks. See the "Metadata Prefixes and Tag Dropout"
+            // section for full usage.
             meta_prefix: None,
         }))
     }
