@@ -1,5 +1,5 @@
 <p align="center">
-  <h1 align="center">triplets</h1>
+  <h1 align="center">⛏️ triplets</h1>
   <p align="center"><strong>Composable data sampling primitives for deterministic multi-source ML/AI training-data orchestration.</strong></p>
   <p align="center">
     <a href="#getting-started">Getting Started</a> &middot;
