@@ -36,6 +36,7 @@ use crate::config::{NegativeStrategy, SamplerConfig, Selector, TripletRecipe};
 use crate::constants::cache::HUGGINGFACE_GROUP;
 use crate::constants::env_vars::{
     HF_TOKEN, TRIPLETS_HF_INFO_ENDPOINT, TRIPLETS_HF_PARQUET_ENDPOINT, TRIPLETS_HF_SIZE_ENDPOINT,
+    TRIPLETS_HF_WHOAMI_ENDPOINT,
 };
 use crate::constants::huggingface::{
     ALL_SPLITS_DIR, HF_CLASSLABEL_TYPE, HF_JSON_KEY_CONFIG, HF_JSON_KEY_CONFIG_NAME,
@@ -1975,6 +1976,15 @@ impl HuggingFaceRowSource {
         HF_INFO_DEFAULT_ENDPOINT.to_string()
     }
 
+    fn whoami_endpoint() -> String {
+        if let Ok(value) = std::env::var(TRIPLETS_HF_WHOAMI_ENDPOINT)
+            && !value.trim().is_empty()
+        {
+            return value;
+        }
+        HF_WHOAMI_ENDPOINT.to_string()
+    }
+
     fn build_http_runtime(
         config: &HuggingFaceRowsConfig,
     ) -> Result<tokio::runtime::Runtime, SamplerError> {
@@ -2013,7 +2023,7 @@ impl HuggingFaceRowSource {
         runtime.block_on(async {
             let client = Self::http_client(config)?;
             client
-                .get(HF_WHOAMI_ENDPOINT)
+                .get(Self::whoami_endpoint())
                 .send()
                 .await
                 .map_err(|err| SamplerError::SourceUnavailable {
@@ -5049,6 +5059,83 @@ mod tests {
             || HuggingFaceRowSource::list_remote_candidates(&config),
         );
         assert!(result.is_err());
+    }
+
+    // ── Token validation tests ──────────────────────────────────────────────
+
+    #[test]
+    fn http_client_builds_with_token() {
+        let temp = tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        config.hf_token = Some("test-bearer-token".to_string());
+        let result = HuggingFaceRowSource::http_client(&config);
+        assert!(result.is_ok(), "http_client should succeed with a well-formed token string");
+    }
+
+    #[test]
+    fn validate_token_accepts_200_response() {
+        let temp = tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        config.hf_token = Some("valid-test-token".to_string());
+        let (base_url, server) = spawn_one_shot_http(b"{\"name\":\"testuser\"}".to_vec());
+        with_env_var(TRIPLETS_HF_WHOAMI_ENDPOINT, &base_url, || {
+            let runtime = HuggingFaceRowSource::build_http_runtime(&config).unwrap();
+            let result =
+                HuggingFaceRowSource::validate_token_with_runtime(&config, &runtime);
+            assert!(result.is_ok(), "200 response should pass token validation");
+        });
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn validate_token_rejects_401_response() {
+        let temp = tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        config.hf_token = Some("invalid-test-token".to_string());
+        let (base_url, server) =
+            spawn_one_shot_http_with_status(401, b"Unauthorized".to_vec());
+        with_env_var(TRIPLETS_HF_WHOAMI_ENDPOINT, &base_url, || {
+            let runtime = HuggingFaceRowSource::build_http_runtime(&config).unwrap();
+            let result =
+                HuggingFaceRowSource::validate_token_with_runtime(&config, &runtime);
+            assert!(result.is_err(), "401 response should fail token validation");
+            match result {
+                Err(SamplerError::SourceUnavailable { reason, .. }) => {
+                    assert!(
+                        reason.contains("invalid or expired"),
+                        "error should mention invalid/expired, got: {reason}"
+                    );
+                }
+                _ => panic!("expected SamplerError::SourceUnavailable"),
+            }
+        });
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn new_validates_hf_token_when_set() {
+        // When hf_token is Some and the mock whoami returns 200, new() succeeds.
+        // The info and size endpoints are pointed at a port that refuses connections
+        // so they degrade gracefully without making real network calls.
+        let temp = tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        config.hf_token = Some("test-token-for-new".to_string());
+        let (whoami_url, whoami_server) = spawn_one_shot_http(b"{}".to_vec());
+        with_env_vars(
+            &[
+                (TRIPLETS_HF_WHOAMI_ENDPOINT, &whoami_url),
+                (TRIPLETS_HF_SIZE_ENDPOINT, "http://127.0.0.1:1/size"),
+                (TRIPLETS_HF_INFO_ENDPOINT, "http://127.0.0.1:1/info"),
+            ],
+            || {
+                let result = HuggingFaceRowSource::new(config.clone());
+                assert!(
+                    result.is_ok(),
+                    "new() should succeed when mock whoami returns 200"
+                );
+            },
+        );
+        whoami_server.join().unwrap();
     }
 
     #[test]

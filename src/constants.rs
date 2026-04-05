@@ -48,6 +48,13 @@ pub mod env_vars {
     /// `hf://org/dataset-name` source URI.  Must be a private repo to
     /// exercise the token authentication path end-to-end.
     pub const TRIPLETS_HF_TOKEN_TEST_DATASET: &str = "TRIPLETS_HF_TOKEN_TEST_DATASET";
+
+    /// Overrides the Hugging Face whoami endpoint URL used for token validation.
+    ///
+    /// When set to a non-blank value, `whoami_endpoint()` returns this value
+    /// instead of the default `https://huggingface.co/api/whoami-v2`.
+    /// Useful for test doubles and air-gapped / on-premises deployments.
+    pub const TRIPLETS_HF_WHOAMI_ENDPOINT: &str = "TRIPLETS_HF_WHOAMI_ENDPOINT";
 }
 
 /// Constants used by capacity estimation heuristics.
