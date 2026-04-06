@@ -142,6 +142,108 @@ Streams rows directly from the Hugging Face Hub without requiring a full dataset
 }
 ```
 
+#### Column Mapping Modes
+
+The HF source supports two exclusive extraction modes, selected by which fields are populated on `HuggingFaceRowsConfig`:
+
+**Role mode** — activated when `anchor_columns`, `positive_columns`, or `context_columns` is non-empty. Each row produces a `DataRecord` with explicitly assigned section roles:
+
+| Config field       | Coalesces? | `SectionRole` produced          | Behaviour when missing / empty                   |
+| ------------------ | ---------- | ------------------------------- | ------------------------------------------------ |
+| `anchor_columns`   | Yes        | `Anchor`                        | Row is skipped                                   |
+| `positive_columns` | Yes        | `Context`                       | Row is skipped                                   |
+| `context_columns`  | No         | `Context` (one section per col) | Row is skipped if **any** column is absent/blank |
+
+*Coalescing* means multiple candidate column names can be supplied; the first with a non-empty value is used and the rest are ignored. `context_columns` does **not** coalesce — every listed column is strictly required and each contributes its own independent section.
+
+**Text mode** — used when `anchor_columns` is empty and `text_columns` is non-empty. The first non-empty candidate column supplies the sole content for the row. This is the SimCSE-style path where the model learns from augmented views of the same text.
+
+##### Role mode: three-column datasets (question / answer / context)
+
+Datasets that pair a question with both an answer and a passage of supporting context — common in RAG evaluation sets — can be ingested with a single source-list line:
+
+```
+# in hf_sources.txt
+hf://zeitgeist-ai/financial-rag-nvidia-sec/default/train anchor=question positive=answer context=context
+```
+
+Or programmatically via `context_columns`:
+
+```rust,no_run
+#[cfg(feature = "huggingface")]
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    use triplets::{HuggingFaceRowSource, HuggingFaceRowsConfig};
+
+    let mut config = HuggingFaceRowsConfig::new(
+        "hf_fin_rag",
+        "zeitgeist-ai/financial-rag-nvidia-sec",
+        "default",
+        "train",
+        "cache/hf_snapshots",
+    );
+    config.anchor_columns   = vec!["question".to_string()];
+    config.positive_columns = vec!["answer".to_string()];
+    config.context_columns  = vec!["context".to_string()];
+
+    let source = HuggingFaceRowSource::new(config)?;
+    let _ = source;
+    Ok(())
+}
+```
+
+Each ingested row produces a `DataRecord` with three sections in declaration order:
+
+| Section | Source column | `SectionRole` |
+| ------- | ------------- | ------------- |
+| 0       | `question`    | `Anchor`      |
+| 1       | `answer`      | `Context`     |
+| 2       | `context`     | `Context`     |
+
+Because both the positive column and every context column are emitted as `SectionRole::Context` sections, a recipe using `Selector::Role(SectionRole::Context)` will see all of them as candidates.
+
+> **Row-skipping**: if any column listed in `context_columns` is absent from a row or contains an empty string, that row is silently dropped. This hard requirement prevents partially-populated rows from appearing in training batches. `anchor_columns` and `positive_columns` behave the same way — a row is skipped if the coalesced result is empty.
+
+Multiple context columns are supported and each produces its own section, in the order they are declared:
+
+```
+hf://my-org/my-dataset/default/train anchor=title positive=summary context=body,tags
+```
+
+#### Source-list file format
+
+When using `build_hf_sources` / `load_hf_sources_from_list`, sources are described one per line in a plain-text file. Lines starting with `#` are comments; blank lines are ignored.
+
+```
+hf://<org>/<dataset>/<config>/<split>  key=value  [key=value ...]
+```
+
+Every accepted key and its semantics:
+
+| Key                       | Value                       | Accepts commas? | Required?                                                              | Description                                                                                                                                                                              |
+| ------------------------- | --------------------------- | --------------- | ---------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `anchor=`                 | one or more column names    | Yes             | At least one of `anchor`, `positive`, `context`, or `text` is required | Activates role mode. Columns are tried in order; the first non-empty value is used as the `Anchor` section. Row skipped if all candidates are absent/empty.                              |
+| `positive=`               | one or more column names    | Yes             | No                                                                     | Activates role mode. Columns are tried in order; the first non-empty value becomes a `Context` section. Row skipped if all candidates are absent/empty.                                  |
+| `context=`                | one or more column names    | Yes             | No                                                                     | Activates role mode. Every listed column is required — if any is absent or blank the row is dropped. Each column becomes its own `Context` section, in declaration order. No coalescing. |
+| `text=` / `text_columns=` | one or more column names    | Yes             | At least one mapping key is required                                   | Activates text mode (SimCSE). Columns are tried in order; the first non-empty value is the sole content of the record. Ignored when role mode is active. Both spellings are equivalent.  |
+| `trust=`                  | float in `[0.0, 1.0]`       | No              | No (default: `0.5`)                                                    | Overrides the quality trust score stamped on every record produced by this source. Out-of-range values or non-float strings are hard errors at parse time.                               |
+| `source_id=`              | non-empty identifier string | No              | No (auto-derived when absent)                                          | Overrides the automatically generated source identifier. Must not be empty.                                                                                                              |
+
+**Auto-derived `source_id`**
+
+When `source_id=` is omitted, an identifier is derived from the URI:
+
+1. The short dataset name (the part after the last `/` in the org/dataset pair) is taken as the base.
+2. If the config is not `"default"`, it is appended as `.config`.
+3. If the split is not `"train"`, it is appended as `.split`.
+4. Special characters are sanitized to underscores.
+5. If two sources produce the same auto-slug, `.{index}` is appended to the second and subsequent collisions.
+
+Examples: `hf://org/wikipedia/20231101.en/train` → `wikipedia.20231101_en`; `hf://org/dataset/default/validation` → `dataset.validation`.
+
+**Error behaviour**
+
+Unknown keys (including typos such as `positve=`) are hard errors — the parser rejects the line immediately rather than silently ignoring the key. This prevents misconfigured sources from being silently loaded with missing column mappings. A line with no recognised mapping key (`anchor=`, `positive=`, `context=`, or `text=`) is also rejected.
+
 #### Authenticating with Private Datasets
 
 To access private or gated datasets set the `HF_TOKEN` environment variable to a valid
