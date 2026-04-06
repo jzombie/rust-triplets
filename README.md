@@ -142,6 +142,73 @@ Streams rows directly from the Hugging Face Hub without requiring a full dataset
 }
 ```
 
+#### Column Mapping Modes
+
+The HF source supports two exclusive extraction modes, selected by which fields are populated on `HuggingFaceRowsConfig`:
+
+**Role mode** — activated when `anchor_columns`, `positive_columns`, or `context_columns` is non-empty. Each row produces a `DataRecord` with explicitly assigned section roles:
+
+| Config field       | Coalesces? | `SectionRole` produced          | Behaviour when missing / empty                   |
+| ------------------ | ---------- | ------------------------------- | ------------------------------------------------ |
+| `anchor_columns`   | Yes        | `Anchor`                        | Row is skipped                                   |
+| `positive_columns` | Yes        | `Context`                       | Row is skipped                                   |
+| `context_columns`  | No         | `Context` (one section per col) | Row is skipped if **any** column is absent/blank |
+
+*Coalescing* means multiple candidate column names can be supplied; the first with a non-empty value is used and the rest are ignored. `context_columns` does **not** coalesce — every listed column is strictly required and each contributes its own independent section.
+
+**Text mode** — used when `anchor_columns` is empty and `text_columns` is non-empty. The first non-empty candidate column supplies the sole content for the row. This is the SimCSE-style path where the model learns from augmented views of the same text.
+
+##### Role mode: three-column datasets (question / answer / context)
+
+Datasets that pair a question with both an answer and a passage of supporting context — common in RAG evaluation sets — can be ingested with a single source-list line:
+
+```
+# in hf_sources.txt
+hf://zeitgeist-ai/financial-rag-nvidia-sec/default/train anchor=question positive=answer context=context
+```
+
+Or programmatically via `context_columns`:
+
+```rust,no_run
+#[cfg(feature = "huggingface")]
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    use triplets::{HuggingFaceRowSource, HuggingFaceRowsConfig};
+
+    let mut config = HuggingFaceRowsConfig::new(
+        "hf_fin_rag",
+        "zeitgeist-ai/financial-rag-nvidia-sec",
+        "default",
+        "train",
+        "cache/hf_snapshots",
+    );
+    config.anchor_columns   = vec!["question".to_string()];
+    config.positive_columns = vec!["answer".to_string()];
+    config.context_columns  = vec!["context".to_string()];
+
+    let source = HuggingFaceRowSource::new(config)?;
+    let _ = source;
+    Ok(())
+}
+```
+
+Each ingested row produces a `DataRecord` with three sections in declaration order:
+
+| Section | Source column | `SectionRole` |
+| ------- | ------------- | ------------- |
+| 0       | `question`    | `Anchor`      |
+| 1       | `answer`      | `Context`     |
+| 2       | `context`     | `Context`     |
+
+Because both the positive column and every context column are emitted as `SectionRole::Context` sections, a recipe using `Selector::Role(SectionRole::Context)` will see all of them as candidates.
+
+> **Row-skipping**: if any column listed in `context_columns` is absent from a row or contains an empty string, that row is silently dropped. This hard requirement prevents partially-populated rows from appearing in training batches. `anchor_columns` and `positive_columns` behave the same way — a row is skipped if the coalesced result is empty.
+
+Multiple context columns are supported and each produces its own section, in the order they are declared:
+
+```
+hf://my-org/my-dataset/default/train anchor=title positive=summary context=body,tags
+```
+
 #### Authenticating with Private Datasets
 
 To access private or gated datasets set the `HF_TOKEN` environment variable to a valid
