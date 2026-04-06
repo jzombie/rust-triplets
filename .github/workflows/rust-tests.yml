@@ -19,7 +19,6 @@ jobs:
   test_matrix:
     name: test (OS=${{ matrix.os }}, Features=${{ matrix.name }})
     runs-on: ${{ matrix.os }}
-    environment: CI
 
     strategy:
       fail-fast: false
@@ -78,7 +77,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           TRIPLETS_HF_TOKEN_TEST_DATASET: ${{ secrets.TRIPLETS_HF_TOKEN_TEST_DATASET }}
-          
+
           # Skip live network tests automatically when credentials are absent
           # (e.g. pull requests from forks where secrets are not injected).
           #
@@ -114,7 +113,6 @@ jobs:
   coverage:
     name: coverage (cargo-llvm-cov)
     runs-on: ubuntu-latest
-    environment: CI
     needs: test_matrix
     outputs:
       line_coverage: ${{ steps.cov-summary.outputs.line_percent }}
