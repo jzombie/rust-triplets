@@ -4344,6 +4344,79 @@ fn source_recipes_drive_text_sampling() {
     assert!(batch.samples[0].recipe.starts_with("inline_title_context_"));
 }
 
+/// Verifies that `next_text_batch` reaches all three selector slots (`_anchor`,
+/// `_positive`, `_negative`) derived from a role-mode triplet recipe.
+/// `build_derived_text_recipes` expands one triplet recipe into three derived
+/// selectors — one per slot — and this ensures none are silently dropped by
+/// the selector dispatch.
+#[test]
+fn role_mode_text_batches_cover_all_three_selector_slots() {
+    let split = SplitRatios::default();
+    let config = SamplerConfig {
+        seed: 77,
+        batch_size: 1,
+        chunking: ChunkingStrategy::default(),
+        recipes: vec![],
+        text_recipes: vec![],
+        split,
+        ..SamplerConfig::default()
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 77).unwrap());
+    let recipes = vec![TripletRecipe {
+        name: "role_mode_recipe".into(),
+        anchor: Selector::Role(SectionRole::Anchor),
+        positive_selector: Selector::Role(SectionRole::Context),
+        negative_selector: Selector::Role(SectionRole::Context),
+        negative_strategy: NegativeStrategy::WrongArticle,
+        weight: 1.0,
+        instruction: None,
+        allow_same_anchor_positive: false,
+    }];
+    let records: Vec<DataRecord> = (0..6)
+        .map(|i| {
+            trader_record(
+                &format!("src::article_{i}"),
+                "2025-01-01",
+                &format!("Title {i}"),
+                &format!("Body text {i}"),
+            )
+        })
+        .collect();
+    let sampler = TripletSampler::new(config, store);
+    sampler.register_source(Box::new(RecipeSource::new(records, recipes)));
+
+    let mut seen_anchor = false;
+    let mut seen_positive = false;
+    let mut seen_negative = false;
+    for _ in 0..64 {
+        let batch = sampler.next_text_batch(SplitLabel::Train).unwrap();
+        for sample in &batch.samples {
+            match sample.recipe.as_str() {
+                "role_mode_recipe_anchor" => seen_anchor = true,
+                "role_mode_recipe_positive" => seen_positive = true,
+                "role_mode_recipe_negative" => seen_negative = true,
+                _ => {}
+            }
+        }
+        if seen_anchor && seen_positive && seen_negative {
+            break;
+        }
+    }
+
+    assert!(
+        seen_anchor,
+        "text batch never sampled the _anchor derived recipe"
+    );
+    assert!(
+        seen_positive,
+        "text batch never sampled the _positive derived recipe"
+    );
+    assert!(
+        seen_negative,
+        "text batch never sampled the _negative derived recipe"
+    );
+}
+
 #[test]
 fn source_a_negative_pairs_follow_strategy() {
     let split = SplitRatios::default();
