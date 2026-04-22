@@ -52,7 +52,7 @@ In metric learning and language model training, a **triplet** consists of an **a
 
 A `TripletSampler` needs a `SplitStore` for record-to-split assignments and a `SamplerConfig` for runtime behavior.
 
-```rust
+```rust,no_run
 use std::sync::Arc;
 use triplets::{
     BatchPrefetcher, SamplerConfig, TripletSampler, TripletBatch,
@@ -99,7 +99,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## Cargo Features
 
 | Feature            | What it enables                                                               | Default |
-| ------------------ | ----------------------------------------------------------------------------- | ------- |
+|--------------------|-------------------------------------------------------------------------------|---------|
 | `huggingface`      | [Streaming from Hugging Face dataset repositories.](#hugging-face-source)     | No      |
 | `bm25-mining`      | [BM25 hard-negative ranking within strategy-defined pools.](#negative-mining) | No      |
 | `extended-metrics` | Additional per-triplet diagnostics for debugging.                             | No      |
@@ -149,7 +149,7 @@ The HF source supports two exclusive extraction modes, selected by which fields 
 **Role mode** — activated when `anchor_columns`, `positive_columns`, or `context_columns` is non-empty. Each row produces a `DataRecord` with explicitly assigned section roles:
 
 | Config field       | Coalesces? | `SectionRole` produced          | Behaviour when missing / empty                   |
-| ------------------ | ---------- | ------------------------------- | ------------------------------------------------ |
+|--------------------|------------|---------------------------------|--------------------------------------------------|
 | `anchor_columns`   | Yes        | `Anchor`                        | Row is skipped                                   |
 | `positive_columns` | Yes        | `Context`                       | Row is skipped                                   |
 | `context_columns`  | No         | `Context` (one section per col) | Row is skipped if **any** column is absent/blank |
@@ -162,7 +162,7 @@ The HF source supports two exclusive extraction modes, selected by which fields 
 
 Datasets that pair a question with both an answer and a passage of supporting context — common in RAG evaluation sets — can be ingested with a single source-list line:
 
-```
+```text
 # in hf_sources.txt
 hf://zeitgeist-ai/financial-rag-nvidia-sec/default/train anchor=question positive=answer context=context
 ```
@@ -189,12 +189,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = source;
     Ok(())
 }
+
+#[cfg(not(feature = "huggingface"))]
+fn main() {}
 ```
 
 Each ingested row produces a `DataRecord` with three sections in declaration order:
 
 | Section | Source column | `SectionRole` |
-| ------- | ------------- | ------------- |
+|---------|---------------|---------------|
 | 0       | `question`    | `Anchor`      |
 | 1       | `answer`      | `Context`     |
 | 2       | `context`     | `Context`     |
@@ -205,7 +208,7 @@ Because both the positive column and every context column are emitted as `Sectio
 
 Multiple context columns are supported and each produces its own section, in the order they are declared:
 
-```
+```text
 hf://my-org/my-dataset/default/train anchor=title positive=summary context=body,tags
 ```
 
@@ -213,14 +216,14 @@ hf://my-org/my-dataset/default/train anchor=title positive=summary context=body,
 
 When using `build_hf_sources` / `load_hf_sources_from_list`, sources are described one per line in a plain-text file. Lines starting with `#` are comments; blank lines are ignored.
 
-```
+```text
 hf://<org>/<dataset>/<config>/<split>  key=value  [key=value ...]
 ```
 
 Every accepted key and its semantics:
 
 | Key                       | Value                       | Accepts commas? | Required?                                                              | Description                                                                                                                                                                              |
-| ------------------------- | --------------------------- | --------------- | ---------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+|---------------------------|-----------------------------|-----------------|------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `anchor=`                 | one or more column names    | Yes             | At least one of `anchor`, `positive`, `context`, or `text` is required | Activates role mode. Columns are tried in order; the first non-empty value is used as the `Anchor` section. Row skipped if all candidates are absent/empty.                              |
 | `positive=`               | one or more column names    | Yes             | No                                                                     | Activates role mode. Columns are tried in order; the first non-empty value becomes a `Context` section. Row skipped if all candidates are absent/empty.                                  |
 | `context=`                | one or more column names    | Yes             | No                                                                     | Activates role mode. Every listed column is required — if any is absent or blank the row is dropped. Each column becomes its own `Context` section, in declaration order. No coalescing. |
@@ -256,7 +259,7 @@ download. If the token is invalid or expired, `HuggingFaceRowSource::new()` retu
 error immediately rather than silently degrading later.
 
 | Platform                 | Command                                                |
-| ------------------------ | ------------------------------------------------------ |
+|--------------------------|--------------------------------------------------------|
 | macOS / Linux            | `export HF_TOKEN="hf_..."`                             |
 | Windows — Command Prompt | `set HF_TOKEN=hf_...`                                  |
 | Windows — PowerShell     | `$env:HF_TOKEN = "hf_..."`                             |
@@ -284,6 +287,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = source;
     Ok(())
 }
+
+#[cfg(not(feature = "huggingface"))]
+fn main() {}
 ```
 
 > **Security**: never commit tokens to source control. Use environment variables, a secrets
@@ -466,7 +472,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 The `weight` field on `TripletRecipe` controls **how often a recipe is selected** relative to other active recipes. The sampler expands each recipe into a proportional number of selection slots, shuffles them, and cycles through — so a recipe with `weight = 3.0` is drawn approximately three times as often as one with `weight = 1.0`.
 
 | `weight` value                            | Effect                                                                                                  |
-| ----------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+|-------------------------------------------|---------------------------------------------------------------------------------------------------------|
 | Equal across all recipes (e.g. all `1.0`) | Uniform round-robin — each recipe is selected equally often (default behavior).                         |
 | `2.0` vs `1.0`                            | The `2.0` recipe is tried ~2× as often per batch.                                                       |
 | `0.0` or negative                         | Recipe is **excluded entirely** — useful for disabling a recipe without removing it from configuration. |
@@ -615,7 +621,7 @@ for triplet in batch.triplets {
 The value is computed as `triplet.weight = recipe.weight × chunk_quality`, where `chunk_quality` is the average of three per-slot signals (one per chunk: anchor, positive, negative). Each signal is the product of two independent factors:
 
 | Factor                    | What it measures                                                                                                          | How it is set                                    |
-| ------------------------- | ------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+|---------------------------|---------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------|
 | **Window position score** | `1 / (window_index + 1)` — earlier chunks in a section score higher (1.0 at index 0, 0.5 at index 1, 0.25 at index 3, …). | Automatic.                                       |
 | **Source trust**          | Configured quality signal for the originating source (clamped to `[0, 1]`).                                               | Set via `.with_trust(0.9)` on the source config. |
 
@@ -661,7 +667,7 @@ Not every record needs to have all sections. If a recipe targets `Selector::Para
 Imagine each record represents one publicly-traded company with up to three sections:
 
 | Index | Role           | Content                                                       | Always present?                       |
-| ----- | -------------- | ------------------------------------------------------------- | ------------------------------------- |
+|-------|----------------|---------------------------------------------------------------|---------------------------------------|
 | 0     | `Anchor`       | Linearized financial metrics — view A (a random tag subset)   | Yes                                   |
 | 1     | `Context`      | Linearized financial metrics — view B (a disjoint tag subset) | Yes                                   |
 | 2     | *(positional)* | Earnings-call transcript for the same period                  | No — only when a transcript was found |
@@ -812,7 +818,7 @@ meta: date=Jan 1, 2025 | source=daily-update
 The `dropout` parameter controls how often the prefix is included at all:
 
 | `dropout` | Effect                                                                              |
-| --------- | ----------------------------------------------------------------------------------- |
+|-----------|-------------------------------------------------------------------------------------|
 | `1.0`     | Prefix is **always** prepended.                                                     |
 | `0.5`     | Prefix is prepended ~half the time; the rest of the time the model sees plain text. |
 | `0.0`     | Prefix is **never** prepended.                                                      |
@@ -973,7 +979,7 @@ Negative selection is delegated to a pluggable backend.
 ## Capabilities
 
 | Capability              | Description                                                                   |
-| ----------------------- | ----------------------------------------------------------------------------- |
+|-------------------------|-------------------------------------------------------------------------------|
 | **Source Agnostic**     | Implement `DataSource` or `IndexableSource` for any DB or API.                |
 | **Weighted Sampling**   | Tune source and recipe frequencies to handle class imbalance.                 |
 | **Epoch Shuffling**     | Deterministic pseudo-random shuffling that re-permutes per epoch.             |

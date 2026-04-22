@@ -44,6 +44,11 @@ pub struct FileSourceConfig {
     pub title_replace_underscores: bool,
     /// Whether default recipe set includes the date-aware negative lane.
     pub include_date_aware_default_recipe: bool,
+    /// Optional directory used for persisted file-corpus index stores.
+    ///
+    /// When `None`, file-corpus indexing uses the managed cache discovery root.
+    /// Set this in tests to keep index writes inside temporary directories.
+    pub index_dir: Option<PathBuf>,
     /// Optional default recipes returned by this source.
     pub default_triplet_recipes: Vec<TripletRecipe>,
     /// Taxonomy builder invoked per file.
@@ -65,6 +70,7 @@ impl FileSourceConfig {
             group_by_directory: true,
             title_replace_underscores: true,
             include_date_aware_default_recipe: false,
+            index_dir: None,
             default_triplet_recipes: default_title_context_triplet_recipes(false),
             taxonomy_builder: Arc::new(taxonomy_from_path),
             section_builder: Arc::new(anchor_context_sections),
@@ -115,6 +121,12 @@ impl FileSourceConfig {
     pub fn with_date_aware_default_recipe(mut self, include: bool) -> Self {
         self.include_date_aware_default_recipe = include;
         self.default_triplet_recipes = default_title_context_triplet_recipes(include);
+        self
+    }
+
+    /// Override the directory used to persist file-corpus index stores.
+    pub fn with_index_dir(mut self, index_dir: impl Into<PathBuf>) -> Self {
+        self.index_dir = Some(index_dir.into());
         self
     }
 
@@ -209,11 +221,17 @@ impl FileSource {
     }
 
     fn file_corpus_index(&self, sampler_seed: u64) -> FileCorpusIndex {
-        FileCorpusIndex::new(&self.config.root, &self.config.source_id)
+        let mut index = FileCorpusIndex::new(&self.config.root, &self.config.source_id)
             .with_sampler_seed(sampler_seed)
             .with_follow_links(self.config.follow_links)
             .with_text_files_only(self.config.text_files_only)
-            .with_directory_grouping(self.config.group_by_directory)
+            .with_directory_grouping(self.config.group_by_directory);
+
+        if let Some(index_dir) = &self.config.index_dir {
+            index = index.with_index_dir(index_dir.clone());
+        }
+
+        index
     }
 
     fn trust_for_taxonomy(&self, taxonomy: &[String]) -> f32 {
@@ -641,5 +659,67 @@ mod tests {
 
         assert_eq!(ids_a, ids_b);
         assert_ne!(ids_a, ids_c);
+    }
+
+    #[test]
+    fn with_index_dir_persists_refresh_index_store_under_custom_directory() {
+        let temp = tempdir().unwrap();
+        let index_temp = tempdir().unwrap();
+        std::fs::write(temp.path().join("alpha.txt"), "Alpha body").unwrap();
+
+        let custom_index_dir = index_temp.path().join("custom_index_store");
+        std::fs::create_dir_all(&custom_index_dir).unwrap();
+
+        let source_id = "qa_custom_index_refresh".to_string();
+        let source = FileSource::new(
+            FileSourceConfig::new(source_id.clone(), temp.path())
+                .with_index_dir(custom_index_dir.clone()),
+        );
+
+        let snapshot = source.refresh(&sampler_config(101), None, None).unwrap();
+        assert_eq!(snapshot.records.len(), 1);
+
+        let expected_store_path = FileCorpusIndex::index_store_path_for(
+            Some(custom_index_dir.as_path()),
+            temp.path(),
+            &source_id,
+        );
+        assert!(
+            expected_store_path.is_file(),
+            "expected index store to exist at {}",
+            expected_store_path.display()
+        );
+    }
+
+    #[test]
+    fn with_index_dir_persists_count_index_store_under_custom_directory() {
+        let temp = tempdir().unwrap();
+        let index_temp = tempdir().unwrap();
+        std::fs::write(temp.path().join("alpha.txt"), "Alpha body").unwrap();
+
+        let custom_index_dir = index_temp.path().join("custom_index_store");
+        std::fs::create_dir_all(&custom_index_dir).unwrap();
+
+        let source_id = "qa_custom_index_count".to_string();
+        let source = FileSource::new(
+            FileSourceConfig::new(source_id.clone(), temp.path())
+                .with_index_dir(custom_index_dir.clone()),
+        );
+
+        assert_eq!(
+            source.reported_record_count(&sampler_config(101)).unwrap(),
+            1
+        );
+
+        let expected_store_path = FileCorpusIndex::index_store_path_for(
+            Some(custom_index_dir.as_path()),
+            temp.path(),
+            &source_id,
+        );
+        assert!(
+            expected_store_path.is_file(),
+            "expected index store to exist at {}",
+            expected_store_path.display()
+        );
     }
 }
