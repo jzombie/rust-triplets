@@ -1,6 +1,6 @@
 <p align="center">
   <h1 align="center">⛏️ triplets</h1>
-  <p align="center"><strong>A composable, deterministic text data pipeline for ML/AI. Ingest, denoise, chunk, split, and sample multi-source corpora into reproducible training triplets and pairs.</strong></p>
+  <p align="center"><strong>A composable, deterministic text data pipeline for ML/AI.<br />Ingest, denoise, chunk, split, and sample multi-source corpora into reproducible training triplets and pairs.</strong></p>
   <p align="center">
     <a href="#getting-started">Getting Started</a> &middot;
     <a href="#cargo-features">Cargo Features</a> &middot;
