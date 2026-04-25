@@ -245,6 +245,7 @@ fn huggingface_text_mode_triplets_can_use_different_anchor_positive_windows() {
         summary_fallback_weight: 0.0,
         summary_fallback_tokens: 0,
         chunk_weight_floor: 0.0,
+        ..ChunkingStrategy::default()
     };
 
     let store = Arc::new(DeterministicSplitStore::new(split, 777).expect("split store"));

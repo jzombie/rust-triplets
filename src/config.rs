@@ -5,33 +5,21 @@ use std::borrow::Cow;
 /// Configuration for the OCR denoiser that filters digit-heavy text.
 ///
 /// When enabled, text sections that are predominantly numerical (e.g. mangled OCR tables)
-/// are either dropped entirely or stripped down to their alphabetical content, depending
-/// on `line_level`.
+/// are stripped down to their alphabetical content on a line-by-line basis, or dropped
+/// entirely when no alphabetical content remains.
 #[derive(Clone, Debug)]
 pub struct DenoiserConfig {
-    /// Whether denoising is active. Defaults to `false` so existing behaviour is unchanged.
+    /// Whether denoising is active. Defaults to `false` so existing behavior is unchanged.
     pub enabled: bool,
     /// Maximum ratio of digit characters to (digit + alphabetical) characters before a
-    /// section is considered mangled OCR output. Range: `0.0`–`1.0`.
+    /// line is considered mangled OCR output. Range: `0.0`–`1.0`.
     ///
-    /// A value of `0.35` means that if more than 35 % of the alphanumeric characters in
-    /// the evaluated unit (a line or a whole block) are digits, the content is treated as
-    /// a mangled table and dropped or stripped.
+    /// A value of `0.35` means that if more than 35% of the alphanumeric characters on a
+    /// line are digits, the line is treated as a mangled table row and stripped down to
+    /// its alphabetical tokens.
     ///
     /// Defaults to `0.35`.
     pub max_digit_ratio: f32,
-    /// When `true`, the rule is applied line-by-line within a section.
-    ///
-    /// Lines that exceed the threshold have their digit-heavy tokens stripped so that only
-    /// tokens containing at least one alphabetical character are retained. Lines that
-    /// become empty after stripping are dropped. The section is only dropped in its entirety
-    /// if *every* line is removed.
-    ///
-    /// When `false`, the ratio is evaluated for the whole section text. If the section
-    /// exceeds the threshold the entire section is dropped and no chunks are produced.
-    ///
-    /// Defaults to `true`.
-    pub line_level: bool,
 }
 
 impl Default for DenoiserConfig {
@@ -39,7 +27,6 @@ impl Default for DenoiserConfig {
         Self {
             enabled: false,
             max_digit_ratio: 0.35,
-            line_level: true,
         }
     }
 }

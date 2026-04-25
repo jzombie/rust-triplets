@@ -100,9 +100,7 @@ fn strip_table_pipes(line: &str) -> String {
 /// Returns `Some(cleaned)` with the (possibly stripped) text, or `None` when
 /// the entire block should be dropped and no chunks should be produced.
 ///
-/// # Line-level mode (`config.line_level == true`)
-///
-/// Line endings are first normalised with [`LineEnding::normalize`].  Each
+/// Line endings are first normalized with [`LineEnding::normalize`].  Each
 /// line is then evaluated through three gates in order:
 ///
 /// 1. **Markdown table formatting** — GFM pipe-table rows (trimmed form
@@ -115,7 +113,7 @@ fn strip_table_pipes(line: &str) -> String {
 ///
 /// 2. **No alphabetical characters** — lines that contain zero alphabetical
 ///    characters (all-numeric rows, symbol/dash-only rows, OCR separator
-///    artefacts) are dropped.
+///    artifacts) are dropped.
 ///
 /// 3. **High digit ratio** — lines whose `digit / (digit + alpha)` ratio
 ///    exceeds `config.max_digit_ratio` are *stripped*: only whitespace-
@@ -124,12 +122,6 @@ fn strip_table_pipes(line: &str) -> String {
 ///
 /// `None` is returned only when every line is removed.
 ///
-/// # Whole-block mode (`config.line_level == false`)
-///
-/// The ratio is computed for the entire block.  If it exceeds the threshold
-/// the whole block is dropped (`None`); otherwise the block is returned
-/// unchanged.
-///
 /// When `config.enabled` is `false` the function returns `Some(text.to_string())`
 /// unconditionally.
 pub fn denoise_text(text: &str, config: &DenoiserConfig) -> Option<String> {
@@ -137,54 +129,46 @@ pub fn denoise_text(text: &str, config: &DenoiserConfig) -> Option<String> {
         return Some(text.to_string());
     }
 
-    if config.line_level {
-        let normalized = LineEnding::normalize(text);
-        let mut cleaned_lines: Vec<String> = Vec::new();
-        for line in normalized.lines() {
-            // Gate 1: markdown table formatting.
-            // Separator rows (containing only |, -, :, and whitespace) carry no
-            // textual content and are dropped.  Header and data rows have their
-            // pipe delimiters stripped; the extracted cell text then passes
-            // through gates 2 and 3 like any other line.
-            let table_stripped = if is_markdown_table_line(line) {
-                if is_markdown_table_separator(line) {
-                    continue;
-                }
-                Some(strip_table_pipes(line))
-            } else {
-                None
-            };
-            let effective = table_stripped.as_deref().unwrap_or(line);
-
-            // Gate 2: no alphabetical characters → drop (all-numeric lines,
-            //         symbol-only rows, OCR column-separator artefacts, etc.).
-            let (_, alpha) = count_digit_alpha(effective);
-            if alpha == 0 {
+    let normalized = LineEnding::normalize(text);
+    let mut cleaned_lines: Vec<String> = Vec::new();
+    for line in normalized.lines() {
+        // Gate 1: markdown table formatting.
+        // Separator rows (containing only |, -, :, and whitespace) carry no
+        // textual content and are dropped.  Header and data rows have their
+        // pipe delimiters stripped; the extracted cell text then passes
+        // through gates 2 and 3 like any other line.
+        let table_stripped = if is_markdown_table_line(line) {
+            if is_markdown_table_separator(line) {
                 continue;
             }
+            Some(strip_table_pipes(line))
+        } else {
+            None
+        };
+        let effective = table_stripped.as_deref().unwrap_or(line);
 
-            // Gate 3: digit-heavy line → strip to alpha-bearing tokens only.
-            if digit_ratio(effective) > config.max_digit_ratio {
-                let retained = strip_digit_tokens(effective);
-                if !retained.is_empty() {
-                    cleaned_lines.push(retained);
-                }
-                // else: drop the line entirely
-            } else {
-                cleaned_lines.push(effective.to_string());
+        // Gate 2: no alphabetical characters → drop (all-numeric lines,
+        //         symbol-only rows, OCR column-separator artifacts, etc.).
+        let (_, alpha) = count_digit_alpha(effective);
+        if alpha == 0 {
+            continue;
+        }
+
+        // Gate 3: digit-heavy line → strip to alpha-bearing tokens only.
+        if digit_ratio(effective) > config.max_digit_ratio {
+            let retained = strip_digit_tokens(effective);
+            if !retained.is_empty() {
+                cleaned_lines.push(retained);
             }
-        }
-        if cleaned_lines.is_empty() {
-            None
+            // else: drop the line entirely
         } else {
-            Some(cleaned_lines.join("\n"))
+            cleaned_lines.push(effective.to_string());
         }
+    }
+    if cleaned_lines.is_empty() {
+        None
     } else {
-        if digit_ratio(text) > config.max_digit_ratio {
-            None
-        } else {
-            Some(text.to_string())
-        }
+        Some(cleaned_lines.join("\n"))
     }
 }
 
@@ -197,11 +181,10 @@ mod tests {
     use super::*;
     use indoc::indoc;
 
-    fn denoiser_enabled(line_level: bool) -> DenoiserConfig {
+    fn denoiser_enabled() -> DenoiserConfig {
         DenoiserConfig {
             enabled: true,
             max_digit_ratio: 0.35,
-            line_level,
         }
     }
 
@@ -328,12 +311,12 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Whole-block mode
+    // Single digit-heavy line / below-threshold pass-through
     // -----------------------------------------------------------------------
 
     #[test]
-    fn denoise_whole_block_drops_digit_heavy_text() {
-        let cfg = denoiser_enabled(false);
+    fn denoise_drops_digit_heavy_single_line() {
+        let cfg = denoiser_enabled();
         let input = "42 524 10788 143 1995 190 394 13611 358 6444 266";
         assert_eq!(denoise_text(input, &cfg), None);
     }
@@ -341,20 +324,20 @@ mod tests {
     /// Below the threshold every character — including numbers and symbols —
     /// must be returned verbatim.
     #[test]
-    fn denoise_whole_block_below_threshold_preserves_numbers_and_symbols() {
-        let cfg = denoiser_enabled(false);
+    fn denoise_below_threshold_preserves_numbers_and_symbols() {
+        let cfg = denoiser_enabled();
         // ratio ≈ 0.12 — well below 0.35.
         let input = "Q3 revenue grew 12% to $4.2B, up from $3.8B in Q2 (a 10.5% increase).";
         assert_eq!(
             denoise_text(input, &cfg),
             Some(input.to_string()),
-            "below-threshold block must be returned byte-for-byte"
+            "below-threshold line must be returned byte-for-byte"
         );
     }
 
     #[test]
-    fn denoise_whole_block_keeps_text_light_on_digits() {
-        let cfg = denoiser_enabled(false);
+    fn denoise_pure_text_passes_through() {
+        let cfg = denoiser_enabled();
         let input = "The quick brown fox jumps over the lazy dog";
         assert_eq!(denoise_text(input, &cfg), Some(input.to_string()));
     }
@@ -365,13 +348,13 @@ mod tests {
 
     #[test]
     fn denoise_empty_input_returns_none_when_enabled() {
-        let cfg = denoiser_enabled(true);
+        let cfg = denoiser_enabled();
         assert_eq!(denoise_text("", &cfg), None);
     }
 
     #[test]
     fn denoise_line_level_returns_none_when_all_lines_dropped() {
-        let cfg = denoiser_enabled(true);
+        let cfg = denoiser_enabled();
         let input = indoc! {"
             42 524 10788
             143 1995 190
@@ -382,7 +365,7 @@ mod tests {
 
     #[test]
     fn denoise_line_level_preserves_clean_lines_unchanged() {
-        let cfg = denoiser_enabled(true);
+        let cfg = denoiser_enabled();
         let clean = "Climate change drives ocean temperatures higher each decade.";
         let result = denoise_text(clean, &cfg).expect("clean text should be kept");
         assert_eq!(result, clean);
@@ -392,7 +375,7 @@ mod tests {
     /// through byte-for-byte; no tokens should be stripped.
     #[test]
     fn denoise_line_level_below_threshold_line_preserves_numbers_and_symbols() {
-        let cfg = denoiser_enabled(true);
+        let cfg = denoiser_enabled();
         // ratio ≈ 0.18 — alpha-heavy enough not to trigger the rule.
         let input = "See section 3.1 (page 42) for details on the Q2 results.";
         let result = denoise_text(input, &cfg).expect("below-threshold line must be kept");
@@ -406,7 +389,7 @@ mod tests {
     /// numbers and special characters pass through unchanged.
     #[test]
     fn denoise_line_level_clean_lines_with_numbers_preserved_junk_stripped() {
-        let cfg = denoiser_enabled(true);
+        let cfg = denoiser_enabled();
         let input = indoc! {"
             Revenue grew 8% to $2.1B in FY2025 (vs $1.9B prior year).
             42 9871 3302 19283 4710 22913 5518 30021 6627 41132 7736 52243
@@ -432,7 +415,7 @@ mod tests {
     /// stripped while the text tokens survive.
     #[test]
     fn denoise_line_level_mixed_content_same_line() {
-        let cfg = denoiser_enabled(true);
+        let cfg = denoiser_enabled();
         let input = indoc! {"
             42 524 NOVEX INDUSTRIES Springfield 10788 143 1995 190 394 13611 358
             343 294 ZETA POWER Riverside 10758 31 1283 267 189 45432 175
@@ -462,7 +445,7 @@ mod tests {
     /// `None` only when *every* line is removed.
     #[test]
     fn denoise_line_level_drops_lines_with_no_alpha_tokens() {
-        let cfg = denoiser_enabled(true);
+        let cfg = denoiser_enabled();
         let input = indoc! {"
             42 524 10788 143 1995
             — — (0.8) (203.5) 473
@@ -479,7 +462,7 @@ mod tests {
 
     #[test]
     fn denoise_line_level_retains_text_from_mixed_line() {
-        let cfg = denoiser_enabled(true);
+        let cfg = denoiser_enabled();
         let input = "42 524 NOVEX INDUSTRIES Springfield 10788 143 1995 190 394 13611 358 6444 266";
         let result = denoise_text(input, &cfg).expect("should not be None");
 
@@ -498,7 +481,7 @@ mod tests {
     /// Digit-junk sandwiched *between* text tokens — all text must survive.
     #[test]
     fn denoise_line_level_text_sandwiched_between_junk_tokens() {
-        let cfg = denoiser_enabled(true);
+        let cfg = denoiser_enabled();
         let input = "42 NOVEX 524 INDUSTRIES 10788 143 1995 190";
         let result = denoise_text(input, &cfg).expect("should not be None");
 
@@ -515,7 +498,7 @@ mod tests {
     /// their original relative order.
     #[test]
     fn denoise_line_level_repeated_junk_text_interleaving() {
-        let cfg = denoiser_enabled(true);
+        let cfg = denoiser_enabled();
         let input = "42 ZETA 524 POWER 10758 Riverside 31 GRID 1283 GROUP 267 Holdings 45432 Corp";
         let result = denoise_text(input, &cfg).expect("should not be None");
 
@@ -552,7 +535,7 @@ mod tests {
     /// Parenthesized negatives, em-dashes, and dotted abbreviations.
     #[test]
     fn denoise_line_level_parenthesized_negatives_and_dashes_stripped() {
-        let cfg = denoiser_enabled(true);
+        let cfg = denoiser_enabled();
         let input = "345 397 DELTA CORP Detroit, Mich. 10689 (0.8) 1069 302 — 18214 336 17590 182";
         let result = denoise_text(input, &cfg).expect("should not be None");
 
@@ -575,7 +558,7 @@ mod tests {
     /// Comma-formatted numbers like `10,788.0` contain no alpha → stripped.
     #[test]
     fn denoise_line_level_comma_formatted_numbers_stripped() {
-        let cfg = denoiser_enabled(true);
+        let cfg = denoiser_enabled();
         let input =
             "42 524 NOVEX INDUSTRIES Springfield 10,788.0 14.3 1,995.0 190 39.4 13,611.0 358";
         let result = denoise_text(input, &cfg).expect("should not be None");
@@ -594,7 +577,7 @@ mod tests {
     /// A line of only symbols / numbers with no alpha → block returns `None`.
     #[test]
     fn denoise_line_level_symbol_only_line_is_dropped() {
-        let cfg = denoiser_enabled(true);
+        let cfg = denoiser_enabled();
         let input = "— — — (0.8) (203.5) 473 42 524";
         assert_eq!(
             denoise_text(input, &cfg),
@@ -606,7 +589,7 @@ mod tests {
     /// Ordinal tokens like `3rd` / `2nd` contain alpha chars and must be kept.
     #[test]
     fn denoise_line_level_ordinal_tokens_are_kept() {
-        let cfg = denoiser_enabled(true);
+        let cfg = denoiser_enabled();
         let input = "3rd Quarter performance review 2nd half summary";
         let result = denoise_text(input, &cfg).expect("should not be None");
 
@@ -618,7 +601,7 @@ mod tests {
     /// Dense interleaving: numbers, parenthesized values, em-dashes, and text.
     #[test]
     fn denoise_line_level_dense_interleave_with_symbols() {
-        let cfg = denoiser_enabled(true);
+        let cfg = denoiser_enabled();
         let input = "42 (524) ZETA 10,758.0 — POWER 31.5 Riverside, 1283 Corp.";
         let result = denoise_text(input, &cfg).expect("should not be None");
 
@@ -639,7 +622,7 @@ mod tests {
     /// tokens survive, and the full output must equal exactly their joined form.
     #[test]
     fn denoise_line_level_multiple_em_dashes_all_stripped() {
-        let cfg = denoiser_enabled(true);
+        let cfg = denoiser_enabled();
         let input = "— 42 NOVEX — 524 INDUSTRIES — 10789 —";
         let result = denoise_text(input, &cfg).expect("should not be None");
 
@@ -657,7 +640,7 @@ mod tests {
     /// must be stripped; the full output must be an exact match.
     #[test]
     fn denoise_line_level_multiple_parenthesized_values_stripped() {
-        let cfg = denoiser_enabled(true);
+        let cfg = denoiser_enabled();
         let input = "(0.8) NOVEX (1.2) INDUSTRIES (3.4) 10789";
         let result = denoise_text(input, &cfg).expect("should not be None");
 
@@ -685,7 +668,7 @@ mod tests {
     /// stripped; the exact joined remainder must match.
     #[test]
     fn denoise_line_level_mixed_symbol_trash_repeated() {
-        let cfg = denoiser_enabled(true);
+        let cfg = denoiser_enabled();
         let input = "— (0.8) 42 ZETA — (1.5) 524 POWER — (2.3) 10758 Corp —";
         let result = denoise_text(input, &cfg).expect("should not be None");
 
@@ -708,7 +691,7 @@ mod tests {
     /// residual symbol tokens, correct newline separator.
     #[test]
     fn denoise_line_level_multiple_symbol_trash_multiline_exact_output() {
-        let cfg = denoiser_enabled(true);
+        let cfg = denoiser_enabled();
         let input = indoc! {"
             — 42 NOVEX — 524 INDUSTRIES — 10789 —
             (0.8) ZETA (1.2) POWER (3.4) 10758
@@ -729,7 +712,7 @@ mod tests {
     /// have their pipe delimiters stripped and cell text is returned.
     #[test]
     fn denoise_line_level_pure_markdown_table_separator_dropped_text_extracted() {
-        let cfg = denoiser_enabled(true);
+        let cfg = denoiser_enabled();
         let input = indoc! {"
             | Metric         | Value     | Change  |
             |----------------|-----------|----------|
@@ -750,7 +733,7 @@ mod tests {
     /// returned — the block does not need to be multi-line for this to work.
     #[test]
     fn denoise_line_level_single_markdown_table_row_pipes_stripped() {
-        let cfg = denoiser_enabled(true);
+        let cfg = denoiser_enabled();
 
         // A lone separator row — no content → None.
         assert_eq!(
@@ -779,7 +762,7 @@ mod tests {
     /// digit-heavy data rows are further stripped to their alpha-bearing tokens.
     #[test]
     fn denoise_line_level_markdown_table_embedded_in_prose() {
-        let cfg = denoiser_enabled(true);
+        let cfg = denoiser_enabled();
         let input = indoc! {"
             Revenue grew steadily over the past three fiscal years.
             | Year | Revenue | Growth |
@@ -822,7 +805,7 @@ mod tests {
     /// Various separator-row styles all get dropped.
     #[test]
     fn denoise_line_level_markdown_table_various_separator_styles() {
-        let cfg = denoiser_enabled(true);
+        let cfg = denoiser_enabled();
         let input = indoc! {"
             Only this prose line should survive.
             |------|------|
@@ -846,7 +829,7 @@ mod tests {
     /// gate 2 (zero alphabetical characters after pipe stripping).
     #[test]
     fn denoise_line_level_markdown_table_numeric_cells_dropped() {
-        let cfg = denoiser_enabled(true);
+        let cfg = denoiser_enabled();
         let input = indoc! {"
             | ID   | Score | Rank |
             |------|-------|------|
@@ -866,7 +849,7 @@ mod tests {
     /// pipe delimiters are stripped and cell text is retained alongside prose.
     #[test]
     fn denoise_line_level_markdown_table_single_column() {
-        let cfg = denoiser_enabled(true);
+        let cfg = denoiser_enabled();
         let input = indoc! {"
             Plain sentence before the table.
             | Item       |
@@ -900,7 +883,7 @@ mod tests {
     /// or informal OR notation) are *not* treated as table rows.
     #[test]
     fn denoise_line_level_single_pipe_in_prose_is_not_a_table_row() {
-        let cfg = denoiser_enabled(true);
+        let cfg = denoiser_enabled();
         let input = "Use the syntax foo | bar to combine options.";
         let result = denoise_text(input, &cfg).expect("should not be None");
         assert_eq!(
@@ -914,7 +897,7 @@ mod tests {
     /// characters stay but are not treated as markdown table delimiters.
     #[test]
     fn denoise_line_level_borderless_table_separator_dropped_data_survives() {
-        let cfg = denoiser_enabled(true);
+        let cfg = denoiser_enabled();
         let input = indoc! {"
             Name | Age | City
             -----|-----|------
@@ -939,7 +922,7 @@ mod tests {
     /// Every row has a company name + city interspersed with dense numeric columns.
     #[test]
     fn denoise_full_table_block_retains_company_names() {
-        let cfg = denoiser_enabled(true);
+        let cfg = denoiser_enabled();
 
         let input = indoc! {"
             42 524 NOVEX INDUSTRIES Springfield 10788 143 1995 190 394 13611 358 6444 266
@@ -1059,7 +1042,7 @@ mod tests {
             " | first=30.00B | last=42.10B | filing_quality=score=100.0 grade=A transitions=12",
             " scale_issues=0 uom_issues=0",
         );
-        let cfg = denoiser_enabled(true);
+        let cfg = denoiser_enabled();
         let result = denoise_text(line, &cfg);
         assert_eq!(
             result,
@@ -1080,7 +1063,7 @@ mod tests {
 
             label=Operating income | dir=up | traj=non_monotonic | path=mostly_upward | recent=up_bias | reg=growth_with_resets | cons=erratic | turn=high_turn | run=clustered_runs | end=recovering_off_peak | rec=weak_recovery | dd=severe | shock=repeated_shock | pol=upside_shocks | flip=false | sig=UUDUUUDU-t4 | first=36.02B | last=50.85B | filing_quality=score=100.0 grade=A transitions=12 scale_issues=0 uom_issues=0"
         };
-        let cfg = denoiser_enabled(true);
+        let cfg = denoiser_enabled();
         let result = denoise_text(input, &cfg);
         // Blank separator lines are stripped (Gate 2 — no alpha). All content lines preserved.
         assert_eq!(
