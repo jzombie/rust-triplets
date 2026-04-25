@@ -8,7 +8,6 @@
 
 use chrono::{DateTime, Utc};
 use std::hash::Hash;
-use std::sync::Arc;
 use std::time::Instant;
 
 use crate::config::{SamplerConfig, TripletRecipe};
@@ -31,6 +30,7 @@ pub use backends::huggingface_source::{
     HuggingFaceRowSource, HuggingFaceRowsConfig, managed_hf_list_snapshot_dir,
     managed_hf_snapshot_dir,
 };
+pub use backends::in_memory_source::InMemorySource;
 
 /// Source-owned incremental refresh position.
 ///
@@ -367,78 +367,11 @@ impl IndexPermutation {
     }
 }
 
-/// In-memory data source for tests and small datasets.
-pub struct InMemorySource {
-    id: SourceId,
-    records: Arc<Vec<DataRecord>>,
-}
-
-impl InMemorySource {
-    /// Create an in-memory source from prebuilt records.
-    pub fn new(id: impl Into<SourceId>, records: Vec<DataRecord>) -> Self {
-        Self {
-            id: id.into(),
-            records: Arc::new(records),
-        }
-    }
-}
-
-impl DataSource for InMemorySource {
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn refresh(
-        &self,
-        _config: &SamplerConfig,
-        cursor: Option<&SourceCursor>,
-        limit: Option<usize>,
-    ) -> Result<SourceSnapshot, SamplerError> {
-        let records = &*self.records;
-        let total = records.len();
-        let mut start = cursor.map(|cursor| cursor.revision as usize).unwrap_or(0);
-        if total > 0 && start >= total {
-            start = 0;
-        }
-        let max = limit.unwrap_or(total);
-        let mut filtered = Vec::new();
-        for idx in 0..total {
-            if filtered.len() >= max {
-                break;
-            }
-            let pos = (start + idx) % total;
-            filtered.push(records[pos].clone());
-        }
-        let last_seen = filtered
-            .iter()
-            .map(|record| record.updated_at)
-            .max()
-            .unwrap_or_else(Utc::now);
-        let next_start = if total == 0 {
-            0
-        } else {
-            (start + filtered.len()) % total
-        };
-        Ok(SourceSnapshot {
-            records: filtered,
-            cursor: SourceCursor {
-                last_seen,
-                revision: next_start as u64,
-            },
-        })
-    }
-
-    fn reported_record_count(&self, _config: &SamplerConfig) -> Result<u128, SamplerError> {
-        Ok(self.records.len() as u128)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::data::{QualityScore, RecordSection, SectionRole};
     use crate::types::RecordId;
-    use chrono::Duration;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::thread;
     use std::time::Duration as StdDuration;
@@ -596,42 +529,6 @@ mod tests {
     }
 
     #[test]
-    fn in_memory_source_refresh_wraps_cursor_and_uses_latest_timestamp() {
-        let now = Utc::now();
-        let older = now - Duration::seconds(5);
-        let newer = now + Duration::seconds(5);
-        let mk = |id: &str, ts: chrono::DateTime<Utc>| DataRecord {
-            id: id.to_string(),
-            source: "mem".to_string(),
-            created_at: ts,
-            updated_at: ts,
-            quality: QualityScore { trust: 1.0 },
-            taxonomy: Vec::new(),
-            sections: vec![RecordSection {
-                role: SectionRole::Anchor,
-                heading: None,
-                text: id.to_string(),
-                sentences: vec![id.to_string()],
-            }],
-            meta_prefix: None,
-        };
-
-        let source = InMemorySource::new("mem", vec![mk("a", older), mk("b", newer)]);
-        let cursor = SourceCursor {
-            last_seen: now,
-            revision: 7,
-        };
-
-        let snapshot = source
-            .refresh(&SamplerConfig::default(), Some(&cursor), Some(1))
-            .unwrap();
-        assert_eq!(snapshot.records.len(), 1);
-        assert_eq!(snapshot.records[0].id, "a");
-        assert_eq!(snapshot.cursor.revision, 1);
-        assert_eq!(snapshot.cursor.last_seen, older);
-    }
-
-    #[test]
     fn index_permutation_permute_bits_handles_zero_bits_and_zero_seed_path() {
         assert_eq!(IndexPermutation::permute_bits(123, 0, 99), 0);
 
@@ -709,15 +606,6 @@ mod tests {
                 .reported_record_count(&SamplerConfig::default())
                 .unwrap(),
             3
-        );
-
-        let memory = InMemorySource::new("mem_id", Vec::new());
-        assert_eq!(memory.id(), "mem_id");
-        assert_eq!(
-            memory
-                .reported_record_count(&SamplerConfig::default())
-                .unwrap(),
-            0
         );
     }
 

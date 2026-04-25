@@ -224,7 +224,7 @@ fn split_store_growth_stays_bounded_per_epoch() {
     let records: Vec<DataRecord> = (0..64).map(|idx| build_record("unit", idx)).collect();
     let store = Arc::new(FileSplitStore::open(&store_path, split, 123).unwrap());
     let sampler = TripletSampler::new(build_config(8, split), store);
-    sampler.register_source(Box::new(InMemorySource::new("unit", records)));
+    sampler.register_source(Box::new(InMemorySource::from_records("unit", records)));
 
     let mut sizes = Vec::new();
     for _ in 0..5 {

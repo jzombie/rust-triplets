@@ -56,6 +56,7 @@ pub use hash::stable_hash_str;
 pub use ingestion::{IngestionManager, RecordCache};
 pub use kvp::{KvpField, KvpPrefixSampler};
 pub use sampler::{BatchPrefetcher, Sampler, TripletSampler};
+pub use source::InMemorySource;
 pub use source::backends::csv_source::{CsvSource, CsvSourceConfig};
 #[cfg(feature = "huggingface")]
 pub use source::backends::huggingface_source::{

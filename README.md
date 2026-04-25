@@ -353,7 +353,7 @@ sampler.register_source(Box::new(source));
 
 ### Custom Source
 
-Implement the `IndexableSource` trait to integrate any backend that can fetch records by a stable integer index.
+Implement the `IndexableSource` trait to integrate any backend that can fetch records by a stable integer index. For simple in-process corpora that do not require a custom backend, use [`InMemorySource`](#inmemory-source) instead.
 
 ```rust
 use std::sync::Arc;
@@ -422,6 +422,101 @@ let store = Arc::new(DeterministicSplitStore::new(ratios, 42).unwrap());
 let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
 let adapter = IndexableAdapter::new(MyApiSource);
 sampler.register_source(Box::new(adapter));
+```
+
+### InMemory Source
+
+`InMemorySource` is a built-in backend for in-process corpora — tests, documentation examples, and small runtime datasets that live entirely in memory. Unlike `IndexableSource` custom backends, it implements `DataSource` directly so no `IndexableAdapter` wrapper is needed.
+
+Build the source incrementally with `add_record` / `add_records`, or use `from_records` to pre-populate from a `Vec<DataRecord>` in one call:
+
+```rust
+use std::sync::Arc;
+use chrono::Utc;
+use triplets::{
+    DataRecord, DeterministicSplitStore, InMemorySource, SamplerConfig,
+    SplitLabel, SplitRatios, TextRecipe, TripletSampler, Sampler, Selector,
+};
+use triplets::data::{RecordSection, SectionRole};
+
+let mut source = InMemorySource::new("my_corpus");
+source.add_record(DataRecord {
+    id: "doc-0".into(),
+    source: "my_corpus".into(),
+    created_at: Utc::now(),
+    updated_at: Utc::now(),
+    quality: Default::default(),
+    taxonomy: vec![],
+    sections: vec![RecordSection {
+        role: SectionRole::Context,
+        heading: None,
+        text: "The quick brown fox jumps over the lazy dog.".into(),
+        sentences: vec![],
+    }],
+    meta_prefix: None,
+});
+
+// add_records accepts any iterator of DataRecord.
+source.add_records(vec![
+    DataRecord {
+        id: "doc-1".into(),
+        source: "my_corpus".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        quality: Default::default(),
+        taxonomy: vec![],
+        sections: vec![RecordSection {
+            role: SectionRole::Context,
+            heading: None,
+            text: "Pack my box with five dozen liquor jugs.".into(),
+            sentences: vec![],
+        }],
+        meta_prefix: None,
+    },
+]);
+
+// InMemorySource implements DataSource directly — register it bare, no adapter needed.
+let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
+let store = Arc::new(DeterministicSplitStore::new(ratios, 42).unwrap());
+let sampler = TripletSampler::new(
+    SamplerConfig {
+        text_recipes: vec![TextRecipe {
+            name: "body".into(),
+            selector: Selector::Role(SectionRole::Context),
+            weight: 1.0,
+            instruction: None,
+        }],
+        ..SamplerConfig::default()
+    },
+    store,
+);
+sampler.register_source(Box::new(source));
+```
+
+`from_records` is a convenience constructor when you already have a collected `Vec`:
+
+```rust,no_run
+use chrono::Utc;
+use triplets::{DataRecord, InMemorySource};
+use triplets::data::{RecordSection, SectionRole};
+
+let records: Vec<DataRecord> = (0..100).map(|i| DataRecord {
+    id: format!("doc-{i}"),
+    source: "generated".into(),
+    created_at: Utc::now(),
+    updated_at: Utc::now(),
+    quality: Default::default(),
+    taxonomy: vec![],
+    sections: vec![RecordSection {
+        role: SectionRole::Context,
+        heading: None,
+        text: format!("Document {i} body text."),
+        sentences: vec![],
+    }],
+    meta_prefix: None,
+}).collect();
+
+let source = InMemorySource::from_records("generated", records);
 ```
 
 ## Sampling and Mixing
@@ -993,7 +1088,7 @@ let config = SamplerConfig {
 };
 ```
 
-The denoiser runs automatically inside the pipeline. Here is a complete end-to-end example using an in-memory source — the same `IndexableSource` trait used for any custom backend — so you can see exactly what the denoiser strips before chunks reach your training loop:
+The denoiser runs automatically inside the pipeline. Here is a complete end-to-end example using `InMemorySource` — the built-in in-memory backend — so you can see exactly what the denoiser strips before chunks reach your training loop:
 
 ```rust
 use std::sync::Arc;
@@ -1001,50 +1096,40 @@ use chrono::Utc;
 use indoc::indoc;
 use triplets::{
     ChunkingStrategy, DataRecord, DenoiserConfig, DeterministicSplitStore,
-    Sampler, SamplerConfig, SamplerError, Selector, SplitLabel, SplitRatios,
+    InMemorySource, Sampler, SamplerConfig, Selector, SplitLabel, SplitRatios,
     TextRecipe, TripletSampler,
 };
 use triplets::data::{RecordSection, SectionRole};
-use triplets::source::{IndexableAdapter, IndexableSource};
 
-// An in-memory source that holds one document with OCR noise.
-struct OcrDoc(String);
+let mut source = InMemorySource::new("ocr_doc");
+source.add_record(DataRecord {
+    id: "q3-2024".into(),
+    source: "ocr_doc".into(),
+    created_at: Utc::now(),
+    updated_at: Utc::now(),
+    quality: Default::default(),
+    taxonomy: vec![],
+    sections: vec![RecordSection {
+        role: SectionRole::Context,
+        heading: None,
+        // Raw PDF-extracted text: a markdown table followed by digit-heavy
+        // OCR garbage rows, then the actual prose summary.
+        text: indoc! {"
+            Operating Results — Q3 2024
 
-impl IndexableSource for OcrDoc {
-    fn id(&self) -> &str { "ocr_doc" }
-    fn len_hint(&self) -> Option<usize> { Some(1) }
-    fn record_at(&self, idx: usize) -> Result<Option<DataRecord>, SamplerError> {
-        if idx != 0 { return Ok(None); }
-        Ok(Some(DataRecord {
-            id: "q3-2024".into(),
-            source: "ocr_doc".into(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            quality: Default::default(),
-            taxonomy: vec![],
-            sections: vec![RecordSection {
-                role: SectionRole::Context,
-                heading: None,
-                // Raw PDF-extracted text: a markdown table followed by digit-heavy
-                // OCR garbage rows, then the actual prose summary.
-                text: indoc! {"
-                    Operating Results — Q3 2024
+            | Metric          | Q3 2024 | Q3 2023 |
+            |-----------------|---------|---------|
+            | Revenue ($M)    | 94,930  | 89,498  |
+            | Net Income ($M) | 21,448  | 19,881  |
 
-                    | Metric          | Q3 2024 | Q3 2023 |
-                    |-----------------|---------|---------|
-                    | Revenue ($M)    | 94,930  | 89,498  |
-                    | Net Income ($M) | 21,448  | 19,881  |
+            2 1 4 4 8 1 9 8 8 1 9 4 9 3 0 8 9 4 9 8
+            0 0 1 2 3 5 8 13 21 34 0 0 1 1 2 3 5 8
 
-                    2 1 4 4 8 1 9 8 8 1 9 4 9 3 0 8 9 4 9 8
-                    0 0 1 2 3 5 8 13 21 34 0 0 1 1 2 3 5 8
-
-                    Revenue grew six percent year over year."}.to_string(),
-                sentences: vec![],
-            }],
-            meta_prefix: None,
-        }))
-    }
-}
+            Revenue grew six percent year over year."}.to_string(),
+        sentences: vec![],
+    }],
+    meta_prefix: None,
+});
 
 let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
 let store = Arc::new(DeterministicSplitStore::new(ratios, 42).unwrap());
@@ -1068,7 +1153,7 @@ let sampler = TripletSampler::new(
     },
     store,
 );
-sampler.register_source(Box::new(IndexableAdapter::new(OcrDoc(String::new()))));
+sampler.register_source(Box::new(source));
 
 // The sampler supports triplet, pair, and text batches — use whichever
 // output format your training loop requires:
