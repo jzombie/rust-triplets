@@ -973,7 +973,7 @@ Long documents are handled through a pluggable `ChunkingAlgorithm`. The default 
 
 ## OCR & Markdown Denoiser
 
-Real-world corpora often contain text extracted from PDFs or scanned documents where OCR produces mangled tables: rows packed with bare numbers, column separators, and financial data that carries no semantic signal for embedding models. The denoiser also strips GFM pipe-table formatting (separator rows dropped, cell text extracted) so that markdown tables embedded in documents don't produce raw pipe characters in chunks. Both kinds of cleanup happen as preprocessing steps before chunking.
+Real-world corpora often contain text extracted from PDFs or scanned documents where OCR produces mangled tables: rows packed with bare numbers, column separators, and financial data that carries no semantic signal for embedding models. The denoiser also strips [GFM](https://github.github.com/gfm/) (GitHub Flavored Markdown) pipe-table formatting (separator rows dropped, cell text extracted) so that markdown tables embedded in documents don't produce raw pipe characters in chunks. Both kinds of cleanup happen as preprocessing steps before chunking.
 
 It is **disabled by default** and is activated via `DenoiserConfig::enabled` on the `ChunkingStrategy`:
 
