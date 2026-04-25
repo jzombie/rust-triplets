@@ -62,6 +62,35 @@ fn is_markdown_table_line(line: &str) -> bool {
     trimmed.starts_with('|') && trimmed.matches('|').count() >= 2
 }
 
+/// Returns `true` when `line` is a GFM pipe-table separator row.
+///
+/// A separator row contains only `|`, `-`, `:`, and whitespace (e.g.
+/// `|------|-----|` or `|:----:|:---:|`).  These rows carry no textual
+/// content and should be dropped entirely.
+fn is_markdown_table_separator(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.starts_with('|')
+        && trimmed.matches('|').count() >= 2
+        && trimmed
+            .chars()
+            .all(|c| c == '|' || c == '-' || c == ':' || c == ' ' || c == '\t')
+}
+
+/// Strip GFM pipe-table delimiters from a header or data row and return the
+/// concatenated cell text.
+///
+/// Each `|`-delimited cell is trimmed; empty cells (from leading/trailing
+/// pipes) are discarded.  The surviving cells are joined with a single space.
+///
+/// Example: `"| Name | Age |"` → `"Name Age"`
+fn strip_table_pipes(line: &str) -> String {
+    line.split('|')
+        .map(|cell| cell.trim())
+        .filter(|cell| !cell.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -76,10 +105,13 @@ fn is_markdown_table_line(line: &str) -> bool {
 /// Line endings are first normalised with [`LineEnding::normalize`].  Each
 /// line is then evaluated through three gates in order:
 ///
-/// 1. **Markdown table rows** — lines whose trimmed form starts with `'|'` and
-///    contains at least one more `'|'` are dropped unconditionally.  This
-///    removes GFM pipe-table headers, separator rows, and data rows, all of
-///    which carry no semantic value for text embeddings.
+/// 1. **Markdown table formatting** — GFM pipe-table rows (trimmed form
+///    starts with `'|'` and contains at least one more `'|'`) are handled in
+///    two ways.  *Separator rows* (containing only `|`, `-`, `:`, and
+///    whitespace) carry no textual content and are dropped.  *Header and data
+///    rows* have their pipe delimiters stripped and the extracted cell text is
+///    evaluated by gates 2 and 3 like any other line, preserving useful text
+///    from inside table cells.
 ///
 /// 2. **No alphabetical characters** — lines that contain zero alphabetical
 ///    characters (all-numeric rows, symbol/dash-only rows, OCR separator
@@ -109,27 +141,37 @@ pub fn denoise_text(text: &str, config: &DenoiserConfig) -> Option<String> {
         let normalized = LineEnding::normalize(text);
         let mut cleaned_lines: Vec<String> = Vec::new();
         for line in normalized.lines() {
-            // Gate 1: markdown table formatting rows → drop entirely.
-            if is_markdown_table_line(line) {
-                continue;
-            }
+            // Gate 1: markdown table formatting.
+            // Separator rows (containing only |, -, :, and whitespace) carry no
+            // textual content and are dropped.  Header and data rows have their
+            // pipe delimiters stripped; the extracted cell text then passes
+            // through gates 2 and 3 like any other line.
+            let table_stripped = if is_markdown_table_line(line) {
+                if is_markdown_table_separator(line) {
+                    continue;
+                }
+                Some(strip_table_pipes(line))
+            } else {
+                None
+            };
+            let effective = table_stripped.as_deref().unwrap_or(line);
 
             // Gate 2: no alphabetical characters → drop (all-numeric lines,
             //         symbol-only rows, OCR column-separator artefacts, etc.).
-            let (_, alpha) = count_digit_alpha(line);
+            let (_, alpha) = count_digit_alpha(effective);
             if alpha == 0 {
                 continue;
             }
 
             // Gate 3: digit-heavy line → strip to alpha-bearing tokens only.
-            if digit_ratio(line) > config.max_digit_ratio {
-                let retained = strip_digit_tokens(line);
+            if digit_ratio(effective) > config.max_digit_ratio {
+                let retained = strip_digit_tokens(effective);
                 if !retained.is_empty() {
                     cleaned_lines.push(retained);
                 }
                 // else: drop the line entirely
             } else {
-                cleaned_lines.push(line.to_string());
+                cleaned_lines.push(effective.to_string());
             }
         }
         if cleaned_lines.is_empty() {
@@ -171,8 +213,13 @@ mod tests {
     fn markdown_table_line_detects_separator_row() {
         assert!(is_markdown_table_line("|------|-----|"));
         assert!(is_markdown_table_line("|:----:|:---:|"));
-        assert!(is_markdown_table_line("|----------------|-----------|----------|"));
-        assert!(is_markdown_table_line("  |---|---|  "), "leading/trailing spaces ok");
+        assert!(is_markdown_table_line(
+            "|----------------|-----------|----------|"
+        ));
+        assert!(
+            is_markdown_table_line("  |---|---|  "),
+            "leading/trailing spaces ok"
+        );
     }
 
     #[test]
@@ -207,6 +254,59 @@ mod tests {
         assert!(!is_markdown_table_line("The quick brown fox."));
         assert!(!is_markdown_table_line("42 524 NOVEX INDUSTRIES"));
         assert!(!is_markdown_table_line(""));
+    }
+
+    // -----------------------------------------------------------------------
+    // is_markdown_table_separator helper
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn markdown_table_separator_detects_dash_and_colon_rows() {
+        assert!(is_markdown_table_separator("|------|-----|"));
+        assert!(is_markdown_table_separator("|:----:|:---:|"));
+        assert!(is_markdown_table_separator("|:-----|-----:|"));
+        assert!(is_markdown_table_separator(
+            "|----------------|-----------|----------|"
+        ));
+        assert!(
+            is_markdown_table_separator("| ---- | ---- |"),
+            "dashes with spaces ok"
+        );
+        assert!(
+            is_markdown_table_separator("  |---|---|  "),
+            "leading/trailing spaces ok"
+        );
+    }
+
+    #[test]
+    fn markdown_table_separator_rejects_rows_with_text_or_digits() {
+        assert!(!is_markdown_table_separator("| Name | Age |"), "has alpha");
+        assert!(
+            !is_markdown_table_separator("| 2023 | $3.8B | +10% |"),
+            "has digit"
+        );
+        assert!(
+            !is_markdown_table_separator("| Annual revenue | $4.2B |"),
+            "has alpha"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // strip_table_pipes helper
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn strip_table_pipes_extracts_cell_text() {
+        assert_eq!(strip_table_pipes("| Name | Age |"), "Name Age");
+        assert_eq!(
+            strip_table_pipes("| Annual revenue | $4.2B | +12% |"),
+            "Annual revenue $4.2B +12%"
+        );
+        assert_eq!(strip_table_pipes("| Widget A |"), "Widget A");
+        assert_eq!(
+            strip_table_pipes("| Metric         | Value     | Change  |"),
+            "Metric Value Change"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -317,7 +417,11 @@ mod tests {
         assert!(result.contains("Revenue grew 8% to $2.1B in FY2025 (vs $1.9B prior year)."));
         assert!(result.contains("Net income rose 15% YoY, reaching $310M by Q4-2025."));
         assert!(!result.contains("9871"), "junk line must be stripped");
-        assert_eq!(result.lines().count(), 2, "only the two clean lines should remain");
+        assert_eq!(
+            result.lines().count(),
+            2,
+            "only the two clean lines should remain"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -335,8 +439,18 @@ mod tests {
         "};
         let result = denoise_text(input.trim(), &cfg).expect("should not be None");
 
-        for word in &["NOVEX", "INDUSTRIES", "Springfield", "ZETA", "POWER", "Riverside"] {
-            assert!(result.contains(word), "'{word}' must survive line-level strip");
+        for word in &[
+            "NOVEX",
+            "INDUSTRIES",
+            "Springfield",
+            "ZETA",
+            "POWER",
+            "Riverside",
+        ] {
+            assert!(
+                result.contains(word),
+                "'{word}' must survive line-level strip"
+            );
         }
         for num in &["10788", "45432"] {
             assert!(!result.contains(num), "'{num}' must be stripped");
@@ -366,8 +480,7 @@ mod tests {
     #[test]
     fn denoise_line_level_retains_text_from_mixed_line() {
         let cfg = denoiser_enabled(true);
-        let input =
-            "42 524 NOVEX INDUSTRIES Springfield 10788 143 1995 190 394 13611 358 6444 266";
+        let input = "42 524 NOVEX INDUSTRIES Springfield 10788 143 1995 190 394 13611 358 6444 266";
         let result = denoise_text(input, &cfg).expect("should not be None");
 
         for word in &["NOVEX", "INDUSTRIES", "Springfield"] {
@@ -389,10 +502,13 @@ mod tests {
         let input = "42 NOVEX 524 INDUSTRIES 10788 143 1995 190";
         let result = denoise_text(input, &cfg).expect("should not be None");
 
-        assert!(result.contains("NOVEX"),      "NOVEX should survive");
+        assert!(result.contains("NOVEX"), "NOVEX should survive");
         assert!(result.contains("INDUSTRIES"), "INDUSTRIES should survive");
-        assert!(!result.contains("10788"),     "pure-numeric token should be gone");
-        assert!(!result.contains("524"),       "pure-numeric token should be gone");
+        assert!(
+            !result.contains("10788"),
+            "pure-numeric token should be gone"
+        );
+        assert!(!result.contains("524"), "pure-numeric token should be gone");
     }
 
     /// Text and junk tokens alternating many times — all text tokens survive in
@@ -400,11 +516,18 @@ mod tests {
     #[test]
     fn denoise_line_level_repeated_junk_text_interleaving() {
         let cfg = denoiser_enabled(true);
-        let input =
-            "42 ZETA 524 POWER 10758 Riverside 31 GRID 1283 GROUP 267 Holdings 45432 Corp";
+        let input = "42 ZETA 524 POWER 10758 Riverside 31 GRID 1283 GROUP 267 Holdings 45432 Corp";
         let result = denoise_text(input, &cfg).expect("should not be None");
 
-        let text_tokens = ["ZETA", "POWER", "Riverside", "GRID", "GROUP", "Holdings", "Corp"];
+        let text_tokens = [
+            "ZETA",
+            "POWER",
+            "Riverside",
+            "GRID",
+            "GROUP",
+            "Holdings",
+            "Corp",
+        ];
         let num_tokens = ["42", "524", "10758", "31", "1283", "267", "45432"];
 
         for word in &text_tokens {
@@ -430,19 +553,23 @@ mod tests {
     #[test]
     fn denoise_line_level_parenthesized_negatives_and_dashes_stripped() {
         let cfg = denoiser_enabled(true);
-        let input =
-            "345 397 DELTA CORP Detroit, Mich. 10689 (0.8) 1069 302 — 18214 336 17590 182";
+        let input = "345 397 DELTA CORP Detroit, Mich. 10689 (0.8) 1069 302 — 18214 336 17590 182";
         let result = denoise_text(input, &cfg).expect("should not be None");
 
-        assert!(result.contains("DELTA"),    "DELTA must survive");
-        assert!(result.contains("CORP"),     "CORP must survive");
-        assert!(result.contains("Detroit"),  "city must survive");
-        assert!(result.contains("Mich."),    "dotted abbreviation must survive");
-        assert!(!result.contains("10689"),   "bare number must be stripped");
-        assert!(!result.contains("(0.8)"),   "parenthesized negative must be stripped");
-        assert!(!result.contains("18214"),   "bare number must be stripped");
-        assert_eq!(result, "DELTA CORP Detroit, Mich.",
-            "complete output must equal only the alpha-bearing tokens joined by spaces");
+        assert!(result.contains("DELTA"), "DELTA must survive");
+        assert!(result.contains("CORP"), "CORP must survive");
+        assert!(result.contains("Detroit"), "city must survive");
+        assert!(result.contains("Mich."), "dotted abbreviation must survive");
+        assert!(!result.contains("10689"), "bare number must be stripped");
+        assert!(
+            !result.contains("(0.8)"),
+            "parenthesized negative must be stripped"
+        );
+        assert!(!result.contains("18214"), "bare number must be stripped");
+        assert_eq!(
+            result, "DELTA CORP Detroit, Mich.",
+            "complete output must equal only the alpha-bearing tokens joined by spaces"
+        );
     }
 
     /// Comma-formatted numbers like `10,788.0` contain no alpha → stripped.
@@ -457,7 +584,10 @@ mod tests {
             assert!(result.contains(word), "'{word}' must survive");
         }
         for num in &["10,788.0", "1,995.0", "13,611.0"] {
-            assert!(!result.contains(num), "comma-number '{num}' must be stripped");
+            assert!(
+                !result.contains(num),
+                "comma-number '{num}' must be stripped"
+            );
         }
     }
 
@@ -480,8 +610,8 @@ mod tests {
         let input = "3rd Quarter performance review 2nd half summary";
         let result = denoise_text(input, &cfg).expect("should not be None");
 
-        assert!(result.contains("3rd"),     "ordinal '3rd' should be retained");
-        assert!(result.contains("2nd"),     "ordinal '2nd' should be retained");
+        assert!(result.contains("3rd"), "ordinal '3rd' should be retained");
+        assert!(result.contains("2nd"), "ordinal '2nd' should be retained");
         assert!(result.contains("Quarter"), "plain word must be retained");
     }
 
@@ -498,8 +628,10 @@ mod tests {
         for junk in &["42", "(524)", "10,758.0", "1283"] {
             assert!(!result.contains(junk), "'{junk}' must be stripped");
         }
-        assert_eq!(result, "ZETA POWER Riverside, Corp.",
-            "complete output must equal only the alpha-bearing tokens joined by spaces");
+        assert_eq!(
+            result, "ZETA POWER Riverside, Corp.",
+            "complete output must equal only the alpha-bearing tokens joined by spaces"
+        );
     }
 
     /// A single line where em-dashes appear *multiple* times — before, between,
@@ -511,11 +643,13 @@ mod tests {
         let input = "— 42 NOVEX — 524 INDUSTRIES — 10789 —";
         let result = denoise_text(input, &cfg).expect("should not be None");
 
-        assert!(!result.contains('—'),   "every em-dash instance must be gone");
-        assert!(!result.contains("42"),  "bare number must be stripped");
+        assert!(!result.contains('—'), "every em-dash instance must be gone");
+        assert!(!result.contains("42"), "bare number must be stripped");
         assert!(!result.contains("524"), "bare number must be stripped");
-        assert_eq!(result, "NOVEX INDUSTRIES",
-            "full output must be only the two surviving text tokens");
+        assert_eq!(
+            result, "NOVEX INDUSTRIES",
+            "full output must be only the two surviving text tokens"
+        );
     }
 
     /// A single line where parenthesized values appear *multiple* times —
@@ -527,12 +661,23 @@ mod tests {
         let input = "(0.8) NOVEX (1.2) INDUSTRIES (3.4) 10789";
         let result = denoise_text(input, &cfg).expect("should not be None");
 
-        assert!(!result.contains("(0.8)"), "first parenthesized value must be gone");
-        assert!(!result.contains("(1.2)"), "second parenthesized value must be gone");
-        assert!(!result.contains("(3.4)"), "third parenthesized value must be gone");
+        assert!(
+            !result.contains("(0.8)"),
+            "first parenthesized value must be gone"
+        );
+        assert!(
+            !result.contains("(1.2)"),
+            "second parenthesized value must be gone"
+        );
+        assert!(
+            !result.contains("(3.4)"),
+            "third parenthesized value must be gone"
+        );
         assert!(!result.contains("10789"), "bare number must be stripped");
-        assert_eq!(result, "NOVEX INDUSTRIES",
-            "full output must be only the two surviving text tokens");
+        assert_eq!(
+            result, "NOVEX INDUSTRIES",
+            "full output must be only the two surviving text tokens"
+        );
     }
 
     /// A single line that mixes em-dashes, parenthesized values, and bare
@@ -544,13 +689,18 @@ mod tests {
         let input = "— (0.8) 42 ZETA — (1.5) 524 POWER — (2.3) 10758 Corp —";
         let result = denoise_text(input, &cfg).expect("should not be None");
 
-        assert!(!result.contains('—'),      "all em-dash instances must be gone");
-        assert!(!result.contains("(0.8)"),  "first parens value must be gone");
-        assert!(!result.contains("(1.5)"),  "second parens value must be gone");
-        assert!(!result.contains("(2.3)"),  "third parens value must be gone");
-        assert!(!result.contains("10758"),  "bare number must be stripped");
-        assert_eq!(result, "ZETA POWER Corp",
-            "full output must be only the three surviving text tokens");
+        assert!(!result.contains('—'), "all em-dash instances must be gone");
+        assert!(!result.contains("(0.8)"), "first parens value must be gone");
+        assert!(
+            !result.contains("(1.5)"),
+            "second parens value must be gone"
+        );
+        assert!(!result.contains("(2.3)"), "third parens value must be gone");
+        assert!(!result.contains("10758"), "bare number must be stripped");
+        assert_eq!(
+            result, "ZETA POWER Corp",
+            "full output must be only the three surviving text tokens"
+        );
     }
 
     /// Two lines both containing multiple instances of different symbol trash.
@@ -566,8 +716,7 @@ mod tests {
         let result = denoise_text(input.trim(), &cfg).expect("should not be None");
 
         assert_eq!(
-            result,
-            "NOVEX INDUSTRIES\nZETA POWER",
+            result, "NOVEX INDUSTRIES\nZETA POWER",
             "full multiline output must exactly equal the joined alpha tokens per line"
         );
     }
@@ -576,10 +725,10 @@ mod tests {
     // Markdown table handling
     // -----------------------------------------------------------------------
 
-    /// A pure GFM pipe table — all rows start with `|` — produces `None`
-    /// because every line is identified as a markdown table row and dropped.
+    /// A pure GFM pipe table: separator rows are dropped; header and data rows
+    /// have their pipe delimiters stripped and cell text is returned.
     #[test]
-    fn denoise_line_level_pure_markdown_table_returns_none() {
+    fn denoise_line_level_pure_markdown_table_separator_dropped_text_extracted() {
         let cfg = denoiser_enabled(true);
         let input = indoc! {"
             | Metric         | Value     | Change  |
@@ -588,14 +737,46 @@ mod tests {
             | Operating cost | $2.1B     | +8%      |
             | Net income     | $310M     | +15%     |
         "};
+        let result = denoise_text(input.trim(), &cfg).expect("cell text should survive");
         assert_eq!(
-            denoise_text(input.trim(), &cfg),
-            None,
-            "all pipe-table rows should be dropped, making the block None"
+            result,
+            "Metric Value Change\nAnnual revenue $4.2B +12%\nOperating cost $2.1B +8%\nNet income $310M +15%",
+            "separator row dropped, pipe delimiters stripped, cell text retained"
         );
     }
 
-    /// A markdown table embedded inside prose: only the prose survives.
+    /// A single pipe-table separator row (no alpha, no content) produces `None`.
+    /// A lone header or data row has its pipe delimiters stripped and cell text
+    /// returned — the block does not need to be multi-line for this to work.
+    #[test]
+    fn denoise_line_level_single_markdown_table_row_pipes_stripped() {
+        let cfg = denoiser_enabled(true);
+
+        // A lone separator row — no content → None.
+        assert_eq!(
+            denoise_text("|----------------|-----------|----------|", &cfg),
+            None,
+            "a separator row has no content and must produce None"
+        );
+
+        // A lone header row — pipes stripped, cell text survives.
+        assert_eq!(
+            denoise_text("| Metric | Value | Change |", &cfg),
+            Some("Metric Value Change".to_string()),
+            "header row pipes must be stripped, cell text retained"
+        );
+
+        // A lone data row with mixed text and symbols — pipes stripped, text survives.
+        assert_eq!(
+            denoise_text("| Annual revenue | $4.2B | +12% |", &cfg),
+            Some("Annual revenue $4.2B +12%".to_string()),
+            "data row pipes must be stripped, cell text retained"
+        );
+    }
+
+    /// A markdown table embedded inside prose: prose lines survive unchanged,
+    /// separator rows are dropped, header cell text is extracted, and
+    /// digit-heavy data rows are further stripped to their alpha-bearing tokens.
     #[test]
     fn denoise_line_level_markdown_table_embedded_in_prose() {
         let cfg = denoiser_enabled(true);
@@ -607,15 +788,35 @@ mod tests {
             | 2024 | $4.2B   | +12%   |
             Management expects the trend to continue.
         "};
-        let result = denoise_text(input.trim(), &cfg).expect("should not be None — prose lines exist");
+        let result =
+            denoise_text(input.trim(), &cfg).expect("should not be None — prose lines exist");
 
-        assert!(result.contains("Revenue grew"),            "opening prose must survive");
-        assert!(result.contains("Management expects"),      "closing prose must survive");
-        assert!(!result.contains("---|"),                   "separator row must be gone");
-        assert!(!result.contains("| Year"),                 "header row must be gone");
-        assert!(!result.contains("| 2023"),                 "data row must be gone");
-        assert!(!result.contains("| 2024"),                 "data row must be gone");
-        assert_eq!(result.lines().count(), 2, "only the two prose lines should remain");
+        assert!(
+            result.contains("Revenue grew"),
+            "opening prose must survive"
+        );
+        assert!(
+            result.contains("Management expects"),
+            "closing prose must survive"
+        );
+        assert!(
+            result.contains("Year Revenue Growth"),
+            "header cell text must survive"
+        );
+        assert!(!result.contains("---|"), "separator row must be gone");
+        assert!(
+            !result.contains("| Year"),
+            "pipe delimiters must be stripped"
+        );
+        assert!(
+            !result.contains("| 2023"),
+            "pipe delimiters must be stripped"
+        );
+        assert_eq!(
+            result.lines().count(),
+            5,
+            "prose(1) + header(1) + two stripped data rows(2) + prose(1)"
+        );
     }
 
     /// Various separator-row styles all get dropped.
@@ -633,12 +834,16 @@ mod tests {
             denoise_text(input.trim(), &cfg).expect("should not be None — prose line exists");
 
         assert!(result.contains("Only this prose line"));
-        assert!(!result.contains("---"),    "no separator content should remain");
+        assert!(
+            !result.contains("---"),
+            "no separator content should remain"
+        );
         assert_eq!(result.lines().count(), 1);
     }
 
-    /// A table whose data cells are numeric-heavy: every row is still a
-    /// markdown table row and must be dropped regardless of cell content.
+    /// A table whose data cells are purely numeric: the header row text survives
+    /// after pipe stripping (`ID Score Rank`), but all data rows are dropped by
+    /// gate 2 (zero alphabetical characters after pipe stripping).
     #[test]
     fn denoise_line_level_markdown_table_numeric_cells_dropped() {
         let cfg = denoiser_enabled(true);
@@ -649,14 +854,16 @@ mod tests {
             | 1002 | 87.3  | 2    |
             | 1003 | 76.0  | 3    |
         "};
+        let result = denoise_text(input.trim(), &cfg)
+            .expect("header row text must survive — block is not None");
         assert_eq!(
-            denoise_text(input.trim(), &cfg),
-            None,
-            "pipe-table rows with numeric cells must still be dropped"
+            result, "ID Score Rank",
+            "separator and numeric data rows dropped; only header cell text survives"
         );
     }
 
-    /// A single-column table (two pipes per row: opening + closing).
+    /// A single-column table (two pipes per row: opening + closing):
+    /// pipe delimiters are stripped and cell text is retained alongside prose.
     #[test]
     fn denoise_line_level_markdown_table_single_column() {
         let cfg = denoiser_enabled(true);
@@ -668,13 +875,25 @@ mod tests {
             | Widget B   |
             Plain sentence after the table.
         "};
-        let result = denoise_text(input.trim(), &cfg).expect("prose lines must survive");
+        let result = denoise_text(input.trim(), &cfg).expect("prose and cell text must survive");
 
-        assert!(result.contains("Plain sentence before"));
-        assert!(result.contains("Plain sentence after"));
-        assert!(!result.contains("Widget"),    "table data rows must be dropped");
-        assert!(!result.contains("---"),       "separator row must be dropped");
-        assert_eq!(result.lines().count(), 2);
+        assert!(
+            result.contains("Plain sentence before"),
+            "opening prose must survive"
+        );
+        assert!(
+            result.contains("Plain sentence after"),
+            "closing prose must survive"
+        );
+        assert!(result.contains("Item"), "header cell text must survive");
+        assert!(result.contains("Widget A"), "data cell text must survive");
+        assert!(result.contains("Widget B"), "data cell text must survive");
+        assert!(!result.contains("---"), "separator row must be dropped");
+        assert!(
+            !result.contains('|'),
+            "pipe delimiters must all be stripped"
+        );
+        assert_eq!(result.lines().count(), 5);
     }
 
     /// Prose lines that happen to contain a single `|` (e.g. inline code
@@ -684,7 +903,10 @@ mod tests {
         let cfg = denoiser_enabled(true);
         let input = "Use the syntax foo | bar to combine options.";
         let result = denoise_text(input, &cfg).expect("should not be None");
-        assert_eq!(result, input, "prose with a single pipe must pass through unchanged");
+        assert_eq!(
+            result, input,
+            "prose with a single pipe must pass through unchanged"
+        );
     }
 
     /// A borderless-style table (no leading `|`) has its separator row dropped
@@ -704,9 +926,9 @@ mod tests {
         // The separator row has no alpha — dropped.
         assert!(!result.contains("-----"), "separator row must be gone");
         // The header and data rows do not start with '|' → not treated as table rows.
-        assert!(result.contains("Name"),  "borderless header must survive");
+        assert!(result.contains("Name"), "borderless header must survive");
         assert!(result.contains("Alice"), "borderless data row must survive");
-        assert!(result.contains("Bob"),   "borderless data row must survive");
+        assert!(result.contains("Bob"), "borderless data row must survive");
     }
 
     // -----------------------------------------------------------------------
@@ -736,25 +958,56 @@ mod tests {
             denoise_text(input.trim(), &cfg).expect("block should not be dropped entirely");
 
         let expected_names = [
-            "NOVEX", "INDUSTRIES", "ZETA", "POWER", "OCEAN", "FORGE",
-            "DELTA", "FINANCIAL", "APEX", "HOLDINGS", "VEGA", "SYSTEMS",
-            "CREST", "BRANDS", "TITAN", "CHEMICAL", "AIR", "PRODUCTS",
-            "LOGISTICS", "NORTHLAND", "MEMBERS",
+            "NOVEX",
+            "INDUSTRIES",
+            "ZETA",
+            "POWER",
+            "OCEAN",
+            "FORGE",
+            "DELTA",
+            "FINANCIAL",
+            "APEX",
+            "HOLDINGS",
+            "VEGA",
+            "SYSTEMS",
+            "CREST",
+            "BRANDS",
+            "TITAN",
+            "CHEMICAL",
+            "AIR",
+            "PRODUCTS",
+            "LOGISTICS",
+            "NORTHLAND",
+            "MEMBERS",
         ];
         for name in &expected_names {
-            assert!(result.contains(name), "expected company token '{name}' in output");
+            assert!(
+                result.contains(name),
+                "expected company token '{name}' in output"
+            );
         }
 
         let expected_locations = [
-            "Springfield", "Riverside", "Denver", "Detroit", "Brentwood",
-            "Tulsa", "Atlanta", "Kingsport", "Allentown", "Minneapolis",
+            "Springfield",
+            "Riverside",
+            "Denver",
+            "Detroit",
+            "Brentwood",
+            "Tulsa",
+            "Atlanta",
+            "Kingsport",
+            "Allentown",
+            "Minneapolis",
         ];
         for loc in &expected_locations {
             assert!(result.contains(loc), "expected location '{loc}' in output");
         }
 
         for junk in &["10788", "45432", "13539", "116524", "10312"] {
-            assert!(!result.contains(junk), "junk token '{junk}' should have been stripped");
+            assert!(
+                !result.contains(junk),
+                "junk token '{junk}' should have been stripped"
+            );
         }
 
         // "&" has no alpha chars → stripped.
@@ -784,6 +1037,61 @@ mod tests {
             },
             "full stripped output must match exactly — all numeric columns gone, \
              '&' dropped, company names and cities intact"
+        );
+    }
+
+    // --- Linearized XBRL passthrough (rust-sec-xbrl-textualizer) ---
+    //
+    // These strings are real output captured from:
+    //   cargo run -- trend-render "Revenues,NetIncomeLoss,OperatingIncomeLoss" "AAPL" \
+    //       --window-years 3 --view linearized
+    //
+    // The denoiser must not corrupt this format. Blank lines (no alpha) are
+    // legitimately dropped by Gate 2 — all content lines must survive verbatim.
+
+    #[test]
+    fn linearized_xbrl_single_metric_line_passes_through_unchanged() {
+        let line = concat!(
+            "label=Net income | dir=up | traj=non_monotonic | path=mostly_upward",
+            " | recent=up_bias | reg=growth_with_resets | cons=erratic | turn=high_turn",
+            " | run=clustered_runs | end=recovering_off_peak | rec=weak_recovery | dd=extreme",
+            " | shock=repeated_shock | pol=upside_shocks | flip=false | sig=UUDUUUDU-t4",
+            " | first=30.00B | last=42.10B | filing_quality=score=100.0 grade=A transitions=12",
+            " scale_issues=0 uom_issues=0",
+        );
+        let cfg = denoiser_enabled(true);
+        let result = denoise_text(line, &cfg);
+        assert_eq!(
+            result,
+            Some(line.to_string()),
+            "linearized metric line must pass through denoise_text completely unchanged"
+        );
+    }
+
+    #[test]
+    fn linearized_xbrl_full_aapl_block_content_preserved() {
+        // Real output block — blank lines are dropped by Gate 2 (zero alpha),
+        // every content line must survive verbatim and in order.
+        let input = indoc! {"
+            ### AAPL
+            periods=2026Q1,2025Q4,2025Q3,2025Q2,2025Q1,2024Q4,2024Q3,2024Q2,2024Q1,2023Q4,2023Q3,2023Q2,2023Q1
+
+            label=Net income | dir=up | traj=non_monotonic | path=mostly_upward | recent=up_bias | reg=growth_with_resets | cons=erratic | turn=high_turn | run=clustered_runs | end=recovering_off_peak | rec=weak_recovery | dd=extreme | shock=repeated_shock | pol=upside_shocks | flip=false | sig=UUDUUUDU-t4 | first=30.00B | last=42.10B | filing_quality=score=100.0 grade=A transitions=12 scale_issues=0 uom_issues=0
+
+            label=Operating income | dir=up | traj=non_monotonic | path=mostly_upward | recent=up_bias | reg=growth_with_resets | cons=erratic | turn=high_turn | run=clustered_runs | end=recovering_off_peak | rec=weak_recovery | dd=severe | shock=repeated_shock | pol=upside_shocks | flip=false | sig=UUDUUUDU-t4 | first=36.02B | last=50.85B | filing_quality=score=100.0 grade=A transitions=12 scale_issues=0 uom_issues=0"
+        };
+        let cfg = denoiser_enabled(true);
+        let result = denoise_text(input, &cfg);
+        // Blank separator lines are stripped (Gate 2 — no alpha). All content lines preserved.
+        assert_eq!(
+            result,
+            Some(indoc! {"
+                ### AAPL
+                periods=2026Q1,2025Q4,2025Q3,2025Q2,2025Q1,2024Q4,2024Q3,2024Q2,2024Q1,2023Q4,2023Q3,2023Q2,2023Q1
+                label=Net income | dir=up | traj=non_monotonic | path=mostly_upward | recent=up_bias | reg=growth_with_resets | cons=erratic | turn=high_turn | run=clustered_runs | end=recovering_off_peak | rec=weak_recovery | dd=extreme | shock=repeated_shock | pol=upside_shocks | flip=false | sig=UUDUUUDU-t4 | first=30.00B | last=42.10B | filing_quality=score=100.0 grade=A transitions=12 scale_issues=0 uom_issues=0
+                label=Operating income | dir=up | traj=non_monotonic | path=mostly_upward | recent=up_bias | reg=growth_with_resets | cons=erratic | turn=high_turn | run=clustered_runs | end=recovering_off_peak | rec=weak_recovery | dd=severe | shock=repeated_shock | pol=upside_shocks | flip=false | sig=UUDUUUDU-t4 | first=36.02B | last=50.85B | filing_quality=score=100.0 grade=A transitions=12 scale_issues=0 uom_issues=0"
+            }.to_string()),
+            "all AAPL content lines must survive unchanged; only blank separators may be dropped"
         );
     }
 }
