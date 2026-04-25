@@ -2,6 +2,48 @@ use crate::data::SectionRole;
 use crate::splits::{SplitLabel, SplitRatios};
 use std::borrow::Cow;
 
+/// Configuration for the OCR denoiser that filters digit-heavy text.
+///
+/// When enabled, text sections that are predominantly numerical (e.g. mangled OCR tables)
+/// are either dropped entirely or stripped down to their alphabetical content, depending
+/// on `line_level`.
+#[derive(Clone, Debug)]
+pub struct DenoiserConfig {
+    /// Whether denoising is active. Defaults to `false` so existing behaviour is unchanged.
+    pub enabled: bool,
+    /// Maximum ratio of digit characters to (digit + alphabetical) characters before a
+    /// section is considered mangled OCR output. Range: `0.0`–`1.0`.
+    ///
+    /// A value of `0.35` means that if more than 35 % of the alphanumeric characters in
+    /// the evaluated unit (a line or a whole block) are digits, the content is treated as
+    /// a mangled table and dropped or stripped.
+    ///
+    /// Defaults to `0.35`.
+    pub max_digit_ratio: f32,
+    /// When `true`, the rule is applied line-by-line within a section.
+    ///
+    /// Lines that exceed the threshold have their digit-heavy tokens stripped so that only
+    /// tokens containing at least one alphabetical character are retained. Lines that
+    /// become empty after stripping are dropped. The section is only dropped in its entirety
+    /// if *every* line is removed.
+    ///
+    /// When `false`, the ratio is evaluated for the whole section text. If the section
+    /// exceeds the threshold the entire section is dropped and no chunks are produced.
+    ///
+    /// Defaults to `true`.
+    pub line_level: bool,
+}
+
+impl Default for DenoiserConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_digit_ratio: 0.35,
+            line_level: true,
+        }
+    }
+}
+
 /// Controls how long text sections are chunked and weighted.
 #[derive(Clone, Debug)]
 pub struct ChunkingStrategy {
@@ -15,6 +57,10 @@ pub struct ChunkingStrategy {
     pub summary_fallback_tokens: usize,
     /// Floor applied to per-chunk weight after offset or summary fallback weighting.
     pub chunk_weight_floor: f32,
+    /// OCR denoiser settings applied to section text before chunking.
+    ///
+    /// Disabled by default; set [`DenoiserConfig::enabled`] to `true` to activate.
+    pub denoiser: DenoiserConfig,
 }
 
 impl Default for ChunkingStrategy {
@@ -25,6 +71,7 @@ impl Default for ChunkingStrategy {
             summary_fallback_weight: 0.35,
             summary_fallback_tokens: 512,
             chunk_weight_floor: 0.1,
+            denoiser: DenoiserConfig::default(),
         }
     }
 }

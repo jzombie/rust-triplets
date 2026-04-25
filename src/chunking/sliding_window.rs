@@ -2,6 +2,7 @@ use super::algorithm::ChunkingAlgorithm;
 use crate::config::ChunkingStrategy;
 use crate::data::{ChunkView, DataRecord, RecordChunk, RecordSection};
 use crate::tokenizer::{Tokenizer, WhitespaceTokenizer};
+use crate::denoiser::denoise_text;
 
 /// Default sliding-window chunking algorithm.
 #[derive(Clone, Copy, Debug, Default)]
@@ -15,7 +16,15 @@ impl ChunkingAlgorithm for SlidingWindowChunker {
         section_idx: usize,
         section: &RecordSection,
     ) -> Vec<RecordChunk> {
-        let text = section.text.as_str();
+        let raw_text = section.text.as_str();
+        let denoised_owned: String;
+        let text = match denoise_text(raw_text, &strategy.denoiser) {
+            Some(cleaned) => {
+                denoised_owned = cleaned;
+                denoised_owned.as_str()
+            }
+            None => return Vec::new(),
+        };
         let tokens: Vec<&str> = WhitespaceTokenizer.tokenize(text);
         if tokens.is_empty() {
             return Vec::new();
@@ -113,6 +122,7 @@ mod tests {
             summary_fallback_weight: 0.3,
             summary_fallback_tokens: 2,
             chunk_weight_floor: 0.0,
+            ..ChunkingStrategy::default()
         }
     }
 
@@ -152,5 +162,48 @@ mod tests {
 
         assert_eq!(window_count, 2);
         assert_eq!(summary_count, 1);
+    }
+
+    #[test]
+    fn denoiser_disabled_produces_chunks_unchanged() {
+        // Default strategy has denoiser disabled; numeric text should chunk normally.
+        let strategy = strategy();
+        let rec = record("42 524 10788 143 1995 190 394");
+        let section = &rec.sections[0];
+        let chunks = SlidingWindowChunker.materialize(&strategy, &rec, 0, section);
+        assert!(!chunks.is_empty());
+    }
+
+    #[test]
+    fn denoiser_enabled_drops_pure_numeric_section() {
+        use crate::config::DenoiserConfig;
+        let mut strategy = strategy();
+        strategy.denoiser = DenoiserConfig {
+            enabled: true,
+            max_digit_ratio: 0.35,
+            line_level: false,
+        };
+        let rec = record("42 524 10788 143 1995 190 394 13611 358 6444 266");
+        let section = &rec.sections[0];
+        let chunks = SlidingWindowChunker.materialize(&strategy, &rec, 0, section);
+        assert!(chunks.is_empty(), "digit-heavy section should produce no chunks");
+    }
+
+    #[test]
+    fn denoiser_line_level_strips_noisy_lines_retaining_text() {
+        use crate::config::DenoiserConfig;
+        let mut strategy = strategy();
+        strategy.denoiser = DenoiserConfig {
+            enabled: true,
+            max_digit_ratio: 0.35,
+            line_level: true,
+        };
+        // The section contains one clean line and one numeric-heavy line.
+        let rec = record("NOVEX INDUSTRIES Springfield\n42 524 10788 143 1995 190 394 13611 358");
+        let section = &rec.sections[0];
+        let chunks = SlidingWindowChunker.materialize(&strategy, &rec, 0, section);
+        assert!(!chunks.is_empty(), "clean line should yield at least one chunk");
+        let all_text: String = chunks.iter().map(|c| c.text.as_str()).collect::<Vec<_>>().join(" ");
+        assert!(all_text.contains("NOVEX") || all_text.contains("Springfield"));
     }
 }

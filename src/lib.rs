@@ -3,6 +3,8 @@
 
 /// Pluggable chunking algorithms and default sliding-window implementation.
 pub mod chunking;
+/// OCR denoising and markdown-table cleanup for text chunks.
+pub mod denoiser;
 /// Sampling configuration types.
 pub mod config;
 /// Centralized constants used across sampler, splits, and sources.
@@ -42,7 +44,8 @@ mod errors;
 
 pub use chunking::{ChunkingAlgorithm, SlidingWindowChunker};
 pub use config::{
-    ChunkingStrategy, NegativeStrategy, SamplerConfig, Selector, TextRecipe, TripletRecipe,
+    ChunkingStrategy, DenoiserConfig, NegativeStrategy, SamplerConfig, Selector, TextRecipe,
+    TripletRecipe,
 };
 pub use data::{
     DataRecord, PairLabel, QualityScore, RecordChunk, SampleBatch, SamplePair, SampleTriplet,
