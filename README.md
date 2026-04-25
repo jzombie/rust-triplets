@@ -7,6 +7,7 @@
     <a href="#configuring-sources">Sources</a> &middot;
     <a href="#sampling-and-mixing">Sampling &amp; Mixing</a> &middot;
     <a href="#epochs-and-determinism">Epochs</a> &middot;
+    <a href="#chunking--preprocessing">Chunking &amp; Preprocessing</a> &middot;
     <a href="#ocr--markdown-denoiser">Denoiser</a> &middot;
     <a href="#license">License</a>
   </p>
@@ -1019,6 +1020,8 @@ Concurrency is handled at multiple levels for high throughput:
 - **Parallel Ingestion**: Source refresh executes concurrently across registered sources during ingestion cycles.
 - **Synchronous API**: Sampling calls are synchronous at the API boundary for straightforward training-loop integration.
 - **Thread-Safe Shared Use**: `TripletSampler` is safe to share across threads (for example via `Arc`); concurrent calls are internally synchronized with a mutex, so a single sampler instance is callable from multiple threads without data races.
+
+## Chunking &amp; Preprocessing
 
 ### Chunking and Windows
 
