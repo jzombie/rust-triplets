@@ -109,6 +109,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Configuring Sources
 
+- [Hugging Face Source](#hugging-face-source)
+- [CSV Source](#csv-source)
+- [Text File Source](#text-file-source)
+- [InMemory Source](#inmemory-source)
+- [Custom Source](#custom-source)
+
 ### Hugging Face Source
 
 Streams rows directly from the Hugging Face Hub without requiring a full dataset download. Map dataset columns to anchor, positive, or plain-text roles the same way as the CSV source.
