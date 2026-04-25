@@ -88,10 +88,7 @@ fn strip_digit_tokens(line: &str, max_digit_ratio: f32) -> String {
     loop {
         // Collect the indices of tokens that would be added in this wave.
         let wave: Vec<usize> = (0..n)
-            .filter(|&i| {
-                !keep[i]
-                    && ((i > 0 && keep[i - 1]) || (i + 1 < n && keep[i + 1]))
-            })
+            .filter(|&i| !keep[i] && ((i > 0 && keep[i - 1]) || (i + 1 < n && keep[i + 1])))
             .collect();
 
         if wave.is_empty() {
@@ -99,14 +96,17 @@ fn strip_digit_tokens(line: &str, max_digit_ratio: f32) -> String {
         }
 
         // Compute the ratio if we were to accept this wave.
-        let (wd, wa): (usize, usize) =
-            wave.iter().fold((0, 0), |(ad, aa), &i| {
-                (ad + char_counts[i].0, aa + char_counts[i].1)
-            });
+        let (wd, wa): (usize, usize) = wave.iter().fold((0, 0), |(ad, aa), &i| {
+            (ad + char_counts[i].0, aa + char_counts[i].1)
+        });
         let new_d = d + wd;
         let new_a = a + wa;
         let new_total = new_d + new_a;
-        let new_ratio = if new_total == 0 { 0.0 } else { new_d as f32 / new_total as f32 };
+        let new_ratio = if new_total == 0 {
+            0.0
+        } else {
+            new_d as f32 / new_total as f32
+        };
 
         if new_ratio > max_digit_ratio {
             break; // This wave would push ratio over threshold — stop.
@@ -556,18 +556,37 @@ mod tests {
         "};
         let result = denoise_text(input.trim(), &cfg).expect("should not be None");
 
-        for word in &["NOVEX", "INDUSTRIES", "Springfield", "ZETA", "POWER", "Riverside"] {
+        for word in &[
+            "NOVEX",
+            "INDUSTRIES",
+            "Springfield",
+            "ZETA",
+            "POWER",
+            "Riverside",
+        ] {
             assert!(result.contains(word), "'{word}' must survive");
         }
         // Numbers immediately adjacent to alpha tokens are rescued
         // (candidate ratio stays below 0.35 on both lines).
-        assert!(result.contains("524"),   "'524' adjacent to NOVEX — rescued");
-        assert!(result.contains("10788"), "'10788' adjacent to Springfield — rescued");
-        assert!(result.contains("294"),   "'294' adjacent to ZETA — rescued");
-        assert!(result.contains("10758"), "'10758' adjacent to Riverside — rescued");
+        assert!(result.contains("524"), "'524' adjacent to NOVEX — rescued");
+        assert!(
+            result.contains("10788"),
+            "'10788' adjacent to Springfield — rescued"
+        );
+        assert!(result.contains("294"), "'294' adjacent to ZETA — rescued");
+        assert!(
+            result.contains("10758"),
+            "'10758' adjacent to Riverside — rescued"
+        );
         // Numbers 2+ hops from any alpha token are still stripped.
-        assert!(!result.contains("45432"), "'45432' 2+ hops from alpha — stripped");
-        assert!(!result.contains("13611"), "'13611' 2+ hops from alpha — stripped");
+        assert!(
+            !result.contains("45432"),
+            "'45432' 2+ hops from alpha — stripped"
+        );
+        assert!(
+            !result.contains("13611"),
+            "'13611' 2+ hops from alpha — stripped"
+        );
         assert_eq!(result.lines().count(), 2);
     }
 
@@ -600,9 +619,15 @@ mod tests {
             assert!(result.contains(word), "'{word}' must survive");
         }
         // Adjacent to alpha: rescued.
-        assert!(result.contains("10788"), "'10788' adjacent to Springfield — rescued");
+        assert!(
+            result.contains("10788"),
+            "'10788' adjacent to Springfield — rescued"
+        );
         // 2+ hops from alpha: stripped.
-        assert!(!result.contains("13611"), "'13611' 2+ hops from alpha — stripped");
+        assert!(
+            !result.contains("13611"),
+            "'13611' 2+ hops from alpha — stripped"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -676,11 +701,17 @@ mod tests {
         assert!(result.contains("Mich."), "dotted abbreviation must survive");
         // "397" is adjacent to DELTA and "10689" is adjacent to Mich. — both rescued
         // (candidate ratio ≈ 0.29 < 0.35).
-        assert!(result.contains("397"),   "'397' adjacent to DELTA — rescued");
-        assert!(result.contains("10689"), "'10689' adjacent to Mich. — rescued");
+        assert!(result.contains("397"), "'397' adjacent to DELTA — rescued");
+        assert!(
+            result.contains("10689"),
+            "'10689' adjacent to Mich. — rescued"
+        );
         // Tokens 2+ hops from alpha are still stripped.
-        assert!(!result.contains("(0.8)"),  "parenthesized negative must be stripped");
-        assert!(!result.contains("18214"),  "bare number must be stripped");
+        assert!(
+            !result.contains("(0.8)"),
+            "parenthesized negative must be stripped"
+        );
+        assert!(!result.contains("18214"), "bare number must be stripped");
         assert_eq!(
             result, "397 DELTA CORP Detroit, Mich. 10689",
             "complete output: alpha tokens plus immediately adjacent digit tokens"
@@ -703,7 +734,10 @@ mod tests {
         assert!(result.contains("10,788.0"), "adjacent comma-number rescued");
         // Numbers 2+ hops from alpha are still stripped.
         for num in &["1,995.0", "13,611.0"] {
-            assert!(!result.contains(num), "non-adjacent comma-number '{num}' must be stripped");
+            assert!(
+                !result.contains(num),
+                "non-adjacent comma-number '{num}' must be stripped"
+            );
         }
     }
 
@@ -778,10 +812,16 @@ mod tests {
 
         // Leading "—" (no alpha neighbour in keep-set before wave 1) is in wave 2
         // alongside 10789 — the wave is rejected, so both are dropped.
-        assert!(!result.contains("10789"), "10789 unreachable within ratio budget — dropped");
+        assert!(
+            !result.contains("10789"),
+            "10789 unreachable within ratio budget — dropped"
+        );
         // "42" and "524" are adjacent to NOVEX/INDUSTRIES — rescued in wave 1.
-        assert!(result.contains("42"),  "42 adjacent to NOVEX — rescued");
-        assert!(result.contains("524"), "524 adjacent to INDUSTRIES — rescued");
+        assert!(result.contains("42"), "42 adjacent to NOVEX — rescued");
+        assert!(
+            result.contains("524"),
+            "524 adjacent to INDUSTRIES — rescued"
+        );
         assert_eq!(
             result, "42 NOVEX — 524 INDUSTRIES —",
             "digit tokens and adjacent em-dashes rescued up to ratio limit; outer tokens dropped"
@@ -813,7 +853,10 @@ mod tests {
             "parenthesized value adjacent to INDUSTRIES must be rescued"
         );
         // "10789" has no alpha neighbor — isolated, not rescued.
-        assert!(!result.contains("10789"), "isolated number must be stripped");
+        assert!(
+            !result.contains("10789"),
+            "isolated number must be stripped"
+        );
         assert_eq!(
             result, "(0.8) NOVEX (1.2) INDUSTRIES (3.4)",
             "adjacent digit tokens rescued; isolated number stripped"
@@ -1155,7 +1198,10 @@ mod tests {
 
         // "&" is between two alpha tokens (PRODUCTS and LOGISTICS); wave expansion
         // rescues it in wave 1 (no digit chars → zero cost to ratio).  It is kept.
-        assert!(result.contains("PRODUCTS & LOGISTICS"), "'&' between alpha tokens is rescued");
+        assert!(
+            result.contains("PRODUCTS & LOGISTICS"),
+            "'&' between alpha tokens is rescued"
+        );
 
         // Digit tokens immediately adjacent to an alpha token ARE rescued when
         // the candidate digit-ratio stays below the threshold.
@@ -1237,10 +1283,16 @@ mod tests {
         // Wave 3: {10788(6)}     — wd=5,     ratio=10/25=0.40 > 0.35 → reject.
         let input = "REVENUE — COSTS NET 42 524 10788";
         let result = denoise_text(input, &cfg).expect("should not be None");
-        assert!(result.contains('—'), "em-dash between alpha tokens must survive");
-        assert!(result.contains("42"),   "'42' rescued in wave 1 alongside —");
-        assert!(result.contains("524"),  "'524' rescued in wave 2");
-        assert!(!result.contains("10788"), "'10788' in rejected wave 3 — stripped");
+        assert!(
+            result.contains('—'),
+            "em-dash between alpha tokens must survive"
+        );
+        assert!(result.contains("42"), "'42' rescued in wave 1 alongside —");
+        assert!(result.contains("524"), "'524' rescued in wave 2");
+        assert!(
+            !result.contains("10788"),
+            "'10788' in rejected wave 3 — stripped"
+        );
         assert_eq!(result, "REVENUE — COSTS NET 42 524");
     }
 
@@ -1259,14 +1311,23 @@ mod tests {
         // Wave 4: {5520(9)}                — wd=4,  ratio=17/43=0.40 > 0.35 → reject.
         let input = "REVENUE GROWTH +12% EARNINGS -8% COSTS 42 524 10788 5520 3918";
         let result = denoise_text(input, &cfg).expect("should not be None");
-        assert!(result.contains("+12%"),  "'+12%' adjacent to alpha — rescued");
-        assert!(result.contains("-8%"),   "'-8%' adjacent to alpha — rescued");
-        assert!(result.contains("42"),    "'42' rescued in wave 1");
-        assert!(result.contains("524"),   "'524' rescued in wave 2");
+        assert!(
+            result.contains("+12%"),
+            "'+12%' adjacent to alpha — rescued"
+        );
+        assert!(result.contains("-8%"), "'-8%' adjacent to alpha — rescued");
+        assert!(result.contains("42"), "'42' rescued in wave 1");
+        assert!(result.contains("524"), "'524' rescued in wave 2");
         assert!(result.contains("10788"), "'10788' rescued in wave 3");
-        assert!(!result.contains("5520"), "'5520' in rejected wave 4 — stripped");
+        assert!(
+            !result.contains("5520"),
+            "'5520' in rejected wave 4 — stripped"
+        );
         assert!(!result.contains("3918"), "'3918' unreachable — stripped");
-        assert_eq!(result, "REVENUE GROWTH +12% EARNINGS -8% COSTS 42 524 10788");
+        assert_eq!(
+            result,
+            "REVENUE GROWTH +12% EARNINGS -8% COSTS 42 524 10788"
+        );
     }
 
     // --- Linearized XBRL passthrough (rust-sec-xbrl-textualizer) ---
