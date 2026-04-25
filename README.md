@@ -7,6 +7,7 @@
     <a href="#configuring-sources">Sources</a> &middot;
     <a href="#sampling-and-mixing">Sampling &amp; Mixing</a> &middot;
     <a href="#epochs-and-determinism">Epochs</a> &middot;
+    <a href="#ocr-denoiser">Denoiser</a> &middot;
     <a href="#license">License</a>
   </p>
   <p align="center">
@@ -148,7 +149,7 @@ The HF source supports two exclusive extraction modes, selected by which fields 
 
 **Role mode** — activated when `anchor_columns`, `positive_columns`, or `context_columns` is non-empty. Each row produces a `DataRecord` with explicitly assigned section roles:
 
-| Config field       | Coalesces? | `SectionRole` produced          | Behaviour when missing / empty                   |
+| Config field       | Coalesces? | `SectionRole` produced          | Behavior when missing / empty                    |
 |--------------------|------------|---------------------------------|--------------------------------------------------|
 | `anchor_columns`   | Yes        | `Anchor`                        | Row is skipped                                   |
 | `positive_columns` | Yes        | `Context`                       | Row is skipped                                   |
@@ -243,9 +244,9 @@ When `source_id=` is omitted, an identifier is derived from the URI:
 
 Examples: `hf://org/wikipedia/20231101.en/train` → `wikipedia.20231101_en`; `hf://org/dataset/default/validation` → `dataset.validation`.
 
-**Error behaviour**
+**Error behavior**
 
-Unknown keys (including typos such as `positve=`) are hard errors — the parser rejects the line immediately rather than silently ignoring the key. This prevents misconfigured sources from being silently loaded with missing column mappings. A line with no recognised mapping key (`anchor=`, `positive=`, `context=`, or `text=`) is also rejected.
+Unknown keys (including typos such as `positve=`) are hard errors — the parser rejects the line immediately rather than silently ignoring the key. This prevents misconfigured sources from being silently loaded with missing column mappings. A line with no recognized mapping key (`anchor=`, `positive=`, `context=`, or `text=`) is also rejected.
 
 #### Authenticating with Private Datasets
 
@@ -970,6 +971,98 @@ Concurrency is handled at multiple levels for high throughput:
 
 Long documents are handled through a pluggable `ChunkingAlgorithm`. The default `SlidingWindowChunker` splits sections into fixed-size token windows with configurable overlap, preserving full coverage of long text.
 
+## OCR Denoiser
+
+Real-world corpora often contain text extracted from PDFs or scanned documents where OCR produces mangled tables: rows packed with bare numbers, column separators, and financial data that carries no semantic signal for embedding models. The denoiser also strips GFM pipe-table formatting (separator rows dropped, cell text extracted) so that markdown tables embedded in documents don't produce raw pipe characters in chunks. Both kinds of cleanup happen before chunking.
+
+It is **disabled by default** and is activated via `DenoiserConfig::enabled` on the `ChunkingStrategy`:
+
+```rust,no_run
+use triplets::{SamplerConfig, ChunkingStrategy, DenoiserConfig};
+
+let config = SamplerConfig {
+    chunking: ChunkingStrategy {
+        denoiser: DenoiserConfig {
+            enabled: true,
+            max_digit_ratio: 0.35, // default
+        },
+        ..ChunkingStrategy::default()
+    },
+    ..SamplerConfig::default()
+};
+```
+
+The denoiser can also be called directly if you want to pre-filter text before constructing a sampler:
+
+```rust
+use triplets::DenoiserConfig;
+use triplets::denoiser::denoise_text;
+
+let cfg = DenoiserConfig { enabled: true, max_digit_ratio: 0.35 };
+
+// Digit-heavy OCR row is dropped entirely.
+assert_eq!(denoise_text("42 524 10788 143 1995 190 394 13611", &cfg), None);
+
+// Clean prose passes through unchanged.
+assert_eq!(
+    denoise_text("Revenue grew twelve percent year over year.", &cfg),
+    Some("Revenue grew twelve percent year over year.".to_string()),
+);
+
+// Mixed input: the noisy line is removed, the clean line is kept.
+let mixed = "Revenue grew twelve percent year over year.\n42 524 10788 143 1995 190 394";
+assert_eq!(
+    denoise_text(mixed, &cfg),
+    Some("Revenue grew twelve percent year over year.".to_string()),
+);
+```
+
+### DenoiserConfig fields
+
+| Field             | Type    | Default | Description                                                                              |
+|-------------------|---------|---------|------------------------------------------------------------------------------------------|
+| `enabled`         | `bool`  | `false` | Master switch. When `false`, text passes through completely unchanged.                   |
+| `max_digit_ratio` | `f32`   | `0.35`  | Maximum fraction of alphanumeric chars that may be digits before a line is treated as mangled. |
+
+### How it works: three gates
+
+Line endings are first normalized and each line passes through three gates in order:
+
+**Gate 1 — Markdown table formatting**
+
+Lines whose trimmed form starts with `|` and contains at least one additional `|` are treated as GFM pipe-table rows:
+
+- *Separator rows* (containing only `|`, `-`, `:`, and whitespace, e.g. `|---|---|`) are **dropped**.
+- *Header and data rows* have their pipe delimiters stripped and the extracted cell text is then evaluated by gates 2 and 3.
+
+Prose lines that happen to contain a single `|` (e.g. `foo | bar`) are not affected.
+
+**Gate 2 — No alphabetical characters**
+
+Lines with zero alphabetical characters are **dropped**. This removes all-numeric rows, symbol-only OCR artifacts, and blank separators.
+
+**Gate 3 — High digit ratio**
+
+Lines whose `digits / (digits + alpha)` ratio exceeds `max_digit_ratio` are **stripped**: only whitespace-delimited tokens that contain at least one alphabetical character are retained. If stripping leaves the line empty it is dropped.
+
+The section is only discarded entirely (`None`) when *every* line is removed.
+
+### What survives
+
+Alpha-heavy text — prose, markdown headings, key=value metadata lines — passes through completely unchanged. Only blank lines (no alpha) and lines that exceed the digit ratio threshold are affected.
+
+OCR table rows that mix company names with dense numeric columns are stripped down to the name tokens only:
+
+```text
+# Input (mangled OCR financial table)
+42 524 NOVEX INDUSTRIES Springfield 10788 143 1995 190 394 13611 358
+343 294 ZETA POWER Riverside 10758 31 1283 267 189 45432 175
+
+# Output — numeric tokens stripped, text tokens preserved
+NOVEX INDUSTRIES Springfield
+ZETA POWER Riverside
+```
+
 ### Negative Mining
 
 Negative selection is delegated to a pluggable backend.
@@ -986,6 +1079,7 @@ Negative selection is delegated to a pluggable backend.
 | **Instruction Tuning**  | Attach task-specific prompts (e.g., "Summarize this...") to specific recipes. |
 | **Metadata Decorators** | Inject structured prefixes into sampled text via `KvpPrefixSampler`.          |
 | **Anti-Shortcut**       | Includes anchor/positive swapping to avoid asymmetric slot bias.              |
+| **OCR Denoiser**        | Strips digit-heavy OCR noise and markdown table formatting before chunking.   |
 
 ## License
 
