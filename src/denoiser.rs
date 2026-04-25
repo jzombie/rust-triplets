@@ -39,11 +39,92 @@ fn digit_ratio(text: &str) -> f32 {
     }
 }
 
-/// Keep only whitespace-delimited tokens that contain at least one alphabetical
-/// character.  Returns the space-joined result; may be empty.
-fn strip_digit_tokens(line: &str) -> String {
-    line.split_whitespace()
-        .filter(|token| token.chars().any(|ch| ch.is_alphabetic()))
+/// Keep tokens from a digit-heavy line while preserving numeric context.
+///
+/// Algorithm: wave expansion from alpha-token seeds.
+///
+/// 1. Seed the keep-set with all alpha-bearing tokens.
+/// 2. Each wave rescues the immediate neighbors (±1 position) of every
+///    currently-kept token that are not yet kept.  Before committing the wave,
+///    the combined digit-ratio of the *new candidate set* (current keep ∪ wave)
+///    is checked.  If the ratio stays ≤ `max_digit_ratio` the wave is accepted
+///    and expansion continues; otherwise the wave is rejected and expansion stops.
+/// 3. This process repeats until no new neighbors exist or a wave is rejected.
+///
+/// Any token type (bare numbers, `—`, `$12.5M`, `+3%`, …) is eligible for
+/// rescue — the ratio check is the sole gate.  Pure-symbol tokens adjacent to
+/// alpha tokens can therefore be rescued when they carry contextual meaning
+/// (e.g. `—` used as a minus sign, `$` prefixes).
+///
+/// Returns the space-joined result; may be empty.
+fn strip_digit_tokens(line: &str, max_digit_ratio: f32) -> String {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    if tokens.is_empty() {
+        return String::new();
+    }
+    let n = tokens.len();
+
+    let has_alpha: Vec<bool> = tokens
+        .iter()
+        .map(|t| t.chars().any(|c| c.is_alphabetic()))
+        .collect();
+
+    // Seed: all alpha-bearing tokens.
+    let mut keep: Vec<bool> = has_alpha.clone();
+
+    // Pre-compute (digits, alpha) per token for ratio checks.
+    let char_counts: Vec<(usize, usize)> = tokens.iter().map(|t| count_digit_alpha(t)).collect();
+
+    // Running totals for the current keep-set.
+    let (mut d, mut a) = (0usize, 0usize);
+    for (i, &k) in keep.iter().enumerate() {
+        if k {
+            d += char_counts[i].0;
+            a += char_counts[i].1;
+        }
+    }
+
+    // Wave expansion: each iteration rescues ±1 neighbours of kept tokens.
+    loop {
+        // Collect the indices of tokens that would be added in this wave.
+        let wave: Vec<usize> = (0..n)
+            .filter(|&i| {
+                !keep[i]
+                    && ((i > 0 && keep[i - 1]) || (i + 1 < n && keep[i + 1]))
+            })
+            .collect();
+
+        if wave.is_empty() {
+            break;
+        }
+
+        // Compute the ratio if we were to accept this wave.
+        let (wd, wa): (usize, usize) =
+            wave.iter().fold((0, 0), |(ad, aa), &i| {
+                (ad + char_counts[i].0, aa + char_counts[i].1)
+            });
+        let new_d = d + wd;
+        let new_a = a + wa;
+        let new_total = new_d + new_a;
+        let new_ratio = if new_total == 0 { 0.0 } else { new_d as f32 / new_total as f32 };
+
+        if new_ratio > max_digit_ratio {
+            break; // This wave would push ratio over threshold — stop.
+        }
+
+        // Accept the wave.
+        for &i in &wave {
+            keep[i] = true;
+        }
+        d = new_d;
+        a = new_a;
+    }
+
+    tokens
+        .iter()
+        .enumerate()
+        .filter(|&(i, _)| keep[i])
+        .map(|(_, t)| *t)
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -154,9 +235,9 @@ pub fn denoise_text(text: &str, config: &DenoiserConfig) -> Option<String> {
             continue;
         }
 
-        // Gate 3: digit-heavy line → strip to alpha-bearing tokens only.
+        // Gate 3: digit-heavy line → rescue adjacent numeric tokens, strip remainder.
         if digit_ratio(effective) > config.max_digit_ratio {
-            let retained = strip_digit_tokens(effective);
+            let retained = strip_digit_tokens(effective, config.max_digit_ratio);
             if !retained.is_empty() {
                 cleaned_lines.push(retained);
             }
@@ -463,8 +544,9 @@ mod tests {
     // Line-level: mixed content on the same line
     // -----------------------------------------------------------------------
 
-    /// Every line has text and numbers interleaved; digit-bearing tokens are
-    /// stripped while the text tokens survive.
+    /// Alpha tokens survive; numbers immediately adjacent to alpha tokens are
+    /// rescued when the candidate ratio stays within the threshold; numbers
+    /// 2+ hops from any alpha token are stripped.
     #[test]
     fn denoise_line_level_mixed_content_same_line() {
         let cfg = denoiser_enabled();
@@ -474,22 +556,18 @@ mod tests {
         "};
         let result = denoise_text(input.trim(), &cfg).expect("should not be None");
 
-        for word in &[
-            "NOVEX",
-            "INDUSTRIES",
-            "Springfield",
-            "ZETA",
-            "POWER",
-            "Riverside",
-        ] {
-            assert!(
-                result.contains(word),
-                "'{word}' must survive line-level strip"
-            );
+        for word in &["NOVEX", "INDUSTRIES", "Springfield", "ZETA", "POWER", "Riverside"] {
+            assert!(result.contains(word), "'{word}' must survive");
         }
-        for num in &["10788", "45432"] {
-            assert!(!result.contains(num), "'{num}' must be stripped");
-        }
+        // Numbers immediately adjacent to alpha tokens are rescued
+        // (candidate ratio stays below 0.35 on both lines).
+        assert!(result.contains("524"),   "'524' adjacent to NOVEX — rescued");
+        assert!(result.contains("10788"), "'10788' adjacent to Springfield — rescued");
+        assert!(result.contains("294"),   "'294' adjacent to ZETA — rescued");
+        assert!(result.contains("10758"), "'10758' adjacent to Riverside — rescued");
+        // Numbers 2+ hops from any alpha token are still stripped.
+        assert!(!result.contains("45432"), "'45432' 2+ hops from alpha — stripped");
+        assert!(!result.contains("13611"), "'13611' 2+ hops from alpha — stripped");
         assert_eq!(result.lines().count(), 2);
     }
 
@@ -521,9 +599,10 @@ mod tests {
         for word in &["NOVEX", "INDUSTRIES", "Springfield"] {
             assert!(result.contains(word), "'{word}' must survive");
         }
-        for num in &["10788", "13611"] {
-            assert!(!result.contains(num), "'{num}' must be stripped");
-        }
+        // Adjacent to alpha: rescued.
+        assert!(result.contains("10788"), "'10788' adjacent to Springfield — rescued");
+        // 2+ hops from alpha: stripped.
+        assert!(!result.contains("13611"), "'13611' 2+ hops from alpha — stripped");
     }
 
     // -----------------------------------------------------------------------
@@ -595,15 +674,16 @@ mod tests {
         assert!(result.contains("CORP"), "CORP must survive");
         assert!(result.contains("Detroit"), "city must survive");
         assert!(result.contains("Mich."), "dotted abbreviation must survive");
-        assert!(!result.contains("10689"), "bare number must be stripped");
-        assert!(
-            !result.contains("(0.8)"),
-            "parenthesized negative must be stripped"
-        );
-        assert!(!result.contains("18214"), "bare number must be stripped");
+        // "397" is adjacent to DELTA and "10689" is adjacent to Mich. — both rescued
+        // (candidate ratio ≈ 0.29 < 0.35).
+        assert!(result.contains("397"),   "'397' adjacent to DELTA — rescued");
+        assert!(result.contains("10689"), "'10689' adjacent to Mich. — rescued");
+        // Tokens 2+ hops from alpha are still stripped.
+        assert!(!result.contains("(0.8)"),  "parenthesized negative must be stripped");
+        assert!(!result.contains("18214"),  "bare number must be stripped");
         assert_eq!(
-            result, "DELTA CORP Detroit, Mich.",
-            "complete output must equal only the alpha-bearing tokens joined by spaces"
+            result, "397 DELTA CORP Detroit, Mich. 10689",
+            "complete output: alpha tokens plus immediately adjacent digit tokens"
         );
     }
 
@@ -618,12 +698,27 @@ mod tests {
         for word in &["NOVEX", "INDUSTRIES", "Springfield"] {
             assert!(result.contains(word), "'{word}' must survive");
         }
-        for num in &["10,788.0", "1,995.0", "13,611.0"] {
-            assert!(
-                !result.contains(num),
-                "comma-number '{num}' must be stripped"
-            );
+        // "10,788.0" is immediately adjacent to Springfield — rescued
+        // (candidate ratio ≈ 0.26 < 0.35).
+        assert!(result.contains("10,788.0"), "adjacent comma-number rescued");
+        // Numbers 2+ hops from alpha are still stripped.
+        for num in &["1,995.0", "13,611.0"] {
+            assert!(!result.contains(num), "non-adjacent comma-number '{num}' must be stripped");
         }
+    }
+
+    /// When rescuing adjacent tokens would push the candidate set back over
+    /// `max_digit_ratio`, the fallback emits alpha-only tokens.
+    #[test]
+    fn denoise_neighbor_rescue_falls_back_when_ratio_still_exceeds_threshold() {
+        let cfg = denoiser_enabled(); // max_digit_ratio = 0.35
+        // "1234 word 5678": candidate = ["1234", "word", "5678"]
+        // digits = 4+4 = 8, alpha = 4; ratio = 8/12 = 0.67 > 0.35 → fallback.
+        let input = "1234 word 5678";
+        let result = denoise_text(input, &cfg).expect("should not be None");
+        assert_eq!(result, "word", "fallback must emit only the alpha token");
+        assert!(!result.contains("1234"));
+        assert!(!result.contains("5678"));
     }
 
     /// A line of only symbols / numbers with no alpha → block returns `None`.
@@ -670,48 +765,58 @@ mod tests {
     }
 
     /// A single line where em-dashes appear *multiple* times — before, between,
-    /// and after text tokens.  Every em-dash must be stripped; only the text
-    /// tokens survive, and the full output must equal exactly their joined form.
+    /// and after text tokens.  With wave expansion, em-dashes adjacent to alpha
+    /// tokens are rescued in the first wave (they add zero digit chars so ratio
+    /// does not increase).  The em-dash *after* `INDUSTRIES` (index 6) is rescued
+    /// in wave 1; `10789` and the trailing `—` (index 8) would require wave 2
+    /// which pushes ratio over threshold — both are dropped.
     #[test]
     fn denoise_line_level_multiple_em_dashes_all_stripped() {
         let cfg = denoiser_enabled();
         let input = "— 42 NOVEX — 524 INDUSTRIES — 10789 —";
         let result = denoise_text(input, &cfg).expect("should not be None");
 
-        assert!(!result.contains('—'), "every em-dash instance must be gone");
-        assert!(!result.contains("42"), "bare number must be stripped");
-        assert!(!result.contains("524"), "bare number must be stripped");
+        // Leading "—" (no alpha neighbour in keep-set before wave 1) is in wave 2
+        // alongside 10789 — the wave is rejected, so both are dropped.
+        assert!(!result.contains("10789"), "10789 unreachable within ratio budget — dropped");
+        // "42" and "524" are adjacent to NOVEX/INDUSTRIES — rescued in wave 1.
+        assert!(result.contains("42"),  "42 adjacent to NOVEX — rescued");
+        assert!(result.contains("524"), "524 adjacent to INDUSTRIES — rescued");
         assert_eq!(
-            result, "NOVEX INDUSTRIES",
-            "full output must be only the two surviving text tokens"
+            result, "42 NOVEX — 524 INDUSTRIES —",
+            "digit tokens and adjacent em-dashes rescued up to ratio limit; outer tokens dropped"
         );
     }
 
-    /// A single line where parenthesized values appear *multiple* times —
-    /// before, between, and after text tokens.  Every parenthesized value
-    /// must be stripped; the full output must be an exact match.
+    /// A single line where parenthesized decimal values appear *multiple* times
+    /// adjacent to alpha tokens.  Because the parenthesized tokens contain digits
+    /// they are eligible for rescue; the candidate ratio (6 digits / 21
+    /// alphanumeric chars ≈ 0.29) stays below the threshold so they are kept.
+    /// A trailing bare number with no alpha neighbor is still stripped.
     #[test]
-    fn denoise_line_level_multiple_parenthesized_values_stripped() {
+    fn denoise_line_level_multiple_parenthesized_values_rescued() {
         let cfg = denoiser_enabled();
         let input = "(0.8) NOVEX (1.2) INDUSTRIES (3.4) 10789";
         let result = denoise_text(input, &cfg).expect("should not be None");
 
+        // Adjacent digit tokens are rescued when ratio is below threshold.
         assert!(
-            !result.contains("(0.8)"),
-            "first parenthesized value must be gone"
+            result.contains("(0.8)"),
+            "parenthesized value adjacent to NOVEX must be rescued"
         );
         assert!(
-            !result.contains("(1.2)"),
-            "second parenthesized value must be gone"
+            result.contains("(1.2)"),
+            "parenthesized value between alpha tokens must be rescued"
         );
         assert!(
-            !result.contains("(3.4)"),
-            "third parenthesized value must be gone"
+            result.contains("(3.4)"),
+            "parenthesized value adjacent to INDUSTRIES must be rescued"
         );
-        assert!(!result.contains("10789"), "bare number must be stripped");
+        // "10789" has no alpha neighbor — isolated, not rescued.
+        assert!(!result.contains("10789"), "isolated number must be stripped");
         assert_eq!(
-            result, "NOVEX INDUSTRIES",
-            "full output must be only the two surviving text tokens"
+            result, "(0.8) NOVEX (1.2) INDUSTRIES (3.4)",
+            "adjacent digit tokens rescued; isolated number stripped"
         );
     }
 
@@ -739,8 +844,10 @@ mod tests {
     }
 
     /// Two lines both containing multiple instances of different symbol trash.
-    /// The exact multiline output string must match — no extra spaces, no
-    /// residual symbol tokens, correct newline separator.
+    /// Line 1: wave 1 rescues 42, —, 524, — (ratio 5/20 = 0.25 ≤ 0.35);
+    /// wave 2 would add 10789 + trailing — (ratio 10/25 = 0.40 > 0.35) → rejected.
+    /// Line 2: `(0.8)`, `(1.2)`, `(3.4)` each contain TWO digit chars ('0','8', etc.);
+    /// wave 1 wd=6 → ratio 6/15 = 0.40 > 0.35 → rejected; only alpha seed survives.
     #[test]
     fn denoise_line_level_multiple_symbol_trash_multiline_exact_output() {
         let cfg = denoiser_enabled();
@@ -751,8 +858,8 @@ mod tests {
         let result = denoise_text(input.trim(), &cfg).expect("should not be None");
 
         assert_eq!(
-            result, "NOVEX INDUSTRIES\nZETA POWER",
-            "full multiline output must exactly equal the joined alpha tokens per line"
+            result, "42 NOVEX — 524 INDUSTRIES —\nZETA POWER",
+            "line 1: wave expansion rescues up to budget; line 2: wave 1 rejected (’(0.8)’ has 2 digit chars)"
         );
     }
 
@@ -1038,15 +1145,26 @@ mod tests {
             assert!(result.contains(loc), "expected location '{loc}' in output");
         }
 
-        for junk in &["10788", "45432", "13539", "116524", "10312"] {
+        // Isolated numeric tokens (not adjacent to any alpha token) are stripped.
+        for junk in &["45432", "13539", "116524"] {
             assert!(
                 !result.contains(junk),
-                "junk token '{junk}' should have been stripped"
+                "isolated junk token '{junk}' should have been stripped"
             );
         }
 
-        // "&" has no alpha chars → stripped.
-        assert!(!result.contains(" & "), "'&' token should be stripped");
+        // "&" is between two alpha tokens (PRODUCTS and LOGISTICS); wave expansion
+        // rescues it in wave 1 (no digit chars → zero cost to ratio).  It is kept.
+        assert!(result.contains("PRODUCTS & LOGISTICS"), "'&' between alpha tokens is rescued");
+
+        // Digit tokens immediately adjacent to an alpha token ARE rescued when
+        // the candidate digit-ratio stays below the threshold.
+        for rescued in &["10788", "10312"] {
+            assert!(
+                result.contains(rescued),
+                "adjacent digit token '{rescued}' should be rescued"
+            );
+        }
 
         assert_eq!(
             result.lines().count(),
@@ -1054,25 +1172,101 @@ mod tests {
             "every input row should survive as a stripped output line"
         );
 
-        // Exact full multiline output — every numeric column stripped, only
-        // the company name and city tokens remain on each line.
+        // Exact full multiline output — wave expansion rescues digit tokens and
+        // zero-cost symbol tokens (like `&`) adjacent to alpha tokens; tokens
+        // that would push the ratio over threshold are dropped.  The first token
+        // of each row (e.g. `42`, `343`) is 2+ hops from alpha and gets stripped
+        // from most rows, but on rows 1, 9, and 10 more waves are accepted because
+        // those rows have more alpha to absorb the digit budget.
         assert_eq!(
             result,
             indoc! {"
-                NOVEX INDUSTRIES Springfield
-                ZETA POWER Riverside
-                OCEAN FORGE Denver
-                DELTA FINANCIAL Detroit
-                APEX HOLDINGS Brentwood
-                VEGA SYSTEMS Tulsa
-                CREST BRANDS Atlanta
-                TITAN CHEMICAL Kingsport
-                AIR PRODUCTS LOGISTICS Allentown
-                NORTHLAND FINANCIAL FOR MEMBERS Minneapolis"
+                42 524 NOVEX INDUSTRIES Springfield 10788 143
+                294 ZETA POWER Riverside 10758
+                442 OCEAN FORGE Denver 10707
+                397 DELTA FINANCIAL Detroit 10689
+                397 APEX HOLDINGS Brentwood 10648
+                379 VEGA SYSTEMS Tulsa 10627
+                225 CREST BRANDS Atlanta 10589
+                555 TITAN CHEMICAL Kingsport 10476
+                350 540 AIR PRODUCTS & LOGISTICS Allentown 10323 166
+                351 399 NORTHLAND FINANCIAL FOR MEMBERS Minneapolis 10312 265 25302"
             },
-            "full stripped output must match exactly — all numeric columns gone, \
-             '&' dropped, company names and cities intact"
+            "full stripped output: wave-expanded rescue up to per-row ratio budget; '&' kept"
         );
+    }
+
+    // --- Linearized XBRL passthrough (rust-sec-xbrl-textualizer) ---
+    //
+    // These strings are real output captured from:
+    //   cargo run -- trend-render "Revenues,NetIncomeLoss,OperatingIncomeLoss" "AAPL" \
+    //       --window-years 3 --view linearized
+    //
+    // The denoiser must not corrupt this format. Blank lines (no alpha) are
+    // legitimately dropped by Gate 2 — all content lines must survive verbatim.
+
+    // -----------------------------------------------------------------------
+    // Financial punctuation: +, -, —, $, %
+    // -----------------------------------------------------------------------
+
+    /// Lines below the digit-ratio threshold must pass through entirely
+    /// unchanged — every financial token (`$4.2B`, `+12%`, `-$1.1B`, `23%`,
+    /// `—`) is preserved byte-for-byte.
+    #[test]
+    fn denoise_financial_punctuation_below_threshold_passes_through_unchanged() {
+        let cfg = denoiser_enabled();
+        // digits ≈ 8, alpha ≈ 35 → ratio ≈ 0.19 — well below 0.35.
+        let input = "Operating cash: $4.2B (+12% YoY) — net debt fell -$1.1B; margin: 23%.";
+        let result = denoise_text(input, &cfg).expect("should not be None");
+        assert_eq!(
+            result, input,
+            "below-threshold line with financial symbols must be byte-identical"
+        );
+    }
+
+    /// On a gate-3 line, an em-dash (`—`) used as a minus-sign operator between
+    /// alpha tokens is rescued by wave expansion: it carries zero digit chars so
+    /// it adds nothing to the digit budget and is always accepted with its wave.
+    #[test]
+    fn denoise_em_dash_operator_on_gate3_line_is_rescued() {
+        let cfg = denoiser_enabled();
+        // ratio = 10/25 = 0.40 → gate 3 triggered.
+        // Seed: {REVENUE(0), COSTS(2), NET(3)}, a=15, d=0.
+        // Wave 1: {—(1), 42(4)}   — wd=0+2=2, ratio=2/17=0.12 ≤ 0.35 → accept.
+        // Wave 2: {524(5)}       — wd=3,     ratio=5/20=0.25 ≤ 0.35 → accept.
+        // Wave 3: {10788(6)}     — wd=5,     ratio=10/25=0.40 > 0.35 → reject.
+        let input = "REVENUE — COSTS NET 42 524 10788";
+        let result = denoise_text(input, &cfg).expect("should not be None");
+        assert!(result.contains('—'), "em-dash between alpha tokens must survive");
+        assert!(result.contains("42"),   "'42' rescued in wave 1 alongside —");
+        assert!(result.contains("524"),  "'524' rescued in wave 2");
+        assert!(!result.contains("10788"), "'10788' in rejected wave 3 — stripped");
+        assert_eq!(result, "REVENUE — COSTS NET 42 524");
+    }
+
+    /// On a gate-3 line, `+N%` and `-N%` tokens (digit-bearing, no alpha) are
+    /// rescued by wave expansion when adjacent to alpha tokens and the wave ratio
+    /// stays within budget.  This verifies sign and percent characters are never
+    /// blindly stripped.
+    #[test]
+    fn denoise_sign_percent_tokens_on_gate3_line_are_rescued() {
+        let cfg = denoiser_enabled();
+        // ratio = 21/47 ≈ 0.45 → gate 3 triggered.
+        // Seed: {REVENUE(0), GROWTH(1), EARNINGS(3), COSTS(5)}, a=26, d=0.
+        // Wave 1: {+12%(2), -8%(4), 42(6)} — wd=5,  ratio=5/31=0.16 ≤ 0.35 → accept.
+        // Wave 2: {524(7)}                 — wd=3,  ratio=8/34=0.24 ≤ 0.35 → accept.
+        // Wave 3: {10788(8)}               — wd=5,  ratio=13/39=0.33 ≤ 0.35 → accept.
+        // Wave 4: {5520(9)}                — wd=4,  ratio=17/43=0.40 > 0.35 → reject.
+        let input = "REVENUE GROWTH +12% EARNINGS -8% COSTS 42 524 10788 5520 3918";
+        let result = denoise_text(input, &cfg).expect("should not be None");
+        assert!(result.contains("+12%"),  "'+12%' adjacent to alpha — rescued");
+        assert!(result.contains("-8%"),   "'-8%' adjacent to alpha — rescued");
+        assert!(result.contains("42"),    "'42' rescued in wave 1");
+        assert!(result.contains("524"),   "'524' rescued in wave 2");
+        assert!(result.contains("10788"), "'10788' rescued in wave 3");
+        assert!(!result.contains("5520"), "'5520' in rejected wave 4 — stripped");
+        assert!(!result.contains("3918"), "'3918' unreachable — stripped");
+        assert_eq!(result, "REVENUE GROWTH +12% EARNINGS -8% COSTS 42 524 10788");
     }
 
     // --- Linearized XBRL passthrough (rust-sec-xbrl-textualizer) ---
