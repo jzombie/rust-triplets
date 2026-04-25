@@ -441,6 +441,8 @@ mod tests {
         assert!(!result.contains("10689"),   "bare number must be stripped");
         assert!(!result.contains("(0.8)"),   "parenthesized negative must be stripped");
         assert!(!result.contains("18214"),   "bare number must be stripped");
+        assert_eq!(result, "DELTA CORP Detroit, Mich.",
+            "complete output must equal only the alpha-bearing tokens joined by spaces");
     }
 
     /// Comma-formatted numbers like `10,788.0` contain no alpha → stripped.
@@ -496,6 +498,78 @@ mod tests {
         for junk in &["42", "(524)", "10,758.0", "1283"] {
             assert!(!result.contains(junk), "'{junk}' must be stripped");
         }
+        assert_eq!(result, "ZETA POWER Riverside, Corp.",
+            "complete output must equal only the alpha-bearing tokens joined by spaces");
+    }
+
+    /// A single line where em-dashes appear *multiple* times — before, between,
+    /// and after text tokens.  Every em-dash must be stripped; only the text
+    /// tokens survive, and the full output must equal exactly their joined form.
+    #[test]
+    fn denoise_line_level_multiple_em_dashes_all_stripped() {
+        let cfg = denoiser_enabled(true);
+        let input = "— 42 NOVEX — 524 INDUSTRIES — 10789 —";
+        let result = denoise_text(input, &cfg).expect("should not be None");
+
+        assert!(!result.contains('—'),   "every em-dash instance must be gone");
+        assert!(!result.contains("42"),  "bare number must be stripped");
+        assert!(!result.contains("524"), "bare number must be stripped");
+        assert_eq!(result, "NOVEX INDUSTRIES",
+            "full output must be only the two surviving text tokens");
+    }
+
+    /// A single line where parenthesized values appear *multiple* times —
+    /// before, between, and after text tokens.  Every parenthesized value
+    /// must be stripped; the full output must be an exact match.
+    #[test]
+    fn denoise_line_level_multiple_parenthesized_values_stripped() {
+        let cfg = denoiser_enabled(true);
+        let input = "(0.8) NOVEX (1.2) INDUSTRIES (3.4) 10789";
+        let result = denoise_text(input, &cfg).expect("should not be None");
+
+        assert!(!result.contains("(0.8)"), "first parenthesized value must be gone");
+        assert!(!result.contains("(1.2)"), "second parenthesized value must be gone");
+        assert!(!result.contains("(3.4)"), "third parenthesized value must be gone");
+        assert!(!result.contains("10789"), "bare number must be stripped");
+        assert_eq!(result, "NOVEX INDUSTRIES",
+            "full output must be only the two surviving text tokens");
+    }
+
+    /// A single line that mixes em-dashes, parenthesized values, and bare
+    /// numbers — all appearing *multiple* times.  Every non-alpha token is
+    /// stripped; the exact joined remainder must match.
+    #[test]
+    fn denoise_line_level_mixed_symbol_trash_repeated() {
+        let cfg = denoiser_enabled(true);
+        let input = "— (0.8) 42 ZETA — (1.5) 524 POWER — (2.3) 10758 Corp —";
+        let result = denoise_text(input, &cfg).expect("should not be None");
+
+        assert!(!result.contains('—'),      "all em-dash instances must be gone");
+        assert!(!result.contains("(0.8)"),  "first parens value must be gone");
+        assert!(!result.contains("(1.5)"),  "second parens value must be gone");
+        assert!(!result.contains("(2.3)"),  "third parens value must be gone");
+        assert!(!result.contains("10758"),  "bare number must be stripped");
+        assert_eq!(result, "ZETA POWER Corp",
+            "full output must be only the three surviving text tokens");
+    }
+
+    /// Two lines both containing multiple instances of different symbol trash.
+    /// The exact multiline output string must match — no extra spaces, no
+    /// residual symbol tokens, correct newline separator.
+    #[test]
+    fn denoise_line_level_multiple_symbol_trash_multiline_exact_output() {
+        let cfg = denoiser_enabled(true);
+        let input = indoc! {"
+            — 42 NOVEX — 524 INDUSTRIES — 10789 —
+            (0.8) ZETA (1.2) POWER (3.4) 10758
+        "};
+        let result = denoise_text(input.trim(), &cfg).expect("should not be None");
+
+        assert_eq!(
+            result,
+            "NOVEX INDUSTRIES\nZETA POWER",
+            "full multiline output must exactly equal the joined alpha tokens per line"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -690,6 +764,26 @@ mod tests {
             result.lines().count(),
             input.trim().lines().count(),
             "every input row should survive as a stripped output line"
+        );
+
+        // Exact full multiline output — every numeric column stripped, only
+        // the company name and city tokens remain on each line.
+        assert_eq!(
+            result,
+            indoc! {"
+                NOVEX INDUSTRIES Springfield
+                ZETA POWER Riverside
+                OCEAN FORGE Denver
+                DELTA FINANCIAL Detroit
+                APEX HOLDINGS Brentwood
+                VEGA SYSTEMS Tulsa
+                CREST BRANDS Atlanta
+                TITAN CHEMICAL Kingsport
+                AIR PRODUCTS LOGISTICS Allentown
+                NORTHLAND FINANCIAL FOR MEMBERS Minneapolis"
+            },
+            "full stripped output must match exactly — all numeric columns gone, \
+             '&' dropped, company names and cities intact"
         );
     }
 }
