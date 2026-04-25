@@ -3,14 +3,14 @@
 
 /// Pluggable chunking algorithms and default sliding-window implementation.
 pub mod chunking;
-/// OCR denoising and markdown-table cleanup for text chunks.
-pub mod denoiser;
 /// Sampling configuration types.
 pub mod config;
 /// Centralized constants used across sampler, splits, and sources.
 pub mod constants;
 /// Data record and sample batch types.
 pub mod data;
+/// OCR denoising and markdown-table cleanup for text chunks.
+pub mod denoiser;
 mod epoch;
 /// Reusable example runners shared by downstream crates.
 pub mod example_apps;

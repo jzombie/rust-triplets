@@ -1,8 +1,8 @@
 use super::algorithm::ChunkingAlgorithm;
 use crate::config::ChunkingStrategy;
 use crate::data::{ChunkView, DataRecord, RecordChunk, RecordSection};
-use crate::tokenizer::{Tokenizer, WhitespaceTokenizer};
 use crate::denoiser::denoise_text;
+use crate::tokenizer::{Tokenizer, WhitespaceTokenizer};
 
 /// Default sliding-window chunking algorithm.
 #[derive(Clone, Copy, Debug, Default)]
@@ -186,7 +186,10 @@ mod tests {
         let rec = record("42 524 10788 143 1995 190 394 13611 358 6444 266");
         let section = &rec.sections[0];
         let chunks = SlidingWindowChunker.materialize(&strategy, &rec, 0, section);
-        assert!(chunks.is_empty(), "digit-heavy section should produce no chunks");
+        assert!(
+            chunks.is_empty(),
+            "digit-heavy section should produce no chunks"
+        );
     }
 
     #[test]
@@ -202,8 +205,15 @@ mod tests {
         let rec = record("NOVEX INDUSTRIES Springfield\n42 524 10788 143 1995 190 394 13611 358");
         let section = &rec.sections[0];
         let chunks = SlidingWindowChunker.materialize(&strategy, &rec, 0, section);
-        assert!(!chunks.is_empty(), "clean line should yield at least one chunk");
-        let all_text: String = chunks.iter().map(|c| c.text.as_str()).collect::<Vec<_>>().join(" ");
+        assert!(
+            !chunks.is_empty(),
+            "clean line should yield at least one chunk"
+        );
+        let all_text: String = chunks
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
         assert!(all_text.contains("NOVEX") || all_text.contains("Springfield"));
     }
 }

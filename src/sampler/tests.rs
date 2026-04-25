@@ -706,7 +706,7 @@ fn kvp_prefix_is_applied_to_non_initial_windows_from_long_sections() {
         summary_fallback_weight: 0.0,
         summary_fallback_tokens: 0,
         chunk_weight_floor: 0.0,
-    ..ChunkingStrategy::default()
+        ..ChunkingStrategy::default()
     };
     config.recipes = Vec::new();
     config.text_recipes = vec![TextRecipe {
@@ -1152,7 +1152,7 @@ fn chunk_view_carries_window_index() {
         summary_fallback_weight: 0.0,
         summary_fallback_tokens: 2,
         chunk_weight_floor: 0.0,
-    ..ChunkingStrategy::default()
+        ..ChunkingStrategy::default()
     };
     let store = Arc::new(DeterministicSplitStore::new(split, 3).unwrap());
     let sampler = TripletSampler::new(config, store);
@@ -1203,7 +1203,7 @@ fn chunk_windows_follow_stride_for_large_sections() {
         summary_fallback_weight: 0.0,
         summary_fallback_tokens: 0,
         chunk_weight_floor: 0.0,
-    ..ChunkingStrategy::default()
+        ..ChunkingStrategy::default()
     };
     let store = Arc::new(DeterministicSplitStore::new(split, 11).unwrap());
     let sampler = TripletSampler::new(config, store);
@@ -1272,7 +1272,7 @@ fn chunk_windows_materialize_all_configured_overlaps() {
         summary_fallback_weight: 0.0,
         summary_fallback_tokens: 0,
         chunk_weight_floor: 0.0,
-    ..ChunkingStrategy::default()
+        ..ChunkingStrategy::default()
     };
     let store = Arc::new(DeterministicSplitStore::new(split, 23).unwrap());
     let sampler = TripletSampler::new(config, store);
@@ -1999,7 +1999,7 @@ fn non_adjacent_auto_window_pair_proximity_is_not_half() {
         summary_fallback_weight: 0.0,
         summary_fallback_tokens: 0,
         chunk_weight_floor: 0.0,
-    ..ChunkingStrategy::default()
+        ..ChunkingStrategy::default()
     };
     let store = Arc::new(DeterministicSplitStore::new(split, 19).unwrap());
     let sampler = TripletSampler::new(config, store);
@@ -2081,7 +2081,7 @@ fn text_pair_and_triplet_chunks_all_come_from_materialize_pool() {
         summary_fallback_weight: 0.0,
         summary_fallback_tokens: 0,
         chunk_weight_floor: 0.0,
-    ..ChunkingStrategy::default()
+        ..ChunkingStrategy::default()
     };
     let context_text = "alpha beta gamma delta epsilon zeta eta theta";
     config.recipes = vec![TripletRecipe {
@@ -2226,7 +2226,7 @@ fn end_to_end_text_weighting_uses_chunk_offsets() {
         summary_fallback_weight: 0.0,
         summary_fallback_tokens: 0,
         chunk_weight_floor: 0.0,
-    ..ChunkingStrategy::default()
+        ..ChunkingStrategy::default()
     };
 
     let store = Arc::new(DeterministicSplitStore::new(split, 9).unwrap());
@@ -2307,7 +2307,7 @@ fn end_to_end_text_weighting_respects_splits() {
         summary_fallback_weight: 0.0,
         summary_fallback_tokens: 0,
         chunk_weight_floor: 0.0,
-    ..ChunkingStrategy::default()
+        ..ChunkingStrategy::default()
     };
     let chunking = config.chunking.clone();
 
@@ -3223,7 +3223,7 @@ fn cycles_through_section_windows_before_repeating() {
         summary_fallback_weight: 0.0,
         summary_fallback_tokens: 0,
         chunk_weight_floor: 0.0,
-    ..ChunkingStrategy::default()
+        ..ChunkingStrategy::default()
     };
     config.text_recipes = vec![TextRecipe {
         name: "evidence_chunks".into(),
@@ -3290,7 +3290,7 @@ fn first_chunk_offset_is_deterministic_and_nonzero_when_hash_demands_it() {
             summary_fallback_weight: 0.0,
             summary_fallback_tokens: 0,
             chunk_weight_floor: 0.0,
-        ..ChunkingStrategy::default()
+            ..ChunkingStrategy::default()
         };
         config.text_recipes = vec![TextRecipe {
             name: "context_chunks".into(),
@@ -3376,7 +3376,7 @@ fn first_role_section_offset_is_deterministic_and_nonzero_when_hash_demands_it()
             summary_fallback_weight: 0.0,
             summary_fallback_tokens: 0,
             chunk_weight_floor: 0.0,
-        ..ChunkingStrategy::default()
+            ..ChunkingStrategy::default()
         };
         config.text_recipes = vec![TextRecipe {
             name: "context_role".into(),
@@ -4041,7 +4041,7 @@ fn role_reentry_same_epoch_restarts_from_same_section_offset() {
         summary_fallback_weight: 0.0,
         summary_fallback_tokens: 0,
         chunk_weight_floor: 0.0,
-    ..ChunkingStrategy::default()
+        ..ChunkingStrategy::default()
     };
     let mut inner = TripletSamplerInner::new(config, store);
 
@@ -4115,7 +4115,7 @@ fn role_reentry_after_epoch_change_can_restart_from_different_section_offset() {
         summary_fallback_weight: 0.0,
         summary_fallback_tokens: 0,
         chunk_weight_floor: 0.0,
-    ..ChunkingStrategy::default()
+        ..ChunkingStrategy::default()
     };
     let mut inner = TripletSamplerInner::new(config, store);
 
@@ -4887,7 +4887,7 @@ fn selector_edge_cases_cover_internal_branches() {
         summary_fallback_weight: 0.0,
         summary_fallback_tokens: 0,
         chunk_weight_floor: 0.0,
-    ..ChunkingStrategy::default()
+        ..ChunkingStrategy::default()
     };
     let mut inner = TripletSamplerInner::new(config, Arc::clone(&store));
 
@@ -7633,7 +7633,7 @@ fn oversampling_advances_cursors_on_large_records() {
         summary_fallback_weight: 0.0,
         summary_fallback_tokens: 0,
         chunk_weight_floor: 0.0,
-    ..ChunkingStrategy::default()
+        ..ChunkingStrategy::default()
     };
 
     let store = Arc::new(DeterministicSplitStore::new(split, 123).unwrap());
@@ -7834,7 +7834,7 @@ fn chunk_sampling_respects_split_boundaries() {
         summary_fallback_weight: 0.0,
         summary_fallback_tokens: 0,
         chunk_weight_floor: 0.0,
-    ..ChunkingStrategy::default()
+        ..ChunkingStrategy::default()
     };
 
     let sampler = TripletSampler::new(config, store);
@@ -7885,7 +7885,7 @@ fn adds_dynamic_chunk_pair_recipe_for_long_section_sources() {
         summary_fallback_weight: 0.0,
         summary_fallback_tokens: 0,
         chunk_weight_floor: 0.0,
-    ..ChunkingStrategy::default()
+        ..ChunkingStrategy::default()
     };
 
     let recipes = vec![TripletRecipe {
@@ -7991,7 +7991,7 @@ fn does_not_add_dynamic_chunk_pair_recipe_when_all_sections_fit_window() {
         summary_fallback_weight: 0.0,
         summary_fallback_tokens: 0,
         chunk_weight_floor: 0.0,
-    ..ChunkingStrategy::default()
+        ..ChunkingStrategy::default()
     };
 
     let recipes = vec![TripletRecipe {
@@ -8103,7 +8103,7 @@ fn adds_dynamic_chunk_pair_recipe_even_with_global_config_recipes() {
         summary_fallback_weight: 0.0,
         summary_fallback_tokens: 0,
         chunk_weight_floor: 0.0,
-    ..ChunkingStrategy::default()
+        ..ChunkingStrategy::default()
     };
     config.recipes = vec![TripletRecipe {
         name: "global_anchor_context".into(),
@@ -8209,7 +8209,7 @@ fn auto_injected_recipe_uses_distinct_context_chunks_for_anchor_and_positive() {
         summary_fallback_weight: 0.0,
         summary_fallback_tokens: 0,
         chunk_weight_floor: 0.0,
-    ..ChunkingStrategy::default()
+        ..ChunkingStrategy::default()
     };
 
     let now = Utc::now();
@@ -8318,7 +8318,7 @@ fn auto_injected_recipe_never_uses_identical_anchor_and_positive_chunks() {
         summary_fallback_weight: 0.0,
         summary_fallback_tokens: 0,
         chunk_weight_floor: 0.0,
-    ..ChunkingStrategy::default()
+        ..ChunkingStrategy::default()
     };
 
     let now = Utc::now();
@@ -8409,7 +8409,7 @@ fn auto_injected_recipe_uses_window_chunks_for_anchor_and_positive() {
         summary_fallback_weight: 0.5,
         summary_fallback_tokens: 2,
         chunk_weight_floor: 0.0,
-    ..ChunkingStrategy::default()
+        ..ChunkingStrategy::default()
     };
 
     let now = Utc::now();
@@ -8486,7 +8486,7 @@ fn auto_injected_recipe_keeps_all_components_in_requested_split() {
         summary_fallback_weight: 0.0,
         summary_fallback_tokens: 0,
         chunk_weight_floor: 0.0,
-    ..ChunkingStrategy::default()
+        ..ChunkingStrategy::default()
     };
 
     let store = Arc::new(DeterministicSplitStore::new(split, 1441).unwrap());
@@ -8577,7 +8577,7 @@ fn same_selector_triplet_returns_none_when_only_one_chunk_exists() {
         summary_fallback_weight: 0.0,
         summary_fallback_tokens: 0,
         chunk_weight_floor: 0.0,
-    ..ChunkingStrategy::default()
+        ..ChunkingStrategy::default()
     };
     let store = Arc::new(DeterministicSplitStore::new(split, 122).unwrap());
     let mut inner = TripletSamplerInner::new(config, store);
