@@ -365,48 +365,23 @@ Build the source incrementally with `add_record` / `add_records`, or use `from_r
 
 ```rust
 use std::sync::Arc;
-use chrono::Utc;
 use triplets::{
     DataRecord, DeterministicSplitStore, InMemorySource, SamplerConfig,
-    SplitLabel, SplitRatios, TextRecipe, TripletSampler, Sampler, Selector,
+    SplitLabel, SplitRatios, TextRecipe, TripletSampler, Sampler, Selector, SectionRole,
 };
-use triplets::data::{RecordSection, SectionRole};
 
 let mut source = InMemorySource::new("my_corpus");
-source.add_record(DataRecord {
-    id: "doc-0".into(),
-    source: "my_corpus".into(),
-    created_at: Utc::now(),
-    updated_at: Utc::now(),
-    quality: Default::default(),
-    taxonomy: vec![],
-    sections: vec![RecordSection {
-        role: SectionRole::Context,
-        heading: None,
-        text: "The quick brown fox jumps over the lazy dog.".into(),
-        sentences: vec![],
-    }],
-    meta_prefix: None,
-});
 
-// add_records accepts any iterator of DataRecord.
-source.add_records(vec![
-    DataRecord {
-        id: "doc-1".into(),
-        source: "my_corpus".into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-        quality: Default::default(),
-        taxonomy: vec![],
-        sections: vec![RecordSection {
-            role: SectionRole::Context,
-            heading: None,
-            text: "Pack my box with five dozen liquor jugs.".into(),
-            sentences: vec![],
-        }],
-        meta_prefix: None,
-    },
-]);
+// DataRecord::from_text creates a record with a single Context section in one call.
+source.add_record(DataRecord::from_text("doc-0", "my_corpus", "The quick brown fox jumps over the lazy dog."));
+source.add_record(DataRecord::from_text("doc-1", "my_corpus", "Pack my box with five dozen liquor jugs."));
+
+// Use from_text_with_role when you need an Anchor section instead.
+source.add_record(DataRecord::from_text_with_role(
+    "doc-2", "my_corpus",
+    "What is the capital of France?",
+    SectionRole::Anchor,
+));
 
 // InMemorySource implements DataSource directly — register it bare, no adapter needed.
 let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
@@ -426,28 +401,14 @@ let sampler = TripletSampler::new(
 sampler.register_source(Box::new(source));
 ```
 
-`from_records` is a convenience constructor when you already have a collected `Vec`:
+`from_records` is a convenience constructor when you already have a collected `Vec`. Pair it with `DataRecord::from_text` to keep bulk construction concise:
 
 ```rust,no_run
-use chrono::Utc;
 use triplets::{DataRecord, InMemorySource};
-use triplets::data::{RecordSection, SectionRole};
 
-let records: Vec<DataRecord> = (0..100).map(|i| DataRecord {
-    id: format!("doc-{i}"),
-    source: "generated".into(),
-    created_at: Utc::now(),
-    updated_at: Utc::now(),
-    quality: Default::default(),
-    taxonomy: vec![],
-    sections: vec![RecordSection {
-        role: SectionRole::Context,
-        heading: None,
-        text: format!("Document {i} body text."),
-        sentences: vec![],
-    }],
-    meta_prefix: None,
-}).collect();
+let records: Vec<DataRecord> = (0..100)
+    .map(|i| DataRecord::from_text(format!("doc-{i}"), "generated", format!("Document {i} body text.")))
+    .collect();
 
 let source = InMemorySource::from_records("generated", records);
 ```
@@ -962,7 +923,6 @@ sampler.add_variant_fields([KvpField::many("date", ["2025-01-15", "Jan 15, 2025"
 Set `DataRecord::meta_prefix` on any record before registering it with a source:
 
 ```rust
-use chrono::Utc;
 use triplets::DataRecord;
 use triplets::kvp::{KvpField, KvpPrefixSampler};
 
@@ -972,16 +932,8 @@ prefix.add_variant_fields([
     KvpField::one("source", "daily-update").with_presence(0.7),
 ]);
 
-let record = DataRecord {
-    id: "rec-001".into(),
-    source: "news".into(),
-    created_at: Utc::now(),
-    updated_at: Utc::now(),
-    quality: Default::default(),
-    taxonomy: vec![],
-    sections: vec![],
-    meta_prefix: Some(prefix),
-};
+let mut record = DataRecord::from_text("rec-001", "news", "Today's market update.");
+record.meta_prefix = Some(prefix);
 ```
 
 ### Inspecting metadata on output chunks
@@ -1098,44 +1050,32 @@ The denoiser runs automatically inside the pipeline. Here is a complete end-to-e
 
 ```rust
 use std::sync::Arc;
-use chrono::Utc;
 use indoc::indoc;
 use triplets::{
     ChunkingStrategy, DataRecord, DenoiserConfig, DeterministicSplitStore,
     InMemorySource, Sampler, SamplerConfig, Selector, SplitLabel, SplitRatios,
-    TextRecipe, TripletSampler,
+    SectionRole, TextRecipe, TripletSampler,
 };
-use triplets::data::{RecordSection, SectionRole};
 
 let mut source = InMemorySource::new("ocr_doc");
-source.add_record(DataRecord {
-    id: "q3-2024".into(),
-    source: "ocr_doc".into(),
-    created_at: Utc::now(),
-    updated_at: Utc::now(),
-    quality: Default::default(),
-    taxonomy: vec![],
-    sections: vec![RecordSection {
-        role: SectionRole::Context,
-        heading: None,
-        // Raw PDF-extracted text: a markdown table followed by digit-heavy
-        // OCR garbage rows, then the actual prose summary.
-        text: indoc! {"
-            Operating Results — Q3 2024
+source.add_record(DataRecord::from_text(
+    "q3-2024",
+    "ocr_doc",
+    // Raw PDF-extracted text: a markdown table followed by digit-heavy
+    // OCR garbage rows, then the actual prose summary.
+    indoc! {"
+        Operating Results — Q3 2024
 
-            | Metric          | Q3 2024 | Q3 2023 |
-            |-----------------|---------|---------|
-            | Revenue ($M)    | 94,930  | 89,498  |
-            | Net Income ($M) | 21,448  | 19,881  |
+        | Metric          | Q3 2024 | Q3 2023 |
+        |-----------------|---------|---------|
+        | Revenue ($M)    | 94,930  | 89,498  |
+        | Net Income ($M) | 21,448  | 19,881  |
 
-            2 1 4 4 8 1 9 8 8 1 9 4 9 3 0 8 9 4 9 8
-            0 0 1 2 3 5 8 13 21 34 0 0 1 1 2 3 5 8
+        2 1 4 4 8 1 9 8 8 1 9 4 9 3 0 8 9 4 9 8
+        0 0 1 2 3 5 8 13 21 34 0 0 1 1 2 3 5 8
 
-            Revenue grew six percent year over year."}.to_string(),
-        sentences: vec![],
-    }],
-    meta_prefix: None,
-});
+        Revenue grew six percent year over year."},
+));
 
 let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
 let store = Arc::new(DeterministicSplitStore::new(ratios, 42).unwrap());

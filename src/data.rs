@@ -44,6 +44,66 @@ pub struct DataRecord {
     pub meta_prefix: Option<KvpPrefixSampler>,
 }
 
+impl DataRecord {
+    /// Create a record with a single [`SectionRole::Context`] section from a plain text string.
+    ///
+    /// The `id` and `source` are set to the same value. Use [`DataRecord::from_text_with_role`]
+    /// to assign a different role, or construct the struct directly for full control.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use triplets::DataRecord;
+    ///
+    /// let record = DataRecord::from_text("doc-0", "my_corpus", "The quick brown fox.");
+    /// assert_eq!(record.id.as_str(), "doc-0");
+    /// assert_eq!(record.sections[0].text, "The quick brown fox.");
+    /// ```
+    pub fn from_text(
+        id: impl Into<crate::types::RecordId>,
+        source: impl Into<crate::types::SourceId>,
+        text: impl Into<String>,
+    ) -> Self {
+        Self::from_text_with_role(id, source, text, SectionRole::Context)
+    }
+
+    /// Create a record with a single section of the given role from a plain text string.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use triplets::{DataRecord, SectionRole};
+    ///
+    /// let record = DataRecord::from_text_with_role(
+    ///     "doc-0", "my_corpus", "What is the capital of France?", SectionRole::Anchor,
+    /// );
+    /// assert_eq!(record.sections[0].role, SectionRole::Anchor);
+    /// ```
+    pub fn from_text_with_role(
+        id: impl Into<crate::types::RecordId>,
+        source: impl Into<crate::types::SourceId>,
+        text: impl Into<String>,
+        role: SectionRole,
+    ) -> Self {
+        let now = chrono::Utc::now();
+        Self {
+            id: id.into(),
+            source: source.into(),
+            created_at: now,
+            updated_at: now,
+            quality: QualityScore::default(),
+            taxonomy: vec![],
+            sections: vec![RecordSection {
+                role,
+                heading: None,
+                text: text.into(),
+                sentences: vec![],
+            }],
+            meta_prefix: None,
+        }
+    }
+}
+
 /// A structured section within a record.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RecordSection {
