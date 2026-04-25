@@ -2,7 +2,7 @@
 name = "triplets"
 version = "0.18.1-alpha"
 edition = "2024"
-description = "Composable data sampling primitives for deterministic multi-source ML/AI training-data orchestration."
+description = "A composable, deterministic text data pipeline for ML. Ingest, denoise, chunk, split, and sample multi-source corpora into reproducible training triplets."
 license = "MIT OR Apache-2.0"
 authors = ["Jeremy Harris <jeremy.harris@zenosmosis.com>"]
 repository = "https://github.com/jzombie/rust-triplets"
@@ -11,7 +11,7 @@ keywords = [
     "train-test-split",
     "triplet-mining",
     "dataset-sampling",
-    "training-data",
+    "preprocessing",
     "bm25",
 ]
 

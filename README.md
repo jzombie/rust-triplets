@@ -1,6 +1,6 @@
 <p align="center">
   <h1 align="center">⛏️ triplets</h1>
-  <p align="center"><strong>Composable data sampling primitives for deterministic multi-source ML/AI training-data orchestration.</strong></p>
+  <p align="center"><strong>A composable, deterministic text data pipeline for ML/AI. Ingest, denoise, chunk, split, and sample multi-source corpora into reproducible training triplets and pairs.</strong></p>
   <p align="center">
     <a href="#getting-started">Getting Started</a> &middot;
     <a href="#cargo-features">Cargo Features</a> &middot;
@@ -24,7 +24,7 @@
 
 Generate an effectively unlimited stream of [training triplets](https://en.wikipedia.org/wiki/Triplet_loss), pairs, or plaintext samples from your existing corpus. This crate handles ingestion, multi-source mixing, deterministic train/validation/test splitting, and optional [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) hard-negative mining.
 
-**Designed as a data-pipeline layer for a training loop.**
+**Designed as a preprocessing and data-pipeline layer for a training loop.**
 
 > A training loop has two halves: the *data side* and the *model side*. `triplets` owns the data side — deterministic and reproducible train/validation/test splitting, seeded shuffling across epochs, weighted multi-source mixing, BM25 hard-negative mining, and static per-record KVP metadata for input conditioning. What it intentionally does *not* include is the model side: forward passes, loss computation, and optimizer steps. The design goal is that you plug this crate's output stream directly into your training framework (crates like [Candle](https://github.com/huggingface/candle), [burn](https://crates.io/crates/burn), [tch](https://crates.io/crates/tch), [PyO3](https://crates.io/crates/pyo3)) and it already handles the parts of the data pipeline that are hardest to get right — correctness, reproducibility, and scale.
 
@@ -973,7 +973,7 @@ Long documents are handled through a pluggable `ChunkingAlgorithm`. The default 
 
 ## OCR Denoiser
 
-Real-world corpora often contain text extracted from PDFs or scanned documents where OCR produces mangled tables: rows packed with bare numbers, column separators, and financial data that carries no semantic signal for embedding models. The denoiser also strips GFM pipe-table formatting (separator rows dropped, cell text extracted) so that markdown tables embedded in documents don't produce raw pipe characters in chunks. Both kinds of cleanup happen before chunking.
+Real-world corpora often contain text extracted from PDFs or scanned documents where OCR produces mangled tables: rows packed with bare numbers, column separators, and financial data that carries no semantic signal for embedding models. The denoiser also strips GFM pipe-table formatting (separator rows dropped, cell text extracted) so that markdown tables embedded in documents don't produce raw pipe characters in chunks. Both kinds of cleanup happen as preprocessing steps before chunking.
 
 It is **disabled by default** and is activated via `DenoiserConfig::enabled` on the `ChunkingStrategy`:
 
@@ -992,7 +992,7 @@ let config = SamplerConfig {
 };
 ```
 
-The denoiser can also be called directly if you want to pre-filter text before constructing a sampler:
+The denoiser can also be called directly if you want to preprocess text before constructing a sampler:
 
 ```rust
 use triplets::DenoiserConfig;
@@ -1079,7 +1079,7 @@ Negative selection is delegated to a pluggable backend.
 | **Instruction Tuning**  | Attach task-specific prompts (e.g., "Summarize this...") to specific recipes. |
 | **Metadata Decorators** | Inject structured prefixes into sampled text via `KvpPrefixSampler`.          |
 | **Anti-Shortcut**       | Includes anchor/positive swapping to avoid asymmetric slot bias.              |
-| **OCR Denoiser**        | Strips digit-heavy OCR noise and markdown table formatting before chunking.   |
+| **OCR Denoiser**        | Preprocessing step: strips digit-heavy OCR noise and markdown table formatting before chunking. |
 
 ## License
 
