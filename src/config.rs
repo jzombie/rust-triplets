@@ -20,6 +20,14 @@ pub struct DenoiserConfig {
     ///
     /// Defaults to `0.35`.
     pub max_digit_ratio: f32,
+    /// Whether to strip common markdown formatting boundaries (e.g. pipe `|` table boundaries,
+    /// dropping layout-only separator rows like `|---|---|`).
+    ///
+    /// Currently covers GFM tables; may expand to other structural markers in the future.
+    /// Semantic text is preserved.
+    ///
+    /// Defaults to `true`.
+    pub strip_markdown: bool,
 }
 
 impl Default for DenoiserConfig {
@@ -27,6 +35,7 @@ impl Default for DenoiserConfig {
         Self {
             enabled: false,
             max_digit_ratio: 0.35,
+            strip_markdown: true,
         }
     }
 }

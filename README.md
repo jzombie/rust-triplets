@@ -7,7 +7,7 @@
     <a href="#configuring-sources">Sources</a> &middot;
     <a href="#sampling-and-mixing">Sampling &amp; Mixing</a> &middot;
     <a href="#epochs-and-determinism">Epochs</a> &middot;
-    <a href="#ocr-denoiser">Denoiser</a> &middot;
+    <a href="#ocr--markdown-denoiser">Denoiser</a> &middot;
     <a href="#license">License</a>
   </p>
   <p align="center">
@@ -971,7 +971,7 @@ Concurrency is handled at multiple levels for high throughput:
 
 Long documents are handled through a pluggable `ChunkingAlgorithm`. The default `SlidingWindowChunker` splits sections into fixed-size token windows with configurable overlap, preserving full coverage of long text.
 
-## OCR Denoiser
+## OCR & Markdown Denoiser
 
 Real-world corpora often contain text extracted from PDFs or scanned documents where OCR produces mangled tables: rows packed with bare numbers, column separators, and financial data that carries no semantic signal for embedding models. The denoiser also strips GFM pipe-table formatting (separator rows dropped, cell text extracted) so that markdown tables embedded in documents don't produce raw pipe characters in chunks. Both kinds of cleanup happen as preprocessing steps before chunking.
 
@@ -985,6 +985,7 @@ let config = SamplerConfig {
         denoiser: DenoiserConfig {
             enabled: true,
             max_digit_ratio: 0.35, // default
+            strip_markdown: true,  // default
         },
         ..ChunkingStrategy::default()
     },
@@ -998,7 +999,7 @@ The denoiser can also be called directly if you want to preprocess text before c
 use triplets::DenoiserConfig;
 use triplets::denoiser::denoise_text;
 
-let cfg = DenoiserConfig { enabled: true, max_digit_ratio: 0.35 };
+let cfg = DenoiserConfig { enabled: true, strip_markdown: true, max_digit_ratio: 0.35 };
 
 // Digit-heavy OCR row is dropped entirely.
 assert_eq!(denoise_text("42 524 10788 143 1995 190 394 13611", &cfg), None);
@@ -1079,7 +1080,7 @@ Negative selection is delegated to a pluggable backend.
 | **Instruction Tuning**  | Attach task-specific prompts (e.g., "Summarize this...") to specific recipes. |
 | **Metadata Decorators** | Inject structured prefixes into sampled text via `KvpPrefixSampler`.          |
 | **Anti-Shortcut**       | Includes anchor/positive swapping to avoid asymmetric slot bias.              |
-| **OCR Denoiser**        | Preprocessing step: strips digit-heavy OCR noise and markdown table formatting before chunking. |
+| **OCR & Markdown Denoiser** | Preprocessing step: strips digit-heavy OCR noise and markdown table formatting before chunking. |
 
 ## License
 

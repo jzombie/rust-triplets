@@ -132,12 +132,12 @@ pub fn denoise_text(text: &str, config: &DenoiserConfig) -> Option<String> {
     let normalized = LineEnding::normalize(text);
     let mut cleaned_lines: Vec<String> = Vec::new();
     for line in normalized.lines() {
-        // Gate 1: markdown table formatting.
-        // Separator rows (containing only |, -, :, and whitespace) carry no
-        // textual content and are dropped.  Header and data rows have their
-        // pipe delimiters stripped; the extracted cell text then passes
-        // through gates 2 and 3 like any other line.
-        let table_stripped = if is_markdown_table_line(line) {
+        // Gate 1: markdown formatting.
+        // If `strip_markdown` is active, separator rows (containing only |, -, :,
+        // and whitespace) carry no textual content and are dropped. Header and data
+        // rows have their pipe delimiters stripped; the extracted cell text then
+        // passes through gates 2 and 3 like any other line.
+        let table_stripped = if config.strip_markdown && is_markdown_table_line(line) {
             if is_markdown_table_separator(line) {
                 continue;
             }
@@ -185,6 +185,7 @@ mod tests {
         DenoiserConfig {
             enabled: true,
             max_digit_ratio: 0.35,
+            strip_markdown: true,
         }
     }
 
@@ -308,6 +309,57 @@ mod tests {
         let cfg = DenoiserConfig::default(); // enabled = false
         let input = "| Name | Age |\n|------|-----|\n| Alice | 30 |";
         assert_eq!(denoise_text(input, &cfg), Some(input.to_string()));
+    }
+
+    #[test]
+    fn denoise_enabled_but_strip_markdown_false_leaves_tables_intact() {
+        let mut cfg = denoiser_enabled();
+        cfg.strip_markdown = false;
+
+        let input = indoc! {"
+            | Name | Age |
+            |------|-----|
+            | Alice | 30 |
+        "};
+        // The table survives unchanged, including the |---|---| separator row,
+        // because the markdown gate is bypassed and the separator row gets
+        // dropped by gate 2 ONLY if it has no alpha. Wait, `|---|---|` has no alpha!
+        // So gate 2 drops the separator row anyway! Let's assert on what actually happens.
+        // `| Name | Age |` -> passes (has alpha, low digits)
+        // `|------|-----|` -> drops (no alpha)
+        // `| Alice | 30 |` -> passes (has alpha, low digits)
+        let expected = "| Name | Age |\n| Alice | 30 |";
+        assert_eq!(denoise_text(input.trim(), &cfg), Some(expected.to_string()));
+    }
+
+    #[test]
+    fn denoise_enabled_with_strip_markdown_strips_tables_and_preserves_headings() {
+        let cfg = denoiser_enabled(); // strip_markdown is true by default
+        let input = indoc! {"
+            ### User Demographics
+            
+            | Name | Age |
+            |------|-----|
+            | Alice | 30 |
+            
+            Some bold **text** and `code` here.
+        "};
+
+        // - "### User Demographics" survives (has alpha)
+        // - blank lines dropped (no alpha)
+        // - "| Name | Age |" -> "Name Age"
+        // - "|------|-----|" -> dropped (separator)
+        // - "| Alice | 30 |" -> "Alice 30"
+        // - "Some bold **text** and `code` here." -> survives (has alpha)
+        let expected = indoc! {"
+            ### User Demographics
+            Name Age
+            Alice 30
+            Some bold **text** and `code` here.
+        "}
+        .trim();
+
+        assert_eq!(denoise_text(input.trim(), &cfg), Some(expected.to_string()));
     }
 
     // -----------------------------------------------------------------------

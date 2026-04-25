@@ -181,6 +181,7 @@ mod tests {
         strategy.denoiser = DenoiserConfig {
             enabled: true,
             max_digit_ratio: 0.35,
+            strip_markdown: true,
         };
         let rec = record("42 524 10788 143 1995 190 394 13611 358 6444 266");
         let section = &rec.sections[0];
@@ -198,6 +199,7 @@ mod tests {
         strategy.denoiser = DenoiserConfig {
             enabled: true,
             max_digit_ratio: 0.35,
+            strip_markdown: true,
         };
         // The section contains one clean line and one numeric-heavy line.
         let rec = record("NOVEX INDUSTRIES Springfield\n42 524 10788 143 1995 190 394 13611 358");
