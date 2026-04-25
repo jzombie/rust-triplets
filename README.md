@@ -1024,9 +1024,30 @@ Concurrency is handled at multiple levels for high throughput:
 
 Long documents are handled through a pluggable `ChunkingAlgorithm`. The default `SlidingWindowChunker` splits sections into fixed-size token windows with configurable overlap, preserving full coverage of long text.
 
+### Pluggable Preprocessors
+
+Before a section reaches the chunker, it passes through a sequential pipeline of `TextPreprocessor` implementations registered on `ChunkingStrategy`.  Each preprocessor receives the section text and returns either `Some(transformed)` to continue the pipeline or `None` to discard the section entirely — producing no chunks from it.
+
+```rust,no_run
+use triplets::{ChunkingStrategy, TextPreprocessor};
+
+struct UppercasePreprocessor;
+
+impl TextPreprocessor for UppercasePreprocessor {
+    fn process(&self, text: &str) -> Option<String> {
+        Some(text.to_uppercase())
+    }
+}
+
+let mut strategy = ChunkingStrategy::default();
+strategy.register_preprocessor(UppercasePreprocessor);
+```
+
+Multiple preprocessors can be chained; they run in registration order and the output of each stage feeds the next.  The built-in `DenoiserPreprocessor` (see below) is implemented as a preprocessor and can be mixed with custom ones.
+
 ## OCR & Markdown Denoiser
 
-Real-world corpora often contain text extracted from PDFs or scanned documents where OCR produces mangled tables: rows packed with bare numbers, column separators, and financial data that carries no semantic signal for embedding models. The denoiser also strips [GFM](https://github.github.com/gfm/) (GitHub Flavored Markdown) pipe-table formatting (separator rows dropped, cell text extracted) so that markdown tables embedded in documents don't produce raw pipe characters in chunks. Both kinds of cleanup happen as preprocessing steps before chunking.
+Real-world corpora often contain text extracted from PDFs or scanned documents where OCR produces mangled tables: rows packed with bare numbers, column separators, and financial data that carries no semantic signal for embedding models. The denoiser also strips [GFM](https://github.github.com/gfm/) (GitHub Flavored Markdown) pipe-table formatting (separator rows dropped, cell text extracted) so that markdown tables embedded in documents don't produce raw pipe characters in chunks. Both kinds of cleanup are implemented as a `TextPreprocessor` and registered via `register_preprocessor`.
 
 It is **disabled by default** and is activated via `DenoiserConfig::enabled` on the `ChunkingStrategy`:
 
