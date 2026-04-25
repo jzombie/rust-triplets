@@ -357,79 +357,6 @@ let source = FileSource::new(config);
 sampler.register_source(Box::new(source));
 ```
 
-### Custom Source
-
-Implement the `IndexableSource` trait to integrate any backend that can fetch records by a stable integer index. For simple in-process corpora that do not require a custom backend, use [`InMemorySource`](#inmemory-source) instead.
-
-```rust
-use std::sync::Arc;
-use triplets::{SamplerConfig, TripletSampler, SplitRatios, DeterministicSplitStore};
-use chrono::Utc;
-use triplets::{DataRecord, SamplerError};
-use triplets::data::{RecordSection, SectionRole};
-use triplets::source::{IndexableSource, IndexableAdapter};
-
-struct MyApiSource;
-
-impl IndexableSource for MyApiSource {
-    fn id(&self) -> &str { "api_source" }
-    fn len_hint(&self) -> Option<usize> { Some(1000) }
-    fn record_at(&self, idx: usize) -> Result<Option<DataRecord>, SamplerError> {
-        // Fetch record 'idx' from your database or API.
-        // Return Ok(None) to skip a record (e.g. deleted rows or filtered entries).
-        Ok(Some(DataRecord {
-            id: format!("api_{idx}"),
-            source: self.id().into(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            quality: Default::default(),
-            // Optional free-form tags for filtering or recipe targeting.
-            // Examples: domain labels, year strings, content-type markers.
-            taxonomy: vec!["finance".into(), "2025".into()],
-            // Each section represents one logical view of the record's content.
-            // SectionRole::Anchor  — the primary subject text (e.g. a question, title, or key passage).
-            // SectionRole::Context — supporting or related text (e.g. an answer, body, or description).
-            // Recipes select sections by role: Selector::Role(SectionRole::Anchor / Context).
-            //
-            // `sentences` is an optional pre-split list of individual sentences within `text`.
-            // Providing it gives the chunker more accurate boundaries when creating token windows.
-            // Leave it as vec![] and the chunker will split `text` automatically.
-            sections: vec![
-                RecordSection {
-                    role: SectionRole::Anchor,
-                    heading: Some("Title".into()),
-                    text: format!("Primary content for record {idx}."),
-                    sentences: vec![], // or: vec!["Sentence one.".into(), "Sentence two.".into()]
-                },
-                RecordSection {
-                    role: SectionRole::Context,
-                    heading: None,
-                    text: format!("Supporting context for record {idx}."),
-                    sentences: vec![],
-                },
-            ],
-            // Optional: attach a KvpPrefixSampler to inject structured key-value
-            // metadata into sampled chunk text at training time. For example:
-            //
-            //   meta: source=api | date=2025-01-01
-            //   <actual chunk text>
-            //
-            // The sampler controls dropout (how often the prefix appears) and
-            // per-field presence probability, so the model learns to handle both
-            // prefixed and plain chunks. See the "Metadata Prefixes and Tag Dropout"
-            // section for full usage.
-            meta_prefix: None,
-        }))
-    }
-}
-
-let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
-let store = Arc::new(DeterministicSplitStore::new(ratios, 42).unwrap());
-let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
-let adapter = IndexableAdapter::new(MyApiSource);
-sampler.register_source(Box::new(adapter));
-```
-
 ### InMemory Source
 
 `InMemorySource` is a built-in backend for in-process corpora — tests, documentation examples, and small runtime datasets that live entirely in memory. Unlike `IndexableSource` custom backends, it implements `DataSource` directly so no `IndexableAdapter` wrapper is needed.
@@ -523,6 +450,79 @@ let records: Vec<DataRecord> = (0..100).map(|i| DataRecord {
 }).collect();
 
 let source = InMemorySource::from_records("generated", records);
+```
+
+### Custom Source
+
+Implement the `IndexableSource` trait to integrate any backend that can fetch records by a stable integer index. For simple in-process corpora that do not require a custom backend, use [`InMemorySource`](#inmemory-source) instead.
+
+```rust
+use std::sync::Arc;
+use triplets::{SamplerConfig, TripletSampler, SplitRatios, DeterministicSplitStore};
+use chrono::Utc;
+use triplets::{DataRecord, SamplerError};
+use triplets::data::{RecordSection, SectionRole};
+use triplets::source::{IndexableSource, IndexableAdapter};
+
+struct MyApiSource;
+
+impl IndexableSource for MyApiSource {
+    fn id(&self) -> &str { "api_source" }
+    fn len_hint(&self) -> Option<usize> { Some(1000) }
+    fn record_at(&self, idx: usize) -> Result<Option<DataRecord>, SamplerError> {
+        // Fetch record 'idx' from your database or API.
+        // Return Ok(None) to skip a record (e.g. deleted rows or filtered entries).
+        Ok(Some(DataRecord {
+            id: format!("api_{idx}"),
+            source: self.id().into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            quality: Default::default(),
+            // Optional free-form tags for filtering or recipe targeting.
+            // Examples: domain labels, year strings, content-type markers.
+            taxonomy: vec!["finance".into(), "2025".into()],
+            // Each section represents one logical view of the record's content.
+            // SectionRole::Anchor  — the primary subject text (e.g. a question, title, or key passage).
+            // SectionRole::Context — supporting or related text (e.g. an answer, body, or description).
+            // Recipes select sections by role: Selector::Role(SectionRole::Anchor / Context).
+            //
+            // `sentences` is an optional pre-split list of individual sentences within `text`.
+            // Providing it gives the chunker more accurate boundaries when creating token windows.
+            // Leave it as vec![] and the chunker will split `text` automatically.
+            sections: vec![
+                RecordSection {
+                    role: SectionRole::Anchor,
+                    heading: Some("Title".into()),
+                    text: format!("Primary content for record {idx}."),
+                    sentences: vec![], // or: vec!["Sentence one.".into(), "Sentence two.".into()]
+                },
+                RecordSection {
+                    role: SectionRole::Context,
+                    heading: None,
+                    text: format!("Supporting context for record {idx}."),
+                    sentences: vec![],
+                },
+            ],
+            // Optional: attach a KvpPrefixSampler to inject structured key-value
+            // metadata into sampled chunk text at training time. For example:
+            //
+            //   meta: source=api | date=2025-01-01
+            //   <actual chunk text>
+            //
+            // The sampler controls dropout (how often the prefix appears) and
+            // per-field presence probability, so the model learns to handle both
+            // prefixed and plain chunks. See the "Metadata Prefixes and Tag Dropout"
+            // section for full usage.
+            meta_prefix: None,
+        }))
+    }
+}
+
+let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
+let store = Arc::new(DeterministicSplitStore::new(ratios, 42).unwrap());
+let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
+let adapter = IndexableAdapter::new(MyApiSource);
+sampler.register_source(Box::new(adapter));
 ```
 
 ## Sampling and Mixing
