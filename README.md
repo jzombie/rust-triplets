@@ -1031,17 +1031,16 @@ Real-world corpora often contain text extracted from PDFs or scanned documents w
 It is **disabled by default** and is activated via `DenoiserConfig::enabled` on the `ChunkingStrategy`:
 
 ```rust,no_run
-use triplets::{SamplerConfig, ChunkingStrategy, DenoiserConfig};
+use triplets::{SamplerConfig, ChunkingStrategy, DenoiserConfig, DenoiserPreprocessor};
 
+let mut chunking = ChunkingStrategy::default();
+chunking.register_preprocessor(DenoiserPreprocessor::new(DenoiserConfig {
+    enabled: true,
+    max_digit_ratio: 0.35, // default
+    strip_markdown: true,  // default
+}));
 let config = SamplerConfig {
-    chunking: ChunkingStrategy {
-        denoiser: DenoiserConfig {
-            enabled: true,
-            max_digit_ratio: 0.35, // default
-            strip_markdown: true,  // default
-        },
-        ..ChunkingStrategy::default()
-    },
+    chunking,
     ..SamplerConfig::default()
 };
 ```
@@ -1052,7 +1051,7 @@ The denoiser runs automatically inside the pipeline. Here is a complete end-to-e
 use std::sync::Arc;
 use indoc::indoc;
 use triplets::{
-    ChunkingStrategy, DataRecord, DenoiserConfig, DeterministicSplitStore,
+    ChunkingStrategy, DataRecord, DenoiserConfig, DenoiserPreprocessor, DeterministicSplitStore,
     InMemorySource, Sampler, SamplerConfig, Selector, SplitLabel, SplitRatios,
     SectionRole, TextRecipe, TripletSampler,
 };
@@ -1081,13 +1080,14 @@ let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
 let store = Arc::new(DeterministicSplitStore::new(ratios, 42).unwrap());
 let sampler = TripletSampler::new(
     SamplerConfig {
-        chunking: ChunkingStrategy {
-            denoiser: DenoiserConfig {
+        chunking: {
+            let mut chunking = ChunkingStrategy::default();
+            chunking.register_preprocessor(DenoiserPreprocessor::new(DenoiserConfig {
                 enabled: true,
                 strip_markdown: true,
                 max_digit_ratio: 0.35,
-            },
-            ..ChunkingStrategy::default()
+            }));
+            chunking
         },
         text_recipes: vec![TextRecipe {
             name: "body".into(),
@@ -1128,6 +1128,7 @@ assert!(chunk_text.contains("Revenue"), "Prose should be preserved");
 |-------------------|---------|---------|------------------------------------------------------------------------------------------|
 | `enabled`         | `bool`  | `false` | Master switch. When `false`, text passes through completely unchanged.                   |
 | `max_digit_ratio` | `f32`   | `0.35`  | Maximum fraction of alphanumeric chars that may be digits before a line is treated as mangled. |
+| `strip_markdown`  | `bool`  | `true`  | When `true`, GFM pipe-table separator rows are dropped and cell text is extracted from header/data rows before the digit-ratio gates run. |
 
 ### How it works: three gates
 
@@ -1146,9 +1147,15 @@ Prose lines that happen to contain a single `|` (e.g. `foo | bar`) are not affec
 
 Lines with zero alphabetical characters are **dropped**. This removes all-numeric rows, symbol-only OCR artifacts, and blank separators.
 
-**Gate 3 — High digit ratio**
+**Gate 3 — High digit ratio (iterative wave expansion)**
 
-Lines whose `digits / (digits + alpha)` ratio exceeds `max_digit_ratio` are **stripped**: only whitespace-delimited tokens that contain at least one alphabetical character are retained. If stripping leaves the line empty it is dropped.
+Lines whose `digits / (digits + alpha)` ratio exceeds `max_digit_ratio` are **stripped** using an iterative wave expansion from alpha-token seeds:
+
+1. **Seed** the keep-set with every token that contains at least one alphabetical character.
+2. **Each wave** rescues the immediate ±1 neighbors of all currently-kept tokens. Before committing the wave, the combined digit-ratio of the new candidate set is checked: if it stays ≤ `max_digit_ratio` the wave is accepted and expansion continues; otherwise the wave is rejected and expansion stops.
+3. Repeat until no new neighbors exist or a wave is rejected.
+
+Any token type is eligible for rescue — bare numbers, `—`, `+3%`, `$12B` — the ratio check is the sole gate. Tokens that would push the budget over the threshold are dropped. If no tokens survive after stripping, the line is dropped.
 
 The section is only discarded entirely (`None`) when *every* line is removed.
 
@@ -1156,16 +1163,16 @@ The section is only discarded entirely (`None`) when *every* line is removed.
 
 Alpha-heavy text — prose, markdown headings, key=value metadata lines — passes through completely unchanged. Only blank lines (no alpha) and lines that exceed the digit ratio threshold are affected.
 
-OCR table rows that mix company names with dense numeric columns are stripped down to the name tokens only:
+OCR table rows that mix company names with dense numeric columns are stripped down to the name tokens and their immediately adjacent numeric neighbors (as long as the ratio budget allows):
 
 ```text
 # Input (mangled OCR financial table)
 42 524 NOVEX INDUSTRIES Springfield 10788 143 1995 190 394 13611 358
 343 294 ZETA POWER Riverside 10758 31 1283 267 189 45432 175
 
-# Output — numeric tokens stripped, text tokens preserved
-NOVEX INDUSTRIES Springfield
-ZETA POWER Riverside
+# Output — wave expansion rescues adjacent tokens within ratio budget
+42 524 NOVEX INDUSTRIES Springfield 10788 143
+294 ZETA POWER Riverside 10758
 ```
 
 ### Negative Mining

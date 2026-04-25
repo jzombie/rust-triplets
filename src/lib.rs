@@ -9,8 +9,6 @@ pub mod config;
 pub mod constants;
 /// Data record and sample batch types.
 pub mod data;
-/// OCR denoising and markdown-table cleanup for text chunks.
-pub mod denoiser;
 mod epoch;
 /// Reusable example runners shared by downstream crates.
 pub mod example_apps;
@@ -26,6 +24,8 @@ pub mod kvp;
 pub mod metadata;
 /// Aggregate metrics helpers.
 pub mod metrics;
+/// OCR denoising and markdown-table cleanup for text chunks.
+pub mod preprocessor;
 /// Sampler implementations and public sampling API.
 pub mod sampler;
 /// Data source traits and built-in sources.
@@ -55,6 +55,8 @@ pub use errors::SamplerError;
 pub use hash::stable_hash_str;
 pub use ingestion::{IngestionManager, RecordCache};
 pub use kvp::{KvpField, KvpPrefixSampler};
+pub use preprocessor::TextPreprocessor;
+pub use preprocessor::backends::denoiser_preprocessor::DenoiserPreprocessor;
 pub use sampler::{BatchPrefetcher, Sampler, TripletSampler};
 pub use source::InMemorySource;
 pub use source::backends::csv_source::{CsvSource, CsvSourceConfig};

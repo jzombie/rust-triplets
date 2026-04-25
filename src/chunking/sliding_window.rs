@@ -1,7 +1,6 @@
 use super::algorithm::ChunkingAlgorithm;
 use crate::config::ChunkingStrategy;
 use crate::data::{ChunkView, DataRecord, RecordChunk, RecordSection};
-use crate::denoiser::denoise_text;
 use crate::tokenizer::{Tokenizer, WhitespaceTokenizer};
 
 /// Default sliding-window chunking algorithm.
@@ -17,13 +16,21 @@ impl ChunkingAlgorithm for SlidingWindowChunker {
         section: &RecordSection,
     ) -> Vec<RecordChunk> {
         let raw_text = section.text.as_str();
-        let denoised_owned: String;
-        let text = match denoise_text(raw_text, &strategy.denoiser) {
-            Some(cleaned) => {
-                denoised_owned = cleaned;
-                denoised_owned.as_str()
+        let preprocessed_owned: String;
+        let text = if strategy.preprocessors().is_empty() {
+            raw_text
+        } else {
+            let result = strategy
+                .preprocessors()
+                .iter()
+                .try_fold(raw_text.to_string(), |t, p| p.process(&t));
+            match result {
+                Some(s) => {
+                    preprocessed_owned = s;
+                    preprocessed_owned.as_str()
+                }
+                None => return Vec::new(),
             }
-            None => return Vec::new(),
         };
         let tokens: Vec<&str> = WhitespaceTokenizer.tokenize(text);
         if tokens.is_empty() {
@@ -177,12 +184,13 @@ mod tests {
     #[test]
     fn denoiser_enabled_drops_pure_numeric_section() {
         use crate::config::DenoiserConfig;
+        use crate::preprocessor::backends::denoiser_preprocessor::DenoiserPreprocessor;
         let mut strategy = strategy();
-        strategy.denoiser = DenoiserConfig {
+        strategy.register_preprocessor(DenoiserPreprocessor::new(DenoiserConfig {
             enabled: true,
             max_digit_ratio: 0.35,
             strip_markdown: true,
-        };
+        }));
         let rec = record("42 524 10788 143 1995 190 394 13611 358 6444 266");
         let section = &rec.sections[0];
         let chunks = SlidingWindowChunker.materialize(&strategy, &rec, 0, section);
@@ -195,13 +203,13 @@ mod tests {
     #[test]
     fn denoiser_line_level_strips_noisy_lines_retaining_text() {
         use crate::config::DenoiserConfig;
+        use crate::preprocessor::backends::denoiser_preprocessor::DenoiserPreprocessor;
         let mut strategy = strategy();
-        strategy.denoiser = DenoiserConfig {
+        strategy.register_preprocessor(DenoiserPreprocessor::new(DenoiserConfig {
             enabled: true,
             max_digit_ratio: 0.35,
             strip_markdown: true,
-        };
-        // The section contains one clean line and one numeric-heavy line.
+        }));
         let rec = record("NOVEX INDUSTRIES Springfield\n42 524 10788 143 1995 190 394 13611 358");
         let section = &rec.sections[0];
         let chunks = SlidingWindowChunker.materialize(&strategy, &rec, 0, section);

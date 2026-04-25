@@ -1,6 +1,7 @@
 use crate::data::SectionRole;
 use crate::splits::{SplitLabel, SplitRatios};
 use std::borrow::Cow;
+use std::sync::Arc;
 
 /// Configuration for the OCR denoiser that filters digit-heavy text.
 ///
@@ -41,7 +42,6 @@ impl Default for DenoiserConfig {
 }
 
 /// Controls how long text sections are chunked and weighted.
-#[derive(Clone, Debug)]
 pub struct ChunkingStrategy {
     /// Max tokens per window when slicing a section into chunks.
     pub max_window_tokens: usize,
@@ -53,10 +53,8 @@ pub struct ChunkingStrategy {
     pub summary_fallback_tokens: usize,
     /// Floor applied to per-chunk weight after offset or summary fallback weighting.
     pub chunk_weight_floor: f32,
-    /// OCR denoiser settings applied to section text before chunking.
-    ///
-    /// Disabled by default; set [`DenoiserConfig::enabled`] to `true` to activate.
-    pub denoiser: DenoiserConfig,
+    /// Pluggable text preprocessors applied in order before chunking.
+    pub(crate) preprocessors: Vec<Arc<dyn crate::preprocessor::TextPreprocessor>>,
 }
 
 impl Default for ChunkingStrategy {
@@ -67,8 +65,56 @@ impl Default for ChunkingStrategy {
             summary_fallback_weight: 0.35,
             summary_fallback_tokens: 512,
             chunk_weight_floor: 0.1,
-            denoiser: DenoiserConfig::default(),
+            preprocessors: Vec::new(),
         }
+    }
+}
+
+impl Clone for ChunkingStrategy {
+    fn clone(&self) -> Self {
+        Self {
+            max_window_tokens: self.max_window_tokens,
+            overlap_tokens: self.overlap_tokens.clone(),
+            summary_fallback_weight: self.summary_fallback_weight,
+            summary_fallback_tokens: self.summary_fallback_tokens,
+            chunk_weight_floor: self.chunk_weight_floor,
+            preprocessors: self.preprocessors.clone(),
+        }
+    }
+}
+
+impl std::fmt::Debug for ChunkingStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChunkingStrategy")
+            .field("max_window_tokens", &self.max_window_tokens)
+            .field("overlap_tokens", &self.overlap_tokens)
+            .field("summary_fallback_weight", &self.summary_fallback_weight)
+            .field("summary_fallback_tokens", &self.summary_fallback_tokens)
+            .field("chunk_weight_floor", &self.chunk_weight_floor)
+            .field(
+                "preprocessors",
+                &format_args!("{} registered", self.preprocessors.len()),
+            )
+            .finish()
+    }
+}
+
+impl ChunkingStrategy {
+    /// Register a [`crate::preprocessor::TextPreprocessor`] to run before chunking.
+    ///
+    /// Preprocessors are applied in registration order; if any returns `None`
+    /// the section is dropped and produces no chunks.
+    pub fn register_preprocessor(
+        &mut self,
+        p: impl crate::preprocessor::TextPreprocessor + 'static,
+    ) -> &mut Self {
+        self.preprocessors.push(Arc::new(p));
+        self
+    }
+
+    /// Return the slice of registered preprocessors.
+    pub fn preprocessors(&self) -> &[Arc<dyn crate::preprocessor::TextPreprocessor>] {
+        &self.preprocessors
     }
 }
 
