@@ -1085,6 +1085,267 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Unicode and non-ASCII symbol survival
+    //
+    // The wave-expansion algorithm uses `char::is_alphabetic()`, which
+    // correctly returns `true` for CJK ideographs, Greek letters, Arabic,
+    // Hebrew, and other Unicode scripts.  Non-alphabetic Unicode characters
+    // (currency symbols, emoji, diacritics-only clusters) carry zero alpha
+    // count and are treated identically to em-dashes: they survive whenever
+    // the ratio budget allows their wave to be accepted.
+    // -----------------------------------------------------------------------
+
+    /// A line that is below the digit threshold must pass through
+    /// byte-for-byte regardless of what non-ASCII characters it contains.
+    #[test]
+    fn unicode_below_threshold_passes_through_unchanged() {
+        let cfg = denoiser_enabled();
+        // Euro, yen, rupee, emoji — ratio ≈ 0.09, well below 0.35.
+        let input = "Operating cash: €4.2B (+12% YoY) ¥310M ₹28B 🚀 — net margin: 23% (prev 21%).";
+        let result = denoise_text(input, &cfg).expect("should not be None");
+        assert_eq!(
+            result, input,
+            "below-threshold line with unicode symbols must be byte-identical"
+        );
+    }
+
+    /// CJK ideographs are classified as `alphabetic` by Rust's Unicode
+    /// tables.  A block where CJK tokens seed the keep-set should rescue
+    /// their immediate numeric neighbours exactly like ASCII alpha tokens do.
+    ///
+    /// Tokens and wave math:
+    ///   input = "12 34 56 北京工业有限公司 78 90"
+    ///   d=10  a=8  ratio=0.56 → gate 3 triggered
+    ///   seed  = {北京工业有限公司(3)}, d=0 a=8
+    ///   wave1 = {56(2), 78(4)}  wd=4  new_ratio=4/12≈0.33 ≤ 0.35 → accept
+    ///   wave2 = {34(1), 90(5)}  wd=4  new_ratio=8/16=0.50 > 0.35 → reject
+    ///   result = "56 北京工业有限公司 78"
+    #[test]
+    fn cjk_ideographs_act_as_alpha_seeds_rescuing_adjacent_numbers() {
+        let cfg = denoiser_enabled();
+        let input = "12 34 56 北京工业有限公司 78 90";
+        let result = denoise_text(input, &cfg).expect("should not be None");
+        assert!(
+            result.contains("北京工业有限公司"),
+            "CJK token must survive as alpha seed"
+        );
+        assert!(
+            result.contains("56"),
+            "'56' adjacent to CJK — rescued in wave 1"
+        );
+        assert!(
+            result.contains("78"),
+            "'78' adjacent to CJK — rescued in wave 1"
+        );
+        assert!(!result.contains("34"), "'34' two hops from CJK — stripped");
+        assert!(!result.contains("90"), "'90' two hops from CJK — stripped");
+        assert!(!result.contains("12"), "'12' isolated — stripped");
+        assert_eq!(result, "56 北京工业有限公司 78");
+    }
+
+    /// Greek letters are `alphabetic` and act as alpha seeds.  Mixed
+    /// Greek/ASCII alpha tokens should seed the keep-set and rescue the
+    /// first wave of adjacent numeric tokens within the ratio budget.
+    ///
+    ///   input = "α β Revenue 42 524 10788"
+    ///   d=10  a=9  ratio≈0.53 → gate 3
+    ///   seed  = {α(0), β(1), Revenue(2)}, d=0 a=9
+    ///   wave1 = {42(3)}  wd=2  ratio=2/11≈0.18 ≤ 0.35 → accept
+    ///   wave2 = {524(4)} wd=3  ratio=5/14≈0.36 > 0.35 → reject
+    ///   result = "α β Revenue 42"
+    #[test]
+    fn greek_letters_act_as_alpha_seeds() {
+        let cfg = denoiser_enabled();
+        let input = "α β Revenue 42 524 10788";
+        let result = denoise_text(input, &cfg).expect("should not be None");
+        assert!(result.contains('α'), "Greek α must survive as alpha seed");
+        assert!(result.contains('β'), "Greek β must survive as alpha seed");
+        assert!(result.contains("Revenue"), "ASCII alpha token must survive");
+        assert!(result.contains("42"), "'42' adjacent to Revenue — rescued");
+        assert!(!result.contains("524"), "'524' in rejected wave — stripped");
+        assert!(!result.contains("10788"), "'10788' unreachable — stripped");
+        assert_eq!(result, "α β Revenue 42");
+    }
+
+    /// Arabic script characters are `alphabetic`.  A token composed entirely
+    /// of Arabic letters seeds the keep-set just like any Latin token and
+    /// rescues its immediate numeric neighbour in wave 1.
+    ///
+    ///   input = "إيرادات 42 99999"
+    ///   d=7 a=7 ratio=0.50 → gate 3
+    ///   seed  = {إيرادات(0)}, d=0 a=7
+    ///   wave1 = {42(1)}     wd=2  ratio=2/9≈0.22 ≤ 0.35 → accept
+    ///   wave2 = {99999(2)}  wd=5  ratio=7/14=0.50 > 0.35 → reject
+    ///   result = "إيرادات 42"
+    #[test]
+    fn arabic_script_acts_as_alpha_seed() {
+        let cfg = denoiser_enabled();
+        let input = "إيرادات 42 99999";
+        let result = denoise_text(input, &cfg).expect("should not be None");
+        assert!(
+            result.contains("إيرادات"),
+            "Arabic token must survive as alpha seed"
+        );
+        assert!(result.contains("42"), "adjacent number rescued in wave 1");
+        assert!(!result.contains("99999"), "non-adjacent number stripped");
+        assert_eq!(result, "إيرادات 42");
+    }
+
+    /// Hebrew script characters are `alphabetic` and seed the keep-set,
+    /// rescuing their immediate numeric neighbour in wave 1.
+    ///
+    ///   input = "הכנסות 42 99999"
+    ///   d=7 a=6 ratio=0.54 → gate 3
+    ///   seed  = {הכנסות(0)}, d=0 a=6
+    ///   wave1 = {42(1)}     wd=2  ratio=2/8=0.25 ≤ 0.35 → accept
+    ///   wave2 = {99999(2)}  wd=5  ratio=7/13≈0.54 > 0.35 → reject
+    ///   result = "הכנסות 42"
+    #[test]
+    fn hebrew_script_acts_as_alpha_seed() {
+        let cfg = denoiser_enabled();
+        let input = "הכנסות 42 99999";
+        let result = denoise_text(input, &cfg).expect("should not be None");
+        assert!(
+            result.contains("הכנסות"),
+            "Hebrew token must survive as alpha seed"
+        );
+        assert!(result.contains("42"), "adjacent number rescued in wave 1");
+        assert!(!result.contains("99999"), "non-adjacent number stripped");
+        assert_eq!(result, "הכנסות 42");
+    }
+
+    /// Accented/extended Latin characters (`é`, `ü`, `ñ`, etc.) are
+    /// `alphabetic` — a token like `Société` seeds the keep-set normally.
+    #[test]
+    fn accented_latin_acts_as_alpha_seed() {
+        let cfg = denoiser_enabled();
+        // Société(a=7) and Ünternehmen(a=10) are seeds; digit tokens rescued
+        // by wave expansion within budget.
+        let input = "12 34 56 Société 78 Ünternehmen 90 1234 5678";
+        let result = denoise_text(input, &cfg).expect("should not be None");
+        assert!(
+            result.contains("Société"),
+            "accented token must survive as alpha seed"
+        );
+        assert!(
+            result.contains("Ünternehmen"),
+            "umlaut token must survive as alpha seed"
+        );
+    }
+
+    /// A bare currency symbol (`€`, `¥`, `₹`) is NOT `alphabetic` — it
+    /// carries zero alpha chars and zero digit chars.  On a gate-3 line it
+    /// is treated the same as an em-dash: rescued in the first eligible wave
+    /// at zero cost to the digit budget.
+    ///
+    ///   input = "REVENUE €100 COSTS 42 524 10788 5520"
+    ///   d=17 a=12 ratio≈0.59 → gate 3
+    ///   seed  = {REVENUE(0), COSTS(2)}, d=0 a=12
+    ///   wave1 = {€100(1), 42(3)}  wd=3+2=5  ratio=5/17≈0.29 ≤ 0.35 → accept
+    ///   wave2 = {524(4)}           wd=3      ratio=8/20=0.40 > 0.35 → reject
+    ///   result = "REVENUE €100 COSTS 42"
+    #[test]
+    fn euro_sign_token_rescued_by_wave_expansion() {
+        let cfg = denoiser_enabled();
+        let input = "REVENUE €100 COSTS 42 524 10788 5520";
+        let result = denoise_text(input, &cfg).expect("should not be None");
+        assert!(result.contains("REVENUE"), "alpha seed must survive");
+        assert!(result.contains("COSTS"), "alpha seed must survive");
+        assert!(
+            result.contains("€100"),
+            "€100 adjacent to REVENUE — rescued in wave 1"
+        );
+        assert!(
+            result.contains("42"),
+            "'42' adjacent to COSTS — rescued in wave 1"
+        );
+        assert!(
+            !result.contains("524"),
+            "'524' in rejected wave 2 — stripped"
+        );
+        assert!(!result.contains("10788"), "unreachable — stripped");
+        assert_eq!(result, "REVENUE €100 COSTS 42");
+    }
+
+    /// Yen (¥) behaves identically to the euro sign test above.
+    #[test]
+    fn yen_sign_token_rescued_by_wave_expansion() {
+        let cfg = denoiser_enabled();
+        let input = "PROFIT ¥500 LOSS 42 524 13000 5520";
+        let result = denoise_text(input, &cfg).expect("should not be None");
+        assert!(result.contains("¥500"), "¥500 adjacent to PROFIT — rescued");
+        assert!(result.contains("42"), "42 adjacent to LOSS — rescued");
+        assert!(!result.contains("524"), "stripped");
+    }
+
+    /// Indian rupee (₹) token rescued by wave expansion.
+    ///
+    /// `₹200` contains digits but no alpha chars, so it is not a seed but IS
+    /// eligible for rescue.  With two alpha-heavy seeds providing enough budget
+    /// the wave that rescues `₹200` is accepted.
+    ///
+    ///   input = "INCOME PROFIT ₹200 9999 9999 9999"
+    ///   d=15 a=12 ratio=0.556 → gate 3
+    ///   seed  = {INCOME(0), PROFIT(1)}, d=0 a=12
+    ///   wave1 = {₹200(2)}   wd=3  ratio=3/15=0.20 ≤ 0.35 → accept
+    ///   wave2 = {9999(3)}   wd=4  ratio=7/19≈0.37 > 0.35 → reject
+    ///   result = "INCOME PROFIT ₹200"
+    #[test]
+    fn rupee_sign_token_rescued_by_wave_expansion() {
+        let cfg = denoiser_enabled();
+        let input = "INCOME PROFIT ₹200 9999 9999 9999";
+        let result = denoise_text(input, &cfg).expect("should not be None");
+        assert!(
+            result.contains("₹200"),
+            "₹200 adjacent to alpha seeds — rescued in wave 1"
+        );
+        assert!(!result.contains("9999"), "non-adjacent numbers stripped");
+        assert_eq!(result, "INCOME PROFIT ₹200");
+    }
+
+    /// An emoji character is NOT `alphabetic` (zero alpha, zero digit chars).
+    /// On a gate-3 line it is rescued at zero cost to the digit budget —
+    /// identical behaviour to em-dashes.
+    ///
+    ///   input = "REVENUE 🚀 COSTS 42 524 10788"
+    ///   d=10 a=12 ratio≈0.45 → gate 3
+    ///   seed  = {REVENUE(0), COSTS(2)}, d=0 a=12
+    ///   wave1 = {🚀(1), 42(3)}  wd=0+2=2   ratio=2/14≈0.14 ≤ 0.35 → accept
+    ///   wave2 = {524(4)}         wd=3        ratio=5/17≈0.29 ≤ 0.35 → accept
+    ///   wave3 = {10788(5)}       wd=5        ratio=10/22≈0.45 > 0.35 → reject
+    ///   result = "REVENUE 🚀 COSTS 42 524"
+    #[test]
+    fn emoji_rescued_by_wave_expansion_on_gate3_line() {
+        let cfg = denoiser_enabled();
+        let input = "REVENUE 🚀 COSTS 42 524 10788";
+        let result = denoise_text(input, &cfg).expect("should not be None");
+        assert!(
+            result.contains('🚀'),
+            "emoji between alpha tokens must be rescued (zero digit cost)"
+        );
+        assert!(result.contains("42"), "rescued in wave 1");
+        assert!(result.contains("524"), "rescued in wave 2");
+        assert!(!result.contains("10788"), "rejected wave 3 — stripped");
+        assert_eq!(result, "REVENUE 🚀 COSTS 42 524");
+    }
+
+    /// Multiple different non-ASCII symbol types on the same gate-3 line:
+    /// emoji, currency, and CJK all handled correctly together.
+    #[test]
+    fn mixed_unicode_symbols_on_gate3_line() {
+        let cfg = denoiser_enabled();
+        // 北京(a=2), CORP(a=4): seeds; €(d=0,a=0) and 🌏(d=0,a=0) rescued at
+        // zero digit cost in wave 1; isolated numerics stripped.
+        let input = "42 € 北京 🌏 CORP 524 10788 99999";
+        let result = denoise_text(input, &cfg).expect("should not be None");
+        assert!(result.contains("北京"), "CJK alpha seed must survive");
+        assert!(result.contains("CORP"), "ASCII alpha seed must survive");
+        assert!(result.contains('€'), "euro sign rescued at zero cost");
+        assert!(result.contains("🌏"), "globe emoji rescued at zero cost");
+        assert!(!result.contains("99999"), "isolated number stripped");
+    }
+
+    // -----------------------------------------------------------------------
     // Linearized XBRL passthrough
     // -----------------------------------------------------------------------
 
