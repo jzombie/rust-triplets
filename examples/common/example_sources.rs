@@ -113,7 +113,7 @@ impl ExampleFileSource {
     fn from_root(id: &str, root: &Path) -> Self {
         let records = load_records(id, root);
         let reported_records = records.len() as u128;
-        let inner = InMemorySource::new(id, records);
+        let inner = InMemorySource::from_records(id, records);
         let triplet_recipes =
             triplets::source::backends::file_source::default_title_context_triplet_recipes(true);
         Self {

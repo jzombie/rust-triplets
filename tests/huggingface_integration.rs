@@ -239,12 +239,14 @@ fn huggingface_text_mode_triplets_can_use_different_anchor_positive_windows() {
     sampler_config.allowed_splits = vec![SplitLabel::Train];
     sampler_config.batch_size = 1;
     sampler_config.ingestion_max_records = 16;
-    sampler_config.chunking = ChunkingStrategy {
-        max_window_tokens: 3,
-        overlap_tokens: vec![0],
-        summary_fallback_weight: 0.0,
-        summary_fallback_tokens: 0,
-        chunk_weight_floor: 0.0,
+    sampler_config.chunking = {
+        let mut c = ChunkingStrategy::default();
+        c.max_window_tokens = 3;
+        c.overlap_tokens = vec![0];
+        c.summary_fallback_weight = 0.0;
+        c.summary_fallback_tokens = 0;
+        c.chunk_weight_floor = 0.0;
+        c
     };
 
     let store = Arc::new(DeterministicSplitStore::new(split, 777).expect("split store"));

@@ -4658,7 +4658,7 @@ mod tests {
     use serde_json::json;
     use std::env;
     use std::io::{Read, Write};
-    use std::net::TcpListener;
+    use std::net::{TcpListener, TcpStream};
     use std::sync::{Mutex, OnceLock};
     use std::thread;
     use tempfile::tempdir;
@@ -4713,13 +4713,35 @@ mod tests {
         source
     }
 
+    /// Drain HTTP request headers from `stream` until `\r\n\r\n` is seen.
+    ///
+    /// Without this, dropping the stream while the client is still sending
+    /// request headers causes macOS to emit a TCP RST (connection reset)
+    /// instead of a graceful FIN, which makes reqwest return a connection
+    /// error even though the response was already written — producing
+    /// intermittent test failures on macOS GitHub Actions runners.
+    fn drain_http_request(stream: &mut TcpStream) {
+        let mut buf = Vec::with_capacity(2048);
+        let mut tmp = [0u8; 512];
+        loop {
+            match stream.read(&mut tmp) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    buf.extend_from_slice(&tmp[..n]);
+                    if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     fn spawn_one_shot_http(payload: Vec<u8>) -> (String, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let handle = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request_buf = [0u8; 1024];
-            let _ = stream.read(&mut request_buf);
+            drain_http_request(&mut stream);
             let headers = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 payload.len()
@@ -4740,8 +4762,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let handle = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request_buf = [0u8; 1024];
-            let _ = stream.read(&mut request_buf);
+            drain_http_request(&mut stream);
             let reason = match status {
                 200 => "OK",
                 400 => "Bad Request",

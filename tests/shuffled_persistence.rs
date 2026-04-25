@@ -81,8 +81,8 @@ fn first_record_ids(store_path: &std::path::Path, batch_size: usize) -> Vec<Reco
         build_record("source_b", "b3", 3),
     ];
 
-    sampler.register_source(Box::new(InMemorySource::new("source_a", source_a)));
-    sampler.register_source(Box::new(InMemorySource::new("source_b", source_b)));
+    sampler.register_source(Box::new(InMemorySource::from_records("source_a", source_a)));
+    sampler.register_source(Box::new(InMemorySource::from_records("source_b", source_b)));
 
     let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
     sampler.save_sampler_state(None).unwrap();
@@ -148,8 +148,14 @@ fn negatives_persist_across_restart() {
     let first_run_negatives = {
         let store = Arc::new(FileSplitStore::open(&store_path, split, 73).unwrap());
         let sampler = TripletSampler::new(build_config(4, split), store);
-        sampler.register_source(Box::new(InMemorySource::new("source_a", source_a.clone())));
-        sampler.register_source(Box::new(InMemorySource::new("source_b", source_b.clone())));
+        sampler.register_source(Box::new(InMemorySource::from_records(
+            "source_a",
+            source_a.clone(),
+        )));
+        sampler.register_source(Box::new(InMemorySource::from_records(
+            "source_b",
+            source_b.clone(),
+        )));
 
         let first = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
         sampler.save_sampler_state(None).unwrap();
@@ -163,8 +169,8 @@ fn negatives_persist_across_restart() {
     let restart_negatives = {
         let store = Arc::new(FileSplitStore::open(&store_path, split, 73).unwrap());
         let sampler = TripletSampler::new(build_config(4, split), store);
-        sampler.register_source(Box::new(InMemorySource::new("source_a", source_a)));
-        sampler.register_source(Box::new(InMemorySource::new("source_b", source_b)));
+        sampler.register_source(Box::new(InMemorySource::from_records("source_a", source_a)));
+        sampler.register_source(Box::new(InMemorySource::from_records("source_b", source_b)));
 
         let first_after_restart = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
         sampler.save_sampler_state(None).unwrap();
@@ -209,7 +215,7 @@ fn save_none_writes_to_save_path_only() {
 
     let store = Arc::new(FileSplitStore::open(&store_path, split, 73).unwrap());
     let sampler = TripletSampler::new(build_config(4, split), store);
-    sampler.register_source(Box::new(InMemorySource::new(
+    sampler.register_source(Box::new(InMemorySource::from_records(
         "source_a",
         vec![
             build_record("source_a", "a1", 1),
@@ -218,7 +224,7 @@ fn save_none_writes_to_save_path_only() {
             build_record("source_a", "a4", 4),
         ],
     )));
-    sampler.register_source(Box::new(InMemorySource::new(
+    sampler.register_source(Box::new(InMemorySource::from_records(
         "source_b",
         vec![
             build_record("source_b", "b1", 1),
@@ -270,7 +276,7 @@ fn save_sampler_state_some_mirrors_to_new_store_path() {
 
     let store = Arc::new(FileSplitStore::open(&source_store_path, split, 73).unwrap());
     let sampler = TripletSampler::new(build_config(4, split), store);
-    sampler.register_source(Box::new(InMemorySource::new(
+    sampler.register_source(Box::new(InMemorySource::from_records(
         "source_a",
         vec![
             build_record("source_a", "a1", 1),
@@ -279,7 +285,7 @@ fn save_sampler_state_some_mirrors_to_new_store_path() {
             build_record("source_a", "a4", 4),
         ],
     )));
-    sampler.register_source(Box::new(InMemorySource::new(
+    sampler.register_source(Box::new(InMemorySource::from_records(
         "source_b",
         vec![
             build_record("source_b", "b1", 1),
@@ -460,7 +466,7 @@ fn save_sampler_state_some_creates_missing_parent_directories() {
 
     let store = Arc::new(FileSplitStore::open(&source_store_path, split, 73).unwrap());
     let sampler = TripletSampler::new(build_config(4, split), store);
-    sampler.register_source(Box::new(InMemorySource::new(
+    sampler.register_source(Box::new(InMemorySource::from_records(
         "source_a",
         vec![
             build_record("source_a", "a1", 1),
@@ -469,7 +475,7 @@ fn save_sampler_state_some_creates_missing_parent_directories() {
             build_record("source_a", "a4", 4),
         ],
     )));
-    sampler.register_source(Box::new(InMemorySource::new(
+    sampler.register_source(Box::new(InMemorySource::from_records(
         "source_b",
         vec![
             build_record("source_b", "b1", 1),
@@ -509,7 +515,7 @@ fn open_with_load_path_and_save_none_writes_only_to_declared_save_path() {
     {
         let store = Arc::new(FileSplitStore::open(&load_path, split, 73).unwrap());
         let sampler = TripletSampler::new(build_config(4, split), store);
-        sampler.register_source(Box::new(InMemorySource::new(
+        sampler.register_source(Box::new(InMemorySource::from_records(
             "source_a",
             vec![
                 build_record("source_a", "a1", 1),
@@ -518,7 +524,7 @@ fn open_with_load_path_and_save_none_writes_only_to_declared_save_path() {
                 build_record("source_a", "a4", 4),
             ],
         )));
-        sampler.register_source(Box::new(InMemorySource::new(
+        sampler.register_source(Box::new(InMemorySource::from_records(
             "source_b",
             vec![
                 build_record("source_b", "b1", 1),
@@ -540,7 +546,7 @@ fn open_with_load_path_and_save_none_writes_only_to_declared_save_path() {
             FileSplitStore::open_with_load_path(Some(&load_path), &save_path, split, 73).unwrap(),
         );
         let sampler = TripletSampler::new(build_config(4, split), store);
-        sampler.register_source(Box::new(InMemorySource::new(
+        sampler.register_source(Box::new(InMemorySource::from_records(
             "source_a",
             vec![
                 build_record("source_a", "a1", 1),
@@ -549,7 +555,7 @@ fn open_with_load_path_and_save_none_writes_only_to_declared_save_path() {
                 build_record("source_a", "a4", 4),
             ],
         )));
-        sampler.register_source(Box::new(InMemorySource::new(
+        sampler.register_source(Box::new(InMemorySource::from_records(
             "source_b",
             vec![
                 build_record("source_b", "b1", 1),
@@ -598,7 +604,7 @@ fn open_with_load_path_and_save_some_writes_only_to_explicit_path() {
     {
         let store = Arc::new(FileSplitStore::open(&load_path, split, 73).unwrap());
         let sampler = TripletSampler::new(build_config(4, split), store);
-        sampler.register_source(Box::new(InMemorySource::new(
+        sampler.register_source(Box::new(InMemorySource::from_records(
             "source_a",
             vec![
                 build_record("source_a", "a1", 1),
@@ -607,7 +613,7 @@ fn open_with_load_path_and_save_some_writes_only_to_explicit_path() {
                 build_record("source_a", "a4", 4),
             ],
         )));
-        sampler.register_source(Box::new(InMemorySource::new(
+        sampler.register_source(Box::new(InMemorySource::from_records(
             "source_b",
             vec![
                 build_record("source_b", "b1", 1),
@@ -628,7 +634,7 @@ fn open_with_load_path_and_save_some_writes_only_to_explicit_path() {
             FileSplitStore::open_with_load_path(Some(&load_path), &save_path, split, 73).unwrap(),
         );
         let sampler = TripletSampler::new(build_config(4, split), store);
-        sampler.register_source(Box::new(InMemorySource::new(
+        sampler.register_source(Box::new(InMemorySource::from_records(
             "source_a",
             vec![
                 build_record("source_a", "a1", 1),
@@ -637,7 +643,7 @@ fn open_with_load_path_and_save_some_writes_only_to_explicit_path() {
                 build_record("source_a", "a4", 4),
             ],
         )));
-        sampler.register_source(Box::new(InMemorySource::new(
+        sampler.register_source(Box::new(InMemorySource::from_records(
             "source_b",
             vec![
                 build_record("source_b", "b1", 1),

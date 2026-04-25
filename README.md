@@ -1,12 +1,14 @@
 <p align="center">
   <h1 align="center">⛏️ triplets</h1>
-  <p align="center"><strong>Composable data sampling primitives for deterministic multi-source ML/AI training-data orchestration.</strong></p>
+  <p align="center"><strong>A composable, deterministic text data pipeline for ML/AI.<br />Ingest, denoise, chunk, split, and sample multi-source corpora into reproducible training triplets and pairs.</strong></p>
   <p align="center">
     <a href="#getting-started">Getting Started</a> &middot;
     <a href="#cargo-features">Cargo Features</a> &middot;
     <a href="#configuring-sources">Sources</a> &middot;
     <a href="#sampling-and-mixing">Sampling &amp; Mixing</a> &middot;
     <a href="#epochs-and-determinism">Epochs</a> &middot;
+    <a href="#chunking--preprocessing">Chunking &amp; Preprocessing</a> &middot;
+    <a href="#ocr--markdown-denoiser">Denoiser</a> &middot;
     <a href="#license">License</a>
   </p>
   <p align="center">
@@ -23,7 +25,7 @@
 
 Generate an effectively unlimited stream of [training triplets](https://en.wikipedia.org/wiki/Triplet_loss), pairs, or plaintext samples from your existing corpus. This crate handles ingestion, multi-source mixing, deterministic train/validation/test splitting, and optional [BM25](https://en.wikipedia.org/wiki/Okapi_BM25) hard-negative mining.
 
-**Designed as a data-pipeline layer for a training loop.**
+**Designed as a preprocessing and data-pipeline layer for a training loop.**
 
 > A training loop has two halves: the *data side* and the *model side*. `triplets` owns the data side — deterministic and reproducible train/validation/test splitting, seeded shuffling across epochs, weighted multi-source mixing, BM25 hard-negative mining, and static per-record KVP metadata for input conditioning. What it intentionally does *not* include is the model side: forward passes, loss computation, and optimizer steps. The design goal is that you plug this crate's output stream directly into your training framework (crates like [Candle](https://github.com/huggingface/candle), [burn](https://crates.io/crates/burn), [tch](https://crates.io/crates/tch), [PyO3](https://crates.io/crates/pyo3)) and it already handles the parts of the data pipeline that are hardest to get right — correctness, reproducibility, and scale.
 
@@ -104,9 +106,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `bm25-mining`      | [BM25 hard-negative ranking within strategy-defined pools.](#negative-mining) | No      |
 | `extended-metrics` | Additional per-triplet diagnostics for debugging.                             | No      |
 
-> _[CSV](#csv-source), [text file](#text-file-source), and [custom source](#custom-source) support are enabled in all builds._
+> _[CSV](#csv-source), [text file](#text-file-source), [in-memory source](#inmemory-source) and [custom source](#custom-source) support are enabled in all builds._
 
 ## Configuring Sources
+
+- [Hugging Face Source](#hugging-face-source)
+- [CSV Source](#csv-source)
+- [Text File Source](#text-file-source)
+- [InMemory Source](#inmemory-source)
+- [Custom Source](#custom-source)
 
 ### Hugging Face Source
 
@@ -148,7 +156,7 @@ The HF source supports two exclusive extraction modes, selected by which fields 
 
 **Role mode** — activated when `anchor_columns`, `positive_columns`, or `context_columns` is non-empty. Each row produces a `DataRecord` with explicitly assigned section roles:
 
-| Config field       | Coalesces? | `SectionRole` produced          | Behaviour when missing / empty                   |
+| Config field       | Coalesces? | `SectionRole` produced          | Behavior when missing / empty                    |
 |--------------------|------------|---------------------------------|--------------------------------------------------|
 | `anchor_columns`   | Yes        | `Anchor`                        | Row is skipped                                   |
 | `positive_columns` | Yes        | `Context`                       | Row is skipped                                   |
@@ -243,9 +251,9 @@ When `source_id=` is omitted, an identifier is derived from the URI:
 
 Examples: `hf://org/wikipedia/20231101.en/train` → `wikipedia.20231101_en`; `hf://org/dataset/default/validation` → `dataset.validation`.
 
-**Error behaviour**
+**Error behavior**
 
-Unknown keys (including typos such as `positve=`) are hard errors — the parser rejects the line immediately rather than silently ignoring the key. This prevents misconfigured sources from being silently loaded with missing column mappings. A line with no recognised mapping key (`anchor=`, `positive=`, `context=`, or `text=`) is also rejected.
+Unknown keys (including typos such as `positve=`) are hard errors — the parser rejects the line immediately rather than silently ignoring the key. This prevents misconfigured sources from being silently loaded with missing column mappings. A line with no recognized mapping key (`anchor=`, `positive=`, `context=`, or `text=`) is also rejected.
 
 #### Authenticating with Private Datasets
 
@@ -350,9 +358,65 @@ let source = FileSource::new(config);
 sampler.register_source(Box::new(source));
 ```
 
+### InMemory Source
+
+`InMemorySource` is a built-in backend for in-process corpora — tests, documentation examples, and small runtime datasets that live entirely in memory. Unlike `IndexableSource` custom backends, it implements `DataSource` directly so no `IndexableAdapter` wrapper is needed.
+
+Build the source incrementally with `add_record` / `add_records`, or use `from_records` to pre-populate from a `Vec<DataRecord>` in one call:
+
+```rust
+use std::sync::Arc;
+use triplets::{
+    DataRecord, DeterministicSplitStore, InMemorySource, SamplerConfig,
+    SplitLabel, SplitRatios, TextRecipe, TripletSampler, Sampler, Selector, SectionRole,
+};
+
+let mut source = InMemorySource::new("my_corpus");
+
+// DataRecord::from_text creates a record with a single Context section in one call.
+source.add_record(DataRecord::from_text("doc-0", "my_corpus", "The quick brown fox jumps over the lazy dog."));
+source.add_record(DataRecord::from_text("doc-1", "my_corpus", "Pack my box with five dozen liquor jugs."));
+
+// Use from_text_with_role when you need an Anchor section instead.
+source.add_record(DataRecord::from_text_with_role(
+    "doc-2", "my_corpus",
+    "What is the capital of France?",
+    SectionRole::Anchor,
+));
+
+// InMemorySource implements DataSource directly — register it bare, no adapter needed.
+let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
+let store = Arc::new(DeterministicSplitStore::new(ratios, 42).unwrap());
+let sampler = TripletSampler::new(
+    SamplerConfig {
+        text_recipes: vec![TextRecipe {
+            name: "body".into(),
+            selector: Selector::Role(SectionRole::Context),
+            weight: 1.0,
+            instruction: None,
+        }],
+        ..SamplerConfig::default()
+    },
+    store,
+);
+sampler.register_source(Box::new(source));
+```
+
+`from_records` is a convenience constructor when you already have a collected `Vec`. Pair it with `DataRecord::from_text` to keep bulk construction concise:
+
+```rust,no_run
+use triplets::{DataRecord, InMemorySource};
+
+let records: Vec<DataRecord> = (0..100)
+    .map(|i| DataRecord::from_text(format!("doc-{i}"), "generated", format!("Document {i} body text.")))
+    .collect();
+
+let source = InMemorySource::from_records("generated", records);
+```
+
 ### Custom Source
 
-Implement the `IndexableSource` trait to integrate any backend that can fetch records by a stable integer index.
+Implement the `IndexableSource` trait to integrate any backend that can fetch records by a stable integer index. For simple in-process corpora that do not require a custom backend, use [`InMemorySource`](#inmemory-source) instead.
 
 ```rust
 use std::sync::Arc;
@@ -860,7 +924,6 @@ sampler.add_variant_fields([KvpField::many("date", ["2025-01-15", "Jan 15, 2025"
 Set `DataRecord::meta_prefix` on any record before registering it with a source:
 
 ```rust
-use chrono::Utc;
 use triplets::DataRecord;
 use triplets::kvp::{KvpField, KvpPrefixSampler};
 
@@ -870,16 +933,8 @@ prefix.add_variant_fields([
     KvpField::one("source", "daily-update").with_presence(0.7),
 ]);
 
-let record = DataRecord {
-    id: "rec-001".into(),
-    source: "news".into(),
-    created_at: Utc::now(),
-    updated_at: Utc::now(),
-    quality: Default::default(),
-    taxonomy: vec![],
-    sections: vec![],
-    meta_prefix: Some(prefix),
-};
+let mut record = DataRecord::from_text("rec-001", "news", "Today's market update.");
+record.meta_prefix = Some(prefix);
 ```
 
 ### Inspecting metadata on output chunks
@@ -966,9 +1021,176 @@ Concurrency is handled at multiple levels for high throughput:
 - **Synchronous API**: Sampling calls are synchronous at the API boundary for straightforward training-loop integration.
 - **Thread-Safe Shared Use**: `TripletSampler` is safe to share across threads (for example via `Arc`); concurrent calls are internally synchronized with a mutex, so a single sampler instance is callable from multiple threads without data races.
 
+## Chunking &amp; Preprocessing
+
 ### Chunking and Windows
 
 Long documents are handled through a pluggable `ChunkingAlgorithm`. The default `SlidingWindowChunker` splits sections into fixed-size token windows with configurable overlap, preserving full coverage of long text.
+
+### Pluggable Preprocessors
+
+Before a section reaches the chunker, it passes through a sequential pipeline of `TextPreprocessor` implementations registered on `ChunkingStrategy`.  Each preprocessor receives the section text and returns either `Some(transformed)` to continue the pipeline or `None` to discard the section entirely — producing no chunks from it.
+
+```rust,no_run
+use triplets::{ChunkingStrategy, TextPreprocessor};
+
+struct UppercasePreprocessor;
+
+impl TextPreprocessor for UppercasePreprocessor {
+    fn process(&self, text: &str) -> Option<String> {
+        Some(text.to_uppercase())
+    }
+}
+
+let mut strategy = ChunkingStrategy::default();
+strategy.register_preprocessor(UppercasePreprocessor);
+```
+
+Multiple preprocessors can be chained; they run in registration order and the output of each stage feeds the next.  The built-in `DenoiserPreprocessor` (see below) is implemented as a preprocessor and can be mixed with custom ones.
+
+## OCR & Markdown Denoiser
+
+Real-world corpora often contain text extracted from PDFs or scanned documents where OCR produces mangled tables: rows packed with bare numbers, column separators, and financial data that carries no semantic signal for embedding models. The denoiser also strips [GFM](https://github.github.com/gfm/) (GitHub Flavored Markdown) pipe-table formatting (separator rows dropped, cell text extracted) so that markdown tables embedded in documents don't produce raw pipe characters in chunks. Both kinds of cleanup are implemented as a `TextPreprocessor` and registered via `register_preprocessor`.
+
+It is **disabled by default** and is activated via `DenoiserConfig::enabled` on the `SamplerConfig`:
+
+```rust,no_run
+use triplets::{SamplerConfig, config::DenoiserConfig};
+
+let config = SamplerConfig::default()
+    .with_denoiser(DenoiserConfig { enabled: true, ..DenoiserConfig::default() });
+```
+
+You can also customize other `SamplerConfig` fields first, then chain the denoiser:
+
+```rust,no_run
+use triplets::{SamplerConfig, config::DenoiserConfig};
+
+let config = SamplerConfig { batch_size: 32, ..SamplerConfig::default() }
+    .with_denoiser(DenoiserConfig { enabled: true, ..DenoiserConfig::default() });
+```
+
+The denoiser runs automatically inside the pipeline. Here is a complete end-to-end example using `InMemorySource` — the built-in in-memory backend — so you can see exactly what the denoiser strips before chunks reach your training loop:
+
+```rust
+use std::sync::Arc;
+use indoc::indoc;
+use triplets::{
+    DataRecord, DenoiserConfig, DeterministicSplitStore,
+    InMemorySource, Sampler, SamplerConfig, Selector, SplitLabel, SplitRatios,
+    SectionRole, TextRecipe, TripletSampler,
+};
+
+let mut source = InMemorySource::new("ocr_doc");
+source.add_record(DataRecord::from_text(
+    "q3-2024",
+    "ocr_doc",
+    // Raw PDF-extracted text: a markdown table followed by digit-heavy
+    // OCR garbage rows, then the actual prose summary.
+    indoc! {"
+        Operating Results — Q3 2024
+
+        | Metric          | Q3 2024 | Q3 2023 |
+        |-----------------|---------|---------|
+        | Revenue ($M)    | 94,930  | 89,498  |
+        | Net Income ($M) | 21,448  | 19,881  |
+
+        2 1 4 4 8 1 9 8 8 1 9 4 9 3 0 8 9 4 9 8
+        0 0 1 2 3 5 8 13 21 34 0 0 1 1 2 3 5 8
+
+        Revenue grew six percent year over year."},
+));
+
+let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
+let store = Arc::new(DeterministicSplitStore::new(ratios, 42).unwrap());
+let sampler = TripletSampler::new(
+    SamplerConfig {
+        text_recipes: vec![TextRecipe {
+            name: "body".into(),
+            selector: Selector::Role(SectionRole::Context),
+            weight: 1.0,
+            instruction: None,
+        }],
+        ..SamplerConfig::default()
+    }
+    .with_denoiser(DenoiserConfig { enabled: true, strip_markdown: true, ..DenoiserConfig::default() }),
+    store,
+);
+sampler.register_source(Box::new(source));
+
+// The sampler supports triplet, pair, and text batches — use whichever
+// output format your training loop requires:
+//   sampler.next_triplet_batch(SplitLabel::Train)
+//   sampler.next_pair_batch(SplitLabel::Train)
+//   sampler.next_text_batch(SplitLabel::Train)
+// Text batches are used here for demonstration because they are the
+// simplest output to inspect: each sample carries a single chunk with
+// no anchor/positive/negative pairing.
+let batch = sampler.next_text_batch(SplitLabel::Train).unwrap();
+// The denoiser runs before chunking, so every chunk produced by the
+// pipeline has already had the noise removed.
+let chunk_text = &batch.samples[0].chunk.text;
+
+// Digit-heavy OCR rows are stripped entirely.
+assert!(!chunk_text.contains("2 1 4 4 8"), "OCR row should be stripped");
+// GFM table separator rows (|---|---| lines) are dropped.
+assert!(!chunk_text.contains("---"), "Markdown separator should be dropped");
+// Prose and table cell text survive.
+assert!(chunk_text.contains("Revenue"), "Prose should be preserved");
+```
+
+### DenoiserConfig fields
+
+| Field             | Type    | Default | Description                                                                              |
+|-------------------|---------|---------|------------------------------------------------------------------------------------------|
+| `enabled`         | `bool`  | `false` | Master switch. When `false`, text passes through completely unchanged.                   |
+| `max_digit_ratio` | `f32`   | `0.35`  | Maximum fraction of alphanumeric chars that may be digits before a line is treated as mangled. |
+| `strip_markdown`  | `bool`  | `true`  | When `true`, GFM pipe-table separator rows are dropped and cell text is extracted from header/data rows before the digit-ratio gates run. |
+
+### How it works: three gates
+
+Line endings are first normalized and each line passes through three gates in order:
+
+**Gate 1 — Markdown table formatting**
+
+Lines whose trimmed form starts with `|` and contains at least one additional `|` are treated as GFM pipe-table rows:
+
+- *Separator rows* (containing only `|`, `-`, `:`, and whitespace, e.g. `|---|---|`) are **dropped**.
+- *Header and data rows* have their pipe delimiters stripped and the extracted cell text is then evaluated by gates 2 and 3.
+
+Prose lines that happen to contain a single `|` (e.g. `foo | bar`) are not affected.
+
+**Gate 2 — No alphabetical characters**
+
+Lines with zero alphabetical characters are **dropped**. This removes all-numeric rows, symbol-only OCR artifacts, and blank separators.
+
+**Gate 3 — High digit ratio (iterative wave expansion)**
+
+Lines whose `digits / (digits + alpha)` ratio exceeds `max_digit_ratio` are **stripped** using an iterative wave expansion from alpha-token seeds:
+
+1. **Seed** the keep-set with every token that contains at least one alphabetical character.
+2. **Each wave** rescues the immediate ±1 neighbors of all currently-kept tokens. Before committing the wave, the combined digit-ratio of the new candidate set is checked: if it stays ≤ `max_digit_ratio` the wave is accepted and expansion continues; otherwise the wave is rejected and expansion stops.
+3. Repeat until no new neighbors exist or a wave is rejected.
+
+Any token type is eligible for rescue — bare numbers, `—`, `+3%`, `$12B` — the ratio check is the sole gate. Tokens that would push the budget over the threshold are dropped. If no tokens survive after stripping, the line is dropped.
+
+The section is only discarded entirely (`None`) when *every* line is removed.
+
+### What survives
+
+Alpha-heavy text — prose, markdown headings, key=value metadata lines — passes through completely unchanged. Only blank lines (no alpha) and lines that exceed the digit ratio threshold are affected.
+
+OCR table rows that mix company names with dense numeric columns are stripped down to the name tokens and their immediately adjacent numeric neighbors (as long as the ratio budget allows):
+
+```text
+# Input (mangled OCR financial table)
+42 524 NOVEX INDUSTRIES Springfield 10788 143 1995 190 394 13611 358
+343 294 ZETA POWER Riverside 10758 31 1283 267 189 45432 175
+
+# Output — wave expansion rescues adjacent tokens within ratio budget
+42 524 NOVEX INDUSTRIES Springfield 10788 143
+294 ZETA POWER Riverside 10758
+```
 
 ### Negative Mining
 
@@ -986,6 +1208,7 @@ Negative selection is delegated to a pluggable backend.
 | **Instruction Tuning**  | Attach task-specific prompts (e.g., "Summarize this...") to specific recipes. |
 | **Metadata Decorators** | Inject structured prefixes into sampled text via `KvpPrefixSampler`.          |
 | **Anti-Shortcut**       | Includes anchor/positive swapping to avoid asymmetric slot bias.              |
+| **OCR & Markdown Denoiser** | Preprocessing step: strips digit-heavy OCR noise and markdown table formatting before chunking. |
 
 ## License
 

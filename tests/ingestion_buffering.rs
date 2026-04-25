@@ -175,8 +175,8 @@ fn test_ingestion_interleaving_no_data_loss() {
         .map(|i| create_dummy_record(&format!("B-{}", i)))
         .collect();
 
-    let source_a = InMemorySource::new("source-A", records_a);
-    let source_b = InMemorySource::new("source-B", records_b);
+    let source_a = InMemorySource::from_records("source-A", records_a);
+    let source_b = InMemorySource::from_records("source-B", records_b);
 
     // Batch size of 4.
     let mut manager = IngestionManager::new(4, SamplerConfig::default());
@@ -242,8 +242,8 @@ fn test_uneven_sources() {
         .collect();
 
     let mut manager = IngestionManager::new(2, SamplerConfig::default());
-    manager.register_source(Box::new(InMemorySource::new("A", records_a)));
-    manager.register_source(Box::new(InMemorySource::new("B", records_b)));
+    manager.register_source(Box::new(InMemorySource::from_records("A", records_a)));
+    manager.register_source(Box::new(InMemorySource::from_records("B", records_b)));
 
     // Round 1: Fetch A(0,1), B(0,1). Batch: A0, B0. Buffer: A1, B1.
     manager.refresh_all();
@@ -356,8 +356,8 @@ fn test_weighted_refresh_all_prefers_weighted_sources() {
         .collect();
 
     let mut manager = IngestionManager::new(4, SamplerConfig::default());
-    manager.register_source(Box::new(InMemorySource::new("A", records_a)));
-    manager.register_source(Box::new(InMemorySource::new("B", records_b)));
+    manager.register_source(Box::new(InMemorySource::from_records("A", records_a)));
+    manager.register_source(Box::new(InMemorySource::from_records("B", records_b)));
 
     let mut weights = HashMap::new();
     weights.insert("A".to_string(), 2.0);
@@ -382,8 +382,8 @@ fn test_weighted_refresh_all_skips_zero_weight_sources() {
         .collect();
 
     let mut manager = IngestionManager::new(6, SamplerConfig::default());
-    manager.register_source(Box::new(InMemorySource::new("A", records_a)));
-    manager.register_source(Box::new(InMemorySource::new("B", records_b)));
+    manager.register_source(Box::new(InMemorySource::from_records("A", records_a)));
+    manager.register_source(Box::new(InMemorySource::from_records("B", records_b)));
 
     let mut weights = HashMap::new();
     weights.insert("A".to_string(), 1.0);
@@ -413,9 +413,9 @@ fn test_weighted_refresh_all_zero_weight_does_not_reduce_batch() {
         .collect();
 
     let mut manager = IngestionManager::new(9, SamplerConfig::default());
-    manager.register_source(Box::new(InMemorySource::new("A", records_a)));
-    manager.register_source(Box::new(InMemorySource::new("B", records_b)));
-    manager.register_source(Box::new(InMemorySource::new("C", records_c)));
+    manager.register_source(Box::new(InMemorySource::from_records("A", records_a)));
+    manager.register_source(Box::new(InMemorySource::from_records("B", records_b)));
+    manager.register_source(Box::new(InMemorySource::from_records("C", records_c)));
 
     let mut weights = HashMap::new();
     weights.insert("A".to_string(), 1.0);
@@ -470,7 +470,7 @@ fn test_refresh_stats_track_success_metrics() {
         .map(|i| create_dummy_record(&format!("A-{}", i)))
         .collect::<Vec<_>>();
     let mut manager = IngestionManager::new(3, SamplerConfig::default());
-    manager.register_source(Box::new(InMemorySource::new("ok_a", records)));
+    manager.register_source(Box::new(InMemorySource::from_records("ok_a", records)));
 
     manager.refresh_all();
 
@@ -529,7 +529,7 @@ fn advance_on_empty_buffer_fills_to_max_records_not_step() {
 
     let mut manager = IngestionManager::new(max_records, SamplerConfig::default());
     manager.register_source(Box::new(CountingSource {
-        inner: triplets::source::InMemorySource::new("counted", records),
+        inner: triplets::source::InMemorySource::from_records("counted", records),
         calls: calls.clone(),
     }));
 

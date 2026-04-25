@@ -1,9 +1,47 @@
 use crate::data::SectionRole;
 use crate::splits::{SplitLabel, SplitRatios};
 use std::borrow::Cow;
+use std::sync::Arc;
+
+/// Configuration for the OCR denoiser that filters digit-heavy text.
+///
+/// When enabled, text sections that are predominantly numerical (e.g. mangled OCR tables)
+/// are stripped down to their alphabetical content on a line-by-line basis, or dropped
+/// entirely when no alphabetical content remains.
+#[derive(Clone, Debug)]
+pub struct DenoiserConfig {
+    /// Whether denoising is active. Defaults to `false` so existing behavior is unchanged.
+    pub enabled: bool,
+    /// Maximum ratio of digit characters to (digit + alphabetical) characters before a
+    /// line is considered mangled OCR output. Range: `0.0`–`1.0`.
+    ///
+    /// A value of `0.35` means that if more than 35% of the alphanumeric characters on a
+    /// line are digits, the line is treated as a mangled table row and stripped down to
+    /// its alphabetical tokens.
+    ///
+    /// Defaults to `0.35`.
+    pub max_digit_ratio: f32,
+    /// Whether to strip common markdown formatting boundaries (e.g. pipe `|` table boundaries,
+    /// dropping layout-only separator rows like `|---|---|`).
+    ///
+    /// Currently covers GFM tables; may expand to other structural markers in the future.
+    /// Semantic text is preserved.
+    ///
+    /// Defaults to `true`.
+    pub strip_markdown: bool,
+}
+
+impl Default for DenoiserConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_digit_ratio: 0.35,
+            strip_markdown: true,
+        }
+    }
+}
 
 /// Controls how long text sections are chunked and weighted.
-#[derive(Clone, Debug)]
 pub struct ChunkingStrategy {
     /// Max tokens per window when slicing a section into chunks.
     pub max_window_tokens: usize,
@@ -15,6 +53,8 @@ pub struct ChunkingStrategy {
     pub summary_fallback_tokens: usize,
     /// Floor applied to per-chunk weight after offset or summary fallback weighting.
     pub chunk_weight_floor: f32,
+    /// Pluggable text preprocessors applied in order before chunking.
+    pub(crate) preprocessors: Vec<Arc<dyn crate::preprocessor::TextPreprocessor>>,
 }
 
 impl Default for ChunkingStrategy {
@@ -25,7 +65,56 @@ impl Default for ChunkingStrategy {
             summary_fallback_weight: 0.35,
             summary_fallback_tokens: 512,
             chunk_weight_floor: 0.1,
+            preprocessors: Vec::new(),
         }
+    }
+}
+
+impl Clone for ChunkingStrategy {
+    fn clone(&self) -> Self {
+        Self {
+            max_window_tokens: self.max_window_tokens,
+            overlap_tokens: self.overlap_tokens.clone(),
+            summary_fallback_weight: self.summary_fallback_weight,
+            summary_fallback_tokens: self.summary_fallback_tokens,
+            chunk_weight_floor: self.chunk_weight_floor,
+            preprocessors: self.preprocessors.clone(),
+        }
+    }
+}
+
+impl std::fmt::Debug for ChunkingStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChunkingStrategy")
+            .field("max_window_tokens", &self.max_window_tokens)
+            .field("overlap_tokens", &self.overlap_tokens)
+            .field("summary_fallback_weight", &self.summary_fallback_weight)
+            .field("summary_fallback_tokens", &self.summary_fallback_tokens)
+            .field("chunk_weight_floor", &self.chunk_weight_floor)
+            .field(
+                "preprocessors",
+                &format_args!("{} registered", self.preprocessors.len()),
+            )
+            .finish()
+    }
+}
+
+impl ChunkingStrategy {
+    /// Register a [`crate::preprocessor::TextPreprocessor`] to run before chunking.
+    ///
+    /// Preprocessors are applied in registration order; if any returns `None`
+    /// the section is dropped and produces no chunks.
+    pub fn register_preprocessor(
+        &mut self,
+        p: impl crate::preprocessor::TextPreprocessor + 'static,
+    ) -> &mut Self {
+        self.preprocessors.push(Arc::new(p));
+        self
+    }
+
+    /// Return the slice of registered preprocessors.
+    pub fn preprocessors(&self) -> &[Arc<dyn crate::preprocessor::TextPreprocessor>] {
+        &self.preprocessors
     }
 }
 
@@ -228,6 +317,33 @@ impl Default for SamplerConfig {
             split: SplitRatios::default(),
             allowed_splits: vec![SplitLabel::Train],
         }
+    }
+}
+
+impl SamplerConfig {
+    /// Consuming builder to enable the built-in OCR/markdown denoiser on
+    /// the sampler's chunking strategy.
+    ///
+    /// Chains denoiser setup during `SamplerConfig` construction. Works with
+    /// struct update syntax to customize other fields at the same time:
+    ///
+    /// ```rust,no_run
+    /// use triplets::{SamplerConfig, config::DenoiserConfig};
+    ///
+    /// // Enable denoiser with all other fields at their defaults:
+    /// let config = SamplerConfig::default()
+    ///     .with_denoiser(DenoiserConfig { enabled: true, ..DenoiserConfig::default() });
+    ///
+    /// // Or customize other fields first, then add the denoiser:
+    /// let config = SamplerConfig { batch_size: 32, ..SamplerConfig::default() }
+    ///     .with_denoiser(DenoiserConfig { enabled: true, ..DenoiserConfig::default() });
+    /// ```
+    pub fn with_denoiser(mut self, config: DenoiserConfig) -> Self {
+        use crate::preprocessor::backends::denoiser_preprocessor::DenoiserPreprocessor;
+        self.chunking
+            .preprocessors
+            .push(Arc::new(DenoiserPreprocessor::new(config)));
+        self
     }
 }
 

@@ -24,6 +24,8 @@ pub mod kvp;
 pub mod metadata;
 /// Aggregate metrics helpers.
 pub mod metrics;
+/// OCR denoising and markdown-table cleanup for text chunks.
+pub mod preprocessor;
 /// Sampler implementations and public sampling API.
 pub mod sampler;
 /// Data source traits and built-in sources.
@@ -42,7 +44,8 @@ mod errors;
 
 pub use chunking::{ChunkingAlgorithm, SlidingWindowChunker};
 pub use config::{
-    ChunkingStrategy, NegativeStrategy, SamplerConfig, Selector, TextRecipe, TripletRecipe,
+    ChunkingStrategy, DenoiserConfig, NegativeStrategy, SamplerConfig, Selector, TextRecipe,
+    TripletRecipe,
 };
 pub use data::{
     DataRecord, PairLabel, QualityScore, RecordChunk, SampleBatch, SamplePair, SampleTriplet,
@@ -52,7 +55,10 @@ pub use errors::SamplerError;
 pub use hash::stable_hash_str;
 pub use ingestion::{IngestionManager, RecordCache};
 pub use kvp::{KvpField, KvpPrefixSampler};
+pub use preprocessor::TextPreprocessor;
+pub use preprocessor::backends::denoiser_preprocessor::DenoiserPreprocessor;
 pub use sampler::{BatchPrefetcher, Sampler, TripletSampler};
+pub use source::InMemorySource;
 pub use source::backends::csv_source::{CsvSource, CsvSourceConfig};
 #[cfg(feature = "huggingface")]
 pub use source::backends::huggingface_source::{

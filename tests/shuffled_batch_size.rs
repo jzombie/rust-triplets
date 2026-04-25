@@ -74,8 +74,8 @@ fn run_samples(batch_size: usize, total_samples: usize) -> Vec<RecordId> {
     ];
 
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(InMemorySource::new("source_a", source_a)));
-    sampler.register_source(Box::new(InMemorySource::new("source_b", source_b)));
+    sampler.register_source(Box::new(InMemorySource::from_records("source_a", source_a)));
+    sampler.register_source(Box::new(InMemorySource::from_records("source_b", source_b)));
 
     let mut samples = Vec::new();
     while samples.len() < total_samples {
