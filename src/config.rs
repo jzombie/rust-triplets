@@ -340,7 +340,9 @@ impl SamplerConfig {
     /// ```
     pub fn with_denoiser(mut self, config: DenoiserConfig) -> Self {
         use crate::preprocessor::backends::denoiser_preprocessor::DenoiserPreprocessor;
-        self.chunking.preprocessors.push(Arc::new(DenoiserPreprocessor::new(config)));
+        self.chunking
+            .preprocessors
+            .push(Arc::new(DenoiserPreprocessor::new(config)));
         self
     }
 }
