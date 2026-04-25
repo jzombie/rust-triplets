@@ -320,6 +320,31 @@ impl Default for SamplerConfig {
     }
 }
 
+impl SamplerConfig {
+    /// Consuming builder to enable the built-in OCR/markdown denoiser on
+    /// the sampler's chunking strategy.
+    ///
+    /// Chains denoiser setup during `SamplerConfig` construction. Works with
+    /// struct update syntax to customize other fields at the same time:
+    ///
+    /// ```rust,no_run
+    /// use triplets::{SamplerConfig, config::DenoiserConfig};
+    ///
+    /// // Enable denoiser with all other fields at their defaults:
+    /// let config = SamplerConfig::default()
+    ///     .with_denoiser(DenoiserConfig { enabled: true, ..DenoiserConfig::default() });
+    ///
+    /// // Or customize other fields first, then add the denoiser:
+    /// let config = SamplerConfig { batch_size: 32, ..SamplerConfig::default() }
+    ///     .with_denoiser(DenoiserConfig { enabled: true, ..DenoiserConfig::default() });
+    /// ```
+    pub fn with_denoiser(mut self, config: DenoiserConfig) -> Self {
+        use crate::preprocessor::backends::denoiser_preprocessor::DenoiserPreprocessor;
+        self.chunking.preprocessors.push(Arc::new(DenoiserPreprocessor::new(config)));
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

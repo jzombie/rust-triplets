@@ -1052,21 +1052,22 @@ Multiple preprocessors can be chained; they run in registration order and the ou
 
 Real-world corpora often contain text extracted from PDFs or scanned documents where OCR produces mangled tables: rows packed with bare numbers, column separators, and financial data that carries no semantic signal for embedding models. The denoiser also strips [GFM](https://github.github.com/gfm/) (GitHub Flavored Markdown) pipe-table formatting (separator rows dropped, cell text extracted) so that markdown tables embedded in documents don't produce raw pipe characters in chunks. Both kinds of cleanup are implemented as a `TextPreprocessor` and registered via `register_preprocessor`.
 
-It is **disabled by default** and is activated via `DenoiserConfig::enabled` on the `ChunkingStrategy`:
+It is **disabled by default** and is activated via `DenoiserConfig::enabled` on the `SamplerConfig`:
 
 ```rust,no_run
-use triplets::{SamplerConfig, ChunkingStrategy, DenoiserConfig, DenoiserPreprocessor};
+use triplets::{SamplerConfig, config::DenoiserConfig};
 
-let mut chunking = ChunkingStrategy::default();
-chunking.register_preprocessor(DenoiserPreprocessor::new(DenoiserConfig {
-    enabled: true,
-    max_digit_ratio: 0.35, // default
-    strip_markdown: true,  // default
-}));
-let config = SamplerConfig {
-    chunking,
-    ..SamplerConfig::default()
-};
+let config = SamplerConfig::default()
+    .with_denoiser(DenoiserConfig { enabled: true, ..DenoiserConfig::default() });
+```
+
+You can also customize other `SamplerConfig` fields first, then chain the denoiser:
+
+```rust,no_run
+use triplets::{SamplerConfig, config::DenoiserConfig};
+
+let config = SamplerConfig { batch_size: 32, ..SamplerConfig::default() }
+    .with_denoiser(DenoiserConfig { enabled: true, ..DenoiserConfig::default() });
 ```
 
 The denoiser runs automatically inside the pipeline. Here is a complete end-to-end example using `InMemorySource` — the built-in in-memory backend — so you can see exactly what the denoiser strips before chunks reach your training loop:
@@ -1075,7 +1076,7 @@ The denoiser runs automatically inside the pipeline. Here is a complete end-to-e
 use std::sync::Arc;
 use indoc::indoc;
 use triplets::{
-    ChunkingStrategy, DataRecord, DenoiserConfig, DenoiserPreprocessor, DeterministicSplitStore,
+    DataRecord, DenoiserConfig, DeterministicSplitStore,
     InMemorySource, Sampler, SamplerConfig, Selector, SplitLabel, SplitRatios,
     SectionRole, TextRecipe, TripletSampler,
 };
@@ -1104,15 +1105,6 @@ let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
 let store = Arc::new(DeterministicSplitStore::new(ratios, 42).unwrap());
 let sampler = TripletSampler::new(
     SamplerConfig {
-        chunking: {
-            let mut chunking = ChunkingStrategy::default();
-            chunking.register_preprocessor(DenoiserPreprocessor::new(DenoiserConfig {
-                enabled: true,
-                strip_markdown: true,
-                max_digit_ratio: 0.35,
-            }));
-            chunking
-        },
         text_recipes: vec![TextRecipe {
             name: "body".into(),
             selector: Selector::Role(SectionRole::Context),
@@ -1120,7 +1112,8 @@ let sampler = TripletSampler::new(
             instruction: None,
         }],
         ..SamplerConfig::default()
-    },
+    }
+    .with_denoiser(DenoiserConfig { enabled: true, strip_markdown: true, ..DenoiserConfig::default() }),
     store,
 );
 sampler.register_source(Box::new(source));
