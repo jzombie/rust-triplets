@@ -1,6 +1,6 @@
 //! OCR denoising and markdown-formatting cleanup for text chunks.
 //!
-//! The entry point is [`denoise_text`], which applies a configurable set of
+//! The entry point is [`crate::denoiser::denoise_text()`], which applies a configurable set of
 //! line-level (or whole-block) filters to strip digit-heavy OCR noise and
 //! markdown table formatting that is useless for text embeddings.
 
