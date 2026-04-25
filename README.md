@@ -1009,8 +1009,8 @@ assert_eq!(
     Some("Revenue grew twelve percent year over year.".to_string()),
 );
 
-// Mixed input: the noisy line is removed, the clean line is kept.
-let mixed = "Revenue grew twelve percent year over year.\n42 524 10788 143 1995 190 394";
+// Mixed input: the noisy section is removed.
+let mixed = "Revenue grew twelve percent year over year. 42 524 10788 143 1995 190 394";
 assert_eq!(
     denoise_text(mixed, &cfg),
     Some("Revenue grew twelve percent year over year.".to_string()),
