@@ -105,7 +105,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `bm25-mining`      | [BM25 hard-negative ranking within strategy-defined pools.](#negative-mining) | No      |
 | `extended-metrics` | Additional per-triplet diagnostics for debugging.                             | No      |
 
-> _[CSV](#csv-source), [text file](#text-file-source), and [custom source](#custom-source) support are enabled in all builds._
+> _[CSV](#csv-source), [text file](#text-file-source), [in-memory source](#inmemory-source) and [custom source](#custom-source) support are enabled in all builds._
 
 ## Configuring Sources
 
