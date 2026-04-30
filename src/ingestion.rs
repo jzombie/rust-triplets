@@ -602,6 +602,14 @@ impl IngestionManager {
                 }
             }
         }
+
+        // Fire per-cycle hooks (e.g. background shard expansion) on every source
+        // regardless of buffer state, so that sources that need background work
+        // independent of refresh can make progress even when their buffers are
+        // still draining.
+        for state in &self.sources {
+            state.source.on_cycle();
+        }
     }
 
     fn weighted_drain_into_caches(&mut self, limit: usize, weights: &HashMap<SourceId, f32>) {
@@ -1311,5 +1319,94 @@ mod tests {
             .refresh_all_with_weights(&empty_weights)
             .expect("no sources should not error");
         assert!(empty_manager.all_caches_empty());
+    }
+
+    #[test]
+    fn on_cycle_fires_every_cycle_independent_of_refresh() {
+        struct OnCycleCounter {
+            id: String,
+            refresh_count: Arc<AtomicUsize>,
+            cycle_count: Arc<AtomicUsize>,
+        }
+
+        impl DataSource for OnCycleCounter {
+            fn id(&self) -> &str {
+                &self.id
+            }
+            fn refresh(
+                &self,
+                _config: &SamplerConfig,
+                _cursor: Option<&SourceCursor>,
+                _limit: Option<usize>,
+            ) -> Result<SourceSnapshot, SamplerError> {
+                self.refresh_count.fetch_add(1, Ordering::SeqCst);
+                Ok(SourceSnapshot {
+                    records: vec![
+                        make_record("r1", &self.id),
+                        make_record("r2", &self.id),
+                        make_record("r3", &self.id),
+                        make_record("r4", &self.id),
+                        make_record("r5", &self.id),
+                    ],
+                    cursor: SourceCursor {
+                        last_seen: Utc::now(),
+                        revision: 1,
+                    },
+                })
+            }
+            fn reported_record_count(&self, _: &SamplerConfig) -> Result<u128, SamplerError> {
+                Ok(5)
+            }
+            fn on_cycle(&self) {
+                self.cycle_count.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let refresh_count = Arc::new(AtomicUsize::new(0));
+        let cycle_count = Arc::new(AtomicUsize::new(0));
+        let source = OnCycleCounter {
+            id: "counter".to_string(),
+            refresh_count: Arc::clone(&refresh_count),
+            cycle_count: Arc::clone(&cycle_count),
+        };
+
+        let mut manager = IngestionManager::new(5, SamplerConfig::default());
+        manager.register_source(Box::new(source));
+
+        // First call: all caches empty → refresh_all fires refresh + on_cycle
+        manager.refresh_all();
+        assert_eq!(
+            refresh_count.load(Ordering::SeqCst),
+            1,
+            "refresh should fire on initial load"
+        );
+        assert_eq!(
+            cycle_count.load(Ordering::SeqCst),
+            1,
+            "on_cycle should fire on initial load"
+        );
+
+        // After refresh_all, buffer has 5 records.
+        // advance(1) drains 1 record at a time:
+        //   advance 1: buffer empty! → refresh (5 records) → drain 1 → buffer=4
+        //   advance 2: buffer=4 no refresh → drain 1 → buffer=3
+        //   advance 3: buffer=3 no refresh → drain 1 → buffer=2
+        //   advance 4: buffer=2 no refresh → drain 1 → buffer=1
+        //   advance 5: buffer=1 no refresh → drain 1 → buffer=0
+        //   advance 6: buffer empty → refresh → drain 1 → buffer=4
+        //   advance 7: buffer=4 no refresh → drain 1 → buffer=3
+        for _ in 0..7 {
+            manager.advance(1);
+        }
+        assert_eq!(
+            refresh_count.load(Ordering::SeqCst),
+            3,
+            "refresh fires on initial + advance 1 + advance 6"
+        );
+        assert_eq!(
+            cycle_count.load(Ordering::SeqCst),
+            8,
+            "on_cycle fires on initial load + 7 advances = 8 total"
+        );
     }
 }

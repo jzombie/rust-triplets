@@ -4645,6 +4645,12 @@ impl DataSource for HuggingFaceRowSource {
             },
         ]
     }
+
+    /// Trigger background shard expansion on every scheduling cycle,
+    /// independent of buffer-drain state.
+    fn on_cycle(&self) {
+        self.trigger_expansion_if_needed();
+    }
 }
 
 #[cfg(test)]

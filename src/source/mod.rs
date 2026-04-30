@@ -83,6 +83,13 @@ pub trait DataSource: Send + Sync {
     /// filtering, and logical corpus definition.
     fn reported_record_count(&self, config: &SamplerConfig) -> Result<u128, SamplerError>;
 
+    /// Called on every ingestion scheduling cycle, regardless of buffer state.
+    ///
+    /// Sources that require background work independent of `refresh` (e.g.
+    /// lazy shard expansion) should override this to kick off background
+    /// threads or I/O. The default implementation is a no-op.
+    fn on_cycle(&self) {}
+
     /// Optional source-provided default triplet recipes.
     ///
     /// Used when sampler config does not provide explicit recipes.
