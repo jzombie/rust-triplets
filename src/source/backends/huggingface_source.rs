@@ -7968,6 +7968,110 @@ mod tests {
     }
 
     #[test]
+    fn download_next_remote_shard_detects_stale_shard_by_size() {
+        // When a cached store exists with a stored source_size that differs from
+        // the current manifest's expected_bytes, the store should be deleted and
+        // the shard re-downloaded.
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config.clone());
+
+        // Create a real .simdr store with source_size = 100.
+        let candidate =
+            "url::http://127.0.0.1:1/datasets/org/ds/resolve/main/train/stale.ndjson".to_string();
+        let store_path = HuggingFaceRowSource::candidate_store_path(&config, &candidate);
+        fs::create_dir_all(store_path.parent().unwrap()).unwrap();
+        write_simdr_fixture(&store_path, &[("r0", "row")]);
+        {
+            let store = DataStore::open(&store_path).unwrap();
+            store
+                .write(HF_SHARD_STORE_SOURCE_SIZE_KEY, &100u64.to_le_bytes())
+                .unwrap();
+        }
+
+        // Manually populate the store cache with the handle so the stale
+        // check can read source_size from it without opening a second handle.
+        let cached_store = Arc::new(DataStore::open(&store_path).unwrap());
+        source
+            .store_cache
+            .lock()
+            .unwrap()
+            .insert(store_path.clone(), cached_store);
+
+        // Set up remote candidates with expected_bytes = 200 (≠ 100).
+        {
+            let mut state = source.state.lock().unwrap();
+            state.remote_candidates = Some(vec![candidate.clone()]);
+            state.remote_candidate_order = vec![0];
+            state.remote_candidate_sizes.insert(candidate, 200);
+            state.next_remote_idx = 0;
+        }
+
+        // The stale check should detect the mismatch, delete the store, and
+        // attempt a download.  Since no HTTP server is running, the download
+        // fails with SourceUnavailable — but the store should already be gone.
+        let result = source.download_next_remote_shard();
+        assert!(
+            !store_path.exists(),
+            "stale store file should be deleted before download attempt"
+        );
+        assert!(
+            result.is_err(),
+            "should fail with SourceUnavailable (no HTTP server for re-download)"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, SamplerError::SourceUnavailable { .. }),
+            "expected SourceUnavailable, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn download_next_remote_shard_preserves_fresh_shard_when_sizes_match() {
+        // When a cached store exists and its stored source_size matches the
+        // manifest's expected_bytes, the download is skipped normally.
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config.clone());
+
+        // Create a store with source_size = 100 and set expected_bytes = 100.
+        let candidate =
+            "url::http://127.0.0.1:1/datasets/org/ds/resolve/main/train/fresh.ndjson".to_string();
+        let store_path = HuggingFaceRowSource::candidate_store_path(&config, &candidate);
+        fs::create_dir_all(store_path.parent().unwrap()).unwrap();
+        write_simdr_fixture(&store_path, &[("r0", "row")]);
+        {
+            let store = DataStore::open(&store_path).unwrap();
+            store
+                .write(HF_SHARD_STORE_SOURCE_SIZE_KEY, &100u64.to_le_bytes())
+                .unwrap();
+        }
+
+        // Populate the store cache for the stale check.
+        let cached_store = Arc::new(DataStore::open(&store_path).unwrap());
+        source
+            .store_cache
+            .lock()
+            .unwrap()
+            .insert(store_path.clone(), cached_store);
+
+        {
+            let mut state = source.state.lock().unwrap();
+            state.remote_candidates = Some(vec![candidate.clone()]);
+            state.remote_candidate_order = vec![0];
+            state.remote_candidate_sizes.insert(candidate, 100);
+            state.next_remote_idx = 0;
+        }
+
+        // Sizes match — should skip without any network call.
+        assert!(
+            source.download_next_remote_shard().unwrap(),
+            "should return true (candidate consumed)"
+        );
+        assert!(store_path.exists(), "fresh store should NOT be deleted");
+    }
+
+    #[test]
     fn extract_split_row_count_reads_split_entries() {
         let payload = json!({
             "size": {
