@@ -3299,26 +3299,26 @@ impl HuggingFaceRowSource {
                                 raw.copy_from_slice(bytes);
                                 Some(u64::from_le_bytes(raw))
                             });
-                        if let Some(stale) = stale {
-                            if stale != expected {
+                        if let Some(stale) = stale
+                            && stale != expected
+                        {
+                            warn!(
+                                "[triplets:hf] {} {} stale on disk (stored size {} ≠ expected {}), redownloading",
+                                self.config.source_id,
+                                Self::format_shard_label(
+                                    remote_path.as_str(),
+                                    candidate_idx,
+                                    remote_total
+                                ),
+                                stale,
+                                expected,
+                            );
+                            if let Err(err) = fs::remove_file(&store_path) {
                                 warn!(
-                                    "[triplets:hf] {} {} stale on disk (stored size {} ≠ expected {}), redownloading",
-                                    self.config.source_id,
-                                    Self::format_shard_label(
-                                        remote_path.as_str(),
-                                        candidate_idx,
-                                        remote_total
-                                    ),
-                                    stale,
-                                    expected,
+                                    "[triplets:hf] failed to delete stale store {}: {}",
+                                    store_path.display(),
+                                    err
                                 );
-                                if let Err(err) = fs::remove_file(&store_path) {
-                                    warn!(
-                                        "[triplets:hf] failed to delete stale store {}: {}",
-                                        store_path.display(),
-                                        err
-                                    );
-                                }
                             }
                         }
                     }
@@ -3488,10 +3488,10 @@ impl HuggingFaceRowSource {
         if source_size > 0 {
             // Write to the already-cached store handle (opened during transcode)
             // to avoid opening a second handle to the same file.
-            if let Ok(cache) = self.store_cache.lock() {
-                if let Some(store) = cache.get(&shard.path) {
-                    let _ = store.write(HF_SHARD_STORE_SOURCE_SIZE_KEY, &source_size.to_le_bytes());
-                }
+            if let Ok(cache) = self.store_cache.lock()
+                && let Some(store) = cache.get(&shard.path)
+            {
+                let _ = store.write(HF_SHARD_STORE_SOURCE_SIZE_KEY, &source_size.to_le_bytes());
             }
         }
 
