@@ -4452,6 +4452,11 @@ impl HuggingFaceRowSource {
     }
 }
 
+/// Global gate that serializes expansion downloads across ALL HuggingFace
+/// sources.  Only one source downloads a shard at any given time, preventing
+/// bursts when multiple sources trigger expansion on the same cycle.
+static EXPANSION_GATE: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+
 impl HuggingFaceRowSource {
     /// Spawn the background shard-expansion thread if expansion is needed and
     /// no download is already in progress.  This is separate from `refresh()`
@@ -4488,6 +4493,15 @@ impl HuggingFaceRowSource {
 
         let source = self.clone();
         let handle = thread::spawn(move || {
+            // Acquire the global expansion gate so only one source downloads
+            // at a time.  This prevents concurrency bursts when all sources
+            // fire on_cycle() on the same scheduling cycle.  The gate is
+            // released when the thread exits (guard dropped).
+            let _gate = EXPANSION_GATE
+                .get_or_init(|| std::sync::Mutex::new(()))
+                .lock()
+                .expect("expansion gate not poisoned");
+
             // If candidates not yet fetched, discover them first.
             let needs_candidates = source
                 .state
@@ -4745,12 +4759,6 @@ impl DataSource for HuggingFaceRowSource {
                 allow_same_anchor_positive: false,
             },
         ]
-    }
-
-    /// Trigger background shard expansion on every scheduling cycle,
-    /// independent of buffer-drain state.
-    fn on_cycle(&self) {
-        self.trigger_expansion_if_needed();
     }
 }
 

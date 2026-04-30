@@ -199,6 +199,9 @@ pub struct IngestionManager {
     /// This is updated even when cache ingest does not change, and is cleared when
     /// no source refresh occurs in that cycle.
     last_refreshed_sources: Vec<SourceId>,
+    /// Persistent round-robin cursor so that buffer drain does not always favour
+    /// the first sources in the list.  Advanced by one position after each drain.
+    drain_offset: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -226,6 +229,7 @@ impl IngestionManager {
             source_epoch: 0,
             source_refresh_generation: 0,
             last_refreshed_sources: Vec::new(),
+            drain_offset: 0,
         }
     }
 
@@ -577,38 +581,41 @@ impl IngestionManager {
         if let Some(weights) = weights {
             self.weighted_drain_into_caches(target_limit, weights);
         } else {
-            // Round-robin drain up to `target_limit` records total, routing each
-            // record into its own source's per-source cache.
+            // Fair round-robin drain: start from `drain_offset` instead of 0 so
+            // that the drain cursor rotates across cycles.  This prevents head
+            // sources (low indices) from always draining faster than tail sources,
+            // which was starving tail sources of refresh opportunities.
             let n = self.sources.len();
-            let mut per_source: Vec<Vec<DataRecord>> = vec![Vec::new(); n];
-            let mut total_drained = 0;
-            let mut any_remaining = true;
-            while total_drained < target_limit && any_remaining {
-                any_remaining = false;
-                for (idx, state) in self.sources.iter_mut().enumerate() {
-                    if total_drained >= target_limit {
-                        break;
+            if n > 0 {
+                let mut per_source: Vec<Vec<DataRecord>> = vec![Vec::new(); n];
+                let mut total_drained = 0;
+                let mut any_remaining = true;
+                while total_drained < target_limit && any_remaining {
+                    any_remaining = false;
+                    for offset in 0..n {
+                        if total_drained >= target_limit {
+                            break;
+                        }
+                        let idx = (self.drain_offset + offset) % n;
+                        if let Some(record) = self.sources[idx].buffer.pop_front() {
+                            per_source[idx].push(record);
+                            total_drained += 1;
+                            any_remaining = true;
+                        }
                     }
-                    if let Some(record) = state.buffer.pop_front() {
-                        per_source[idx].push(record);
-                        total_drained += 1;
-                        any_remaining = true;
+                }
+                // Advance the drain cursor so the next cycle starts from a different
+                // position.  Only advance when at least one record was drained, so a
+                // burst of drain-noop cycles on an empty source list doesn't rotate.
+                if total_drained > 0 {
+                    self.drain_offset = (self.drain_offset + 1) % n;
+                }
+                for (idx, batch) in per_source.into_iter().enumerate() {
+                    if !batch.is_empty() {
+                        self.sources[idx].cache.ingest(batch);
                     }
                 }
             }
-            for (idx, batch) in per_source.into_iter().enumerate() {
-                if !batch.is_empty() {
-                    self.sources[idx].cache.ingest(batch);
-                }
-            }
-        }
-
-        // Fire per-cycle hooks (e.g. background shard expansion) on every source
-        // regardless of buffer state, so that sources that need background work
-        // independent of refresh can make progress even when their buffers are
-        // still draining.
-        for state in &self.sources {
-            state.source.on_cycle();
         }
     }
 
@@ -1322,14 +1329,16 @@ mod tests {
     }
 
     #[test]
-    fn on_cycle_fires_every_cycle_independent_of_refresh() {
-        struct OnCycleCounter {
+    fn drain_offset_rotates_fairly_across_sources() {
+        // Create 3 sources, each with 10 records in their buffer after refresh.
+        // The fair drain offset should ensure all 3 drain at the same rate
+        // over multiple advance cycles.
+        struct FairSource {
             id: String,
             refresh_count: Arc<AtomicUsize>,
-            cycle_count: Arc<AtomicUsize>,
         }
 
-        impl DataSource for OnCycleCounter {
+        impl DataSource for FairSource {
             fn id(&self) -> &str {
                 &self.id
             }
@@ -1341,13 +1350,9 @@ mod tests {
             ) -> Result<SourceSnapshot, SamplerError> {
                 self.refresh_count.fetch_add(1, Ordering::SeqCst);
                 Ok(SourceSnapshot {
-                    records: vec![
-                        make_record("r1", &self.id),
-                        make_record("r2", &self.id),
-                        make_record("r3", &self.id),
-                        make_record("r4", &self.id),
-                        make_record("r5", &self.id),
-                    ],
+                    records: (0..10)
+                        .map(|i| make_record(&format!("r{i}"), &self.id))
+                        .collect(),
                     cursor: SourceCursor {
                         last_seen: Utc::now(),
                         revision: 1,
@@ -1355,58 +1360,61 @@ mod tests {
                 })
             }
             fn reported_record_count(&self, _: &SamplerConfig) -> Result<u128, SamplerError> {
-                Ok(5)
-            }
-            fn on_cycle(&self) {
-                self.cycle_count.fetch_add(1, Ordering::SeqCst);
+                Ok(10)
             }
         }
 
-        let refresh_count = Arc::new(AtomicUsize::new(0));
-        let cycle_count = Arc::new(AtomicUsize::new(0));
-        let source = OnCycleCounter {
-            id: "counter".to_string(),
-            refresh_count: Arc::clone(&refresh_count),
-            cycle_count: Arc::clone(&cycle_count),
-        };
+        let counts = (
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+        );
 
-        let mut manager = IngestionManager::new(5, SamplerConfig::default());
-        manager.register_source(Box::new(source));
+        let mut manager = IngestionManager::new(30, SamplerConfig::default());
+        manager.register_source(Box::new(FairSource {
+            id: "src_0".to_string(),
+            refresh_count: Arc::clone(&counts.0),
+        }));
+        manager.register_source(Box::new(FairSource {
+            id: "src_1".to_string(),
+            refresh_count: Arc::clone(&counts.1),
+        }));
+        manager.register_source(Box::new(FairSource {
+            id: "src_2".to_string(),
+            refresh_count: Arc::clone(&counts.2),
+        }));
 
-        // First call: all caches empty → refresh_all fires refresh + on_cycle
+        // First refresh_all fills all buffers.
         manager.refresh_all();
-        assert_eq!(
-            refresh_count.load(Ordering::SeqCst),
-            1,
-            "refresh should fire on initial load"
-        );
-        assert_eq!(
-            cycle_count.load(Ordering::SeqCst),
-            1,
-            "on_cycle should fire on initial load"
-        );
+        // All 3 refreshed once.
+        assert_eq!(counts.0.load(Ordering::SeqCst), 1);
+        assert_eq!(counts.1.load(Ordering::SeqCst), 1);
+        assert_eq!(counts.2.load(Ordering::SeqCst), 1);
 
-        // After refresh_all, buffer has 5 records.
-        // advance(1) drains 1 record at a time:
-        //   advance 1: buffer empty! → refresh (5 records) → drain 1 → buffer=4
-        //   advance 2: buffer=4 no refresh → drain 1 → buffer=3
-        //   advance 3: buffer=3 no refresh → drain 1 → buffer=2
-        //   advance 4: buffer=2 no refresh → drain 1 → buffer=1
-        //   advance 5: buffer=1 no refresh → drain 1 → buffer=0
-        //   advance 6: buffer empty → refresh → drain 1 → buffer=4
-        //   advance 7: buffer=4 no refresh → drain 1 → buffer=3
-        for _ in 0..7 {
+        // Each advance(1) drains 1 record from 1 source, rotating via
+        // drain_offset.  With 3 sources, after 3 advances each source
+        // loses 1 record.  After 30 advances each source loses 10 records
+        // and triggers a refresh.  Run 33 advances and check all 3 refreshed
+        // roughly the same number of times.
+        for _ in 0..33 {
             manager.advance(1);
         }
-        assert_eq!(
-            refresh_count.load(Ordering::SeqCst),
-            3,
-            "refresh fires on initial + advance 1 + advance 6"
-        );
-        assert_eq!(
-            cycle_count.load(Ordering::SeqCst),
-            8,
-            "on_cycle fires on initial load + 7 advances = 8 total"
+
+        let r0 = counts.0.load(Ordering::SeqCst);
+        let r1 = counts.1.load(Ordering::SeqCst);
+        let r2 = counts.2.load(Ordering::SeqCst);
+
+        // Each had 10 records after initial refresh_all.
+        // 10 records / (1 drained per 3 cycles) = 30 cycles to drain each buffer.
+        // After 33 more advances each buffer emptied ~1 time and re-filled, so
+        // each source should have refreshed ~2 times total (initial + 1 drain).
+        // The exact count can vary by 1 due to timing, but all 3 must be within
+        // 1 of each other — no source can be starved.
+        let min = r0.min(r1).min(r2);
+        let max = r0.max(r1).max(r2);
+        assert!(
+            max <= min + 1,
+            "sources should refresh at roughly the same rate: got {r0}/{r1}/{r2}"
         );
     }
 }
