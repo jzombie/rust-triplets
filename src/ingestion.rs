@@ -199,9 +199,11 @@ pub struct IngestionManager {
     /// This is updated even when cache ingest does not change, and is cleared when
     /// no source refresh occurs in that cycle.
     last_refreshed_sources: Vec<SourceId>,
-    /// Persistent round-robin cursor so that buffer drain does not always favour
-    /// the first sources in the list.  Advanced by one position after each drain.
-    drain_offset: usize,
+    /// Rotating start index for the round-robin buffer drain.  Instead of always
+    /// draining from source 0 (which starves high-index sources of refresh
+    /// opportunities), each cycle begins at this position and advances by one.
+    /// Over N cycles every source is drained first exactly once.
+    drain_start: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -229,7 +231,7 @@ impl IngestionManager {
             source_epoch: 0,
             source_refresh_generation: 0,
             last_refreshed_sources: Vec::new(),
-            drain_offset: 0,
+            drain_start: 0,
         }
     }
 
@@ -581,7 +583,7 @@ impl IngestionManager {
         if let Some(weights) = weights {
             self.weighted_drain_into_caches(target_limit, weights);
         } else {
-            // Fair round-robin drain: start from `drain_offset` instead of 0 so
+            // Fair round-robin drain: start from `drain_start` instead of 0 so
             // that the drain cursor rotates across cycles.  This prevents head
             // sources (low indices) from always draining faster than tail sources,
             // which was starving tail sources of refresh opportunities.
@@ -596,7 +598,7 @@ impl IngestionManager {
                         if total_drained >= target_limit {
                             break;
                         }
-                        let idx = (self.drain_offset + offset) % n;
+                        let idx = (self.drain_start + offset) % n;
                         if let Some(record) = self.sources[idx].buffer.pop_front() {
                             per_source[idx].push(record);
                             total_drained += 1;
@@ -608,7 +610,7 @@ impl IngestionManager {
                 // position.  Only advance when at least one record was drained, so a
                 // burst of drain-noop cycles on an empty source list doesn't rotate.
                 if total_drained > 0 {
-                    self.drain_offset = (self.drain_offset + 1) % n;
+                    self.drain_start = (self.drain_start + 1) % n;
                 }
                 for (idx, batch) in per_source.into_iter().enumerate() {
                     if !batch.is_empty() {
@@ -1329,9 +1331,9 @@ mod tests {
     }
 
     #[test]
-    fn drain_offset_rotates_fairly_across_sources() {
+    fn drain_start_rotates_fairly_across_sources() {
         // Create 3 sources, each with 10 records in their buffer after refresh.
-        // The fair drain offset should ensure all 3 drain at the same rate
+        // The fair round-robin should ensure all 3 drain at the same rate
         // over multiple advance cycles.
         struct FairSource {
             id: String,
@@ -1392,7 +1394,7 @@ mod tests {
         assert_eq!(counts.2.load(Ordering::SeqCst), 1);
 
         // Each advance(1) drains 1 record from 1 source, rotating via
-        // drain_offset.  With 3 sources, after 3 advances each source
+        // drain_start.  With 3 sources, after 3 advances each source
         // loses 1 record.  After 30 advances each source loses 10 records
         // and triggers a refresh.  Run 33 advances and check all 3 refreshed
         // roughly the same number of times.
