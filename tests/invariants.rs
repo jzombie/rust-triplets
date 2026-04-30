@@ -841,3 +841,146 @@ fn per_epoch_shuffle_changes_source_order() {
 
     assert_ne!(first_epoch, second_epoch);
 }
+
+/// Verify that many sources are sampled roughly uniformly even when the batch size
+/// is a tiny fraction of the total source count.
+///
+/// # Why this matters
+///
+/// Inside `next_triplet_batch_inner_with_weights` (in `sampler/mod.rs`), the
+/// multi-source path cycles through sources in a round-robin, using a shuffle that
+/// changes each cycle (`shuffled_source_cycle`).  The number of anchor candidates
+/// it attempts per batch is `batch_size × 4 × max_recipe_len`.  With, say,
+/// `batch_size = 2` and 50 sources it only visits up to 8 sources per batch and
+/// emits just 2 triplets.  The concern is that this could bias the sampler toward
+/// a small clique of sources and systematically starve others.
+///
+/// What prevents that is the persisted `source_cycle_idx`: it advances by the
+/// number of source steps consumed in Phase 1, so the *next* batch picks up where
+/// the previous one left off in the shuffled sequence.  Over many batches the
+/// round-robin covers all sources fairly.
+///
+/// This test checks that property empirically by registering 50 sources with a
+/// batch size of 2, collecting 1000 triplet samples, and applying a chi-squared
+/// goodness-of-fit test against the uniform distribution.
+#[test]
+fn many_sources_small_batch_distribution_is_uniform() {
+    // ── Fixture setup ────────────────────────────────────────────────────────
+    // All records land in Train; no Validation or Test needed for this test.
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+
+    // 50 sources × 4 records each = 200 records.  A batch of 2 can only carry
+    // 2 triplet samples per call, so it takes many batches to accumulate enough
+    // data for a meaningful distribution test.
+    const NUM_SOURCES: usize = 50;
+    const BATCH_SIZE: usize = 2;
+    const NUM_BATCHES: usize = 500; // produces 1 000 triplet samples total
+    const RECORDS_PER_SOURCE: usize = 4;
+
+    let seed = 77;
+    let store = Arc::new(CountingSplitStore::new(split, seed));
+
+    // Bump the ingestion cap from build_config's default (which ties it to
+    // batch_size) so all 200 records get ingested at once rather than trickling
+    // in a few at a time.
+    let mut config = build_config(seed, BATCH_SIZE, split);
+    config.ingestion_max_records = NUM_SOURCES * RECORDS_PER_SOURCE;
+    let sampler = TripletSampler::new(config, store);
+
+    // Register 50 independent in-memory sources, each with 4 records.
+    // Record IDs follow the pattern `src_0::r0`, `src_0::r1`, …, `src_49::r3`.
+    for i in 0..NUM_SOURCES {
+        let source_name = format!("src_{i}");
+        let records: Vec<_> = (0..RECORDS_PER_SOURCE)
+            .map(|j| build_record(&source_name, &format!("r{j}"), j as u32))
+            .collect();
+        sampler.register_source(Box::new(InMemorySource::from_records(
+            &source_name,
+            records,
+        )));
+    }
+
+    // ── Sampling phase ───────────────────────────────────────────────────────
+    // Draw batches sequentially.  For each triplet we extract the source name
+    // from the anchor's record ID (everything before the "::" separator) and
+    // increment that source's counter.
+    let mut source_counts: HashMap<String, usize> = HashMap::new();
+    for _ in 0..NUM_BATCHES {
+        let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
+        for triplet in batch.triplets {
+            let source = triplet
+                .anchor
+                .record_id
+                .split("::")
+                .next()
+                .unwrap()
+                .to_string();
+            *source_counts.entry(source).or_insert(0) += 1;
+        }
+    }
+
+    // ── Distributional assertion via chi-squared ─────────────────────────────
+    // First, a sanity check: we should have collected exactly the number of
+    // samples we asked for (no exhaustion or early stopping).
+    let total: usize = source_counts.values().sum();
+    assert_eq!(total, NUM_BATCHES * BATCH_SIZE);
+
+    // Under perfect uniformity each of the 50 sources would appear
+    // total / NUM_SOURCES = 20 times.
+    let expected = total as f64 / NUM_SOURCES as f64;
+
+    // Compute the chi-squared statistic:
+    //   χ² = Σ ((observed - expected)² / expected)
+    //
+    // Under the null hypothesis (the sampler draws each source with equal
+    // probability over time) this statistic follows a chi-squared distribution
+    // with (NUM_SOURCES - 1) = 49 degrees of freedom.
+    let chi_squared: f64 = source_counts
+        .values()
+        .map(|&count| {
+            let diff = count as f64 - expected;
+            diff * diff / expected
+        })
+        .sum();
+
+    // The critical values for 49 d.f.:
+    //   p = 0.05  →  66.3
+    //   p = 0.01  →  73.2
+    //   p = 0.001 →  82.0
+    //
+    // We use a threshold of 90.0, which is intentionally more lenient than a
+    // strict statistical test.  The sampler's source order is a deterministic
+    // round-robin through a shuffled list, not independent random draws, so
+    // the chi-squared statistic will show more sampling variance than the
+    // textbook null distribution.  By setting the bar at 90.0 we tolerate that
+    // extra variance while still catching severe bias (e.g. always sampling
+    // from the same 1-2 sources).
+    let threshold = 90.0;
+    assert!(
+        chi_squared < threshold,
+        "Source distribution deviates too far from uniform.\
+         χ² = {chi_squared:.1} (threshold = {threshold:.1}) with {df} d.f.\
+         Expected ~{expected:.1} per source, got:\
+         min = {} (source most starved), max = {} (source most favoured), \
+         std = {:.2}",
+        source_counts.values().min().unwrap(),
+        source_counts.values().max().unwrap(),
+        {
+            let mean = expected;
+            let variance: f64 = source_counts
+                .values()
+                .map(|&c| {
+                    let d = c as f64 - mean;
+                    d * d
+                })
+                .sum::<f64>()
+                / NUM_SOURCES as f64;
+            variance.sqrt()
+        },
+        df = NUM_SOURCES - 1,
+    );
+}
