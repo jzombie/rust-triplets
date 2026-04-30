@@ -46,9 +46,9 @@ use crate::constants::huggingface::{
     HF_JSON_KEY_SPLITS, HF_JSON_KEY_URL, HF_PARQUET_DEFAULT_ENDPOINT,
     HF_RESOLVE_UNKNOWN_FALLBACK_PATH, HF_RESOLVE_URL_SEPARATOR, HF_SHARD_CANDIDATE_SEED_TAG,
     HF_SHARD_STORE_EXTENSION, HF_SHARD_STORE_META_ROWS_KEY, HF_SHARD_STORE_ROW_PREFIX,
-    HF_SIZE_DEFAULT_ENDPOINT, HF_WHOAMI_ENDPOINT, HUGGINGFACE_REFRESH_BATCH_MULTIPLIER,
-    PARQUET_MANIFEST_DIR, REMOTE_BOOTSTRAP_SHARDS, REMOTE_EXPANSION_HEADROOM_MULTIPLIER,
-    REMOTE_URL_PREFIX,
+    HF_SHARD_STORE_SOURCE_SIZE_KEY, HF_SIZE_DEFAULT_ENDPOINT, HF_WHOAMI_ENDPOINT,
+    HUGGINGFACE_REFRESH_BATCH_MULTIPLIER, PARQUET_MANIFEST_DIR, REMOTE_BOOTSTRAP_SHARDS,
+    REMOTE_EXPANSION_HEADROOM_MULTIPLIER, REMOTE_URL_PREFIX,
 };
 use crate::data::{DataRecord, QualityScore, SectionRole};
 use crate::utils::make_section;
@@ -2973,6 +2973,33 @@ impl HuggingFaceRowSource {
             } else {
                 0
             };
+
+            // Integrity check: verify the last claimed row actually exists in
+            // the store.  A corrupt store (partial write, truncated file) may
+            // have the metadata key intact but be missing row data.  Delete it
+            // so the shard is re-downloaded on the next expansion cycle.
+            if rows > 0 {
+                let last_key = Self::row_store_row_key(rows.saturating_sub(1));
+                match store.batch_read(&[last_key.as_slice()]) {
+                    Ok(entries) if entries[0].is_some() => {}
+                    _ => {
+                        warn!(
+                            "[triplets:hf] corrupted store detected ({} rows claimed but last row missing), deleting: {}",
+                            rows,
+                            path.display()
+                        );
+                        if let Err(err) = fs::remove_file(path) {
+                            warn!(
+                                "[triplets:hf] failed to delete corrupted store {}: {}",
+                                path.display(),
+                                err
+                            );
+                        }
+                        return Ok((None, None));
+                    }
+                }
+            }
+
             let groups = if rows > 0 {
                 vec![(0, rows)]
             } else {
@@ -3245,14 +3272,69 @@ impl HuggingFaceRowSource {
                 // skip the download — it is already counted in materialized_rows via
                 // build_shard_index.  Cache and order are fully decoupled: the position
                 // is consumed regardless, but no network request is made.
+                //
+                // However, if the remote manifest reports a source size and the cached
+                // store carries a different stored value, the upstream shard was replaced
+                // (newer version).  Delete the stale store so it gets redownloaded.
                 let store_path = Self::candidate_store_path(&self.config, &remote_path);
                 if store_path.exists() {
-                    debug!(
-                        "[triplets:hf] {} {} already on disk, skipping download",
-                        self.config.source_id,
-                        Self::format_shard_label(remote_path.as_str(), candidate_idx, remote_total),
-                    );
-                    return Ok(true);
+                    if let Some(expected) = expected_bytes {
+                        // Only read the stored source size from the cache — never
+                        // call get_or_open_shard_store purely to check, because it
+                        // creates an empty store file if the path doesn't exist.
+                        // If the handle isn't cached yet, the store was just loaded
+                        // and we'll catch staleness on the next cycle.
+                        let stale = self
+                            .store_cache
+                            .lock()
+                            .ok()
+                            .and_then(|cache| cache.get(&store_path).cloned())
+                            .and_then(|store| {
+                                let entry = store.read(HF_SHARD_STORE_SOURCE_SIZE_KEY).ok()??;
+                                let bytes = entry.as_ref();
+                                if bytes.len() != std::mem::size_of::<u64>() {
+                                    return None;
+                                }
+                                let mut raw = [0u8; 8];
+                                raw.copy_from_slice(bytes);
+                                Some(u64::from_le_bytes(raw))
+                            });
+                        if let Some(stale) = stale {
+                            if stale != expected {
+                                warn!(
+                                    "[triplets:hf] {} {} stale on disk (stored size {} ≠ expected {}), redownloading",
+                                    self.config.source_id,
+                                    Self::format_shard_label(
+                                        remote_path.as_str(),
+                                        candidate_idx,
+                                        remote_total
+                                    ),
+                                    stale,
+                                    expected,
+                                );
+                                if let Err(err) = fs::remove_file(&store_path) {
+                                    warn!(
+                                        "[triplets:hf] failed to delete stale store {}: {}",
+                                        store_path.display(),
+                                        err
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    if store_path.exists() {
+                        debug!(
+                            "[triplets:hf] {} {} already on disk, skipping download",
+                            self.config.source_id,
+                            Self::format_shard_label(
+                                remote_path.as_str(),
+                                candidate_idx,
+                                remote_total
+                            ),
+                        );
+                        return Ok(true);
+                    }
                 }
 
                 (
@@ -3391,6 +3473,25 @@ impl HuggingFaceRowSource {
                 }
 
                 shard.path = canonical_store;
+            }
+        }
+
+        // Persist the source shard's expected size from the remote manifest so
+        // that future cycles can detect when the upstream shard was replaced.
+        // When the manifest doesn't provide a size (hf-hub fallback), use the
+        // actual downloaded file size as a best-effort record.
+        let source_size = expected_bytes.unwrap_or_else(|| {
+            fs::metadata(&local_path)
+                .map(|meta| meta.len())
+                .unwrap_or(0)
+        });
+        if source_size > 0 {
+            // Write to the already-cached store handle (opened during transcode)
+            // to avoid opening a second handle to the same file.
+            if let Ok(cache) = self.store_cache.lock() {
+                if let Some(store) = cache.get(&shard.path) {
+                    let _ = store.write(HF_SHARD_STORE_SOURCE_SIZE_KEY, &source_size.to_le_bytes());
+                }
             }
         }
 
@@ -6570,6 +6671,31 @@ mod tests {
             .err()
             .expect("index_single_shard should fail");
         assert!(matches!(err, SamplerError::SourceUnavailable { .. }));
+    }
+
+    #[test]
+    fn index_single_shard_detects_corrupted_store() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let store_path = dir.path().join("shard.simdr");
+
+        // Write a store with 3 valid rows AND a metadata key claiming 5 rows.
+        // The last claimed row (index 4) does not exist — corruption.
+        write_simdr_fixture(&store_path, &[("r0", "zero"), ("r1", "one"), ("r2", "two")]);
+        let store = DataStore::open(&store_path).expect("open store");
+        store
+            .write(HF_SHARD_STORE_META_ROWS_KEY, &(5u64).to_le_bytes())
+            .expect("overwrite meta with inflated count");
+        drop(store);
+
+        // index_single_shard should detect the gap, delete the corrupt file,
+        // and return None.
+        let (maybe_shard, _) = HuggingFaceRowSource::index_single_shard(&config, &store_path, 0)
+            .expect(
+                "corrupted store should not produce a hard error — it deletes and returns None",
+            );
+        assert!(maybe_shard.is_none(), "corrupt store should be skipped");
+        assert!(!store_path.exists(), "corrupt store file should be deleted");
     }
 
     #[test]

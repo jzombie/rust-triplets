@@ -233,6 +233,10 @@ pub mod huggingface {
     pub const HF_SHARD_STORE_ROW_PREFIX: &[u8] = b"rowv1|";
     /// Metadata key storing row counts in shard row stores.
     pub const HF_SHARD_STORE_META_ROWS_KEY: &[u8] = b"meta|rows";
+    /// Metadata key storing the original source shard size from the remote
+    /// manifest at download time.  Compared against the current manifest on
+    /// subsequent cycles to detect out-of-date shards.
+    pub const HF_SHARD_STORE_SOURCE_SIZE_KEY: &[u8] = b"meta|source_size";
     /// Directory segment used when no split is specified (all-splits mode).
     /// Must not collide with any real HF split name; HF split names never start with `_`.
     pub const ALL_SPLITS_DIR: &str = "_all";
