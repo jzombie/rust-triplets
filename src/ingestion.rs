@@ -1491,10 +1491,10 @@ mod tests {
 
         let counts: Vec<Arc<AtomicUsize>> = (0..5).map(|_| Arc::new(AtomicUsize::new(0))).collect();
         let mut manager = IngestionManager::new(40, SamplerConfig::default());
-        for i in 0..5 {
+        for (i, count) in counts.iter().enumerate() {
             manager.register_source(Box::new(SimpleSource {
                 id: format!("src_{i}"),
-                refresh_count: Arc::clone(&counts[i]),
+                refresh_count: Arc::clone(count),
             }));
         }
 
@@ -1589,10 +1589,10 @@ mod tests {
         let store = Arc::new(DeterministicSplitStore::new(config.split, 99).unwrap());
         let sampler = TripletSampler::new(config, store);
 
-        for i in 0..5 {
+        for (i, count) in counts.iter().enumerate() {
             sampler.register_source(Box::new(Tracked {
                 id: format!("src_{i}"),
-                refresh_count: Arc::clone(&counts[i]),
+                refresh_count: Arc::clone(count),
             }));
         }
         sampler
