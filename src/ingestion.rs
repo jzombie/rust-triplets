@@ -1508,16 +1508,13 @@ mod tests {
         }
 
         let totals: Vec<usize> = counts.iter().map(|c| c.load(Ordering::SeqCst)).collect();
-        eprintln!("direct manager totals: {totals:?}");
-        let min = *totals.iter().min().unwrap();
-        let max = *totals.iter().max().unwrap();
-        assert!(
-            max <= min + 1,
-            "direct manager: all sources must refresh equally: {totals:?}"
-        );
-        assert!(
-            min >= 4,
-            "direct manager: each should refresh at least 4 times: {totals:?}"
+        // Determined by the round-robin drain_start rotation across 5 sources.
+        // Sources at higher indices accumulate one extra refresh cycle because
+        // drain_start starts at 0 and advances by 1 after each drain.
+        assert_eq!(
+            totals,
+            vec![5, 5, 6, 6, 6],
+            "direct manager: unexpected refresh distribution"
         );
     }
 
@@ -1710,12 +1707,18 @@ mod tests {
         }
 
         let totals: Vec<usize> = counts.iter().map(|c| c.load(Ordering::SeqCst)).collect();
-        eprintln!("unequal-weights distribution: {totals:?}");
-        // The highest-weight source must have strictly more refreshes than
-        // EVERY weight-1.0 source.
+        // The highest-weight source (src_0, w=2.0) must have strictly more
+        // refreshes than EVERY weight-1.0 source.
         assert!(
             totals[1..].iter().all(|&t| t < totals[0]),
-            "src_0 (w=2.0) must outpace all w=1.0 sources: {totals:?}"
+            "src_0 (w=2.0) must outpace all w=1.0 sources (totals: {totals:?})"
+        );
+        // Lock in the exact deterministic distribution: src_0 (double weight)
+        // refreshes far more often than the equal-weight pack.
+        assert_eq!(
+            totals,
+            vec![26, 11, 7, 7, 7],
+            "unequal-weights: unexpected refresh distribution"
         );
     }
 }
