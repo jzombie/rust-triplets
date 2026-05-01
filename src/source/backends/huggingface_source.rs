@@ -4494,8 +4494,7 @@ impl HuggingFaceRowSource {
         let source = self.clone();
         let handle = thread::spawn(move || {
             // Acquire the global expansion gate so only one source downloads
-            // at a time.  This prevents concurrency bursts when all sources
-            // fire on_cycle() on the same scheduling cycle.  The gate is
+            // a shard at a time across all HuggingFace sources.  The gate is
             // released when the thread exits (guard dropped).
             let _gate = EXPANSION_GATE
                 .get_or_init(|| std::sync::Mutex::new(()))
