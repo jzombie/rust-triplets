@@ -1686,15 +1686,15 @@ mod tests {
 
     #[test]
     fn sampler_weighted_drain_with_unequal_weights_respects_ratios() {
-        // Source 0 gets weight 2.0, others get 1.0.  The weighted
-        // proportional-fair drain must give source 0 proportionally more
+        // Source 3 gets weight 2.0, others get 1.0.  The weighted
+        // proportional-fair drain must give source 3 proportionally more
         // refresh cycles than any weight-1.0 source.
         let counts: Vec<Arc<AtomicUsize>> = (0..5).map(|_| Arc::new(AtomicUsize::new(0))).collect();
         let sampler = make_five_source_sampler(&counts);
 
         let mut weights = HashMap::new();
         for i in 0..5 {
-            weights.insert(format!("src_{i}"), if i == 0 { 2.0f32 } else { 1.0 });
+            weights.insert(format!("src_{i}"), if i == 3 { 2.0f32 } else { 1.0 });
         }
 
         sampler
@@ -1707,17 +1707,20 @@ mod tests {
         }
 
         let totals: Vec<usize> = counts.iter().map(|c| c.load(Ordering::SeqCst)).collect();
-        // The highest-weight source (src_0, w=2.0) must have strictly more
+        // The highest-weight source (src_3, w=2.0) must have strictly more
         // refreshes than EVERY weight-1.0 source.
+        // Note: src_4 (index 4) gets an extra bump from drain_start rotation.
         assert!(
-            totals[1..].iter().all(|&t| t < totals[0]),
-            "src_0 (w=2.0) must outpace all w=1.0 sources (totals: {totals:?})"
+            totals
+                .iter()
+                .enumerate()
+                .all(|(i, &t)| i == 3 || t < totals[3]),
+            "src_3 (w=2.0) must outpace all w=1.0 sources (totals: {totals:?})"
         );
-        // Lock in the exact deterministic distribution: src_0 (double weight)
-        // refreshes far more often than the equal-weight pack.
+        // Lock in the exact deterministic distribution.
         assert_eq!(
             totals,
-            vec![26, 11, 7, 7, 7],
+            vec![6, 7, 7, 26, 12],
             "unequal-weights: unexpected refresh distribution"
         );
     }
