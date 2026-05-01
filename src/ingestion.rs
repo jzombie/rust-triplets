@@ -1508,9 +1508,9 @@ mod tests {
         }
 
         let totals: Vec<usize> = counts.iter().map(|c| c.load(Ordering::SeqCst)).collect();
-        // Determined by the round-robin drain_start rotation across 5 sources.
-        // Sources at higher indices accumulate one extra refresh cycle because
-        // drain_start starts at 0 and advances by 1 after each drain.
+        // Round-robin drain with 5 sources, 8 records each, batch_size=2, 80
+        // advance calls.  Most sources refresh 5×; sources 2-4 get one extra
+        // cycle (6) due to the rotating drain_start tie-breaker positioning.
         assert_eq!(
             totals,
             vec![5, 5, 6, 6, 6],
@@ -1709,7 +1709,11 @@ mod tests {
         let totals: Vec<usize> = counts.iter().map(|c| c.load(Ordering::SeqCst)).collect();
         // The highest-weight source (src_3, w=2.0) must have strictly more
         // refreshes than EVERY weight-1.0 source.
-        // Note: src_4 (index 4) gets an extra bump from drain_start rotation.
+        // Note: src_4 (index 4, w=1.0) gets 12 refreshes while the other
+        // weight-1.0 sources get 6-7.  This happens because the proportional-
+        // fair scheduler uses drain_start as a rotating tie-breaker — being
+        // positioned right after the high-weight source (src_3) gives src_4
+        // extra wins when src_3's buffer empties and refills more frequently.
         assert!(
             totals
                 .iter()
