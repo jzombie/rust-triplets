@@ -2014,7 +2014,15 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         weights: Option<&HashMap<SourceId, f32>>,
     ) -> Result<SampleBatch, SamplerError> {
         if let Some(weights) = weights {
-            self.ingest_internal_with_weights_for_split(target_split, weights)?;
+            if weights.is_empty()
+                || weights
+                    .values()
+                    .all(|&w| w == *weights.values().next().unwrap())
+            {
+                self.ingest_internal_for_split(target_split)?;
+            } else {
+                self.ingest_internal_with_weights_for_split(target_split, weights)?;
+            }
         } else {
             self.ingest_internal_for_split(target_split)?;
         }
@@ -2213,7 +2221,15 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         weights: Option<&HashMap<SourceId, f32>>,
     ) -> Result<TextBatch, SamplerError> {
         if let Some(weights) = weights {
-            self.ingest_internal_with_weights_for_split(target_split, weights)?;
+            if weights.is_empty()
+                || weights
+                    .values()
+                    .all(|&w| w == *weights.values().next().unwrap())
+            {
+                self.ingest_internal_for_split(target_split)?;
+            } else {
+                self.ingest_internal_with_weights_for_split(target_split, weights)?;
+            }
         } else {
             self.ingest_internal_for_split(target_split)?;
         }
@@ -2369,7 +2385,15 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         weights: Option<&HashMap<SourceId, f32>>,
     ) -> Result<TripletBatch, SamplerError> {
         if let Some(weights) = weights {
-            self.ingest_internal_with_weights_for_split(target_split, weights)?;
+            if weights.is_empty()
+                || weights
+                    .values()
+                    .all(|&w| w == *weights.values().next().unwrap())
+            {
+                self.ingest_internal_for_split(target_split)?;
+            } else {
+                self.ingest_internal_with_weights_for_split(target_split, weights)?;
+            }
         } else {
             self.ingest_internal_for_split(target_split)?;
         }
