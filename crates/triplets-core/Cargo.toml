@@ -15,6 +15,11 @@ keywords = [
     "bm25",
 ]
 
+[features]
+default = []
+bm25-mining = ["dep:bm25"]
+extended-metrics = []
+
 [dependencies]
 bitcode = { workspace = true }
 bm25 = { workspace = true, optional = true }
@@ -32,11 +37,6 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 walkdir = { workspace = true }
-
-[features]
-default = []
-bm25-mining = ["dep:bm25"]
-extended-metrics = []
 
 [dev-dependencies]
 indoc = { workspace = true }

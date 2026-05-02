@@ -14,8 +14,12 @@ keywords = [
     "preprocessing",
 ]
 
+[features]
+default = []
+bm25-mining = ["triplets-core/bm25-mining"]
+extended-metrics = ["triplets-core/extended-metrics"]
+
 [dependencies]
-triplets-core = { path = "../triplets-core" }
 cache-manager = { workspace = true }
 clap = { workspace = true }
 indexmap = { workspace = true }
@@ -23,12 +27,8 @@ rand = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+triplets-core = { workspace = true }
 
 [dev-dependencies]
 chrono = { workspace = true }
 tempfile = { workspace = true }
-
-[features]
-default = []
-bm25-mining = ["triplets-core/bm25-mining"]
-extended-metrics = ["triplets-core/extended-metrics"]

@@ -50,6 +50,9 @@ thiserror = "2.0.18"
 tokio = { version = "1.52.1", features = ["rt", "fs", "io-util"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+triplets-core = { path = "crates/triplets-core", version = "0.20.0-alpha" }
+triplets-debug = { path = "crates/triplets-debug", version = "0.20.0-alpha" }
+triplets-hf = { path = "crates/triplets-hf", version = "0.20.0-alpha" }
 walkdir = "2.5.0"
 
 [features]
@@ -59,15 +62,11 @@ bm25-mining = ["dep:bm25", "triplets-core/bm25-mining"]
 extended-metrics = ["triplets-core/extended-metrics"]
 
 [dependencies]
-triplets-core = { path = "crates/triplets-core" }
-triplets-debug = { path = "crates/triplets-debug" }
-triplets-hf = { path = "crates/triplets-hf", optional = true }
-clap = { workspace = true }
-tracing-subscriber = { workspace = true }
 bitcode = { workspace = true }
 bm25 = { workspace = true, optional = true }
 cache-manager = { workspace = true }
 chrono = { workspace = true }
+clap = { workspace = true }
 csv = { workspace = true }
 hf-hub = { workspace = true, optional = true }
 indexmap = { workspace = true }
@@ -83,9 +82,13 @@ tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, optional = true }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+triplets-core = { workspace = true }
+triplets-debug = { workspace = true }
+triplets-hf = { workspace = true, optional = true }
 walkdir = { workspace = true }
 
 [dev-dependencies]
 indoc = { workspace = true }
-serial_test = { workspace = true }
 serde_json = { workspace = true }
+serial_test = { workspace = true }
