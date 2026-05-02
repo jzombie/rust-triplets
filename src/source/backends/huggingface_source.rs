@@ -4801,6 +4801,7 @@ mod tests {
     use std::env;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
+    use std::sync::atomic::AtomicBool;
     use std::thread;
     use tempfile::tempdir;
 
@@ -4872,49 +4873,94 @@ mod tests {
         }
     }
 
-    fn spawn_one_shot_http(payload: Vec<u8>) -> (String, thread::JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let handle = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            drain_http_request(&mut stream);
-            let headers = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                payload.len()
-            );
-            stream.write_all(headers.as_bytes()).unwrap();
-            stream.write_all(&payload).unwrap();
-            let _ = stream.flush();
-        });
-        (format!("http://{addr}"), handle)
+    /// Convenience wrapper — creates a [`TestHttpServer`] returning 200.
+    fn spawn_one_shot_http(payload: Vec<u8>) -> TestHttpServer {
+        TestHttpServer::new(200, payload)
     }
 
-    /// Like `spawn_one_shot_http` but returns a specific HTTP status code.
-    fn spawn_one_shot_http_with_status(
-        status: u16,
-        payload: Vec<u8>,
-    ) -> (String, thread::JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let handle = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            drain_http_request(&mut stream);
-            let reason = match status {
-                200 => "OK",
-                400 => "Bad Request",
-                404 => "Not Found",
-                500 => "Internal Server Error",
-                _ => "Unknown",
-            };
-            let headers = format!(
-                "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                payload.len()
-            );
-            stream.write_all(headers.as_bytes()).unwrap();
-            stream.write_all(&payload).unwrap();
-            let _ = stream.flush();
-        });
-        (format!("http://{addr}"), handle)
+    /// A test HTTP server that accepts multiple connections in a loop until
+    /// dropped.  Unlike the old `spawn_one_shot_*` functions this is resilient
+    /// to extra connections (keep-alive probes, retries, etc.) that reqwest may
+    /// make, which caused intermittent test failures on macOS GitHub Actions.
+    struct TestHttpServer {
+        url: String,
+        shutdown: Arc<AtomicBool>,
+        accept_count: Arc<AtomicUsize>,
+        handle: Option<thread::JoinHandle<()>>,
+    }
+
+    impl TestHttpServer {
+        /// Create a new server that responds with `status` and `body` to every
+        /// request on any path.
+        fn new(status: u16, body: Vec<u8>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let url = format!("http://{addr}");
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let shutdown_clone = Arc::clone(&shutdown);
+            let accept_count = Arc::new(AtomicUsize::new(0));
+            let accept_count_clone = Arc::clone(&accept_count);
+
+            let handle = thread::spawn(move || {
+                // Accept connections in a loop until shutdown is signalled.
+                while !shutdown_clone.load(AtomicOrdering::SeqCst) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            accept_count_clone.fetch_add(1, AtomicOrdering::SeqCst);
+                            drain_http_request(&mut stream);
+                            let reason = match status {
+                                200 => "OK",
+                                400 => "Bad Request",
+                                401 => "Unauthorized",
+                                404 => "Not Found",
+                                500 => "Internal Server Error",
+                                501 => "Not Implemented",
+                                _ => "Unknown",
+                            };
+                            let headers = format!(
+                                "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                body.len()
+                            );
+                            let _ = stream.write_all(headers.as_bytes());
+                            let _ = stream.write_all(&body);
+                            let _ = stream.flush();
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+
+            TestHttpServer {
+                url,
+                shutdown,
+                accept_count,
+                handle: Some(handle),
+            }
+        }
+
+        /// The base URL of this server (e.g. `http://127.0.0.1:56789`).
+        fn url(&self) -> &str {
+            &self.url
+        }
+
+        /// Number of accepted connections since this server was created.
+        fn accept_count(&self) -> usize {
+            self.accept_count.load(AtomicOrdering::SeqCst)
+        }
+    }
+
+    impl Drop for TestHttpServer {
+        fn drop(&mut self) {
+            self.shutdown.store(true, AtomicOrdering::SeqCst);
+            // Connect to our own address to unblock the accept() call so the
+            // background thread can observe the shutdown flag and exit.
+            if let Some(handle) = self.handle.take() {
+                if let Some(addr) = self.url.strip_prefix("http://") {
+                    let _ = TcpStream::connect(addr);
+                }
+                let _ = handle.join();
+            }
+        }
     }
 
     fn spawn_manifest_and_shard_http(
@@ -5268,13 +5314,13 @@ mod tests {
         let temp = tempdir().unwrap();
         let mut config = test_config(temp.path().to_path_buf());
         config.hf_token = Some("valid-test-token".to_string());
-        let (base_url, server) = spawn_one_shot_http(b"{\"name\":\"testuser\"}".to_vec());
+        let server = spawn_one_shot_http(b"{\"name\":\"testuser\"}".to_vec());
+        let base_url = server.url().to_string();
         with_env_var(TRIPLETS_HF_WHOAMI_ENDPOINT, &base_url, || {
             let runtime = HuggingFaceRowSource::build_http_runtime(&config).unwrap();
             let result = HuggingFaceRowSource::validate_token_with_runtime(&config, &runtime);
             assert!(result.is_ok(), "200 response should pass token validation");
         });
-        server.join().unwrap();
     }
 
     #[test]
@@ -5283,7 +5329,8 @@ mod tests {
         let temp = tempdir().unwrap();
         let mut config = test_config(temp.path().to_path_buf());
         config.hf_token = Some("invalid-test-token".to_string());
-        let (base_url, server) = spawn_one_shot_http_with_status(401, b"Unauthorized".to_vec());
+        let server = TestHttpServer::new(401, b"Unauthorized".to_vec());
+        let base_url = server.url().to_string();
         with_env_var(TRIPLETS_HF_WHOAMI_ENDPOINT, &base_url, || {
             let runtime = HuggingFaceRowSource::build_http_runtime(&config).unwrap();
             let result = HuggingFaceRowSource::validate_token_with_runtime(&config, &runtime);
@@ -5298,7 +5345,6 @@ mod tests {
                 _ => panic!("expected SamplerError::SourceUnavailable"),
             }
         });
-        server.join().unwrap();
     }
 
     #[test]
@@ -5315,10 +5361,13 @@ mod tests {
         let mut config = test_config(temp.path().to_path_buf());
         config.hf_token = Some("test-token-for-new".to_string());
         let viewer_disabled = br#"{"error":"Not supported: dataset viewer is disabled."}"#.to_vec();
-        let (whoami_url, whoami_server) = spawn_one_shot_http(b"{}".to_vec());
+        let whoami_server = spawn_one_shot_http(b"{}".to_vec());
+        let whoami_url = whoami_server.url().to_string();
         // /info is called before /size inside new(); each needs its own one-shot server.
-        let (info_url, info_server) = spawn_one_shot_http_with_status(501, viewer_disabled.clone());
-        let (size_url, size_server) = spawn_one_shot_http_with_status(501, viewer_disabled);
+        let info_server = TestHttpServer::new(501, viewer_disabled.clone());
+        let info_url = info_server.url().to_string();
+        let size_server = TestHttpServer::new(501, viewer_disabled);
+        let size_url = size_server.url().to_string();
         with_env_vars(
             &[
                 (TRIPLETS_HF_WHOAMI_ENDPOINT, &whoami_url),
@@ -5333,9 +5382,6 @@ mod tests {
                 );
             },
         );
-        whoami_server.join().unwrap();
-        info_server.join().unwrap();
-        size_server.join().unwrap();
     }
 
     #[test]
@@ -5379,7 +5425,8 @@ mod tests {
         let size_payload = serde_json::json!({"size": {"splits": []}})
             .to_string()
             .into_bytes();
-        let (size_base_url, size_server) = spawn_one_shot_http(size_payload);
+        let size_server = spawn_one_shot_http(size_payload);
+        let size_base_url = size_server.url().to_string();
 
         with_current_dir(temp_root.path(), || {
             with_env_vars(
@@ -5393,8 +5440,6 @@ mod tests {
                 },
             );
         });
-
-        size_server.join().unwrap();
     }
 
     #[test]
@@ -5431,8 +5476,10 @@ mod tests {
                 .to_string()
                 .into_bytes()
         };
-        let (size_base_url_a, size_server_a) = spawn_one_shot_http(size_payload());
-        let (size_base_url_b, size_server_b) = spawn_one_shot_http(size_payload());
+        let size_server_a = spawn_one_shot_http(size_payload());
+        let size_base_url_a = size_server_a.url().to_string();
+        let size_server_b = spawn_one_shot_http(size_payload());
+        let size_base_url_b = size_server_b.url().to_string();
         // Both servers share the same base URL pattern; use the first for the env-var
         // (the second call may hit a different port, but both start with the same host).
         // In practice each spawn_one_shot_http binds its own ephemeral port, so we
@@ -5483,11 +5530,6 @@ mod tests {
                 },
             );
         });
-
-        size_server_a.join().unwrap();
-        // size_server_b may not have been contacted if cache resolved both paths;
-        // drop it without joining to avoid blocking.
-        drop(size_server_b);
     }
 
     #[test]
@@ -6764,7 +6806,8 @@ mod tests {
         fs::write(&old_path, vec![1u8; 20]).unwrap();
 
         let payload = b"{\"text\":\"new\"}\n".to_vec();
-        let (base_url, server) = spawn_one_shot_http(payload);
+        let server = spawn_one_shot_http(payload);
+        let base_url = server.url().to_string();
         let candidate =
             format!("url::{base_url}/datasets/org/ds/resolve/main/train/new-shard.ndjson");
         let new_path = HuggingFaceRowSource::candidate_target_path(&config, &candidate);
@@ -6801,7 +6844,6 @@ mod tests {
         }
 
         assert!(source.download_next_remote_shard().unwrap());
-        server.join().unwrap();
 
         // Eviction removes at least one shard once disk cap is exceeded.
         // Which shard is removed can vary on filesystems with coarse mtime
@@ -6891,7 +6933,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
         let payload = b"{\"text\":\"a\"}\n".to_vec();
-        let (base_url, server) = spawn_one_shot_http(payload.clone());
+        let server = spawn_one_shot_http(payload.clone());
+        let base_url = server.url().to_string();
         let candidate = format!("url::{base_url}/datasets/org/ds/resolve/main/train/part-x.ndjson");
         let target = HuggingFaceRowSource::candidate_target_path(&config, &candidate);
         let temp_target = target.with_extension("part");
@@ -6905,7 +6948,6 @@ mod tests {
             "shard 1/1",
         )
         .unwrap();
-        server.join().unwrap();
 
         assert_eq!(out, target);
         assert_eq!(fs::read(&target).unwrap(), payload);
@@ -6925,7 +6967,8 @@ mod tests {
         let config = test_config(dir.path().to_path_buf());
         let source = test_source(config);
         let payload = Vec::<u8>::new();
-        let (base_url, server) = spawn_one_shot_http(payload);
+        let server = spawn_one_shot_http(payload);
+        let base_url = server.url().to_string();
         let candidate =
             format!("url::{base_url}/datasets/org/ds/resolve/main/train/part-empty.ndjson");
 
@@ -6936,7 +6979,6 @@ mod tests {
         }
 
         assert!(source.download_next_remote_shard().unwrap());
-        server.join().unwrap();
         let state = source.state.lock().unwrap();
         assert_eq!(state.materialized_rows, 0);
         assert!(state.shards.is_empty());
@@ -7244,7 +7286,8 @@ mod tests {
 
         let payload =
             b"{\"id\":\"r1\",\"text\":\"alpha\"}\n{\"id\":\"r2\",\"text\":\"beta\"}\n".to_vec();
-        let (base_url, server) = spawn_one_shot_http(payload);
+        let server = spawn_one_shot_http(payload);
+        let base_url = server.url().to_string();
         let candidate =
             format!("url::{base_url}/datasets/org/ds/resolve/main/train/persisted.ndjson");
 
@@ -7255,7 +7298,6 @@ mod tests {
         }
 
         assert!(source.ensure_row_available(0).unwrap());
-        server.join().unwrap();
 
         let state = source.state.lock().unwrap();
         assert_eq!(state.materialized_rows, 2);
@@ -7451,14 +7493,14 @@ mod tests {
             ]
         }))
         .unwrap();
-        let (base_url, server) = spawn_one_shot_http(body);
+        let server = spawn_one_shot_http(body);
+        let base_url = server.url().to_string();
 
         let (candidates, sizes, matched) =
             with_env_var(TRIPLETS_HF_PARQUET_ENDPOINT, &base_url, || {
                 HuggingFaceRowSource::list_remote_candidates_from_parquet_manifest(&config)
             })
             .unwrap();
-        server.join().unwrap();
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(sizes.len(), 1);
@@ -7478,13 +7520,13 @@ mod tests {
             }
         }))
         .unwrap();
-        let (base_url, server) = spawn_one_shot_http(body);
+        let server = spawn_one_shot_http(body);
+        let base_url = server.url().to_string();
 
         let rows = with_env_var(TRIPLETS_HF_SIZE_ENDPOINT, &base_url, || {
             HuggingFaceRowSource::fetch_global_row_count(&config)
         })
         .unwrap();
-        server.join().unwrap();
         assert_eq!(rows, Some(12));
     }
 
@@ -7502,13 +7544,13 @@ mod tests {
             }
         }))
         .unwrap();
-        let (base_url, server) = spawn_one_shot_http(body);
+        let server = spawn_one_shot_http(body);
+        let base_url = server.url().to_string();
 
         let rows = with_env_var(TRIPLETS_HF_SIZE_ENDPOINT, &base_url, || {
             HuggingFaceRowSource::fetch_global_row_count_with_runtime(&config, Some(&runtime))
         })
         .unwrap();
-        server.join().unwrap();
         assert_eq!(rows, Some(34));
     }
 
@@ -7563,13 +7605,13 @@ mod tests {
             }
         }))
         .unwrap();
-        let (base_url, server) = spawn_one_shot_http(body);
+        let server = spawn_one_shot_http(body);
+        let base_url = server.url().to_string();
 
         let rows = with_env_var(TRIPLETS_HF_SIZE_ENDPOINT, &base_url, || {
             HuggingFaceRowSource::fetch_global_row_count(&config)
         })
         .unwrap();
-        server.join().unwrap();
         assert_eq!(rows, None);
     }
 
@@ -7584,13 +7626,13 @@ mod tests {
             ]
         }))
         .unwrap();
-        let (base_url, server) = spawn_one_shot_http(body);
+        let server = spawn_one_shot_http(body);
+        let base_url = server.url().to_string();
 
         let (candidates, sizes) = with_env_var(TRIPLETS_HF_PARQUET_ENDPOINT, &base_url, || {
             HuggingFaceRowSource::list_remote_candidates(&config)
         })
         .unwrap();
-        server.join().unwrap();
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(sizes.len(), 1);
@@ -7609,13 +7651,13 @@ mod tests {
             ]
         }))
         .unwrap();
-        let (base_url, server) = spawn_one_shot_http(body);
+        let server = spawn_one_shot_http(body);
+        let base_url = server.url().to_string();
 
         let (candidates, sizes) = with_env_var(TRIPLETS_HF_PARQUET_ENDPOINT, &base_url, || {
             HuggingFaceRowSource::list_remote_candidates_with_runtime(&config, Some(&runtime))
         })
         .unwrap();
-        server.join().unwrap();
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(sizes.len(), 1);
@@ -7650,14 +7692,14 @@ mod tests {
             ]
         }))
         .unwrap();
-        let (base_url, server) = spawn_one_shot_http(body);
+        let server = spawn_one_shot_http(body);
+        let base_url = server.url().to_string();
 
         // Must return the full manifest candidate list without falling through to hf-hub.
         let (candidates, sizes) = with_env_var(TRIPLETS_HF_PARQUET_ENDPOINT, &base_url, || {
             HuggingFaceRowSource::list_remote_candidates(&config)
         })
         .unwrap();
-        server.join().unwrap();
 
         assert_eq!(
             candidates.len(),
@@ -7709,12 +7751,12 @@ mod tests {
             }
         }))
         .unwrap();
-        let (base_url, server) = spawn_one_shot_http(body);
+        let server = spawn_one_shot_http(body);
+        let base_url = server.url().to_string();
 
         let maps = with_env_var(TRIPLETS_HF_INFO_ENDPOINT, &base_url, || {
             HuggingFaceRowSource::fetch_classlabel_maps_with_runtime(&config, Some(&runtime))
         });
-        server.join().unwrap();
 
         assert_eq!(maps.len(), 1);
         assert_eq!(maps["sentiment"], vec!["neutral", "bullish", "bearish"]);
@@ -7725,7 +7767,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
         let payload = b"{\"text\":\"a\"}\n{\"text\":\"b\"}\n".to_vec();
-        let (base_url, server) = spawn_one_shot_http(payload.clone());
+        let server = spawn_one_shot_http(payload.clone());
+        let base_url = server.url().to_string();
         let candidate =
             format!("url::{base_url}/datasets/org/ds/resolve/main/train/part-000.ndjson");
 
@@ -7737,7 +7780,6 @@ mod tests {
         )
         .unwrap();
 
-        server.join().unwrap();
         assert!(target.exists());
         assert_eq!(fs::read(&target).unwrap(), payload);
     }
@@ -7755,7 +7797,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
         let payload = b"{\"text\":\"a\"}\n".to_vec();
-        let (base_url, server) = spawn_one_shot_http(payload.clone());
+        let server = spawn_one_shot_http(payload.clone());
+        let base_url = server.url().to_string();
         let candidate =
             format!("url::{base_url}/datasets/org/ds/resolve/main/train/part-009.ndjson");
 
@@ -7771,7 +7814,6 @@ mod tests {
         )
         .unwrap();
 
-        server.join().unwrap();
         assert_eq!(refreshed, target);
         assert_eq!(fs::read(&target).unwrap(), payload);
     }
@@ -7785,7 +7827,8 @@ mod tests {
         let fixture_path = dir.path().join("fixture.parquet");
         write_parquet_fixture(&fixture_path, &[("r1", "alpha"), ("r2", "beta")]);
         let payload = fs::read(&fixture_path).unwrap();
-        let (base_url, server) = spawn_one_shot_http(payload);
+        let server = spawn_one_shot_http(payload);
+        let base_url = server.url().to_string();
         let candidate =
             format!("url::{base_url}/datasets/org/ds/resolve/main/train/part-222.parquet");
 
@@ -7796,7 +7839,6 @@ mod tests {
         }
 
         assert!(source.download_next_remote_shard().unwrap());
-        server.join().unwrap();
 
         let parquet_target = HuggingFaceRowSource::candidate_target_path(&config, &candidate);
         let store_target = HuggingFaceRowSource::shard_store_path_for(&parquet_target);
@@ -7872,7 +7914,8 @@ mod tests {
         let config = test_config(dir.path().to_path_buf());
         let source = test_source(config);
         let payload = b"{\"text\":\"a\"}\n{\"text\":\"b\"}\n".to_vec();
-        let (base_url, server) = spawn_one_shot_http(payload);
+        let server = spawn_one_shot_http(payload);
+        let base_url = server.url().to_string();
         let candidate =
             format!("url::{base_url}/datasets/org/ds/resolve/main/train/part-001.ndjson");
 
@@ -7884,7 +7927,6 @@ mod tests {
         }
 
         assert!(source.download_next_remote_shard().unwrap());
-        server.join().unwrap();
 
         let state = source.state.lock().unwrap();
         assert_eq!(state.materialized_rows, 2);
@@ -7898,7 +7940,8 @@ mod tests {
         let config = test_config(dir.path().to_path_buf());
         let source = test_source(config);
         let payload = b"{\"text\":\"x\"}\n{\"text\":\"y\"}\n".to_vec();
-        let (base_url, server) = spawn_one_shot_http(payload);
+        let server = spawn_one_shot_http(payload);
+        let base_url = server.url().to_string();
         let candidate =
             format!("url::{base_url}/datasets/org/ds/resolve/main/train/part-002.ndjson");
 
@@ -7911,7 +7954,6 @@ mod tests {
         }
 
         assert!(source.ensure_row_available(0).unwrap());
-        server.join().unwrap();
 
         let state = source.state.lock().unwrap();
         assert!(state.materialized_rows >= 1);
@@ -7926,8 +7968,10 @@ mod tests {
 
         let payload_a = b"{\"id\":\"a\",\"text\":\"alpha\"}\n".to_vec();
         let payload_b = b"{\"id\":\"b\",\"text\":\"beta\"}\n".to_vec();
-        let (base_a, server_a) = spawn_one_shot_http(payload_a);
-        let (base_b, server_b) = spawn_one_shot_http(payload_b);
+        let server_a = spawn_one_shot_http(payload_a);
+        let base_a = server_a.url().to_string();
+        let server_b = spawn_one_shot_http(payload_b);
+        let base_b = server_b.url().to_string();
         let candidate_a = format!("url::{base_a}/datasets/org/ds/resolve/main/train/part-a.ndjson");
         let candidate_b = format!("url::{base_b}/datasets/org/ds/resolve/main/train/part-b.ndjson");
         {
@@ -7940,8 +7984,6 @@ mod tests {
 
         assert!(source.download_next_remote_shard().unwrap());
         assert!(source.download_next_remote_shard().unwrap());
-        server_a.join().unwrap();
-        server_b.join().unwrap();
 
         let state = source.state.lock().unwrap();
         assert_eq!(state.next_remote_idx, 2);
@@ -8995,7 +9037,8 @@ mod tests {
             "parquet_files": [{"url": shard_raw_url, "size": 5}]
         }))
         .unwrap();
-        let (base_url, server) = spawn_one_shot_http(manifest_body);
+        let server = spawn_one_shot_http(manifest_body);
+        let base_url = server.url().to_string();
 
         // Row 1 is not yet materialised; this triggers the candidate-init path.
         // all candidates are already on disk → next_remote_idx = candidates.len() → Ok(false).
@@ -9003,7 +9046,6 @@ mod tests {
             source.ensure_row_available(1)
         })
         .unwrap();
-        server.join().unwrap();
 
         assert!(
             !result,
@@ -9528,12 +9570,12 @@ mod tests {
     fn fetch_classlabel_maps_returns_empty_on_non_200_response() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
-        let (base_url, server) = spawn_one_shot_http_with_status(404, b"not found".to_vec());
+        let server = TestHttpServer::new(404, b"not found".to_vec());
+        let base_url = server.url().to_string();
 
         let maps = with_env_var(TRIPLETS_HF_INFO_ENDPOINT, &base_url, || {
             HuggingFaceRowSource::fetch_classlabel_maps(&config)
         });
-        server.join().unwrap();
         assert!(
             maps.is_empty(),
             "HTTP 404 response must yield empty map, got: {maps:?}"
@@ -9545,12 +9587,12 @@ mod tests {
     fn fetch_classlabel_maps_returns_empty_on_malformed_json() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
-        let (base_url, server) = spawn_one_shot_http(b"this is not json".to_vec());
+        let server = spawn_one_shot_http(b"this is not json".to_vec());
+        let base_url = server.url().to_string();
 
         let maps = with_env_var(TRIPLETS_HF_INFO_ENDPOINT, &base_url, || {
             HuggingFaceRowSource::fetch_classlabel_maps(&config)
         });
-        server.join().unwrap();
         assert!(
             maps.is_empty(),
             "malformed JSON must yield empty map, got: {maps:?}"
@@ -9574,12 +9616,12 @@ mod tests {
             }
         }))
         .unwrap();
-        let (base_url, server) = spawn_one_shot_http(body);
+        let server = spawn_one_shot_http(body);
+        let base_url = server.url().to_string();
 
         let maps = with_env_var(TRIPLETS_HF_INFO_ENDPOINT, &base_url, || {
             HuggingFaceRowSource::fetch_classlabel_maps(&config)
         });
-        server.join().unwrap();
         assert_eq!(maps.len(), 1);
         assert_eq!(maps["sentiment"], vec!["neutral", "bullish", "bearish"]);
     }
@@ -9667,8 +9709,10 @@ mod tests {
             .to_string()
             .into_bytes();
 
-        let (info_url_1, info_server_1) = spawn_one_shot_http(info_payload_1);
-        let (size_url, size_server) = spawn_one_shot_http(size_payload);
+        let info_server_1 = spawn_one_shot_http(info_payload_1);
+        let info_url_1 = info_server_1.url().to_string();
+        let size_server = spawn_one_shot_http(size_payload);
+        let size_url = size_server.url().to_string();
 
         let config_for_index = config.clone();
         let source = with_env_vars(
@@ -9690,9 +9734,6 @@ mod tests {
             "fetch_classlabel_maps must have been called during new() \
              and populated label_maps from the mock /info response"
         );
-        // Joining the one-shot server confirms it was called exactly once.
-        info_server_1.join().unwrap();
-        size_server.join().unwrap();
 
         // Phase 2: inject local shard state.
         // Set remote_candidates = Some(vec![]) so trigger_expansion_if_needed
@@ -9716,7 +9757,8 @@ mod tests {
         let info_payload_2 = serde_json::json!({"dataset_info": {"features": {}}})
             .to_string()
             .into_bytes();
-        let (info_url_2, info_server_2) = spawn_one_shot_http(info_payload_2);
+        let info_server_2 = spawn_one_shot_http(info_payload_2);
+        let info_url_2 = info_server_2.url().to_string();
 
         for _ in 0..3 {
             let _ = with_env_vars(&[(TRIPLETS_HF_INFO_ENDPOINT, info_url_2.as_str())], || {
@@ -9725,9 +9767,10 @@ mod tests {
         }
 
         assert!(
-            !info_server_2.is_finished(),
+            info_server_2.accept_count() == 0,
             "fetch_classlabel_maps must NOT be called during refresh() — \
-             /info server was unexpectedly hit"
+             /info server was unexpectedly hit (accept_count={})",
+            info_server_2.accept_count()
         );
     }
 
@@ -9803,12 +9846,12 @@ mod tests {
         let body =
             br#"{"error":"Not supported: dataset viewer is disabled in org/dataset configuration."}"#
                 .to_vec();
-        let (base_url, server) = spawn_one_shot_http_with_status(501, body);
+        let server = TestHttpServer::new(501, body);
+        let base_url = server.url().to_string();
 
         let result = with_env_var(TRIPLETS_HF_SIZE_ENDPOINT, &base_url, || {
             HuggingFaceRowSource::fetch_global_row_count(&config)
         });
-        server.join().unwrap();
 
         // The 501 surfaces as an Err so the caller (new()) can emit a warning;
         // it must not be silently swallowed as Ok(Some(0)) or similar.
@@ -9916,12 +9959,12 @@ mod tests {
         let body =
             br#"{"error":"Not supported: dataset viewer is disabled in org/dataset configuration."}"#
                 .to_vec();
-        let (base_url, server) = spawn_one_shot_http_with_status(501, body);
+        let server = TestHttpServer::new(501, body);
+        let base_url = server.url().to_string();
 
         let maps = with_env_var(TRIPLETS_HF_INFO_ENDPOINT, &base_url, || {
             HuggingFaceRowSource::fetch_classlabel_maps(&config)
         });
-        server.join().unwrap();
 
         assert!(
             maps.is_empty(),
@@ -9941,12 +9984,12 @@ mod tests {
         let body =
             br#"{"error":"Not supported: dataset viewer is disabled in org/dataset configuration."}"#
                 .to_vec();
-        let (base_url, server) = spawn_one_shot_http_with_status(501, body);
+        let server = TestHttpServer::new(501, body);
+        let base_url = server.url().to_string();
 
         let result = with_env_var(TRIPLETS_HF_PARQUET_ENDPOINT, &base_url, || {
             HuggingFaceRowSource::list_remote_candidates_from_parquet_manifest(&config)
         });
-        server.join().unwrap();
 
         assert!(
             result.is_err(),
