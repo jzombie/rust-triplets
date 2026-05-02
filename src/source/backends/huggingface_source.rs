@@ -2176,11 +2176,16 @@ impl HuggingFaceRowSource {
         ) {
             Ok(body) => body,
             Err(err) => {
+                let why = match &err {
+                    SamplerError::SourceUnavailable { reason, .. } => reason.as_str(),
+                    _ => "unknown error",
+                };
                 warn!(
-                    "[triplets:hf] {} dataset info unavailable (datasets viewer may be \
-                     disabled); ClassLabel columns will surface as raw integers: {}",
-                    config.source_id, err
+                    "[triplets:hf] {}: ClassLabel columns will use raw integers ",
+                    config.source_id
                 );
+                warn!("  (couldn't fetch label names: {})", why);
+                warn!("  Parquet data loading is unaffected.");
                 return HashMap::new();
             }
         };
