@@ -2451,7 +2451,7 @@ dependencies = [
  "tracing-subscriber",
  "triplets-core",
  "triplets-debug",
- "triplets-hf",
+ "triplets-hf-source",
  "walkdir",
 ]
 
@@ -2495,7 +2495,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "triplets-hf"
+name = "triplets-hf-source"
 version = "0.20.0-alpha"
 dependencies = [
  "cache-manager",

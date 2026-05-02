@@ -4,4 +4,4 @@ pub use triplets_core::*;
 pub mod debug;
 
 #[cfg(feature = "huggingface")]
-pub use triplets_hf::*;
+pub use triplets_hf_source::*;

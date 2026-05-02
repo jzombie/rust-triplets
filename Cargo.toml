@@ -16,7 +16,7 @@ keywords = [
     "bm25",
 ]
 [workspace]
-members = [".", "crates/triplets-core", "crates/triplets-debug", "crates/triplets-hf"]
+members = [".", "crates/triplets-core", "crates/triplets-debug", "crates/triplets-hf-source"]
 resolver = "2"
 
 [workspace.package]
@@ -52,12 +52,12 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 triplets-core = { path = "crates/triplets-core", version = "0.20.0-alpha" }
 triplets-debug = { path = "crates/triplets-debug", version = "0.20.0-alpha" }
-triplets-hf = { path = "crates/triplets-hf", version = "0.20.0-alpha" }
+triplets-hf-source = { path = "crates/triplets-hf-source", version = "0.20.0-alpha" }
 walkdir = "2.5.0"
 
 [features]
 default = []
-huggingface = ["dep:triplets-hf"]
+huggingface = ["dep:triplets-hf-source"]
 bm25-mining = ["dep:bm25", "triplets-core/bm25-mining"]
 extended-metrics = ["triplets-core/extended-metrics"]
 
@@ -85,7 +85,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 triplets-core = { workspace = true }
 triplets-debug = { workspace = true }
-triplets-hf = { workspace = true, optional = true }
+triplets-hf-source = { workspace = true, optional = true }
 walkdir = { workspace = true }
 
 [dev-dependencies]

@@ -1,5 +1,5 @@
 [package]
-name = "triplets-hf"
+name = "triplets-hf-source"
 description = "HuggingFace integration for the triplets data pipeline framework."
 version.workspace = true
 edition.workspace = true

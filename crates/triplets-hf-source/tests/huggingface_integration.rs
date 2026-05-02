@@ -11,7 +11,7 @@ use triplets_core::{
     ChunkingStrategy, DataSource, DeterministicSplitStore, Sampler, SamplerConfig, SplitLabel,
     SplitRatios, TripletSampler,
 };
-use triplets_hf::{
+use triplets_hf_source::{
     HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE, HF_TOKEN, HfListRoots, HfSourceEntry,
     HuggingFaceRowSource, HuggingFaceRowsConfig, TRIPLETS_HF_INFO_ENDPOINT,
     TRIPLETS_HF_PARQUET_ENDPOINT, TRIPLETS_HF_SIZE_ENDPOINT, TRIPLETS_HF_TOKEN_TEST_DATASET,
@@ -1829,24 +1829,24 @@ fn sampler_next_text_batch_re_expands_after_cache_eviction() {
     // Shard payload: {"id":"s{shard}_r{row}","text":"txt_{shard}_{row}"}
     // Roughly 33 bytes each.  2 shards ≈ 66 bytes, cap = 70 bytes.
     // The manifest server also counts how many times /parquet is queried.
-    let server = triplets_hf::test_utils::HfMockServer::new(5, 1);
+    let server = triplets_hf_source::test_utils::HfMockServer::new(5, 1);
 
     // ── Env var guards ──────────────────────────────────────────────────
     //
     // Set env vars for the test duration.  The triggers MUST outlive
     // the source and sampler so that async expansion threads can still
     // resolve the mock endpoints when they make HTTP requests.
-    let _parquet_guard = triplets_hf::test_utils::EnvGuard::set(
+    let _parquet_guard = triplets_hf_source::test_utils::EnvGuard::set(
         TRIPLETS_HF_PARQUET_ENDPOINT,
         &format!("{}/parquet", server.url()),
     );
     // The /size and /info endpoints are NOT mocked; failing to query them
     // is non-fatal (warns and returns None).  Point them somewhere harmless.
-    let _size_guard = triplets_hf::test_utils::EnvGuard::set(
+    let _size_guard = triplets_hf_source::test_utils::EnvGuard::set(
         TRIPLETS_HF_SIZE_ENDPOINT,
         "http://127.0.0.1:1/unreachable",
     );
-    let _info_guard = triplets_hf::test_utils::EnvGuard::set(
+    let _info_guard = triplets_hf_source::test_utils::EnvGuard::set(
         TRIPLETS_HF_INFO_ENDPOINT,
         "http://127.0.0.1:1/unreachable",
     );
