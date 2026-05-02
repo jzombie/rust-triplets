@@ -17,21 +17,21 @@ keywords = [
 
 [dependencies]
 triplets-core = { path = "../triplets-core" }
-chrono = { version = "0.4.44", features = ["serde"] }
-hf-hub = { version = "0.5.0", default-features = false, features = ["tokio", "rustls-tls"] }
-parquet = { version = "58.1.0", features = ["json"] }
-rayon = "1.12.0"
-reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls", "stream", "json"] }
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
-simd-r-drive = "0.16.1-alpha"
-cache-manager = "0.4.0"
-tempfile = "3.27.0"
-tracing = "0.1.44"
-walkdir = "2.5.0"
-tokio = { version = "1.52.1", features = ["rt", "fs", "io-util"] }
+chrono = { workspace = true }
+hf-hub = { workspace = true }
+parquet = { workspace = true }
+rayon = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+simd-r-drive = { workspace = true }
+cache-manager = { workspace = true }
+tempfile = { workspace = true }
+tracing = { workspace = true }
+walkdir = { workspace = true }
+tokio = { workspace = true }
 
 [dev-dependencies]
-indoc = "2.0.7"
-serial_test = "3.4.0"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+indoc = { workspace = true }
+serial_test = { workspace = true }
+tracing-subscriber = { workspace = true }

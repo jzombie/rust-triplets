@@ -16,22 +16,22 @@ keywords = [
 ]
 
 [dependencies]
-bitcode = "0.6.9"
-bm25 = { version = "2.3.2", optional = true, features = ["parallelism"] }
-cache-manager = "0.4.0"
-chrono = { version = "0.4.44", features = ["serde"] }
-csv = "1.4.0"
-indexmap = "2.14.0"
-line-ending = "1.5.1"
-rand = { version = "0.9.3", features = ["std", "small_rng"] }
-rayon = "1.12.0"
-serde = { version = "1.0.228", features = ["derive"] }
-simd-r-drive = "0.16.1-alpha"
-tempfile = "3.27.0"
-thiserror = "2.0.18"
-tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-walkdir = "2.5.0"
+bitcode = { workspace = true }
+bm25 = { workspace = true, optional = true }
+cache-manager = { workspace = true }
+chrono = { workspace = true }
+csv = { workspace = true }
+indexmap = { workspace = true }
+line-ending = { workspace = true }
+rand = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }
+simd-r-drive = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+walkdir = { workspace = true }
 
 [features]
 default = []
@@ -39,4 +39,4 @@ bm25-mining = ["dep:bm25"]
 extended-metrics = []
 
 [dev-dependencies]
-indoc = "2.0.7"
+indoc = { workspace = true }
