@@ -1,0 +1,39 @@
+[package]
+name = "triplets-core"
+description = "Core types, traits, and algorithms for the triplets data pipeline framework."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+categories = ["algorithms", "artificial-intelligence", "science", "text-processing"]
+keywords = [
+    "train-test-split",
+    "triplet-mining",
+    "dataset-sampling",
+    "preprocessing",
+    "bm25",
+]
+
+[dependencies]
+bitcode = "0.6.9"
+bm25 = { version = "2.3.2", optional = true, features = ["parallelism"] }
+cache-manager = "0.4.0"
+chrono = { version = "0.4.44", features = ["serde"] }
+csv = "1.4.0"
+indexmap = "2.14.0"
+line-ending = "1.5.1"
+rand = { version = "0.9.3", features = ["std", "small_rng"] }
+rayon = "1.12.0"
+serde = { version = "1.0.228", features = ["derive"] }
+simd-r-drive = "0.16.1-alpha"
+tempfile = "3.27.0"
+thiserror = "2.0.18"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+walkdir = "2.5.0"
+
+[features]
+default = []
+bm25-mining = ["dep:bm25"]
+extended-metrics = []

@@ -1,0 +1,32 @@
+[package]
+name = "triplets-hf"
+description = "HuggingFace integration for the triplets data pipeline framework."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+categories = ["algorithms", "artificial-intelligence", "science", "text-processing"]
+keywords = [
+    "train-test-split",
+    "triplet-mining",
+    "huggingface",
+    "dataset-sampling",
+    "preprocessing",
+]
+
+[dependencies]
+triplets-core = { path = "../triplets-core" }
+chrono = { version = "0.4.44", features = ["serde"] }
+hf-hub = { version = "0.5.0", default-features = false, features = ["tokio", "rustls-tls"] }
+parquet = { version = "58.1.0", features = ["json"] }
+rayon = "1.12.0"
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls", "stream", "json"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+simd-r-drive = "0.16.1-alpha"
+cache-manager = "0.4.0"
+tempfile = "3.27.0"
+tracing = "0.1.44"
+walkdir = "2.5.0"
+tokio = { version = "1.52.1", features = ["rt", "fs", "io-util"] }

@@ -25,11 +25,7 @@ pub use backends::file_source::{
     FileSource, FileSourceConfig, SectionBuilder, TaxonomyBuilder, anchor_context_sections,
     taxonomy_from_path,
 };
-#[cfg(feature = "huggingface")]
-pub use backends::huggingface_source::{
-    HuggingFaceRowSource, HuggingFaceRowsConfig, managed_hf_list_snapshot_dir,
-    managed_hf_snapshot_dir,
-};
+
 pub use backends::in_memory_source::InMemorySource;
 
 /// Source-owned incremental refresh position.
@@ -255,8 +251,7 @@ impl IndexablePager {
     }
 
     /// Build a deterministic seed for a source/total pair with explicit sampler seed.
-    #[cfg(any(test, feature = "huggingface"))]
-    pub(crate) fn seed_for_sampler(source_id: &SourceId, total: usize, sampler_seed: u64) -> u64 {
+    pub fn seed_for_sampler(source_id: &SourceId, total: usize, sampler_seed: u64) -> u64 {
         Self::seed_for(source_id, total)
             ^ stable_hash_with(|hasher| {
                 "triplets_sampler_seed".hash(hasher);
