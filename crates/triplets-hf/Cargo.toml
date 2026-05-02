@@ -32,6 +32,5 @@ triplets-core = { workspace = true }
 walkdir = { workspace = true }
 
 [dev-dependencies]
-indoc = { workspace = true }
 serial_test = { workspace = true }
 tracing-subscriber = { workspace = true }

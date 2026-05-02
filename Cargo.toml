@@ -89,6 +89,5 @@ triplets-hf = { workspace = true, optional = true }
 walkdir = { workspace = true }
 
 [dev-dependencies]
-indoc = { workspace = true }
 serde_json = { workspace = true }
 serial_test = { workspace = true }
