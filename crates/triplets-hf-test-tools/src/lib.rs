@@ -71,40 +71,37 @@ impl HfMockServer {
                 if sd.load(Ordering::SeqCst) {
                     break;
                 }
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        let mut buf = [0u8; 4096];
-                        let _ = stream.read(&mut buf);
-                        let request = String::from_utf8_lossy(&buf);
-                        let first_line = request.lines().next().unwrap_or_default();
+                if let Ok((mut stream, _)) = listener.accept() {
+                    let mut buf = [0u8; 4096];
+                    let _ = stream.read(&mut buf);
+                    let request = String::from_utf8_lossy(&buf);
+                    let first_line = request.lines().next().unwrap_or_default();
 
-                        let body: Vec<u8> = if first_line.contains("/parquet") {
-                            mc.fetch_add(1, Ordering::SeqCst);
-                            manifest_body.as_bytes().to_vec()
-                        } else {
-                            let idx: usize = first_line
-                                .split_whitespace()
-                                .nth(1)
-                                .and_then(|path| {
-                                    path.split('/')
-                                        .filter_map(|s| {
-                                            s.trim_end_matches(".ndjson").parse::<usize>().ok()
-                                        })
-                                        .next()
-                                })
-                                .unwrap_or(0);
-                            shard_payloads[idx.min(n_shards.saturating_sub(1))].clone()
-                        };
+                    let body: Vec<u8> = if first_line.contains("/parquet") {
+                        mc.fetch_add(1, Ordering::SeqCst);
+                        manifest_body.as_bytes().to_vec()
+                    } else {
+                        let idx: usize = first_line
+                            .split_whitespace()
+                            .nth(1)
+                            .and_then(|path| {
+                                path.split('/')
+                                    .filter_map(|s| {
+                                        s.trim_end_matches(".ndjson").parse::<usize>().ok()
+                                    })
+                                    .next()
+                            })
+                            .unwrap_or(0);
+                        shard_payloads[idx.min(n_shards.saturating_sub(1))].clone()
+                    };
 
-                        let headers = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                            body.len()
-                        );
-                        let _ = stream.write_all(headers.as_bytes());
-                        let _ = stream.write_all(&body);
-                        let _ = stream.flush();
-                    }
-                    Err(_) => {}
+                    let headers = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(headers.as_bytes());
+                    let _ = stream.write_all(&body);
+                    let _ = stream.flush();
                 }
             }
         });
