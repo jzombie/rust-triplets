@@ -4797,17 +4797,12 @@ mod tests {
     use parquet::file::writer::SerializedFileWriter;
     use parquet::schema::parser::parse_message_type;
     use serde_json::json;
+    use serial_test::serial;
     use std::env;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::sync::{Mutex, OnceLock};
     use std::thread;
     use tempfile::tempdir;
-
-    // Shared lock for all helpers that mutate process-global env vars.
-    // Using a single shared static ensures with_env_var and with_env_vars
-    // are mutually exclusive with each other, preventing races between tests.
-    static TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     fn test_config(snapshot_dir: PathBuf) -> HuggingFaceRowsConfig {
         let mut config =
@@ -4970,10 +4965,6 @@ mod tests {
     }
 
     fn with_env_var<R>(key: &str, value: &str, run: impl FnOnce() -> R) -> R {
-        let _guard = TEST_ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let previous = env::var(key).ok();
         struct EnvRestore {
             key: String,
@@ -4993,20 +4984,12 @@ mod tests {
             previous,
         };
         unsafe { env::set_var(key, value) };
-        // Locals drop in reverse-declaration order: _restore first (env restored),
-        // then _guard (lock released), so the env var is always restored while the
-        // lock is still held.
         run()
     }
 
-    /// Like `with_env_var` but sets multiple `(key, value)` pairs atomically under
-    /// the same `TEST_ENV_LOCK`.  Use this instead of nesting `with_env_var` calls
-    /// (nested calls would deadlock on the shared mutex).
+    /// Sets multiple `(key, value)` pairs atomically, restoring originals on drop.
+    /// Use this instead of nesting `with_env_var` calls.
     fn with_env_vars<R>(pairs: &[(&str, &str)], run: impl FnOnce() -> R) -> R {
-        let _guard = TEST_ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let previous: Vec<(String, Option<String>)> = pairs
             .iter()
             .map(|(key, _)| (key.to_string(), env::var(key).ok()))
@@ -5031,11 +5014,6 @@ mod tests {
     }
 
     fn with_current_dir<R>(dir: &Path, run: impl FnOnce() -> R) -> R {
-        static CWD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let _guard = CWD_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let previous = env::current_dir().expect("get cwd");
         struct CwdRestore {
             previous: PathBuf,
@@ -5047,8 +5025,6 @@ mod tests {
         }
         let _restore = CwdRestore { previous };
         env::set_current_dir(dir).expect("set cwd");
-        // Locals drop in reverse-declaration order: _restore first (cwd restored),
-        // then _guard (lock released).
         run()
     }
 
@@ -5136,6 +5112,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(global_state)]
     fn managed_snapshot_helpers_create_cache_dirs_under_discovered_root() {
         let dir = tempdir().unwrap();
         let nl = platform_newline();
@@ -5165,6 +5142,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(global_state)]
     fn managed_snapshot_dirs_use_all_splits_dir_for_empty_split() {
         let dir = tempdir().unwrap();
         let nl = platform_newline();
@@ -5256,6 +5234,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(global_state)]
     fn list_remote_candidates_falls_back_when_manifest_query_fails() {
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path().to_path_buf());
@@ -5284,6 +5263,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(global_state)]
     fn validate_token_accepts_200_response() {
         let temp = tempdir().unwrap();
         let mut config = test_config(temp.path().to_path_buf());
@@ -5298,6 +5278,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(global_state)]
     fn validate_token_rejects_401_response() {
         let temp = tempdir().unwrap();
         let mut config = test_config(temp.path().to_path_buf());
@@ -5321,6 +5302,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(global_state)]
     fn new_validates_hf_token_when_set() {
         // When hf_token is Some and the mock whoami returns 200, new() succeeds.
         // The info and size endpoints are served by one-shot 501 mocks so they
@@ -5357,6 +5339,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(global_state)]
     fn build_hf_sources_skips_invalid_uri_and_builds_valid_source() {
         let roots = HfListRoots {
             source_list: "inline".to_string(),
@@ -5415,6 +5398,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(global_state)]
     fn build_hf_sources_duplicate_uri_gets_distinct_ids_and_snapshot_dirs() {
         // Two identical entries must produce two built sources whose IDs are
         // disambiguated (".0" / ".1") and whose snapshot directories are
@@ -7457,6 +7441,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(global_state)]
     fn list_remote_candidates_from_parquet_manifest_uses_test_endpoint_override() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
@@ -7481,6 +7466,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(global_state)]
     fn fetch_global_row_count_uses_test_endpoint_override() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
@@ -7503,6 +7489,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(global_state)]
     fn fetch_global_row_count_with_runtime_uses_test_endpoint_override() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
@@ -7526,6 +7513,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(global_state)]
     fn endpoint_helpers_fallback_for_empty_env_values() {
         let parquet = with_env_var(TRIPLETS_HF_PARQUET_ENDPOINT, "   ", || {
             HuggingFaceRowSource::parquet_manifest_endpoint()
@@ -7563,6 +7551,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(global_state)]
     fn fetch_global_row_count_returns_none_when_split_not_present() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
@@ -7585,6 +7574,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(global_state)]
     fn list_remote_candidates_returns_manifest_candidates_before_repo_fallback() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
@@ -7608,6 +7598,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(global_state)]
     fn list_remote_candidates_with_runtime_returns_manifest_candidates() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
@@ -7632,6 +7623,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(global_state)]
     fn list_remote_candidates_does_not_fall_back_when_all_manifest_shards_cached() {
         // Regression test: list_remote_candidates must NOT fall through to the hf-hub
         // siblings listing when a parquet manifest exists, regardless of whether all
@@ -7677,6 +7669,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(global_state)]
     fn list_remote_candidates_from_parquet_manifest_errors_when_endpoint_unreachable() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
@@ -7688,6 +7681,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(global_state)]
     fn fetch_global_row_count_errors_when_endpoint_unreachable() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
@@ -7699,6 +7693,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(global_state)]
     fn fetch_classlabel_maps_with_runtime_resolves_columns_from_info_response() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
@@ -8939,6 +8934,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(global_state)]
     fn ensure_row_available_bootstraps_from_manifest_candidates() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
@@ -8961,6 +8957,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(global_state)]
     fn ensure_row_available_skips_past_all_cached_candidates_on_restart() {
         // Verifies the restart scenario: when every candidate in the manifest is
         // already materialised on disk, next_remote_idx jumps to candidates.len()
@@ -9512,6 +9509,7 @@ mod tests {
     // ── fetch_classlabel_maps ─────────────────────────────────────────────────
 
     #[test]
+    #[serial(global_state)]
     fn fetch_classlabel_maps_returns_empty_when_endpoint_unreachable() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
@@ -9526,6 +9524,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(global_state)]
     fn fetch_classlabel_maps_returns_empty_on_non_200_response() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
@@ -9542,6 +9541,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(global_state)]
     fn fetch_classlabel_maps_returns_empty_on_malformed_json() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
@@ -9558,6 +9558,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(global_state)]
     fn fetch_classlabel_maps_resolves_classlabel_columns_from_info_response() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
@@ -9621,6 +9622,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(global_state)]
     fn info_endpoint_called_exactly_once_per_source_construction() {
         // Verify that /info is called exactly once during new() and never during
         // refresh().  Two separate strategies are used to avoid fragile TCP
@@ -9730,6 +9732,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(global_state)]
     fn parquet_manifest_fetched_exactly_once_per_candidate_list_population() {
         // Verify that the /parquet manifest endpoint is contacted only once per
         // source lifetime.  After the first ensure_row_available() populates
@@ -9787,6 +9790,7 @@ mod tests {
     //                through to the hf-hub repository listing path.
 
     #[test]
+    #[serial(global_state)]
     fn fetch_global_row_count_returns_ok_none_on_501() {
         // A 501 from /size means "viewer disabled"; the error is intentionally
         // swallowed at the call-site and Ok(None) is what the caller receives from
@@ -9815,6 +9819,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(global_state)]
     fn ensure_row_available_does_not_loop_on_eviction() {
         // Regression test for the infinite download loop bug:
         //
@@ -9902,6 +9907,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(global_state)]
     fn fetch_classlabel_maps_returns_empty_on_501() {
         // A 501 from /info means "viewer disabled"; ClassLabel resolution must
         // gracefully degrade to an empty map so raw integers are used instead.
@@ -9924,6 +9930,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(global_state)]
     fn list_remote_candidates_from_parquet_manifest_errors_on_501() {
         // A 501 from /parquet causes the manifest path to return Err, which
         // triggers the fallback to hf-hub repository listing inside
