@@ -31,7 +31,7 @@ pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 7521776225374240393;
 pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 6309523434799430941;
 /// Expected hash for deterministic pair batch sequence.
 #[cfg(not(feature = "bm25-mining"))]
-pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 8866384761834154672;
+pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 17832018185824582948;
 /// Expected hash for deterministic pair batch sequence when bm25-mining is enabled.
 #[cfg(feature = "bm25-mining")]
 pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 3528525448544850669;
@@ -45,7 +45,7 @@ pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 11869075277114531356;
 pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 7938957505253979512;
 /// Expected hash for deterministic prefetch pair batch sequence.
 #[cfg(not(feature = "bm25-mining"))]
-pub const PREFETCH_PAIR_BATCH_SEQUENCE_HASH: u64 = 15929189993293906964;
+pub const PREFETCH_PAIR_BATCH_SEQUENCE_HASH: u64 = 15225298178093196000;
 /// Expected hash for deterministic prefetch pair batch sequence when bm25-mining is enabled.
 #[cfg(feature = "bm25-mining")]
 pub const PREFETCH_PAIR_BATCH_SEQUENCE_HASH: u64 = 7551928633021118805;
