@@ -2452,6 +2452,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "triplets-core",
+ "triplets-debug",
  "triplets-hf",
  "walkdir",
 ]
@@ -2477,6 +2478,22 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "walkdir",
+]
+
+[[package]]
+name = "triplets-debug"
+version = "0.20.0-alpha"
+dependencies = [
+ "cache-manager",
+ "chrono",
+ "clap",
+ "indexmap",
+ "rand",
+ "serde",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
+ "triplets-core",
 ]
 
 [[package]]

@@ -51,7 +51,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         parsed.passthrough
     );
 
-    triplets::example_apps::run_multi_source_demo(
+    triplets::debug::run_multi_source_demo(
         parsed.passthrough.into_iter(),
         move |_source_roots| Ok::<HfListRoots, Box<dyn Error>>(roots.clone()),
         build_hf_sources,

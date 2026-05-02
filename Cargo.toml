@@ -16,7 +16,7 @@ keywords = [
     "bm25",
 ]
 [workspace]
-members = [".", "crates/triplets-core", "crates/triplets-hf"]
+members = [".", "crates/triplets-core", "crates/triplets-debug", "crates/triplets-hf"]
 resolver = "2"
 
 [workspace.package]
@@ -60,6 +60,7 @@ extended-metrics = ["triplets-core/extended-metrics"]
 
 [dependencies]
 triplets-core = { path = "crates/triplets-core" }
+triplets-debug = { path = "crates/triplets-debug" }
 triplets-hf = { path = "crates/triplets-hf", optional = true }
 clap = { workspace = true }
 tracing-subscriber = { workspace = true }
