@@ -3,8 +3,8 @@ mod huggingface_source;
 
 /// Test utilities for HuggingFace source tests.
 ///
-/// Used by both unit tests inside the `triplets-hf` crate and integration tests
-/// in `tests/huggingface_integration.rs` in the main `triplets` crate.
+/// Used by unit tests inside the `triplets-hf` crate and integration tests
+/// in `crates/triplets-hf/tests/huggingface_integration.rs`.
 pub mod test_utils;
 
 pub use constants::{

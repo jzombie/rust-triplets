@@ -1,24 +1,22 @@
-#![cfg(feature = "huggingface")]
-
 use serde::Serialize;
 use simd_r_drive::storage_engine::DataStore;
 use simd_r_drive::storage_engine::traits::DataStoreWriter;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
-use triplets::constants::env_vars::TRIPLETS_SKIP_LIVE_TESTS;
-use triplets::constants::sampler::AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME;
-use triplets::utils::platform_newline;
-use triplets::{
-    ChunkingStrategy, DataSource, DeterministicSplitStore, HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE,
-    HfListRoots, HfSourceEntry, HuggingFaceRowSource, HuggingFaceRowsConfig, Sampler,
-    SamplerConfig, SplitLabel, SplitRatios, TripletSampler, build_hf_sources,
-    load_hf_sources_from_list, parse_csv_fields, parse_hf_source_line, parse_hf_uri,
-    resolve_hf_list_roots,
+use triplets_core::constants::env_vars::TRIPLETS_SKIP_LIVE_TESTS;
+use triplets_core::constants::sampler::AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME;
+use triplets_core::utils::platform_newline;
+use triplets_core::{
+    ChunkingStrategy, DataSource, DeterministicSplitStore, Sampler, SamplerConfig, SplitLabel,
+    SplitRatios, TripletSampler,
 };
-use triplets::{
-    HF_TOKEN, TRIPLETS_HF_INFO_ENDPOINT, TRIPLETS_HF_PARQUET_ENDPOINT, TRIPLETS_HF_SIZE_ENDPOINT,
-    TRIPLETS_HF_TOKEN_TEST_DATASET,
+use triplets_hf::{
+    HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE, HF_TOKEN, HfListRoots, HfSourceEntry,
+    HuggingFaceRowSource, HuggingFaceRowsConfig, TRIPLETS_HF_INFO_ENDPOINT,
+    TRIPLETS_HF_PARQUET_ENDPOINT, TRIPLETS_HF_SIZE_ENDPOINT, TRIPLETS_HF_TOKEN_TEST_DATASET,
+    build_hf_sources, load_hf_sources_from_list, parse_csv_fields, parse_hf_source_line,
+    parse_hf_uri, resolve_hf_list_roots,
 };
 
 const HF_SHARD_STORE_ROW_PREFIX: &[u8] = b"rowv1|";
@@ -277,11 +275,11 @@ fn huggingface_text_mode_triplets_can_use_different_anchor_positive_windows() {
         assert_eq!(triplet.anchor.record_id, triplet.positive.record_id);
 
         let anchor_window = match &triplet.anchor.view {
-            triplets::data::ChunkView::Window { index, .. } => Some(*index),
+            triplets_core::data::ChunkView::Window { index, .. } => Some(*index),
             _ => None,
         };
         let positive_window = match &triplet.positive.view {
-            triplets::data::ChunkView::Window { index, .. } => Some(*index),
+            triplets_core::data::ChunkView::Window { index, .. } => Some(*index),
             _ => None,
         };
         if let (Some(a), Some(p)) = (anchor_window, positive_window)
@@ -377,13 +375,13 @@ fn huggingface_role_columns_mode_and_synthetic_ids_work() {
         record
             .sections
             .iter()
-            .any(|section| matches!(section.role, triplets::SectionRole::Anchor))
+            .any(|section| matches!(section.role, triplets_core::SectionRole::Anchor))
     }));
     assert!(snapshot.records.iter().all(|record| {
         record
             .sections
             .iter()
-            .filter(|section| matches!(section.role, triplets::SectionRole::Context))
+            .filter(|section| matches!(section.role, triplets_core::SectionRole::Context))
             .count()
             >= 2
     }));
@@ -561,7 +559,7 @@ fn huggingface_refresh_cursor_wraps_and_limit_none_reads_all() {
     let wrapped = source
         .refresh(
             &seed,
-            Some(&triplets::SourceCursor {
+            Some(&triplets_core::SourceCursor {
                 last_seen: chrono::Utc::now(),
                 revision: 99,
             }),
