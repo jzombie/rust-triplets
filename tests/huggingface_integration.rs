@@ -6,10 +6,7 @@ use simd_r_drive::storage_engine::traits::DataStoreWriter;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
-use triplets::constants::env_vars::{
-    HF_TOKEN, TRIPLETS_HF_INFO_ENDPOINT, TRIPLETS_HF_PARQUET_ENDPOINT, TRIPLETS_HF_SIZE_ENDPOINT,
-    TRIPLETS_HF_TOKEN_TEST_DATASET, TRIPLETS_SKIP_LIVE_TESTS,
-};
+use triplets::constants::env_vars::TRIPLETS_SKIP_LIVE_TESTS;
 use triplets::constants::sampler::AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME;
 use triplets::utils::platform_newline;
 use triplets::{
@@ -18,6 +15,10 @@ use triplets::{
     SamplerConfig, SplitLabel, SplitRatios, TripletSampler, build_hf_sources,
     load_hf_sources_from_list, parse_csv_fields, parse_hf_source_line, parse_hf_uri,
     resolve_hf_list_roots,
+};
+use triplets::{
+    HF_TOKEN, TRIPLETS_HF_INFO_ENDPOINT, TRIPLETS_HF_PARQUET_ENDPOINT, TRIPLETS_HF_SIZE_ENDPOINT,
+    TRIPLETS_HF_TOKEN_TEST_DATASET,
 };
 
 const HF_SHARD_STORE_ROW_PREFIX: &[u8] = b"rowv1|";

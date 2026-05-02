@@ -317,6 +317,7 @@ pub struct IndexPermutation {
 }
 
 impl IndexPermutation {
+    /// Creates a new deterministic permutation over `[0, total)`.
     pub fn new(total: usize, seed: u64, counter: u64) -> Self {
         let total_u64 = total as u64;
         let domain_bits = (64 - (total_u64 - 1).leading_zeros()).max(1);
@@ -330,6 +331,11 @@ impl IndexPermutation {
         }
     }
 
+    /// Returns the next permuted index, staying within `[0, total)`.
+    ///
+    /// Each call advances the internal counter and returns a deterministic
+    /// pseudo-random index that is guaranteed to be less than `total`.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> usize {
         loop {
             let v =

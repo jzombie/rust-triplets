@@ -6,55 +6,10 @@ use crate::splits::SplitLabel;
 /// Keeping the strings here ensures every call site references the same name
 /// and makes the full set of supported overrides easy to discover.
 pub mod env_vars {
-    /// Overrides the Hugging Face datasets-server parquet-manifest endpoint URL.
-    ///
-    /// When set to a non-blank value, `parquet_manifest_endpoint()` returns this
-    /// value instead of the default `https://datasets-server.huggingface.co/parquet`.
-    /// Useful for test doubles and air-gapped / on-premises deployments.
-    pub const TRIPLETS_HF_PARQUET_ENDPOINT: &str = "TRIPLETS_HF_PARQUET_ENDPOINT";
-
-    /// Overrides the Hugging Face datasets-server size endpoint URL.
-    ///
-    /// When set to a non-blank value, `size_endpoint()` returns this value instead
-    /// of the default `https://datasets-server.huggingface.co/size`.
-    /// Useful for test doubles and air-gapped / on-premises deployments.
-    pub const TRIPLETS_HF_SIZE_ENDPOINT: &str = "TRIPLETS_HF_SIZE_ENDPOINT";
-
-    /// Overrides the Hugging Face datasets-server info endpoint URL.
-    ///
-    /// When set to a non-blank value, `info_endpoint()` returns this value instead
-    /// of the default `https://datasets-server.huggingface.co/info`.
-    /// Useful for test doubles and air-gapped / on-premises deployments.
-    pub const TRIPLETS_HF_INFO_ENDPOINT: &str = "TRIPLETS_HF_INFO_ENDPOINT";
-
-    /// Hugging Face API token for authenticating with private datasets.
-    ///
-    /// When set to a non-blank value, this token is sent as a `Bearer` credential
-    /// on every request to the Hugging Face datasets-server API and on every
-    /// `hf-hub` shard download.  Use a token with at least `read` scope.
-    ///
-    /// This is the standard environment variable used by the Hugging Face
-    /// ecosystem (`huggingface_hub`, `datasets`, `hf-hub`, etc.).
-    pub const HF_TOKEN: &str = "HF_TOKEN";
-
     /// When set to any non-empty value, live network tests that require HF
     /// credentials will skip silently rather than panicking.  Intended for
     /// CI jobs that run without secrets (e.g. fork pull requests).
     pub const TRIPLETS_SKIP_LIVE_TESTS: &str = "TRIPLETS_SKIP_LIVE_TESTS";
-
-    /// Dataset repo used by the live private-dataset integration test.
-    ///
-    /// Format: `"org/dataset-name"` — identical to the repo path in an
-    /// `hf://org/dataset-name` source URI.  Must be a private repo to
-    /// exercise the token authentication path end-to-end.
-    pub const TRIPLETS_HF_TOKEN_TEST_DATASET: &str = "TRIPLETS_HF_TOKEN_TEST_DATASET";
-
-    /// Overrides the Hugging Face whoami endpoint URL used for token validation.
-    ///
-    /// When set to a non-blank value, `whoami_endpoint()` returns this value
-    /// instead of the default `https://huggingface.co/api/whoami-v2`.
-    /// Useful for test doubles and air-gapped / on-premises deployments.
-    pub const TRIPLETS_HF_WHOAMI_ENDPOINT: &str = "TRIPLETS_HF_WHOAMI_ENDPOINT";
 }
 
 /// Constants used by capacity estimation heuristics.
@@ -208,8 +163,6 @@ pub mod file_corpus {
 
 /// Constants used for managed cache-root groups.
 pub mod cache {
-    /// Managed cache group for Hugging Face snapshot-backed sources.
-    pub const HUGGINGFACE_GROUP: &str = "triplets/huggingface";
     /// Managed cache group for file-corpus index stores.
     pub const FILE_CORPUS_GROUP: &str = "triplets/file-corpus";
     /// Managed cache group for multi-source demo split-store persistence.

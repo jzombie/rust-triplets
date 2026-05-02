@@ -59,15 +59,7 @@ pub use preprocessor::backends::denoiser_preprocessor::DenoiserPreprocessor;
 pub use sampler::{BatchPrefetcher, Sampler, TripletSampler};
 pub use source::InMemorySource;
 pub use source::backends::csv_source::{CsvSource, CsvSourceConfig};
-#[cfg(feature = "huggingface")]
-pub use source::backends::huggingface_source::{
-    HfListRoots, HfSourceEntry, build_hf_sources, load_hf_sources_from_list,
-    managed_hf_list_snapshot_dir, managed_hf_snapshot_dir, parse_csv_fields, parse_hf_source_line,
-    parse_hf_uri, resolve_hf_list_roots,
-};
 pub use source::{DataSource, SourceCursor};
-#[cfg(feature = "huggingface")]
-pub use source::{HuggingFaceRowSource, HuggingFaceRowsConfig};
 pub use splits::{DeterministicSplitStore, FileSplitStore, SplitLabel, SplitRatios, SplitStore};
 pub use types::{
     CategoryId, HashPart, KvpValue, LogMessage, MetaValue, PathString, RecipeKey, RecordId,

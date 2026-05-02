@@ -15,8 +15,7 @@ pub const REMOTE_BOOTSTRAP_SHARDS: usize = 1;
 /// (`step.unwrap_or(max_records)`) to set this source's internal row-read
 /// batch target for each refresh pass.
 pub const HUGGINGFACE_REFRESH_BATCH_MULTIPLIER: usize = 8;
-/// Version tag for persisted shard-sequence metadata payloads.
-pub const SHARD_SEQUENCE_STATE_VERSION: u32 = 1;
+
 /// Extension used by persisted per-shard row-store files.
 pub const HF_SHARD_STORE_EXTENSION: &str = "simdr";
 /// Key prefix for individual row payload entries in shard row stores.
@@ -98,3 +97,23 @@ pub const HF_INFO_DEFAULT_ENDPOINT: &str = "https://datasets-server.huggingface.
 /// Used by `HuggingFaceRowSource::new()` to fail fast when an `HF_TOKEN`
 /// is provided but cannot authenticate.
 pub const HF_WHOAMI_ENDPOINT: &str = "https://huggingface.co/api/whoami-v2";
+
+// ---------------------------------------------------------------------------
+// Environment variable name constants (moved from triplets-core to keep the
+// core crate HF-agnostic).
+// ---------------------------------------------------------------------------
+
+/// Environment variable override for the datasets-server parquet-manifest endpoint URL.
+pub const TRIPLETS_HF_PARQUET_ENDPOINT: &str = "TRIPLETS_HF_PARQUET_ENDPOINT";
+/// Environment variable override for the datasets-server size endpoint URL.
+pub const TRIPLETS_HF_SIZE_ENDPOINT: &str = "TRIPLETS_HF_SIZE_ENDPOINT";
+/// Environment variable override for the datasets-server info endpoint URL.
+pub const TRIPLETS_HF_INFO_ENDPOINT: &str = "TRIPLETS_HF_INFO_ENDPOINT";
+/// Hugging Face API token for authenticating with private datasets.
+pub const HF_TOKEN: &str = "HF_TOKEN";
+/// Dataset repo used by the live private-dataset integration test.
+pub const TRIPLETS_HF_TOKEN_TEST_DATASET: &str = "TRIPLETS_HF_TOKEN_TEST_DATASET";
+/// Overrides the Hugging Face whoami endpoint URL used for token validation.
+pub const TRIPLETS_HF_WHOAMI_ENDPOINT: &str = "TRIPLETS_HF_WHOAMI_ENDPOINT";
+/// Managed cache group for Hugging Face snapshot-backed sources.
+pub const HUGGINGFACE_GROUP: &str = "triplets/huggingface";
