@@ -4,10 +4,14 @@ use serde::Serialize;
 use simd_r_drive::storage_engine::DataStore;
 use simd_r_drive::storage_engine::traits::DataStoreWriter;
 use std::fs;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use triplets::constants::env_vars::{
-    HF_TOKEN, TRIPLETS_HF_TOKEN_TEST_DATASET, TRIPLETS_SKIP_LIVE_TESTS,
+    HF_TOKEN, TRIPLETS_HF_INFO_ENDPOINT, TRIPLETS_HF_PARQUET_ENDPOINT, TRIPLETS_HF_SIZE_ENDPOINT,
+    TRIPLETS_HF_TOKEN_TEST_DATASET, TRIPLETS_SKIP_LIVE_TESTS,
 };
 use triplets::constants::sampler::AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME;
 use triplets::source::backends::huggingface_source::{
@@ -1802,4 +1806,303 @@ fn hf_token_private_dataset_access() {
         has_content,
         "expected at least one record with non-empty text content from columns a or b"
     );
+}
+
+/// A minimal mock HTTP server that returns HF-style parquet manifests and shard
+/// payloads.  Created inside `sampler_next_text_batch_re_expands_after_cache_eviction`
+/// so the test is fully self-contained.
+struct HfMockServer {
+    base_url: String,
+    manifest_counter: Arc<AtomicUsize>,
+    shutdown: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl HfMockServer {
+    fn new(n_shards: usize, n_rows_per_shard: usize) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base_url = format!("http://{addr}");
+        let manifest_counter: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
+        let mc = Arc::clone(&manifest_counter);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let sd = Arc::clone(&shutdown);
+
+        // Build shard payloads: each shard has n_rows_per_shard unique rows.
+        let shard_payloads: Vec<Vec<u8>> = (0..n_shards)
+            .map(|s| {
+                let mut buf = String::new();
+                for r in 0..n_rows_per_shard {
+                    buf.push_str(&format!(r#"{{"id":"s{s}_r{r}","text":"txt_{s}_{r}"}}"#));
+                    buf.push('\n');
+                }
+                buf.into_bytes()
+            })
+            .collect();
+
+        // Build the manifest JSON that lists every shard URL pointing at this server.
+        // The URLs must:
+        //   1. Have a recognised extension (ndjson, parquet, simdr, jsonl) so that
+        //      `all_candidates_from_parquet_manifest` matches them.
+        //   2. Contain `/resolve/` so that `candidate_target_path` extracts a
+        //      meaningful local suffix (otherwise it falls back to
+        //      `parquet/unknown.parquet` which is treated as parquet).
+        let manifest_entries: Vec<String> = (0..n_shards)
+            .map(|s| {
+                format!(
+                    r#"{{"url":"{base_url}/resolve/main/train/{s:03}.ndjson","size":{}}}"#,
+                    shard_payloads[s].len()
+                )
+            })
+            .collect();
+        let manifest_body = format!(r#"{{"parquet_files":[{}]}}"#, manifest_entries.join(","));
+
+        let handle = std::thread::spawn(move || {
+            loop {
+                if sd.load(Ordering::SeqCst) {
+                    break;
+                }
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut buf = [0u8; 4096];
+                        let _ = stream.read(&mut buf);
+                        let request = String::from_utf8_lossy(&buf);
+                        let first_line = request.lines().next().unwrap_or_default();
+
+                        let body: Vec<u8> = if first_line.contains("/parquet") {
+                            mc.fetch_add(1, Ordering::SeqCst);
+                            manifest_body.as_bytes().to_vec()
+                        } else {
+                            // Extract shard index from `/resolve/main/train/{idx:03}.ndjson`.
+                            let idx: usize = first_line
+                                .split_whitespace()
+                                .nth(1)
+                                .and_then(|path| {
+                                    path.split('/')
+                                        .filter_map(|s| {
+                                            s.trim_end_matches(".ndjson").parse::<usize>().ok()
+                                        })
+                                        .next()
+                                })
+                                .unwrap_or(0);
+                            shard_payloads[idx.min(n_shards.saturating_sub(1))].clone()
+                        };
+
+                        let headers = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(headers.as_bytes());
+                        let _ = stream.write_all(&body);
+                        let _ = stream.flush();
+                    }
+                    Err(_) => {
+                        // accept() can fail if the listener is closed or a
+                        // spurious error occurs — just retry.
+                    }
+                }
+            }
+        });
+
+        HfMockServer {
+            base_url,
+            manifest_counter,
+            shutdown,
+            handle: Some(handle),
+        }
+    }
+
+    fn shut_down(&self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        // Connect once to unblock accept() so the thread observes the flag.
+        if let Some(addr) = self.base_url.strip_prefix("http://") {
+            let _ = TcpStream::connect(addr);
+        }
+    }
+}
+
+impl Drop for HfMockServer {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            if let Some(addr) = self.base_url.strip_prefix("http://") {
+                let _ = TcpStream::connect(addr);
+            }
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Save current env var value and set a new one.  Returns a guard that restores
+/// the original on drop.  Unlike `with_env_var` this keeps the env var set across
+/// async thread boundaries (the expansion thread spawned by `trigger_expansion_if_needed`
+/// reads env vars at HTTP-request time, which may be after the caller returns).
+struct EnvGuard {
+    key: String,
+    previous: Option<String>,
+}
+
+impl EnvGuard {
+    fn set(key: &str, value: &str) -> Self {
+        let previous = std::env::var(key).ok();
+        unsafe { std::env::set_var(key, value) };
+        EnvGuard {
+            key: key.to_string(),
+            previous,
+        }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        if let Some(ref old) = self.previous {
+            unsafe { std::env::set_var(&self.key, old) };
+        } else {
+            unsafe { std::env::remove_var(&self.key) };
+        }
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn sampler_next_text_batch_re_expands_after_cache_eviction() {
+    // E2E test verifying that when the cache manager automatically evicts
+    // shards during background expansion, the source re-fetches the HF
+    // parquet manifest and re-downloads evicted shards on the next cycle.
+    //
+    // The test uses ONLY the public Sampler API (`next_text_batch`) and
+    // exercises the full production code path:
+    //   next_text_batch -> Sampler -> source.refresh -> trigger_expansion_if_needed
+    //   -> expansion thread -> download_next_remote_shard
+    //   -> enforce_disk_cap_locked -> sync_shard_state_from_disk_locked
+    //   -> remote_candidates nulled -> next cycle re-fetches manifest
+    //
+    // The mock server's manifest counter proves the manifest is re-queried.
+
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    // ── Mock HF server ───────────────────────────────────────────────────
+    //
+    // Returns a manifest listing 5 shards, each containing 1 row of text.
+    // The tight cap (room for ~2 shards) causes automatic eviction once
+    // more than 2 shards have been downloaded.
+    //
+    // Shard payload: {"id":"s{shard}_r{row}","text":"txt_{shard}_{row}"}
+    // Roughly 33 bytes each.  2 shards ≈ 66 bytes, cap = 70 bytes.
+    // The manifest server also counts how many times /parquet is queried.
+    let server = HfMockServer::new(5, 1);
+
+    // ── Env var guards ──────────────────────────────────────────────────
+    //
+    // Set env vars for the test duration.  The triggers MUST outlive
+    // the source and sampler so that async expansion threads can still
+    // resolve the mock endpoints when they make HTTP requests.
+    let _parquet_guard = EnvGuard::set(
+        TRIPLETS_HF_PARQUET_ENDPOINT,
+        &format!("{}/parquet", server.base_url),
+    );
+    // The /size and /info endpoints are NOT mocked; failing to query them
+    // is non-fatal (warns and returns None).  Point them somewhere harmless.
+    let _size_guard = EnvGuard::set(TRIPLETS_HF_SIZE_ENDPOINT, "http://127.0.0.1:1/unreachable");
+    let _info_guard = EnvGuard::set(TRIPLETS_HF_INFO_ENDPOINT, "http://127.0.0.1:1/unreachable");
+
+    // ── Source ───────────────────────────────────────────────────────────
+    let mut config = HuggingFaceRowsConfig::new(
+        "hf_re_expand_test",
+        "org/dataset",
+        "default",
+        "train",
+        temp.path(),
+    );
+    config.hf_token = None;
+    config.text_columns = vec!["text".to_string()];
+    // Tight cap: room for ~2 shards.  After 3+ shards are downloaded the
+    // oldest get evicted by the cache manager.
+    config.local_disk_cap_bytes = Some(70);
+    // Small capacity so the in-memory row cache doesn't mask any eviction.
+    config.cache_capacity = 2;
+
+    let source = HuggingFaceRowSource::new(config).expect("failed creating HuggingFaceRowSource");
+
+    // ── Sampler ──────────────────────────────────────────────────────────
+    let split_store =
+        Arc::new(DeterministicSplitStore::new(SplitRatios::default(), 42).expect("split store"));
+    let sampler_config = SamplerConfig {
+        batch_size: 1,
+        ingestion_max_records: 10,
+        seed: 1,
+        allowed_splits: vec![SplitLabel::Train],
+        ..SamplerConfig::default()
+    };
+    let sampler = TripletSampler::new(sampler_config, split_store);
+    sampler.register_source(Box::new(source));
+
+    // ── Drain shards through next_text_batch ────────────────────────────
+    //
+    // Each call to `next_text_batch`:
+    //   1. Calls `source.refresh()` which bootsraps (materialized_rows == 0)
+    //      → fetches manifest → downloads shard 0.
+    //   2. Reads rows from materialized shards.
+    //   3. Calls `trigger_expansion_if_needed()` which spawns a thread to
+    //      download the next shard in the background → cap exceeded → old
+    //      shard evicted → `remote_candidates` nulled.
+    //
+    // The expansion thread is async so we call many times, allowing the
+    // background downloads to complete between iterations.
+    let total_batches = 20;
+    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut empty_batches = 0usize;
+    let mut errors = 0usize;
+
+    for i in 0..total_batches {
+        // Brief sleep so the async expansion thread from the PRIOR call
+        // has time to finish downloading the shard before we read again.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let batch = match sampler.next_text_batch(SplitLabel::Train) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("[iter {i}] next_text_batch error: {e}");
+                errors += 1;
+                continue;
+            }
+        };
+
+        if batch.samples.is_empty() {
+            empty_batches += 1;
+            continue;
+        }
+
+        for sample in &batch.samples {
+            seen_ids.insert(sample.chunk.record_id.to_string());
+        }
+    }
+
+    // The sampler may return empty or error batches while the source is
+    // expanding.  But we must have seen at least some unique record IDs
+    // from eviction-surviving shards.
+    let survivors = seen_ids.len();
+    eprintln!(
+        "results: {total_batches} iters, {survivors} unique ids, {empty_batches} empty, {errors} errors, ids={seen_ids:?}"
+    );
+    assert!(
+        survivors >= 1,
+        "no unique record IDs observed — expansion never produced surviving rows; \
+         empty={empty_batches} errors={errors}"
+    );
+
+    // ── Verify the manifest was re-fetched after eviction ───────────────
+    //
+    // The counter increments every time a /parquet request lands on the
+    // mock server.  The bootstrap path fetches it once; re-expansion after
+    // eviction fetches it again.  We expect >= 2.
+    let fetch_count = server.manifest_counter.load(Ordering::SeqCst);
+    eprintln!("parquet manifest fetched {fetch_count} times (expected >= 2)");
+    assert!(
+        fetch_count >= 2,
+        "parquet manifest must be re-fetched after eviction-driven re-expansion; \
+         fetched {fetch_count} times, expected >= 2",
+    );
+
+    server.shut_down();
 }
