@@ -4854,6 +4854,17 @@ mod tests {
         source
     }
 
+    /// Flush the HTTP response, signal EOF, and wait for the client to close.
+    ///
+    /// On Linux, dropping a `TcpStream` that the peer is still reading can emit
+    /// a TCP RST instead of a graceful FIN, causing reqwest to return a transport
+    /// error.  Shutting down the write side first ensures a clean close.
+    fn finish_http_response(stream: &mut TcpStream) {
+        let _ = stream.flush();
+        let _ = stream.shutdown(std::net::Shutdown::Write);
+        let _ = stream.read(&mut [0u8; 512]);
+    }
+
     /// Drain HTTP request headers from `stream` until `\r\n\r\n` is seen.
     ///
     /// Without this, dropping the stream while the client is still sending
@@ -4889,7 +4900,7 @@ mod tests {
             );
             stream.write_all(headers.as_bytes()).unwrap();
             stream.write_all(&payload).unwrap();
-            let _ = stream.flush();
+            finish_http_response(&mut stream);
         });
         (format!("http://{addr}"), handle)
     }
@@ -4917,7 +4928,7 @@ mod tests {
             );
             stream.write_all(headers.as_bytes()).unwrap();
             stream.write_all(&payload).unwrap();
-            let _ = stream.flush();
+            finish_http_response(&mut stream);
         });
         (format!("http://{addr}"), handle)
     }
@@ -4960,7 +4971,7 @@ mod tests {
                         );
                         let _ = stream.write_all(headers.as_bytes());
                         let _ = stream.write_all(&body);
-                        let _ = stream.flush();
+                        finish_http_response(&mut stream);
                     }
                     Err(_) => break,
                 }
