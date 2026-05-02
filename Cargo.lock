@@ -2443,7 +2443,6 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "serial_test",
  "simd-r-drive",
  "tempfile",
  "thiserror",
