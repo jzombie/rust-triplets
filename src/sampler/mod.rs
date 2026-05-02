@@ -1921,6 +1921,29 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         Ok(())
     }
 
+    /// Helper that centralises the weight-fallback logic.
+    ///
+    /// If `weights` is `Some` and non-uniform or if `weights` is `None`,
+    /// delegates to the appropriate ingest method.
+    fn ingest_with_weights_fallback(
+        &mut self,
+        target_split: SplitLabel,
+        weights: Option<&HashMap<SourceId, f32>>,
+    ) -> Result<(), SamplerError> {
+        match weights {
+            Some(weights)
+                if !weights.is_empty()
+                    && !weights
+                        .values()
+                        .all(|&w| w == *weights.values().next().unwrap()) =>
+            {
+                self.ingest_internal_with_weights_for_split(target_split, weights)?
+            }
+            _ => self.ingest_internal_for_split(target_split)?,
+        }
+        Ok(())
+    }
+
     fn force_ingest_refresh_with_weights_for_split(
         &mut self,
         target_split: SplitLabel,
@@ -2220,19 +2243,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         target_split: SplitLabel,
         weights: Option<&HashMap<SourceId, f32>>,
     ) -> Result<TextBatch, SamplerError> {
-        if let Some(weights) = weights {
-            if weights.is_empty()
-                || weights
-                    .values()
-                    .all(|&w| w == *weights.values().next().unwrap())
-            {
-                self.ingest_internal_for_split(target_split)?;
-            } else {
-                self.ingest_internal_with_weights_for_split(target_split, weights)?;
-            }
-        } else {
-            self.ingest_internal_for_split(target_split)?;
-        }
+        self.ingest_with_weights_fallback(target_split, weights)?;
         self.ensure_split_has_records(target_split)?;
         let sources = self.source_order.clone();
         if sources.is_empty() {
@@ -2384,19 +2395,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         target_split: SplitLabel,
         weights: Option<&HashMap<SourceId, f32>>,
     ) -> Result<TripletBatch, SamplerError> {
-        if let Some(weights) = weights {
-            if weights.is_empty()
-                || weights
-                    .values()
-                    .all(|&w| w == *weights.values().next().unwrap())
-            {
-                self.ingest_internal_for_split(target_split)?;
-            } else {
-                self.ingest_internal_with_weights_for_split(target_split, weights)?;
-            }
-        } else {
-            self.ingest_internal_for_split(target_split)?;
-        }
+        self.ingest_with_weights_fallback(target_split, weights)?;
         self.ensure_split_has_records(target_split)?;
         let sources = self.source_order.clone();
         if sources.is_empty() {
