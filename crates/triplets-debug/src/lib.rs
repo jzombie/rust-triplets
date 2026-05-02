@@ -1936,7 +1936,7 @@ mod tests {
     }
 
     #[test]
-    fn run_example_apps_invalid_cli_args_return_errors() {
+    fn run_debug_invalid_cli_args_return_errors() {
         let estimate = run_estimate_capacity(
             ["--unknown".to_string()].into_iter(),
             ok_unit_roots,

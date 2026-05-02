@@ -43,7 +43,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let roots = resolve_hf_list_roots(parsed.source_list.clone())
         .map_err(|err| -> Box<dyn Error> { err.into() })?;
 
-    println!("== hf_source_list_demo (example_apps integration) ==");
+    println!("== hf_source_list_demo (debug integration) ==");
     println!("source_list: {}", roots.source_list);
     println!("sources: {}", roots.sources.len());
     println!(
