@@ -2520,6 +2520,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "triplets-hf-test-tools"
+version = "0.20.0-alpha"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
