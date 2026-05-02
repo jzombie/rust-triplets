@@ -2457,7 +2457,7 @@ dependencies = [
 
 [[package]]
 name = "triplets-hf-test-tools"
-version = "0.1.0"
+version = "0.20.0-alpha"
 dependencies = [
  "serde_json",
 ]
