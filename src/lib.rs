@@ -1,3 +1,6 @@
+#![doc = include_str!("../README.md")]
+#![warn(missing_docs)]
+
 pub use triplets_core::*;
 
 /// Reusable example runners shared by downstream crates.
