@@ -3108,6 +3108,18 @@ impl HuggingFaceRowSource {
 
     /// Ensure row index is available, expanding remote shard set lazily if needed.
     fn ensure_row_available(&self, idx: usize) -> Result<bool, SamplerError> {
+        // Track whether we have already fetched the remote candidate list during
+        // this call.  Once candidates are fetched and a download is attempted, we
+        // must NOT re-enter the candidate-fetch path even if the disk-cap eviction
+        // inside download_next_remote_shard nulls `remote_candidates` again.
+        // Doing so would create an infinite download loop:
+        //
+        //   1. Fetch candidate list from HF manifest
+        //   2. Download shard N → evict old shard → candidates nulled
+        //   3. Loop back → need_candidates=true → fetch manifest AGAIN
+        //   4. Download shard M → evict → candidates nulled
+        //   5. Repeat forever — a single expansion thread hammers HF every ~8s
+        let mut fetched_candidates = false;
         loop {
             {
                 let state = self
@@ -3141,6 +3153,16 @@ impl HuggingFaceRowSource {
             };
 
             if need_candidates {
+                if fetched_candidates {
+                    // We already fetched candidates and downloaded a shard in a
+                    // previous iteration.  Eviction inside download_next_remote_shard
+                    // nulled remote_candidates again, but we are not re-fetching.
+                    // The caller (expansion thread or refresh) will see that idx
+                    // is still not available and may try again on the next cycle.
+                    return Ok(true);
+                }
+                fetched_candidates = true;
+
                 let mut state = self
                     .state
                     .lock()
@@ -9785,6 +9807,96 @@ mod tests {
             result.is_err(),
             "expected Err from 501 /size response, got {result:?}"
         );
+    }
+
+    #[test]
+    fn ensure_row_available_does_not_loop_on_eviction() {
+        // Regression test for the infinite download loop bug:
+        //
+        // When `ensure_row_available` fetches candidates and downloads a shard,
+        // the disk-cap eviction inside `download_next_remote_shard` nulls
+        // `remote_candidates` via `sync_shard_state_from_disk_locked`.  The loop
+        // would then re-enter the candidate-fetch path, re-fetch the entire
+        // parquet manifest from HF, and download another shard — repeating
+        // forever within a single expansion thread (~8s per cycle).
+        //
+        // The fix tracks a `fetched_candidates` flag: once candidates have been
+        // fetched once, the function returns Ok(true) after the first download
+        // rather than re-entering the candidate-fetch path.
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        // Tight cap: existing shard fills it, so every new download triggers eviction.
+        config.local_disk_cap_bytes = Some(10);
+        let source = test_source(config.clone());
+
+        // Create an existing shard on disk that fills the entire cap.
+        let manifest_root = source.manifest_cache_root();
+        fs::create_dir_all(&manifest_root).unwrap();
+        let existing_path = manifest_root.join("existing.stub");
+        fs::write(&existing_path, vec![1u8; 10]).unwrap();
+
+        {
+            let mut state = source.state.lock().unwrap();
+            state.shards = vec![ShardIndex {
+                path: existing_path,
+                global_start: 0,
+                row_count: 1,
+                random_access: true,
+                parquet_row_groups: vec![(0, 1)],
+                checkpoints: Vec::new(),
+                remote_candidate: None,
+            }];
+            state.materialized_rows = 1;
+            // None triggers the candidate-fetch path on first ensure_row_available call.
+            state.remote_candidates = None;
+        }
+
+        // Pre-populate remote_candidates with two shard URLs so the initial
+        // call skips the manifest-fetch.  After the first download, disk-cap
+        // eviction nulls remote_candidates — without the fix the function
+        // re-fetches the manifest and downloads shards in an infinite loop.
+        let shard_payload = b"{\"text\":\"new\"}\n".to_vec();
+        let (shard_url_1, shard_server_1) = spawn_one_shot_http(shard_payload.clone());
+        let (shard_url_2, shard_server_2) = spawn_one_shot_http(shard_payload.clone());
+        let candidate_1 = format!("url::{shard_url_1}/resolve/main/train/shard-001.ndjson");
+        let candidate_2 = format!("url::{shard_url_2}/resolve/main/train/shard-002.ndjson");
+        {
+            let mut state = source.state.lock().unwrap();
+            state.remote_candidates = Some(vec![candidate_1, candidate_2]);
+            state.next_remote_idx = 0;
+        }
+
+        // Manifest server for the re-fetch that eviction triggers.
+        let manifest_body = serde_json::json!({
+            "parquet_files": [
+                {
+                    "url": format!("{shard_url_1}/resolve/main/train/shard-001.ndjson"),
+                    "size": shard_payload.len()
+                },
+                {
+                    "url": format!("{shard_url_2}/resolve/main/train/shard-002.ndjson"),
+                    "size": shard_payload.len()
+                }
+            ]
+        })
+        .to_string();
+        let (manifest_url, manifest_server) = spawn_one_shot_http(manifest_body.into_bytes());
+
+        // Call ensure_row_available with idx == materialized_rows so the
+        // first download does not satisfy idx < materialized_rows.
+        with_env_var(TRIPLETS_HF_PARQUET_ENDPOINT, &manifest_url, || {
+            assert!(
+                source.ensure_row_available(1).unwrap(),
+                "ensure_row_available must return Ok(true)"
+            );
+        });
+
+        // With the fix: manifest re-fetched once, shards downloaded exactly
+        // once each, then the function returns (fetched_candidates guard).
+        // With the bug: manifest re-fetched repeatedly in an infinite loop.
+        manifest_server.join().unwrap();
+        shard_server_1.join().unwrap();
+        shard_server_2.join().unwrap();
     }
 
     #[test]
