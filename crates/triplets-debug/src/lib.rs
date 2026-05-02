@@ -1,4 +1,5 @@
-// TODO: Consider extracting to a debug crate
+#![doc = include_str!("../README.md")]
+#![warn(missing_docs)]
 
 use std::collections::HashMap;
 use std::error::Error;
