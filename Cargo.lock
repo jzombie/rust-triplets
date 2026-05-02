@@ -2451,7 +2451,15 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "triplets-hf-test-tools",
  "walkdir",
+]
+
+[[package]]
+name = "triplets-hf-test-tools"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

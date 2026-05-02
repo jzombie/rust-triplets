@@ -4,11 +4,8 @@ use serde::Serialize;
 use simd_r_drive::storage_engine::DataStore;
 use simd_r_drive::storage_engine::traits::DataStoreWriter;
 use std::fs;
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use triplets::constants::env_vars::{
     HF_TOKEN, TRIPLETS_HF_INFO_ENDPOINT, TRIPLETS_HF_PARQUET_ENDPOINT, TRIPLETS_HF_SIZE_ENDPOINT,
     TRIPLETS_HF_TOKEN_TEST_DATASET, TRIPLETS_SKIP_LIVE_TESTS,
@@ -1808,161 +1805,6 @@ fn hf_token_private_dataset_access() {
     );
 }
 
-/// A minimal mock HTTP server that returns HF-style parquet manifests and shard
-/// payloads.  Created inside `sampler_next_text_batch_re_expands_after_cache_eviction`
-/// so the test is fully self-contained.
-struct HfMockServer {
-    base_url: String,
-    manifest_counter: Arc<AtomicUsize>,
-    shutdown: Arc<AtomicBool>,
-    handle: Option<std::thread::JoinHandle<()>>,
-}
-
-impl HfMockServer {
-    fn new(n_shards: usize, n_rows_per_shard: usize) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let base_url = format!("http://{addr}");
-        let manifest_counter: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
-        let mc = Arc::clone(&manifest_counter);
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let sd = Arc::clone(&shutdown);
-
-        // Build shard payloads: each shard has n_rows_per_shard unique rows.
-        let shard_payloads: Vec<Vec<u8>> = (0..n_shards)
-            .map(|s| {
-                let mut buf = String::new();
-                for r in 0..n_rows_per_shard {
-                    buf.push_str(&format!(r#"{{"id":"s{s}_r{r}","text":"txt_{s}_{r}"}}"#));
-                    buf.push('\n');
-                }
-                buf.into_bytes()
-            })
-            .collect();
-
-        // Build the manifest JSON that lists every shard URL pointing at this server.
-        // The URLs must:
-        //   1. Have a recognised extension (ndjson, parquet, simdr, jsonl) so that
-        //      `all_candidates_from_parquet_manifest` matches them.
-        //   2. Contain `/resolve/` so that `candidate_target_path` extracts a
-        //      meaningful local suffix (otherwise it falls back to
-        //      `parquet/unknown.parquet` which is treated as parquet).
-        let manifest_entries: Vec<String> = (0..n_shards)
-            .map(|s| {
-                format!(
-                    r#"{{"url":"{base_url}/resolve/main/train/{s:03}.ndjson","size":{}}}"#,
-                    shard_payloads[s].len()
-                )
-            })
-            .collect();
-        let manifest_body = format!(r#"{{"parquet_files":[{}]}}"#, manifest_entries.join(","));
-
-        let handle = std::thread::spawn(move || {
-            loop {
-                if sd.load(Ordering::SeqCst) {
-                    break;
-                }
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        let mut buf = [0u8; 4096];
-                        let _ = stream.read(&mut buf);
-                        let request = String::from_utf8_lossy(&buf);
-                        let first_line = request.lines().next().unwrap_or_default();
-
-                        let body: Vec<u8> = if first_line.contains("/parquet") {
-                            mc.fetch_add(1, Ordering::SeqCst);
-                            manifest_body.as_bytes().to_vec()
-                        } else {
-                            // Extract shard index from `/resolve/main/train/{idx:03}.ndjson`.
-                            let idx: usize = first_line
-                                .split_whitespace()
-                                .nth(1)
-                                .and_then(|path| {
-                                    path.split('/')
-                                        .filter_map(|s| {
-                                            s.trim_end_matches(".ndjson").parse::<usize>().ok()
-                                        })
-                                        .next()
-                                })
-                                .unwrap_or(0);
-                            shard_payloads[idx.min(n_shards.saturating_sub(1))].clone()
-                        };
-
-                        let headers = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                            body.len()
-                        );
-                        let _ = stream.write_all(headers.as_bytes());
-                        let _ = stream.write_all(&body);
-                        let _ = stream.flush();
-                    }
-                    Err(_) => {
-                        // accept() can fail if the listener is closed or a
-                        // spurious error occurs — just retry.
-                    }
-                }
-            }
-        });
-
-        HfMockServer {
-            base_url,
-            manifest_counter,
-            shutdown,
-            handle: Some(handle),
-        }
-    }
-
-    fn shut_down(&self) {
-        self.shutdown.store(true, Ordering::SeqCst);
-        // Connect once to unblock accept() so the thread observes the flag.
-        if let Some(addr) = self.base_url.strip_prefix("http://") {
-            let _ = TcpStream::connect(addr);
-        }
-    }
-}
-
-impl Drop for HfMockServer {
-    fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::SeqCst);
-        if let Some(handle) = self.handle.take() {
-            if let Some(addr) = self.base_url.strip_prefix("http://") {
-                let _ = TcpStream::connect(addr);
-            }
-            let _ = handle.join();
-        }
-    }
-}
-
-/// Save current env var value and set a new one.  Returns a guard that restores
-/// the original on drop.  Unlike `with_env_var` this keeps the env var set across
-/// async thread boundaries (the expansion thread spawned by `trigger_expansion_if_needed`
-/// reads env vars at HTTP-request time, which may be after the caller returns).
-struct EnvGuard {
-    key: String,
-    previous: Option<String>,
-}
-
-impl EnvGuard {
-    fn set(key: &str, value: &str) -> Self {
-        let previous = std::env::var(key).ok();
-        unsafe { std::env::set_var(key, value) };
-        EnvGuard {
-            key: key.to_string(),
-            previous,
-        }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        if let Some(ref old) = self.previous {
-            unsafe { std::env::set_var(&self.key, old) };
-        } else {
-            unsafe { std::env::remove_var(&self.key) };
-        }
-    }
-}
-
 #[test]
 #[serial_test::serial]
 fn sampler_next_text_batch_re_expands_after_cache_eviction() {
@@ -1990,21 +1832,27 @@ fn sampler_next_text_batch_re_expands_after_cache_eviction() {
     // Shard payload: {"id":"s{shard}_r{row}","text":"txt_{shard}_{row}"}
     // Roughly 33 bytes each.  2 shards ≈ 66 bytes, cap = 70 bytes.
     // The manifest server also counts how many times /parquet is queried.
-    let server = HfMockServer::new(5, 1);
+    let server = triplets_hf_test_tools::HfMockServer::new(5, 1);
 
     // ── Env var guards ──────────────────────────────────────────────────
     //
     // Set env vars for the test duration.  The triggers MUST outlive
     // the source and sampler so that async expansion threads can still
     // resolve the mock endpoints when they make HTTP requests.
-    let _parquet_guard = EnvGuard::set(
+    let _parquet_guard = triplets_hf_test_tools::EnvGuard::set(
         TRIPLETS_HF_PARQUET_ENDPOINT,
-        &format!("{}/parquet", server.base_url),
+        &format!("{}/parquet", server.url()),
     );
     // The /size and /info endpoints are NOT mocked; failing to query them
     // is non-fatal (warns and returns None).  Point them somewhere harmless.
-    let _size_guard = EnvGuard::set(TRIPLETS_HF_SIZE_ENDPOINT, "http://127.0.0.1:1/unreachable");
-    let _info_guard = EnvGuard::set(TRIPLETS_HF_INFO_ENDPOINT, "http://127.0.0.1:1/unreachable");
+    let _size_guard = triplets_hf_test_tools::EnvGuard::set(
+        TRIPLETS_HF_SIZE_ENDPOINT,
+        "http://127.0.0.1:1/unreachable",
+    );
+    let _info_guard = triplets_hf_test_tools::EnvGuard::set(
+        TRIPLETS_HF_INFO_ENDPOINT,
+        "http://127.0.0.1:1/unreachable",
+    );
 
     // ── Source ───────────────────────────────────────────────────────────
     let mut config = HuggingFaceRowsConfig::new(
@@ -2096,7 +1944,7 @@ fn sampler_next_text_batch_re_expands_after_cache_eviction() {
     // The counter increments every time a /parquet request lands on the
     // mock server.  The bootstrap path fetches it once; re-expansion after
     // eviction fetches it again.  We expect >= 2.
-    let fetch_count = server.manifest_counter.load(Ordering::SeqCst);
+    let fetch_count = server.manifest_fetch_count();
     eprintln!("parquet manifest fetched {fetch_count} times (expected >= 2)");
     assert!(
         fetch_count >= 2,
