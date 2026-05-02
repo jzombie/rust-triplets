@@ -5,9 +5,7 @@ use std::error::Error;
 #[cfg(feature = "huggingface")]
 use clap::Parser;
 #[cfg(feature = "huggingface")]
-use triplets::source::backends::huggingface_source::{
-    HfListRoots, build_hf_sources, resolve_hf_list_roots,
-};
+use triplets::{HfListRoots, build_hf_sources, resolve_hf_list_roots};
 
 #[cfg(feature = "huggingface")]
 #[derive(Debug, Parser)]

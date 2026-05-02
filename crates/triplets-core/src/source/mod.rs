@@ -308,7 +308,7 @@ impl<T: IndexableSource> DataSource for IndexableAdapter<T> {
 }
 
 /// Internal permutation used by `IndexablePager`.
-pub(crate) struct IndexPermutation {
+pub struct IndexPermutation {
     total: u64,
     domain_bits: u32,
     domain_size: u64,
@@ -317,7 +317,7 @@ pub(crate) struct IndexPermutation {
 }
 
 impl IndexPermutation {
-    fn new(total: usize, seed: u64, counter: u64) -> Self {
+    pub fn new(total: usize, seed: u64, counter: u64) -> Self {
         let total_u64 = total as u64;
         let domain_bits = (64 - (total_u64 - 1).leading_zeros()).max(1);
         let domain_size = 1u64 << domain_bits;
@@ -330,7 +330,7 @@ impl IndexPermutation {
         }
     }
 
-    fn next(&mut self) -> usize {
+    pub fn next(&mut self) -> usize {
         loop {
             let v =
                 Self::permute_bits(self.counter % self.domain_size, self.domain_bits, self.seed);
@@ -341,7 +341,8 @@ impl IndexPermutation {
         }
     }
 
-    fn cursor(&self) -> usize {
+    /// Current consumption cursor position.
+    pub fn cursor(&self) -> usize {
         (self.counter as usize) % (self.total as usize)
     }
     fn permute_bits(value: u64, bits: u32, seed: u64) -> u64 {

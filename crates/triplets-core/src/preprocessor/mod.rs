@@ -13,7 +13,7 @@
 //! [`crate::config::ChunkingStrategy::register_preprocessor`]:
 //!
 //! ```rust
-//! use triplets::{ChunkingStrategy, DenoiserConfig, DenoiserPreprocessor};
+//! use triplets_core::{ChunkingStrategy, DenoiserConfig, DenoiserPreprocessor};
 //!
 //! let mut strategy = ChunkingStrategy::default();
 //! strategy.register_preprocessor(DenoiserPreprocessor::new(DenoiserConfig {
@@ -38,7 +38,7 @@ pub mod backends;
 /// # Implementing
 ///
 /// ```rust
-/// use triplets::TextPreprocessor;
+/// use triplets_core::TextPreprocessor;
 ///
 /// struct UppercasePreprocessor;
 ///

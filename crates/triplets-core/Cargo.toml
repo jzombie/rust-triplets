@@ -37,3 +37,6 @@ walkdir = "2.5.0"
 default = []
 bm25-mining = ["dep:bm25"]
 extended-metrics = []
+
+[dev-dependencies]
+indoc = "2.0.7"

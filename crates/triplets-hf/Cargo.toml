@@ -30,3 +30,8 @@ tempfile = "3.27.0"
 tracing = "0.1.44"
 walkdir = "2.5.0"
 tokio = { version = "1.52.1", features = ["rt", "fs", "io-util"] }
+
+[dev-dependencies]
+indoc = "2.0.7"
+serial_test = "3.4.0"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

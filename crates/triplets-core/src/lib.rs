@@ -10,8 +10,7 @@ pub mod constants;
 /// Data record and sample batch types.
 pub mod data;
 mod epoch;
-/// Reusable example runners shared by downstream crates.
-pub mod example_apps;
+
 /// Stable deterministic hashing utilities.
 pub mod hash;
 /// Capacity and sampling estimation helpers.

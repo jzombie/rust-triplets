@@ -31,14 +31,7 @@ use tempfile::TempDir;
 use tracing::{debug, info, warn};
 use walkdir::WalkDir;
 
-use crate::SamplerError;
-use crate::config::{NegativeStrategy, SamplerConfig, Selector, TripletRecipe};
-use crate::constants::cache::HUGGINGFACE_GROUP;
-use crate::constants::env_vars::{
-    HF_TOKEN, TRIPLETS_HF_INFO_ENDPOINT, TRIPLETS_HF_PARQUET_ENDPOINT, TRIPLETS_HF_SIZE_ENDPOINT,
-    TRIPLETS_HF_WHOAMI_ENDPOINT,
-};
-use crate::constants::huggingface::{
+use crate::constants::{
     ALL_SPLITS_DIR, HF_CLASSLABEL_TYPE, HF_INFO_DEFAULT_ENDPOINT, HF_JSON_KEY_CONFIG,
     HF_JSON_KEY_CONFIG_NAME, HF_JSON_KEY_CONFIGS, HF_JSON_KEY_DATASET, HF_JSON_KEY_DATASET_INFO,
     HF_JSON_KEY_FEATURE_TYPE, HF_JSON_KEY_FEATURES, HF_JSON_KEY_LABEL_NAMES, HF_JSON_KEY_NUM_ROWS,
@@ -50,11 +43,18 @@ use crate::constants::huggingface::{
     HUGGINGFACE_REFRESH_BATCH_MULTIPLIER, PARQUET_MANIFEST_DIR, REMOTE_BOOTSTRAP_SHARDS,
     REMOTE_EXPANSION_HEADROOM_MULTIPLIER, REMOTE_URL_PREFIX,
 };
-use crate::data::{DataRecord, QualityScore, SectionRole};
-use crate::utils::make_section;
 use chrono::{DateTime, Utc};
+use triplets_core::SamplerError;
+use triplets_core::config::{NegativeStrategy, SamplerConfig, Selector, TripletRecipe};
+use triplets_core::constants::cache::HUGGINGFACE_GROUP;
+use triplets_core::constants::env_vars::{
+    HF_TOKEN, TRIPLETS_HF_INFO_ENDPOINT, TRIPLETS_HF_PARQUET_ENDPOINT, TRIPLETS_HF_SIZE_ENDPOINT,
+    TRIPLETS_HF_WHOAMI_ENDPOINT,
+};
+use triplets_core::data::{DataRecord, QualityScore, SectionRole};
+use triplets_core::utils::make_section;
 
-use crate::source::{DataSource, SourceCursor, SourceSnapshot};
+use triplets_core::source::{DataSource, SourceCursor, SourceSnapshot};
 
 const HF_SOURCE_KEY_ANCHOR: &str = "anchor";
 const HF_SOURCE_KEY_POSITIVE: &str = "positive";
@@ -1588,7 +1588,7 @@ impl HuggingFaceRowSource {
 
     fn paging_seed(&self, total: usize) -> Result<u64, SamplerError> {
         let sampler_seed = self.configured_sampler_seed()?;
-        Ok(crate::source::IndexablePager::seed_for_sampler(
+        Ok(triplets_core::source::IndexablePager::seed_for_sampler(
             &self.config.source_id,
             total,
             sampler_seed,
@@ -4634,7 +4634,8 @@ impl DataSource for HuggingFaceRowSource {
 
         let source_id = self.config.source_id.clone();
         let seed = self.paging_seed(total)?;
-        let mut permutation = crate::source::IndexPermutation::new(total, seed, start as u64);
+        let mut permutation =
+            triplets_core::source::IndexPermutation::new(total, seed, start as u64);
 
         let mut records = Vec::new();
         let read_batch_target = self.effective_refresh_batch_target(max);
@@ -4791,7 +4792,6 @@ impl DataSource for HuggingFaceRowSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::platform_newline;
     use parquet::data_type::{ByteArray, ByteArrayType};
     use parquet::file::properties::WriterProperties;
     use parquet::file::writer::SerializedFileWriter;
@@ -4801,6 +4801,7 @@ mod tests {
     use std::env;
     use std::io::Write;
     use tempfile::tempdir;
+    use triplets_core::utils::platform_newline;
 
     fn test_config(snapshot_dir: PathBuf) -> HuggingFaceRowsConfig {
         let mut config =
@@ -4847,9 +4848,7 @@ mod tests {
         source
     }
 
-    use triplets_hf_test_tools::{
-        TestHttpServer, spawn_manifest_and_shard_http, spawn_one_shot_http,
-    };
+    use crate::test_utils::{TestHttpServer, spawn_manifest_and_shard_http, spawn_one_shot_http};
 
     fn with_env_var<R>(key: &str, value: &str, run: impl FnOnce() -> R) -> R {
         let previous = env::var(key).ok();
@@ -8057,9 +8056,9 @@ mod tests {
         let seed_b = HuggingFaceRowSource::shard_candidate_seed(&config, total, 7);
         let seed_c = HuggingFaceRowSource::shard_candidate_seed(&config, total, 123);
 
-        let mut perm_a = crate::source::IndexPermutation::new(total, seed_a, 0);
-        let mut perm_b = crate::source::IndexPermutation::new(total, seed_b, 0);
-        let mut perm_c = crate::source::IndexPermutation::new(total, seed_c, 0);
+        let mut perm_a = triplets_core::source::IndexPermutation::new(total, seed_a, 0);
+        let mut perm_b = triplets_core::source::IndexPermutation::new(total, seed_b, 0);
+        let mut perm_c = triplets_core::source::IndexPermutation::new(total, seed_c, 0);
 
         let take = 6usize;
         let order_a: Vec<usize> = (0..take).map(|_| perm_a.next()).collect();

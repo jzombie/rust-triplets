@@ -28,16 +28,19 @@ repository = "https://github.com/jzombie/rust-triplets"
 
 [features]
 default = []
-huggingface = ["dep:serde_json", "dep:hf-hub", "dep:parquet", "dep:reqwest", "dep:tokio"]
-bm25-mining = ["dep:bm25"]
-extended-metrics = []
+huggingface = ["dep:triplets-hf"]
+bm25-mining = ["dep:bm25", "triplets-core/bm25-mining"]
+extended-metrics = ["triplets-core/extended-metrics"]
 
 [dependencies]
+triplets-core = { path = "crates/triplets-core" }
+triplets-hf = { path = "crates/triplets-hf", optional = true }
+clap = { version = "4.6.1", features = ["derive"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 bitcode = "0.6.9"
 bm25 = { version = "2.3.2", optional = true, features = ["parallelism"] }
 cache-manager = "0.4.0"
 chrono = { version = "0.4.44", features = ["serde"] }
-clap = { version = "4.6.1", features = ["derive"] }
 csv = "1.4.0"
 hf-hub = { version = "0.5.0", optional = true, default-features = false, features = ["tokio", "rustls-tls"] }
 indexmap = "2.14.0"
@@ -53,11 +56,9 @@ tempfile = "3.27.0"
 thiserror = "2.0.18"
 tokio = { version = "1.52.1", optional = true, features = ["rt", "fs", "io-util"] }
 tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 walkdir = "2.5.0"
 
 [dev-dependencies]
 indoc = "2.0.7"
 serial_test = "3.4.0"
-triplets-core = { path = "crates/triplets-core" }
-triplets-hf = { path = "crates/triplets-hf" }
+serde_json = "1.0.149"

@@ -2451,15 +2451,55 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "triplets-hf-test-tools",
+ "triplets-core",
+ "triplets-hf",
  "walkdir",
 ]
 
 [[package]]
-name = "triplets-hf-test-tools"
+name = "triplets-core"
 version = "0.20.0-alpha"
 dependencies = [
+ "bitcode",
+ "bm25",
+ "cache-manager",
+ "chrono",
+ "csv",
+ "indexmap",
+ "indoc",
+ "line-ending",
+ "rand",
+ "rayon",
+ "serde",
+ "simd-r-drive",
+ "tempfile",
+ "thiserror",
+ "tracing",
+ "tracing-subscriber",
+ "walkdir",
+]
+
+[[package]]
+name = "triplets-hf"
+version = "0.20.0-alpha"
+dependencies = [
+ "cache-manager",
+ "chrono",
+ "hf-hub",
+ "indoc",
+ "parquet",
+ "rayon",
+ "reqwest",
+ "serde",
  "serde_json",
+ "serial_test",
+ "simd-r-drive",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "triplets-core",
+ "walkdir",
 ]
 
 [[package]]
