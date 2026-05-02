@@ -1,6 +1,6 @@
 [package]
 name = "triplets"
-version = "0.19.0-alpha"
+version = "0.20.0-alpha"
 edition = "2024"
 description = "A composable, deterministic text data pipeline for ML. Ingest, denoise, chunk, split, and sample multi-source corpora into reproducible training triplets."
 license = "MIT OR Apache-2.0"
