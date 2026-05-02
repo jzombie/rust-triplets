@@ -9867,52 +9867,49 @@ mod tests {
             state.remote_candidates = None;
         }
 
-        // Pre-populate remote_candidates with two shard URLs so the initial
-        // call skips the manifest-fetch.  After the first download, disk-cap
-        // eviction nulls remote_candidates — without the fix the function
-        // re-fetches the manifest and downloads shards in an infinite loop.
+        // Use a single multi-accept mock server that serves both the
+        // parquet manifest (/parquet) and shard payloads (everything else).
+        // This avoids the flakiness of separate one-shot servers where the
+        // manifest re-fetch could point back to an already-consumed server
+        // (the eviction order is non-deterministic across platforms).
         let shard_payload = b"{\"text\":\"new\"}\n".to_vec();
-        let (shard_url_1, shard_server_1) = spawn_one_shot_http(shard_payload.clone());
-        let (shard_url_2, shard_server_2) = spawn_one_shot_http(shard_payload.clone());
-        let candidate_1 = format!("url::{shard_url_1}/resolve/main/train/shard-001.ndjson");
-        let candidate_2 = format!("url::{shard_url_2}/resolve/main/train/shard-002.ndjson");
+        let (base_url, manifest_counter, server) =
+            spawn_manifest_and_shard_http(3, shard_payload.clone());
+
+        // Pre-populate remote_candidates with one shard URL so the initial
+        // call skips the manifest-fetch.  Use a URL path that differs from
+        // the manifest candidates so their on-disk store paths never collide.
+        let pre_candidate = format!("url::{base_url}/resolve/main/train/pre-populated.ndjson");
         {
             let mut state = source.state.lock().unwrap();
-            state.remote_candidates = Some(vec![candidate_1, candidate_2]);
+            state.remote_candidates = Some(vec![pre_candidate]);
             state.next_remote_idx = 0;
         }
 
-        // Manifest server for the re-fetch that eviction triggers.
-        let manifest_body = serde_json::json!({
-            "parquet_files": [
-                {
-                    "url": format!("{shard_url_1}/resolve/main/train/shard-001.ndjson"),
-                    "size": shard_payload.len()
-                },
-                {
-                    "url": format!("{shard_url_2}/resolve/main/train/shard-002.ndjson"),
-                    "size": shard_payload.len()
-                }
-            ]
-        })
-        .to_string();
-        let (manifest_url, manifest_server) = spawn_one_shot_http(manifest_body.into_bytes());
-
         // Call ensure_row_available with idx == materialized_rows so the
         // first download does not satisfy idx < materialized_rows.
-        with_env_var(TRIPLETS_HF_PARQUET_ENDPOINT, &manifest_url, || {
-            assert!(
-                source.ensure_row_available(1).unwrap(),
-                "ensure_row_available must return Ok(true)"
-            );
-        });
+        // Append /parquet so spawn_manifest_and_shard_http can route the
+        // manifest re-fetch to the manifest body (see first_line.contains("/parquet")).
+        with_env_var(
+            TRIPLETS_HF_PARQUET_ENDPOINT,
+            &format!("{base_url}/parquet"),
+            || {
+                assert!(
+                    source.ensure_row_available(1).unwrap(),
+                    "ensure_row_available must return Ok(true)"
+                );
+            },
+        );
 
         // With the fix: manifest re-fetched once, shards downloaded exactly
         // once each, then the function returns (fetched_candidates guard).
         // With the bug: manifest re-fetched repeatedly in an infinite loop.
-        manifest_server.join().unwrap();
-        shard_server_1.join().unwrap();
-        shard_server_2.join().unwrap();
+        assert_eq!(
+            manifest_counter.load(AtomicOrdering::SeqCst),
+            1,
+            "parquet manifest must be fetched exactly once"
+        );
+        server.join().unwrap();
     }
 
     #[test]
