@@ -8293,9 +8293,7 @@ mod tests {
         let source = test_source(config.clone());
 
         // Candidate pointing at an unreachable address — HEAD will Err.
-        let candidate = format!(
-            "url::{TEST_UNREACHABLE_URL}/resolve/main/train/head-err.ndjson"
-        );
+        let candidate = format!("url::{TEST_UNREACHABLE_URL}/resolve/main/train/head-err.ndjson");
         let store_path = HuggingFaceRowSource::candidate_store_path(&config, &candidate);
         fs::create_dir_all(store_path.parent().unwrap()).unwrap();
         write_simdr_fixture(&store_path, &[("r0", "row")]);
@@ -8353,9 +8351,7 @@ mod tests {
         let server = TestHttpServer::new(500, b"Internal Server Error".to_vec());
         let base_url = server.url().to_string();
 
-        let candidate = format!(
-            "url::{base_url}/resolve/main/train/head-none.ndjson"
-        );
+        let candidate = format!("url::{base_url}/resolve/main/train/head-none.ndjson");
         let store_path = HuggingFaceRowSource::candidate_store_path(&config, &candidate);
         fs::create_dir_all(store_path.parent().unwrap()).unwrap();
         write_simdr_fixture(&store_path, &[("r0", "row")]);
