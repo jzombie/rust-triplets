@@ -10730,6 +10730,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(global_state)]
     fn build_hf_sources_collapses_uri_parse_error() {
         let roots = HfListRoots {
             source_list: "inline".to_string(),
@@ -10759,6 +10760,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(global_state)]
     fn managed_hf_snapshot_dir_resolves_without_replica() {
         let dir = tempdir().unwrap();
         let nl = platform_newline();
@@ -10775,6 +10777,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(global_state)]
     fn managed_hf_snapshot_dir_uses_all_splits_for_empty() {
         let dir = tempdir().unwrap();
         let nl = platform_newline();
@@ -10797,6 +10800,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(global_state)]
     fn managed_hf_list_snapshot_dir_uses_replica_suffix() {
         let dir = tempdir().unwrap();
         let nl = platform_newline();
