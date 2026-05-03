@@ -10528,4 +10528,378 @@ mod tests {
         let result = ensure_cache_group(bad_group);
         assert!(result.is_err());
     }
+
+    // ── New tests for uncovered functions ────────────────────────────────
+
+    #[test]
+    fn new_rejects_missing_explicit_mapping() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.anchor_columns.clear();
+        config.positive_columns.clear();
+        config.context_columns.clear();
+        config.text_columns.clear();
+        let result = HuggingFaceRowSource::new(config);
+        assert!(result.is_err());
+        let err = result.map(|_| ()).unwrap_err();
+        assert!(format!("{err:?}").contains("explicit field mapping"));
+    }
+
+    #[test]
+    fn known_total_rows_returns_state_value() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config);
+        assert_eq!(source.known_total_rows(), None);
+        {
+            let mut state = source.state.lock().unwrap();
+            state.total_rows = Some(500);
+        }
+        assert_eq!(source.known_total_rows(), Some(500));
+    }
+
+    #[test]
+    fn id_returns_source_id() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config);
+        assert_eq!(source.id(), "hf_test");
+    }
+
+    #[test]
+    fn is_store_shard_path_detects_simdr_extension() {
+        assert!(HuggingFaceRowSource::is_store_shard_path(Path::new(
+            "shard.simdr"
+        )));
+        assert!(HuggingFaceRowSource::is_store_shard_path(Path::new(
+            "shard.SIMDR"
+        )));
+        assert!(HuggingFaceRowSource::is_store_shard_path(Path::new(
+            "shard.SimDr"
+        )));
+        assert!(!HuggingFaceRowSource::is_store_shard_path(Path::new(
+            "shard.parquet"
+        )));
+        assert!(!HuggingFaceRowSource::is_store_shard_path(Path::new(
+            "shard.ndjson"
+        )));
+        assert!(!HuggingFaceRowSource::is_store_shard_path(Path::new(
+            "no-extension"
+        )));
+        assert!(!HuggingFaceRowSource::is_store_shard_path(Path::new(
+            ".hidden"
+        )));
+    }
+
+    #[test]
+    fn shard_store_path_for_appends_simdr_extension() {
+        let path = PathBuf::from("cache/shard.parquet");
+        let mapped = HuggingFaceRowSource::shard_store_path_for(&path);
+        assert_eq!(mapped, PathBuf::from("cache/shard.simdr"));
+        let no_ext = PathBuf::from("cache/shard");
+        let mapped2 = HuggingFaceRowSource::shard_store_path_for(&no_ext);
+        assert_eq!(mapped2, PathBuf::from("cache/shard.simdr"));
+    }
+
+    #[test]
+    fn candidate_store_path_maps_via_target_path() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let candidate = "url::https://host/ds/resolve/main/train/data-000.parquet";
+        let target = HuggingFaceRowSource::candidate_target_path(&config, candidate);
+        let store = HuggingFaceRowSource::candidate_store_path(&config, candidate);
+        assert_eq!(store, target.with_extension("simdr"));
+    }
+
+    #[test]
+    fn manifest_cache_root_joins_manifest_dir() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config);
+        let root = source.manifest_cache_root();
+        assert!(root.ends_with(HF_PARQUET_MANIFEST_DIR));
+    }
+
+    #[test]
+    fn recompute_shard_offsets_sums_row_counts() {
+        let mut state = SourceState {
+            materialized_rows: 0,
+            total_rows: None,
+            shards: vec![
+                ShardIndex {
+                    path: PathBuf::from("a.simdr"),
+                    global_start: 0,
+                    row_count: 10,
+                    random_access: true,
+                    parquet_row_groups: vec![(0, 10)],
+                    checkpoints: Vec::new(),
+                    remote_candidate: None,
+                },
+                ShardIndex {
+                    path: PathBuf::from("b.simdr"),
+                    global_start: 0,
+                    row_count: 20,
+                    random_access: true,
+                    parquet_row_groups: vec![(0, 20)],
+                    checkpoints: Vec::new(),
+                    remote_candidate: None,
+                },
+            ],
+            remote_candidates: None,
+            remote_candidate_sizes: HashMap::new(),
+            next_remote_idx: 0,
+            remote_candidate_order: Vec::new(),
+        };
+        HuggingFaceRowSource::recompute_shard_offsets(&mut state);
+        assert_eq!(state.materialized_rows, 30);
+        assert_eq!(state.shards[0].global_start, 0);
+        assert_eq!(state.shards[1].global_start, 10);
+    }
+
+    #[test]
+    fn sync_shard_state_from_disk_removes_missing_shards() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config);
+        let existing = dir.path().join("existing.simdr");
+        fs::write(&existing, b"data").unwrap();
+        let missing = dir.path().join("missing.simdr");
+        let mut state = SourceState {
+            materialized_rows: 100,
+            total_rows: Some(100),
+            shards: vec![
+                ShardIndex {
+                    path: existing.clone(),
+                    global_start: 0,
+                    row_count: 50,
+                    random_access: true,
+                    parquet_row_groups: vec![(0, 50)],
+                    checkpoints: Vec::new(),
+                    remote_candidate: None,
+                },
+                ShardIndex {
+                    path: missing.clone(),
+                    global_start: 50,
+                    row_count: 50,
+                    random_access: true,
+                    parquet_row_groups: vec![(0, 50)],
+                    checkpoints: Vec::new(),
+                    remote_candidate: None,
+                },
+            ],
+            remote_candidates: Some(vec!["candidate".to_string()]),
+            remote_candidate_sizes: HashMap::new(),
+            next_remote_idx: 0,
+            remote_candidate_order: vec![0],
+        };
+        source.sync_shard_state_from_disk_locked(&mut state);
+        assert_eq!(state.shards.len(), 1);
+        assert_eq!(state.shards[0].path, existing);
+        assert_eq!(state.materialized_rows, 50);
+        assert!(state.remote_candidates.is_none());
+    }
+
+    #[test]
+    fn sync_shard_state_from_disk_preserves_candidates_when_all_present() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config);
+        let sp = dir.path().join("shard.simdr");
+        fs::write(&sp, b"data").unwrap();
+        let mut state = SourceState {
+            materialized_rows: 50,
+            total_rows: None,
+            shards: vec![ShardIndex {
+                path: sp.clone(),
+                global_start: 0,
+                row_count: 50,
+                random_access: true,
+                parquet_row_groups: vec![(0, 50)],
+                checkpoints: Vec::new(),
+                remote_candidate: None,
+            }],
+            remote_candidates: Some(vec!["next".to_string()]),
+            remote_candidate_sizes: HashMap::new(),
+            next_remote_idx: 1,
+            remote_candidate_order: vec![0],
+        };
+        source.sync_shard_state_from_disk_locked(&mut state);
+        assert_eq!(state.shards.len(), 1);
+        assert_eq!(state.remote_candidates, Some(vec!["next".to_string()]));
+        assert_eq!(state.next_remote_idx, 1);
+    }
+
+    #[test]
+    fn build_hf_sources_collapses_uri_parse_error() {
+        let roots = HfListRoots {
+            source_list: "inline".to_string(),
+            sources: vec![HfSourceEntry {
+                uri: "hf://incomplete".to_string(),
+                anchor_columns: vec!["title".to_string()],
+                positive_columns: Vec::new(),
+                context_columns: Vec::new(),
+                text_columns: Vec::new(),
+                trust: None,
+                source_id: None,
+            }],
+        };
+        let temp_root = tempdir().unwrap();
+        let nl = platform_newline();
+        fs::write(
+            temp_root.path().join("Cargo.toml"),
+            format!("[package]{nl}name='tmp'{nl}version='0.0.0'{nl}"),
+        )
+        .unwrap();
+        with_current_dir(temp_root.path(), || {
+            with_env_vars(&[(crate::constants::ENV_TRIPLETS_HF_TOKEN, "")], || {
+                let built = build_hf_sources(&roots);
+                assert_eq!(built.len(), 0);
+            });
+        });
+    }
+
+    #[test]
+    fn managed_hf_snapshot_dir_resolves_without_replica() {
+        let dir = tempdir().unwrap();
+        let nl = platform_newline();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            format!("[package]{nl}name='tmp'{nl}version='0.0.0'{nl}"),
+        )
+        .unwrap();
+        with_current_dir(dir.path(), || {
+            let r = managed_hf_snapshot_dir("org/dataset", "default", "train");
+            assert!(r.is_ok());
+            assert!(r.unwrap().ends_with("train"));
+        });
+    }
+
+    #[test]
+    fn managed_hf_snapshot_dir_uses_all_splits_for_empty() {
+        let dir = tempdir().unwrap();
+        let nl = platform_newline();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            format!("[package]{nl}name='tmp'{nl}version='0.0.0'{nl}"),
+        )
+        .unwrap();
+        with_current_dir(dir.path(), || {
+            let r = managed_hf_snapshot_dir("org/dataset", "default", "");
+            assert!(r.is_ok());
+            let path = r.unwrap();
+            assert!(
+                path.to_string_lossy().contains(HF_ALL_SPLITS_DIR),
+                "expected path to contain '{}', got: {}",
+                HF_ALL_SPLITS_DIR,
+                path.display()
+            );
+        });
+    }
+
+    #[test]
+    fn managed_hf_list_snapshot_dir_uses_replica_suffix() {
+        let dir = tempdir().unwrap();
+        let nl = platform_newline();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            format!("[package]{nl}name='tmp'{nl}version='0.0.0'{nl}"),
+        )
+        .unwrap();
+        with_current_dir(dir.path(), || {
+            let r = managed_hf_list_snapshot_dir("org/dataset", "default", "train", 0);
+            assert!(r.is_ok());
+            assert!(r.unwrap().ends_with("replica_0"));
+        });
+    }
+
+    #[test]
+    fn remote_url_for_candidate_builds_bare_urls() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let r1 =
+            HuggingFaceRowSource::remote_url_for_candidate(&config, "url::https://server/parquet");
+        assert_eq!(r1, "https://server/parquet");
+        let r2 = HuggingFaceRowSource::remote_url_for_candidate(&config, "data/train-000.parquet");
+        assert!(r2.contains("/resolve/main/"));
+    }
+
+    #[test]
+    fn row_store_row_key_uses_expected_format() {
+        let key = HuggingFaceRowSource::row_store_row_key(0);
+        assert!(key.starts_with(HF_SHARD_STORE_ROW_PREFIX));
+        assert_eq!(key.len(), HF_SHARD_STORE_ROW_PREFIX.len() + 8);
+        let key_42 = HuggingFaceRowSource::row_store_row_key(42);
+        assert!(key_42.starts_with(HF_SHARD_STORE_ROW_PREFIX));
+    }
+
+    #[test]
+    fn effective_expansion_headroom_rows_uses_config_multiplier() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.cache_capacity = 100;
+        config.remote_expansion_headroom_multiplier = 3;
+        let source = test_source(config);
+        assert_eq!(source.effective_expansion_headroom_rows(), 300);
+
+        source.configure_sampler(&SamplerConfig {
+            ingestion_max_records: 50,
+            ..SamplerConfig::default()
+        });
+        assert_eq!(source.effective_expansion_headroom_rows(), 150);
+    }
+
+    #[test]
+    fn open_store_via_cache_inserts_and_reuses() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let path = dir.path().join("store.simdr");
+        let store = DataStore::open(&path).unwrap();
+        drop(store);
+        let first = HuggingFaceRowSource::open_store_via_cache(&config, &path).unwrap();
+        let second = HuggingFaceRowSource::open_store_via_cache(&config, &path).unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn reported_record_count_uses_len_hint() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config);
+        {
+            let mut state = source.state.lock().unwrap();
+            state.materialized_rows = 10;
+            state.total_rows = Some(10);
+            state.remote_candidates = None;
+        }
+        assert_eq!(source.reported_record_count().unwrap(), 10);
+    }
+
+    #[test]
+    fn format_shard_label_includes_totals() {
+        let label = HuggingFaceRowSource::format_shard_label("data/train-000.parquet", 0, 5);
+        assert!(label.contains("1/5"));
+        assert!(label.contains("train-000.parquet"));
+    }
+
+    #[test]
+    fn effective_refresh_batch_target_uses_multiplier() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config);
+        assert!(source.effective_refresh_batch_target(100) >= 2);
+    }
+
+    #[test]
+    fn remote_shard_permutation_is_deterministic() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let c = vec!["a", "b", "c", "d", "e"];
+        let c1: Vec<String> = c.iter().map(|s| s.to_string()).collect();
+        let c2: Vec<String> = c.iter().map(|s| s.to_string()).collect();
+        let o1 = HuggingFaceRowSource::build_candidate_order(&config, &c1, 42);
+        let o2 = HuggingFaceRowSource::build_candidate_order(&config, &c2, 42);
+        assert_eq!(o1, o2);
+        let o3 = HuggingFaceRowSource::build_candidate_order(&config, &c1, 99);
+        assert_ne!(o1, o3);
+    }
 }
