@@ -1457,8 +1457,19 @@ fn huggingface_live_head_request_matches_manifest_size() {
         HuggingFaceRowSource::build_http_runtime(&config).expect("failed building tokio runtime");
 
     let (shard_url, manifest_size) = runtime.block_on(async {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+        let mut client_builder =
+            reqwest::Client::builder().timeout(std::time::Duration::from_secs(30));
+        if let Some(token) = &hf_token {
+            let auth_value = format!("Bearer {token}");
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                reqwest::header::AUTHORIZATION,
+                reqwest::header::HeaderValue::from_str(&auth_value)
+                    .expect("HF_TOKEN contains invalid header chars"),
+            );
+            client_builder = client_builder.default_headers(headers);
+        }
+        let client = client_builder
             .build()
             .expect("failed building reqwest client");
 
