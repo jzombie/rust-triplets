@@ -1395,33 +1395,42 @@ fn huggingface_live_classlabel_resolution_maps_integers_to_label_strings() {
     }
 }
 
-// ── Live network test: HEAD Content-Length matches manifest shard size ─────
+// ── Live E2E integration test: candidate discovery + shard download ────────
 //
-// Verifies that an HTTP HEAD request to a live HF shard URL returns a
-// Content-Length that matches the size reported in the datasets-server
-// parquet manifest.  The HEAD request is made through the source's own
-// `fetch_remote_size_with_runtime` method, which uses the same authenticated
-// HTTP client (respecting `HF_TOKEN` for private datasets).
+// Exercises the full E2E pipeline through the library's public entry points
+// (`new()` + `refresh()`), then validates that the HTTP HEAD Content-Length
+// for the first shard matches the size from the parquet manifest.
+//
+// Pipeline exercised:
+//   1. /info  — called inside `new()` to resolve ClassLabel column names
+//   2. /size  — called inside `new()` to obtain global row count
+//   3. /parquet or hf-hub listing — called inside `refresh()` via
+//      `ensure_row_available` → `list_remote_candidates_with_runtime`
+//   4. HEAD  — called inside `download_next_remote_shard` via
+//      `fetch_remote_size_with_runtime` (HEAD Content-Length for staleness
+//      detection when the parquet manifest is unavailable)
+//   5. HF CDN — actual parquet shard download
 //
 // Required env vars:
-//   HF_TOKEN                       — optional (for private datasets)
+//   HF_TOKEN                       — optional, for private datasets
 //   TRIPLETS_HF_TOKEN_TEST_DATASET — optional; defaults to a public dataset
 //   TRIPLETS_SKIP_LIVE_TESTS=1     — skips this test without failing
 
 #[test]
-fn huggingface_live_head_request_matches_manifest_size() {
+fn huggingface_live_e2e_candidate_and_shard_download() {
     // ── Guard: respect TRIPLETS_SKIP_LIVE_TESTS ────────────────────────────
     let skip_live = std::env::var(ENV_TRIPLETS_SKIP_LIVE_TESTS)
         .map(|v| !v.trim().is_empty())
         .unwrap_or(false);
 
-    // This test requires a dataset where the datasets-server /parquet endpoint
-    // returns shard sizes (the hf-hub fallback does not provide sizes — returns
-    // an empty HashMap).  Always use the public dataset; the private test dataset
-    // may not support the parquet endpoint.
+    // Always use the public dataset for this test.  The private test dataset
+    // may not support the /parquet endpoint (returns 501), and without the
+    // manifest-provided size there is no reference value to assert the HEAD
+    // Content-Length against.
     if skip_live {
         eprintln!(
-            "[skip] TRIPLETS_SKIP_LIVE_TESTS is active — skipping HEAD size integration test."
+            "[skip] TRIPLETS_SKIP_LIVE_TESTS is active — \
+             skipping E2E integration test."
         );
         return;
     }
@@ -1429,33 +1438,25 @@ fn huggingface_live_head_request_matches_manifest_size() {
 
     let temp = tempfile::tempdir().expect("failed creating tempdir");
 
-    // Build a config that mirrors what the source would use, including
-    // token auth when available so the HEAD request uses the same
-    // authenticated HTTP client.  `new()` already reads `HF_TOKEN` from
-    // the environment and filters empty values, so no manual override is
-    // needed.
-    let mut config = HuggingFaceRowsConfig::new(
-        "hf_live_head_size",
-        &dataset,
-        "default",
-        "train",
-        temp.path(),
-    );
+    // Build the config.  `new()` already reads `HF_TOKEN` from the
+    // environment (filtering empty values), so it authenticates
+    // automatically when a token is available.
+    let mut config =
+        HuggingFaceRowsConfig::new("hf_live_e2e", &dataset, "default", "train", temp.path());
     config.text_columns = vec!["sentiment".to_string()];
 
-    // ── Step 1: fetch the parquet manifest ─────────────────────────────────
-    // Use the library's own authenticated HTTP client and parquet-endpoint
-    // query construction (including the `split` parameter and Bearer token).
+    // ── Reference: fetch candidate URL(s) and manifest sizes ──────────────
+    // This is the same method called internally by `ensure_row_available()`.
+    // We cache the result here so the HEAD assertion below has an expected
+    // size to compare against.
     let runtime =
         HuggingFaceRowSource::build_http_runtime(&config).expect("failed building tokio runtime");
-
     let (candidates, candidate_sizes) =
         HuggingFaceRowSource::list_remote_candidates_with_runtime(&config, Some(&runtime))
             .expect("remote candidate discovery failed");
-
     assert!(
         !candidates.is_empty(),
-        "manifest has no shard candidates for dataset={dataset}"
+        "no shard candidates for dataset={dataset}"
     );
     let first_candidate = &candidates[0];
     let shard_url = first_candidate
@@ -1467,26 +1468,54 @@ fn huggingface_live_head_request_matches_manifest_size() {
         .expect("first candidate missing from sizes map");
     assert!(manifest_size > 0, "manifest reports zero size for shard");
 
-    // ── Step 2: do the HEAD request through the source's own authenticated
-    // infrastructure.  Wrap the shard URL as a url:: candidate so
-    // remote_url_for_candidate can round-trip it.
-    let candidate = format!("url::{shard_url}");
-    let remote_url = HuggingFaceRowSource::remote_url_for_candidate(&config, &candidate);
+    // ── E2E: create source and refresh ────────────────────────────────────
+    // `new()` fetches /info and /size.
+    let source = HuggingFaceRowSource::new(config.clone()).expect("failed creating source");
+
+    // `refresh()` triggers candidate discovery and downloads the first shard
+    // through the full pipeline (parquet manifest → hf-hub fallback → HEAD
+    // → CDN download).
+    let seed = seeded_config(43);
+    let snapshot = source
+        .refresh(&seed, None, Some(5))
+        .expect("refresh should trigger candidate discovery and shard download");
+
+    assert!(
+        !snapshot.records.is_empty(),
+        "expected records from dataset={dataset}"
+    );
+
+    // Verify records have actual content (not empty strings).
+    for record in &snapshot.records {
+        for section in &record.sections {
+            assert!(
+                !section.text.is_empty(),
+                "record section text should not be empty"
+            );
+        }
+    }
+
+    // ── HEAD assertion ────────────────────────────────────────────────────
+    // After the shard was downloaded through the E2E pipeline, validate that
+    // the HTTP HEAD Content-Length matches the size reported by the
+    // datasets-server parquet manifest.  This exercises
+    // `fetch_remote_size_with_runtime`, the same method called internally
+    // inside `download_next_remote_shard` for staleness detection.
+    let remote_url = HuggingFaceRowSource::remote_url_for_candidate(&config, first_candidate);
     assert_eq!(
         remote_url, shard_url,
-        "remote_url_for_candidate should round-trip url:: candidate back to original URL"
+        "remote_url_for_candidate should round-trip url:: candidate"
     );
 
     let head_size =
         HuggingFaceRowSource::fetch_remote_size_with_runtime(&config, &remote_url, &runtime)
             .expect("HEAD request should succeed")
-            .expect("HEAD response should include Content-Length — HF CDN always returns it");
+            .expect("HEAD response should include Content-Length");
 
     assert_eq!(
         head_size, manifest_size,
-        "HEAD Content-Length ({}) differs from manifest size ({}) \
-         for candidate: {candidate}",
-        head_size, manifest_size,
+        "HEAD Content-Length ({head_size}) differs from manifest size ({manifest_size}) \
+         for candidate: {first_candidate}"
     );
 }
 
