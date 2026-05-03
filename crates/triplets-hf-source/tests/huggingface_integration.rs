@@ -13,7 +13,7 @@ use triplets_core::{
 };
 use triplets_hf_source::{
     ENV_TRIPLETS_HF_INFO_ENDPOINT, ENV_TRIPLETS_HF_PARQUET_ENDPOINT, ENV_TRIPLETS_HF_SIZE_ENDPOINT,
-    ENV_TRIPLETS_HF_TOKEN, ENV_TRIPLETS_HF_TOKEN_TEST_DATASET, HF_BASE_URL,
+    ENV_TRIPLETS_HF_TOKEN, ENV_TRIPLETS_HF_TOKEN_TEST_DATASET, HF_BASE_URL, HF_PUBLIC_TEST_DATASET,
     HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE, HfListRoots, HfSourceEntry, HuggingFaceRowSource,
     HuggingFaceRowsConfig, build_hf_sources, load_hf_sources_from_list, parse_csv_fields,
     parse_hf_source_line, parse_hf_uri, resolve_hf_list_roots,
@@ -1360,7 +1360,7 @@ fn huggingface_live_classlabel_resolution_maps_integers_to_label_strings() {
 
     let mut config = config_no_auth(
         "hf_live_classlabel",
-        "TimKoornstra/financial-tweets-sentiment",
+        HF_PUBLIC_TEST_DATASET,
         "default",
         "train",
         temp.path(),
@@ -1378,7 +1378,7 @@ fn huggingface_live_classlabel_resolution_maps_integers_to_label_strings() {
 
     assert!(
         !snapshot.records.is_empty(),
-        "expected records from TimKoornstra/financial-tweets-sentiment"
+        "expected records from HF_PUBLIC_TEST_DATASET"
     );
 
     const KNOWN_LABELS: &[&str] = &["neutral", "bullish", "bearish"];
@@ -1429,7 +1429,7 @@ fn huggingface_live_head_request_matches_manifest_size() {
                 return;
             }
             // Public fallback used by the existing live tests.
-            "TimKoornstra/financial-tweets-sentiment".to_string()
+            HF_PUBLIC_TEST_DATASET.to_string()
         }
     };
 

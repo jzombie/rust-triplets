@@ -99,6 +99,14 @@ pub const HF_SIZE_DEFAULT_ENDPOINT: &str = "https://datasets-server.huggingface.
 /// environment variable.
 pub const HF_INFO_DEFAULT_ENDPOINT: &str = "https://datasets-server.huggingface.co/info";
 
+/// Public Hugging Face dataset used as a fallback in live integration tests.
+///
+/// When `TRIPLETS_HF_TOKEN_TEST_DATASET` is not set (or is empty), live tests
+/// fall back to this public dataset.  It has a `sentiment` column declared as
+/// `ClassLabel` with names `["neutral", "bullish", "bearish"]`, making it
+/// suitable for end-to-end tests of `/info` endpoint ClassLabel resolution.
+pub const HF_PUBLIC_TEST_DATASET: &str = "TimKoornstra/financial-tweets-sentiment";
+
 /// Endpoint used to validate a Hugging Face API token.
 ///
 /// A GET to this URL with a valid `Authorization: Bearer <token>` header
