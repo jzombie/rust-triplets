@@ -10295,4 +10295,237 @@ mod tests {
             "expected Err from 501 /parquet response so caller falls back to hf-hub listing, got {result:?}"
         );
     }
+
+    #[test]
+    fn hf_source_entry_partial_eq_compares_all_fields() {
+        let base = HfSourceEntry {
+            uri: "hf://org/ds/default/train".to_string(),
+            anchor_columns: vec!["title".to_string()],
+            positive_columns: vec!["body".to_string()],
+            context_columns: vec!["meta".to_string()],
+            text_columns: Vec::new(),
+            trust: Some(0.8),
+            source_id: None,
+        };
+        let same = HfSourceEntry { ..base.clone() };
+        assert_eq!(base, same);
+        let diff_uri = HfSourceEntry {
+            uri: "hf://other".to_string(),
+            ..base.clone()
+        };
+        assert_ne!(base, diff_uri);
+        let diff_trust = HfSourceEntry {
+            trust: Some(0.5),
+            ..base.clone()
+        };
+        assert_ne!(base, diff_trust);
+        let diff_sid = HfSourceEntry {
+            source_id: Some("my-id".to_string()),
+            ..base.clone()
+        };
+        assert_ne!(base, diff_sid);
+        let no_trust = HfSourceEntry {
+            trust: None,
+            ..base.clone()
+        };
+        assert_ne!(base, no_trust);
+    }
+
+    #[test]
+    fn open_shard_store_creates_parent_directories() {
+        let dir = tempdir().unwrap();
+        let nested = dir.path().join("a").join("b").join("c.simdr");
+        assert!(!nested.parent().unwrap().exists());
+        let config = test_config(dir.path().to_path_buf());
+        let store = HuggingFaceRowSource::open_shard_store(&config, &nested).unwrap();
+        assert!(nested.parent().unwrap().exists());
+        drop(store);
+    }
+
+    #[test]
+    fn open_shard_store_errors_when_base_path_is_a_file() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let file_path = dir.path().join("not-a-dir");
+        fs::write(&file_path, b"not-a-dir").unwrap();
+        let bad_path = file_path.join("store.simdr");
+        let result = HuggingFaceRowSource::open_shard_store(&config, &bad_path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn remove_stale_store_evicts_from_cache_and_removes_file() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let store_path = dir.path().join("stale.simdr");
+        fs::write(&store_path, b"stale-content").unwrap();
+        config.store_cache.lock().unwrap().insert(
+            store_path.clone(),
+            Arc::new(DataStore::open(&store_path).unwrap()),
+        );
+        HuggingFaceRowSource::remove_stale_store(&config, &store_path);
+        assert!(!store_path.exists(), "stale store file must be removed");
+        assert!(!config.store_cache.lock().unwrap().contains_key(&store_path));
+    }
+
+    #[test]
+    fn remove_stale_store_does_not_panic_when_file_missing() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let missing = dir.path().join("never-existed.simdr");
+        HuggingFaceRowSource::remove_stale_store(&config, &missing);
+        assert!(!missing.exists());
+    }
+
+    #[test]
+    fn invalidate_eligible_index_resets_cache() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config);
+        {
+            let mut cache = source.eligible_index.lock().unwrap();
+            *cache = EligibleIndexCache {
+                signature: Some(42),
+                rows: Some(Arc::new(vec![0, 1, 2])),
+                shards: vec![ShardIndex {
+                    path: PathBuf::from("dummy.parquet"),
+                    global_start: 0,
+                    row_count: 3,
+                    random_access: true,
+                    parquet_row_groups: vec![(0, 3)],
+                    checkpoints: Vec::new(),
+                    remote_candidate: None,
+                }],
+            };
+        }
+        source.invalidate_eligible_index();
+        let cache = source.eligible_index.lock().unwrap();
+        assert!(cache.signature.is_none());
+        assert!(cache.rows.is_none());
+        assert!(cache.shards.is_empty());
+    }
+
+    #[test]
+    fn write_store_row_count_and_read_store_row_count_roundtrip() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config);
+        let store_path = dir.path().join("roundtrip.simdr");
+        let store = DataStore::open(&store_path).unwrap();
+        source.write_store_row_count(&store, 42).unwrap();
+        assert_eq!(source.read_store_row_count(&store).unwrap(), 42);
+        source.write_store_row_count(&store, 99).unwrap();
+        assert_eq!(source.read_store_row_count(&store).unwrap(), 99);
+    }
+
+    #[test]
+    fn read_store_row_count_errors_on_payload_size_mismatch() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config);
+        let store_path = dir.path().join("bad-meta.simdr");
+        let store = DataStore::open(&store_path).unwrap();
+        store.write(HF_SHARD_STORE_META_ROWS_KEY, b"abc").unwrap();
+        match source.read_store_row_count(&store) {
+            Err(SamplerError::SourceUnavailable { reason, .. }) => {
+                assert!(reason.contains("payload size"));
+            }
+            other => panic!("expected SourceUnavailable error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[serial(global_state)]
+    fn trigger_expansion_if_needed_starts_background_thread() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config);
+        {
+            let mut state = source.state.lock().unwrap();
+            state.materialized_rows = 5;
+            state.total_rows = Some(100);
+            state.remote_candidates = Some(vec![
+                "url::http://127.0.0.1:1/ds/resolve/main/train/000.ndjson".to_string(),
+            ]);
+            state.next_remote_idx = 0;
+            state.remote_candidate_order = vec![0];
+        }
+        assert!(source.expansion_thread.lock().unwrap().is_none());
+        source.trigger_expansion_if_needed();
+        let handle = source.expansion_thread.lock().unwrap().take();
+        assert!(handle.is_some());
+        if let Some(h) = handle {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !h.is_finished() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            assert!(h.is_finished());
+        }
+    }
+
+    #[test]
+    fn trigger_expansion_if_needed_skips_when_all_remote_candidates_consumed() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config);
+        {
+            let mut state = source.state.lock().unwrap();
+            state.materialized_rows = 100;
+            state.total_rows = Some(100);
+            state.remote_candidates = Some(vec!["done".to_string()]);
+            state.next_remote_idx = 1;
+        }
+        source.trigger_expansion_if_needed();
+        assert!(source.expansion_thread.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn trigger_expansion_if_needed_skips_when_total_rows_is_zero() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config);
+        {
+            let mut state = source.state.lock().unwrap();
+            state.materialized_rows = 0;
+            state.total_rows = Some(0);
+        }
+        source.trigger_expansion_if_needed();
+        assert!(source.expansion_thread.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn trigger_expansion_if_needed_skips_when_already_running() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config);
+        {
+            let mut state = source.state.lock().unwrap();
+            state.materialized_rows = 5;
+            state.total_rows = Some(100);
+            state.remote_candidates = Some(vec![
+                "url::http://127.0.0.1:1/ds/resolve/main/train/000.ndjson".to_string(),
+            ]);
+            state.next_remote_idx = 0;
+            state.remote_candidate_order = vec![0];
+        }
+        source.trigger_expansion_if_needed();
+        let first_handle = source.expansion_thread.lock().unwrap().take();
+        assert!(first_handle.is_some());
+        {
+            let mut slot = source.expansion_thread.lock().unwrap();
+            *slot = Some(std::thread::spawn(|| {
+                std::thread::sleep(std::time::Duration::from_secs(3600));
+            }));
+        }
+        source.trigger_expansion_if_needed();
+        assert!(source.expansion_thread.lock().unwrap().as_ref().is_some());
+        let _long = source.expansion_thread.lock().unwrap().take();
+    }
+
+    #[test]
+    fn ensure_cache_group_reports_error() {
+        let bad_group = PathBuf::from("bad\0group");
+        let result = ensure_cache_group(bad_group);
+        assert!(result.is_err());
+    }
 }
