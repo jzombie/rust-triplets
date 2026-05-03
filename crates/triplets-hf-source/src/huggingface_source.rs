@@ -32,7 +32,7 @@ use tracing::{debug, info, warn};
 use walkdir::WalkDir;
 
 use crate::constants::{
-    ALL_SPLITS_DIR, HF_CLASSLABEL_TYPE, HF_GROUP, HF_INFO_DEFAULT_ENDPOINT, HF_JSON_KEY_CONFIG,
+    HF_ALL_SPLITS_DIR, HF_CLASSLABEL_TYPE, HF_GROUP, HF_INFO_DEFAULT_ENDPOINT, HF_JSON_KEY_CONFIG,
     HF_JSON_KEY_CONFIG_NAME, HF_JSON_KEY_CONFIGS, HF_JSON_KEY_DATASET, HF_JSON_KEY_DATASET_INFO,
     HF_JSON_KEY_FEATURE_TYPE, HF_JSON_KEY_FEATURES, HF_JSON_KEY_LABEL_NAMES, HF_JSON_KEY_NUM_ROWS,
     HF_JSON_KEY_PARQUET_FILES, HF_JSON_KEY_SIZE, HF_JSON_KEY_SPLIT, HF_JSON_KEY_SPLIT_NAME,
@@ -40,9 +40,9 @@ use crate::constants::{
     HF_RESOLVE_UNKNOWN_FALLBACK_PATH, HF_RESOLVE_URL_SEPARATOR, HF_SHARD_CANDIDATE_SEED_TAG,
     HF_SHARD_STORE_EXTENSION, HF_SHARD_STORE_META_ROWS_KEY, HF_SHARD_STORE_ROW_PREFIX,
     HF_SHARD_STORE_SOURCE_SIZE_KEY, HF_SIZE_DEFAULT_ENDPOINT, HF_TOKEN, HF_WHOAMI_DEFAULT_ENDPOINT,
-    PARQUET_MANIFEST_DIR, REMOTE_BOOTSTRAP_SHARDS, REMOTE_EXPANSION_HEADROOM_MULTIPLIER,
-    REMOTE_URL_PREFIX, TRIPLETS_HF_INFO_ENDPOINT, TRIPLETS_HF_PARQUET_ENDPOINT,
-    TRIPLETS_HF_SIZE_ENDPOINT, TRIPLETS_HF_WHOAMI_ENDPOINT,
+    HF_PARQUET_MANIFEST_DIR, HF_REMOTE_BOOTSTRAP_SHARDS, HF_REMOTE_EXPANSION_HEADROOM_MULTIPLIER,
+    HF_REMOTE_URL_PREFIX, ENV_TRIPLETS_HF_INFO_ENDPOINT, ENV_TRIPLETS_HF_PARQUET_ENDPOINT,
+    ENV_TRIPLETS_HF_SIZE_ENDPOINT, ENV_TRIPLETS_HF_WHOAMI_ENDPOINT,
 };
 use chrono::{DateTime, Utc};
 use triplets_core::SamplerError;
@@ -98,10 +98,10 @@ pub fn managed_hf_list_snapshot_dir(
     split: &str,
     replica_idx: usize,
 ) -> Result<PathBuf, String> {
-    // Empty split (all-splits mode) uses ALL_SPLITS_DIR so the path hierarchy stays valid
+    // Empty split (all-splits mode) uses HF_ALL_SPLITS_DIR so the path hierarchy stays valid
     // and won't collide with a split literally named "" on any filesystem.
     let split_dir = if split.is_empty() {
-        ALL_SPLITS_DIR
+        HF_ALL_SPLITS_DIR
     } else {
         split
     };
@@ -122,7 +122,7 @@ pub fn managed_hf_snapshot_dir(
     split: &str,
 ) -> Result<PathBuf, String> {
     let split_dir = if split.is_empty() {
-        ALL_SPLITS_DIR
+        HF_ALL_SPLITS_DIR
     } else {
         split
     };
@@ -657,7 +657,7 @@ impl HuggingFaceRowsConfig {
             cache_capacity: SamplerConfig::default().ingestion_max_records,
             parquet_row_group_cache_capacity: 8,
             refresh_batch_multiplier: HF_REFRESH_BATCH_MULTIPLIER,
-            remote_expansion_headroom_multiplier: REMOTE_EXPANSION_HEADROOM_MULTIPLIER,
+            remote_expansion_headroom_multiplier: HF_REMOTE_EXPANSION_HEADROOM_MULTIPLIER,
             local_disk_cap_bytes: Some(32 * 1024 * 1024 * 1024),
             id_column: Some("id".to_string()),
             text_columns: vec!["text".to_string()],
@@ -1774,7 +1774,7 @@ impl HuggingFaceRowSource {
                 }
 
                 matched_manifest_entries += 1;
-                let candidate = format!("{REMOTE_URL_PREFIX}{url}");
+                let candidate = format!("{HF_REMOTE_URL_PREFIX}{url}");
                 let expected_size = entry.get(HF_JSON_KEY_SIZE).and_then(Value::as_u64);
 
                 // Remove stale/incomplete transient parquet downloads so they get
@@ -1991,7 +1991,7 @@ impl HuggingFaceRowSource {
     }
 
     fn parquet_manifest_endpoint() -> String {
-        if let Ok(value) = std::env::var(TRIPLETS_HF_PARQUET_ENDPOINT)
+        if let Ok(value) = std::env::var(ENV_TRIPLETS_HF_PARQUET_ENDPOINT)
             && !value.trim().is_empty()
         {
             return value;
@@ -2000,7 +2000,7 @@ impl HuggingFaceRowSource {
     }
 
     fn size_endpoint() -> String {
-        if let Ok(value) = std::env::var(TRIPLETS_HF_SIZE_ENDPOINT)
+        if let Ok(value) = std::env::var(ENV_TRIPLETS_HF_SIZE_ENDPOINT)
             && !value.trim().is_empty()
         {
             return value;
@@ -2009,7 +2009,7 @@ impl HuggingFaceRowSource {
     }
 
     fn info_endpoint() -> String {
-        if let Ok(value) = std::env::var(TRIPLETS_HF_INFO_ENDPOINT)
+        if let Ok(value) = std::env::var(ENV_TRIPLETS_HF_INFO_ENDPOINT)
             && !value.trim().is_empty()
         {
             return value;
@@ -2018,7 +2018,7 @@ impl HuggingFaceRowSource {
     }
 
     fn whoami_endpoint() -> String {
-        if let Ok(value) = std::env::var(TRIPLETS_HF_WHOAMI_ENDPOINT)
+        if let Ok(value) = std::env::var(ENV_TRIPLETS_HF_WHOAMI_ENDPOINT)
             && !value.trim().is_empty()
         {
             return value;
@@ -2298,14 +2298,14 @@ impl HuggingFaceRowSource {
 
     /// Map a candidate identifier to the local snapshot target path.
     fn candidate_target_path(config: &HuggingFaceRowsConfig, candidate: &str) -> PathBuf {
-        if let Some(url) = candidate.strip_prefix(REMOTE_URL_PREFIX) {
+        if let Some(url) = candidate.strip_prefix(HF_REMOTE_URL_PREFIX) {
             let suffix = url
                 .split(HF_RESOLVE_URL_SEPARATOR)
                 .nth(1)
                 .map(|value| value.trim_start_matches('/'))
                 .filter(|value| !value.is_empty())
                 .unwrap_or(HF_RESOLVE_UNKNOWN_FALLBACK_PATH);
-            return config.snapshot_dir.join(PARQUET_MANIFEST_DIR).join(suffix);
+            return config.snapshot_dir.join(HF_PARQUET_MANIFEST_DIR).join(suffix);
         }
         config.snapshot_dir.join(candidate)
     }
@@ -2332,7 +2332,7 @@ impl HuggingFaceRowSource {
 
     /// Return root directory used for manifest-cached remote shards.
     fn manifest_cache_root(&self) -> PathBuf {
-        self.config.snapshot_dir.join(PARQUET_MANIFEST_DIR)
+        self.config.snapshot_dir.join(HF_PARQUET_MANIFEST_DIR)
     }
 
     /// Recompute shard `global_start` offsets and total materialized row count.
@@ -2383,7 +2383,7 @@ impl HuggingFaceRowSource {
 
         let cache_root = CacheRoot::from_root(&self.config.snapshot_dir);
         cache_root
-            .ensure_group_with_policy(PARQUET_MANIFEST_DIR, Some(&policy))
+            .ensure_group_with_policy(HF_PARQUET_MANIFEST_DIR, Some(&policy))
             .map_err(|err| SamplerError::SourceUnavailable {
                 source_id: self.config.source_id.clone(),
                 reason: format!(
@@ -2791,7 +2791,7 @@ impl HuggingFaceRowSource {
         shard_label: &str,
         runtime: Option<&tokio::runtime::Runtime>,
     ) -> Result<PathBuf, SamplerError> {
-        if let Some(remote_url) = remote_path.strip_prefix(REMOTE_URL_PREFIX) {
+        if let Some(remote_url) = remote_path.strip_prefix(HF_REMOTE_URL_PREFIX) {
             let target = Self::candidate_target_path(config, remote_path);
             let store_target = Self::shard_store_path_for(&target);
             if store_target.exists() {
@@ -3227,7 +3227,7 @@ impl HuggingFaceRowSource {
                     drop(state);
 
                     if bootstrap_needed {
-                        let bootstrap_target = REMOTE_BOOTSTRAP_SHARDS.min(candidate_count);
+                        let bootstrap_target = HF_REMOTE_BOOTSTRAP_SHARDS.min(candidate_count);
                         info!(
                             "[triplets:hf] {} cold start: downloading {} initial shard(s) before first read",
                             self.config.source_id, bootstrap_target
@@ -3644,7 +3644,7 @@ impl HuggingFaceRowSource {
     fn build_shard_index(config: &HuggingFaceRowsConfig) -> Result<ShardIndexResult, SamplerError> {
         let start_index = Instant::now();
         let mut shard_paths = Vec::new();
-        let manifest_root = config.snapshot_dir.join(PARQUET_MANIFEST_DIR);
+        let manifest_root = config.snapshot_dir.join(HF_PARQUET_MANIFEST_DIR);
         let accepted = config
             .shard_extensions
             .iter()
@@ -5040,21 +5040,21 @@ mod tests {
 
             assert!(single.exists());
             assert!(listed.exists());
-            // Both must use ALL_SPLITS_DIR ("_all") in the path, not an empty segment.
+            // Both must use HF_ALL_SPLITS_DIR ("_all") in the path, not an empty segment.
             assert!(
                 single.ends_with(PathBuf::from(format!(
                     "{}/org__dataset/default/{}",
-                    HF_GROUP, ALL_SPLITS_DIR
+                    HF_GROUP, HF_ALL_SPLITS_DIR
                 ))),
-                "expected single-source path to end with ALL_SPLITS_DIR, got: {}",
+                "expected single-source path to end with HF_ALL_SPLITS_DIR, got: {}",
                 single.display()
             );
             assert!(
                 listed.ends_with(PathBuf::from(format!(
                     "{}/source-list/org__dataset/default/{}/replica_0",
-                    HF_GROUP, ALL_SPLITS_DIR
+                    HF_GROUP, HF_ALL_SPLITS_DIR
                 ))),
-                "expected list-source path to end with ALL_SPLITS_DIR, got: {}",
+                "expected list-source path to end with HF_ALL_SPLITS_DIR, got: {}",
                 listed.display()
             );
             // Must not collide with the explicit-train path.
@@ -5123,7 +5123,7 @@ mod tests {
         config.dataset = "invalid///dataset".to_string();
 
         let result = with_env_var(
-            TRIPLETS_HF_PARQUET_ENDPOINT,
+            ENV_TRIPLETS_HF_PARQUET_ENDPOINT,
             "http://127.0.0.1:1/parquet",
             || HuggingFaceRowSource::list_remote_candidates(&config),
         );
@@ -5152,7 +5152,7 @@ mod tests {
         config.hf_token = Some("valid-test-token".to_string());
         let server = spawn_one_shot_http(b"{\"name\":\"testuser\"}".to_vec());
         let base_url = server.url().to_string();
-        with_env_var(TRIPLETS_HF_WHOAMI_ENDPOINT, &base_url, || {
+        with_env_var(ENV_TRIPLETS_HF_WHOAMI_ENDPOINT, &base_url, || {
             let runtime = HuggingFaceRowSource::build_http_runtime(&config).unwrap();
             let result = HuggingFaceRowSource::validate_token_with_runtime(&config, &runtime);
             assert!(result.is_ok(), "200 response should pass token validation");
@@ -5167,7 +5167,7 @@ mod tests {
         config.hf_token = Some("invalid-test-token".to_string());
         let server = TestHttpServer::new(401, b"Unauthorized".to_vec());
         let base_url = server.url().to_string();
-        with_env_var(TRIPLETS_HF_WHOAMI_ENDPOINT, &base_url, || {
+        with_env_var(ENV_TRIPLETS_HF_WHOAMI_ENDPOINT, &base_url, || {
             let runtime = HuggingFaceRowSource::build_http_runtime(&config).unwrap();
             let result = HuggingFaceRowSource::validate_token_with_runtime(&config, &runtime);
             assert!(result.is_err(), "401 response should fail token validation");
@@ -5206,9 +5206,9 @@ mod tests {
         let size_url = size_server.url().to_string();
         with_env_vars(
             &[
-                (TRIPLETS_HF_WHOAMI_ENDPOINT, &whoami_url),
-                (TRIPLETS_HF_INFO_ENDPOINT, &info_url),
-                (TRIPLETS_HF_SIZE_ENDPOINT, &size_url),
+                (ENV_TRIPLETS_HF_WHOAMI_ENDPOINT, &whoami_url),
+                (ENV_TRIPLETS_HF_INFO_ENDPOINT, &info_url),
+                (ENV_TRIPLETS_HF_SIZE_ENDPOINT, &size_url),
             ],
             || {
                 let result = HuggingFaceRowSource::new(config.clone());
@@ -5267,7 +5267,7 @@ mod tests {
         with_current_dir(temp_root.path(), || {
             with_env_vars(
                 &[
-                    (TRIPLETS_HF_SIZE_ENDPOINT, &format!("{size_base_url}/size")),
+                    (ENV_TRIPLETS_HF_SIZE_ENDPOINT, &format!("{size_base_url}/size")),
                     (HF_TOKEN, ""),
                 ],
                 || {
@@ -5327,7 +5327,7 @@ mod tests {
             with_env_vars(
                 &[
                     (
-                        TRIPLETS_HF_SIZE_ENDPOINT,
+                        ENV_TRIPLETS_HF_SIZE_ENDPOINT,
                         &format!("{size_base_url_a}/size"),
                     ),
                     (HF_TOKEN, ""),
@@ -5848,7 +5848,7 @@ mod tests {
 
         // A parquet file with the correct declared size — considered fully cached.
         let complete_url = "https://host/datasets/org/ds/resolve/main/train/000.parquet";
-        let complete_candidate = format!("{REMOTE_URL_PREFIX}{complete_url}");
+        let complete_candidate = format!("{HF_REMOTE_URL_PREFIX}{complete_url}");
         let complete_target =
             HuggingFaceRowSource::candidate_target_path(&config, &complete_candidate);
         fs::create_dir_all(complete_target.parent().unwrap()).unwrap();
@@ -5856,7 +5856,7 @@ mod tests {
 
         // A parquet file with the WRONG size — stale/incomplete, must be deleted.
         let stale_url = "https://host/datasets/org/ds/resolve/main/train/001.parquet";
-        let stale_candidate = format!("{REMOTE_URL_PREFIX}{stale_url}");
+        let stale_candidate = format!("{HF_REMOTE_URL_PREFIX}{stale_url}");
         let stale_target = HuggingFaceRowSource::candidate_target_path(&config, &stale_candidate);
         fs::create_dir_all(stale_target.parent().unwrap()).unwrap();
         fs::write(&stale_target, vec![2u8; 3]).unwrap();
@@ -5897,7 +5897,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
         let url = "https://host/datasets/org/ds/resolve/main/train/blocked.parquet";
-        let candidate = format!("{REMOTE_URL_PREFIX}{url}");
+        let candidate = format!("{HF_REMOTE_URL_PREFIX}{url}");
         let target = HuggingFaceRowSource::candidate_target_path(&config, &candidate);
         fs::create_dir_all(&target).unwrap();
 
@@ -7333,7 +7333,7 @@ mod tests {
         let base_url = server.url().to_string();
 
         let (candidates, sizes, matched) =
-            with_env_var(TRIPLETS_HF_PARQUET_ENDPOINT, &base_url, || {
+            with_env_var(ENV_TRIPLETS_HF_PARQUET_ENDPOINT, &base_url, || {
                 HuggingFaceRowSource::list_remote_candidates_from_parquet_manifest(&config)
             })
             .unwrap();
@@ -7359,7 +7359,7 @@ mod tests {
         let server = spawn_one_shot_http(body);
         let base_url = server.url().to_string();
 
-        let rows = with_env_var(TRIPLETS_HF_SIZE_ENDPOINT, &base_url, || {
+        let rows = with_env_var(ENV_TRIPLETS_HF_SIZE_ENDPOINT, &base_url, || {
             HuggingFaceRowSource::fetch_global_row_count(&config)
         })
         .unwrap();
@@ -7383,7 +7383,7 @@ mod tests {
         let server = spawn_one_shot_http(body);
         let base_url = server.url().to_string();
 
-        let rows = with_env_var(TRIPLETS_HF_SIZE_ENDPOINT, &base_url, || {
+        let rows = with_env_var(ENV_TRIPLETS_HF_SIZE_ENDPOINT, &base_url, || {
             HuggingFaceRowSource::fetch_global_row_count_with_runtime(&config, Some(&runtime))
         })
         .unwrap();
@@ -7393,17 +7393,17 @@ mod tests {
     #[test]
     #[serial(global_state)]
     fn endpoint_helpers_fallback_for_empty_env_values() {
-        let parquet = with_env_var(TRIPLETS_HF_PARQUET_ENDPOINT, "   ", || {
+        let parquet = with_env_var(ENV_TRIPLETS_HF_PARQUET_ENDPOINT, "   ", || {
             HuggingFaceRowSource::parquet_manifest_endpoint()
         });
         assert_eq!(parquet, "https://datasets-server.huggingface.co/parquet");
 
-        let size = with_env_var(TRIPLETS_HF_SIZE_ENDPOINT, "", || {
+        let size = with_env_var(ENV_TRIPLETS_HF_SIZE_ENDPOINT, "", || {
             HuggingFaceRowSource::size_endpoint()
         });
         assert_eq!(size, "https://datasets-server.huggingface.co/size");
 
-        let info = with_env_var(TRIPLETS_HF_INFO_ENDPOINT, "   ", || {
+        let info = with_env_var(ENV_TRIPLETS_HF_INFO_ENDPOINT, "   ", || {
             HuggingFaceRowSource::info_endpoint()
         });
         assert_eq!(info, "https://datasets-server.huggingface.co/info");
@@ -7444,7 +7444,7 @@ mod tests {
         let server = spawn_one_shot_http(body);
         let base_url = server.url().to_string();
 
-        let rows = with_env_var(TRIPLETS_HF_SIZE_ENDPOINT, &base_url, || {
+        let rows = with_env_var(ENV_TRIPLETS_HF_SIZE_ENDPOINT, &base_url, || {
             HuggingFaceRowSource::fetch_global_row_count(&config)
         })
         .unwrap();
@@ -7465,7 +7465,7 @@ mod tests {
         let server = spawn_one_shot_http(body);
         let base_url = server.url().to_string();
 
-        let (candidates, sizes) = with_env_var(TRIPLETS_HF_PARQUET_ENDPOINT, &base_url, || {
+        let (candidates, sizes) = with_env_var(ENV_TRIPLETS_HF_PARQUET_ENDPOINT, &base_url, || {
             HuggingFaceRowSource::list_remote_candidates(&config)
         })
         .unwrap();
@@ -7490,7 +7490,7 @@ mod tests {
         let server = spawn_one_shot_http(body);
         let base_url = server.url().to_string();
 
-        let (candidates, sizes) = with_env_var(TRIPLETS_HF_PARQUET_ENDPOINT, &base_url, || {
+        let (candidates, sizes) = with_env_var(ENV_TRIPLETS_HF_PARQUET_ENDPOINT, &base_url, || {
             HuggingFaceRowSource::list_remote_candidates_with_runtime(&config, Some(&runtime))
         })
         .unwrap();
@@ -7516,7 +7516,7 @@ mod tests {
 
         // Pre-create the .simdr store target so the manifest entry is "fully cached".
         let shard_url = "https://host/datasets/org/ds/resolve/main/train/part-000.ndjson";
-        let candidate = format!("{REMOTE_URL_PREFIX}{shard_url}");
+        let candidate = format!("{HF_REMOTE_URL_PREFIX}{shard_url}");
         let target = HuggingFaceRowSource::candidate_target_path(&config, &candidate);
         let store_target = HuggingFaceRowSource::shard_store_path_for(&target);
         fs::create_dir_all(store_target.parent().unwrap()).unwrap();
@@ -7532,7 +7532,7 @@ mod tests {
         let base_url = server.url().to_string();
 
         // Must return the full manifest candidate list without falling through to hf-hub.
-        let (candidates, sizes) = with_env_var(TRIPLETS_HF_PARQUET_ENDPOINT, &base_url, || {
+        let (candidates, sizes) = with_env_var(ENV_TRIPLETS_HF_PARQUET_ENDPOINT, &base_url, || {
             HuggingFaceRowSource::list_remote_candidates(&config)
         })
         .unwrap();
@@ -7552,7 +7552,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
 
-        let result = with_env_var(TRIPLETS_HF_PARQUET_ENDPOINT, "http://127.0.0.1:1", || {
+        let result = with_env_var(ENV_TRIPLETS_HF_PARQUET_ENDPOINT, "http://127.0.0.1:1", || {
             HuggingFaceRowSource::list_remote_candidates_from_parquet_manifest(&config)
         });
         assert!(result.is_err());
@@ -7564,7 +7564,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
 
-        let result = with_env_var(TRIPLETS_HF_SIZE_ENDPOINT, "http://127.0.0.1:1", || {
+        let result = with_env_var(ENV_TRIPLETS_HF_SIZE_ENDPOINT, "http://127.0.0.1:1", || {
             HuggingFaceRowSource::fetch_global_row_count(&config)
         });
         assert!(result.is_err());
@@ -7590,7 +7590,7 @@ mod tests {
         let server = spawn_one_shot_http(body);
         let base_url = server.url().to_string();
 
-        let maps = with_env_var(TRIPLETS_HF_INFO_ENDPOINT, &base_url, || {
+        let maps = with_env_var(ENV_TRIPLETS_HF_INFO_ENDPOINT, &base_url, || {
             HuggingFaceRowSource::fetch_classlabel_maps_with_runtime(&config, Some(&runtime))
         });
 
@@ -8824,7 +8824,7 @@ mod tests {
         source.state.lock().unwrap().remote_candidates = None;
 
         with_env_var(
-            TRIPLETS_HF_PARQUET_ENDPOINT,
+            ENV_TRIPLETS_HF_PARQUET_ENDPOINT,
             &format!("{base_url}/parquet"),
             || {
                 assert!(source.ensure_row_available(0).unwrap());
@@ -8846,7 +8846,7 @@ mod tests {
 
         // Construct the candidate URL that the manifest will list.
         let shard_raw_url = "http://127.0.0.1:1/datasets/org/ds/resolve/main/train/a.ndjson";
-        let shard_candidate = format!("{REMOTE_URL_PREFIX}{shard_raw_url}");
+        let shard_candidate = format!("{HF_REMOTE_URL_PREFIX}{shard_raw_url}");
         let target = HuggingFaceRowSource::candidate_target_path(&config, &shard_candidate);
         let store_path = HuggingFaceRowSource::shard_store_path_for(&target);
         fs::create_dir_all(store_path.parent().unwrap()).unwrap();
@@ -8878,7 +8878,7 @@ mod tests {
 
         // Row 1 is not yet materialised; this triggers the candidate-init path.
         // all candidates are already on disk → next_remote_idx = candidates.len() → Ok(false).
-        let result = with_env_var(TRIPLETS_HF_PARQUET_ENDPOINT, &base_url, || {
+        let result = with_env_var(ENV_TRIPLETS_HF_PARQUET_ENDPOINT, &base_url, || {
             source.ensure_row_available(1)
         })
         .unwrap();
@@ -9392,7 +9392,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
         // Port 1 is always unreachable; ureq returns an Err which must be handled.
-        let maps = with_env_var(TRIPLETS_HF_INFO_ENDPOINT, "http://127.0.0.1:1", || {
+        let maps = with_env_var(ENV_TRIPLETS_HF_INFO_ENDPOINT, "http://127.0.0.1:1", || {
             HuggingFaceRowSource::fetch_classlabel_maps(&config)
         });
         assert!(
@@ -9409,7 +9409,7 @@ mod tests {
         let server = TestHttpServer::new(404, b"not found".to_vec());
         let base_url = server.url().to_string();
 
-        let maps = with_env_var(TRIPLETS_HF_INFO_ENDPOINT, &base_url, || {
+        let maps = with_env_var(ENV_TRIPLETS_HF_INFO_ENDPOINT, &base_url, || {
             HuggingFaceRowSource::fetch_classlabel_maps(&config)
         });
         assert!(
@@ -9426,7 +9426,7 @@ mod tests {
         let server = spawn_one_shot_http(b"this is not json".to_vec());
         let base_url = server.url().to_string();
 
-        let maps = with_env_var(TRIPLETS_HF_INFO_ENDPOINT, &base_url, || {
+        let maps = with_env_var(ENV_TRIPLETS_HF_INFO_ENDPOINT, &base_url, || {
             HuggingFaceRowSource::fetch_classlabel_maps(&config)
         });
         assert!(
@@ -9455,7 +9455,7 @@ mod tests {
         let server = spawn_one_shot_http(body);
         let base_url = server.url().to_string();
 
-        let maps = with_env_var(TRIPLETS_HF_INFO_ENDPOINT, &base_url, || {
+        let maps = with_env_var(ENV_TRIPLETS_HF_INFO_ENDPOINT, &base_url, || {
             HuggingFaceRowSource::fetch_classlabel_maps(&config)
         });
         assert_eq!(maps.len(), 1);
@@ -9553,8 +9553,8 @@ mod tests {
         let config_for_index = config.clone();
         let source = with_env_vars(
             &[
-                (TRIPLETS_HF_INFO_ENDPOINT, info_url_1.as_str()),
-                (TRIPLETS_HF_SIZE_ENDPOINT, size_url.as_str()),
+                (ENV_TRIPLETS_HF_INFO_ENDPOINT, info_url_1.as_str()),
+                (ENV_TRIPLETS_HF_SIZE_ENDPOINT, size_url.as_str()),
             ],
             || HuggingFaceRowSource::new(config).unwrap(),
         );
@@ -9597,7 +9597,7 @@ mod tests {
         let info_url_2 = info_server_2.url().to_string();
 
         for _ in 0..3 {
-            let _ = with_env_vars(&[(TRIPLETS_HF_INFO_ENDPOINT, info_url_2.as_str())], || {
+            let _ = with_env_vars(&[(ENV_TRIPLETS_HF_INFO_ENDPOINT, info_url_2.as_str())], || {
                 source.refresh(None, Some(1))
             });
         }
@@ -9631,7 +9631,7 @@ mod tests {
 
         // First call: remote_candidates is None → fetches manifest (counter→1) → downloads shard.
         let first_available = with_env_var(
-            TRIPLETS_HF_PARQUET_ENDPOINT,
+            ENV_TRIPLETS_HF_PARQUET_ENDPOINT,
             &format!("{base_url}/parquet"),
             || source.ensure_row_available(0).unwrap(),
         );
@@ -9644,7 +9644,7 @@ mod tests {
 
         // Second call: remote_candidates is now Some(...) → must NOT re-fetch manifest.
         let _ = with_env_var(
-            TRIPLETS_HF_PARQUET_ENDPOINT,
+            ENV_TRIPLETS_HF_PARQUET_ENDPOINT,
             &format!("{base_url}/parquet"),
             || source.ensure_row_available(0),
         );
@@ -9685,7 +9685,7 @@ mod tests {
         let server = TestHttpServer::new(501, body);
         let base_url = server.url().to_string();
 
-        let result = with_env_var(TRIPLETS_HF_SIZE_ENDPOINT, &base_url, || {
+        let result = with_env_var(ENV_TRIPLETS_HF_SIZE_ENDPOINT, &base_url, || {
             HuggingFaceRowSource::fetch_global_row_count(&config)
         });
 
@@ -9764,7 +9764,7 @@ mod tests {
         // Append /parquet so spawn_manifest_and_shard_http can route the
         // manifest re-fetch to the manifest body (see first_line.contains("/parquet")).
         with_env_var(
-            TRIPLETS_HF_PARQUET_ENDPOINT,
+            ENV_TRIPLETS_HF_PARQUET_ENDPOINT,
             &format!("{base_url}/parquet"),
             || {
                 assert!(
@@ -9798,7 +9798,7 @@ mod tests {
         let server = TestHttpServer::new(501, body);
         let base_url = server.url().to_string();
 
-        let maps = with_env_var(TRIPLETS_HF_INFO_ENDPOINT, &base_url, || {
+        let maps = with_env_var(ENV_TRIPLETS_HF_INFO_ENDPOINT, &base_url, || {
             HuggingFaceRowSource::fetch_classlabel_maps(&config)
         });
 
@@ -9823,7 +9823,7 @@ mod tests {
         let server = TestHttpServer::new(501, body);
         let base_url = server.url().to_string();
 
-        let result = with_env_var(TRIPLETS_HF_PARQUET_ENDPOINT, &base_url, || {
+        let result = with_env_var(ENV_TRIPLETS_HF_PARQUET_ENDPOINT, &base_url, || {
             HuggingFaceRowSource::list_remote_candidates_from_parquet_manifest(&config)
         });
 

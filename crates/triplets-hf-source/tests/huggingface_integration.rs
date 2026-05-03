@@ -12,11 +12,11 @@ use triplets_core::{
     SplitRatios, TripletSampler,
 };
 use triplets_hf_source::{
-    HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE, HF_TOKEN, HfListRoots, HfSourceEntry,
-    HuggingFaceRowSource, HuggingFaceRowsConfig, TRIPLETS_HF_INFO_ENDPOINT,
-    TRIPLETS_HF_PARQUET_ENDPOINT, TRIPLETS_HF_SIZE_ENDPOINT, TRIPLETS_HF_TOKEN_TEST_DATASET,
-    build_hf_sources, load_hf_sources_from_list, parse_csv_fields, parse_hf_source_line,
-    parse_hf_uri, resolve_hf_list_roots,
+    ENV_TRIPLETS_HF_INFO_ENDPOINT, ENV_TRIPLETS_HF_PARQUET_ENDPOINT, ENV_TRIPLETS_HF_SIZE_ENDPOINT,
+    ENV_TRIPLETS_HF_TOKEN_TEST_DATASET, HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE, HF_TOKEN, HfListRoots,
+    HfSourceEntry, HuggingFaceRowSource, HuggingFaceRowsConfig, build_hf_sources,
+    load_hf_sources_from_list, parse_csv_fields, parse_hf_source_line, parse_hf_uri,
+    resolve_hf_list_roots,
 };
 
 const HF_SHARD_STORE_ROW_PREFIX: &[u8] = b"rowv1|";
@@ -1721,14 +1721,14 @@ fn hf_token_private_dataset_access() {
         }
     };
 
-    let dataset = match std::env::var(TRIPLETS_HF_TOKEN_TEST_DATASET) {
+    let dataset = match std::env::var(ENV_TRIPLETS_HF_TOKEN_TEST_DATASET) {
         Ok(d) if !d.trim().is_empty() => d,
         _ => {
             if skip_live {
                 eprintln!(
                     "[skip] {} not set and TRIPLETS_SKIP_LIVE_TESTS is active — \
                      skipping private dataset integration test.",
-                    TRIPLETS_HF_TOKEN_TEST_DATASET
+                    ENV_TRIPLETS_HF_TOKEN_TEST_DATASET
                 );
                 return;
             }
@@ -1736,7 +1736,7 @@ fn hf_token_private_dataset_access() {
                 "{} is not set. This test requires a private HF dataset repo. \
                  Set it to run the test, or set TRIPLETS_SKIP_LIVE_TESTS=1 to skip it. \
                  See the comment above this test for setup instructions.",
-                TRIPLETS_HF_TOKEN_TEST_DATASET
+                ENV_TRIPLETS_HF_TOKEN_TEST_DATASET
             );
         }
     };
@@ -1837,17 +1837,17 @@ fn sampler_next_text_batch_re_expands_after_cache_eviction() {
     // the source and sampler so that async expansion threads can still
     // resolve the mock endpoints when they make HTTP requests.
     let _parquet_guard = triplets_hf_source::test_utils::EnvGuard::set(
-        TRIPLETS_HF_PARQUET_ENDPOINT,
+        ENV_TRIPLETS_HF_PARQUET_ENDPOINT,
         &format!("{}/parquet", server.url()),
     );
     // The /size and /info endpoints are NOT mocked; failing to query them
     // is non-fatal (warns and returns None).  Point them somewhere harmless.
     let _size_guard = triplets_hf_source::test_utils::EnvGuard::set(
-        TRIPLETS_HF_SIZE_ENDPOINT,
+        ENV_TRIPLETS_HF_SIZE_ENDPOINT,
         "http://127.0.0.1:1/unreachable",
     );
     let _info_guard = triplets_hf_source::test_utils::EnvGuard::set(
-        TRIPLETS_HF_INFO_ENDPOINT,
+        ENV_TRIPLETS_HF_INFO_ENDPOINT,
         "http://127.0.0.1:1/unreachable",
     );
 

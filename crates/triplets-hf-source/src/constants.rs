@@ -1,5 +1,5 @@
 /// Prefix added to remote URL shard identifiers to distinguish them from local paths.
-pub const REMOTE_URL_PREFIX: &str = "url::";
+pub const HF_REMOTE_URL_PREFIX: &str = "url::";
 /// Extra row-index headroom above currently materialized rows exposed via `len_hint`.
 ///
 /// This is not a file count. It lets sampling look slightly past the local row
@@ -7,10 +7,10 @@ pub const REMOTE_URL_PREFIX: &str = "url::";
 /// global row domain at once.
 /// Multiplies the sampler ingestion base (`SamplerConfig.ingestion_max_records`)
 /// to compute `len_hint` expansion headroom rows.
-pub const REMOTE_EXPANSION_HEADROOM_MULTIPLIER: usize = 4;
+pub const HF_REMOTE_EXPANSION_HEADROOM_MULTIPLIER: usize = 4;
 /// Number of initial remote shards to materialize when bootstrapping an empty
 /// local snapshot before regular lazy expansion.
-pub const REMOTE_BOOTSTRAP_SHARDS: usize = 1;
+pub const HF_REMOTE_BOOTSTRAP_SHARDS: usize = 1;
 /// Multiplies the source `refresh` limit passed by `IngestionManager`
 /// (`step.unwrap_or(max_records)`) to set this source's internal row-read
 /// batch target for each refresh pass.
@@ -28,9 +28,9 @@ pub const HF_SHARD_STORE_META_ROWS_KEY: &[u8] = b"meta|rows";
 pub const HF_SHARD_STORE_SOURCE_SIZE_KEY: &[u8] = b"meta|source_size";
 /// Directory segment used when no split is specified (all-splits mode).
 /// Must not collide with any real HF split name; HF split names never start with `_`.
-pub const ALL_SPLITS_DIR: &str = "_all";
+pub const HF_ALL_SPLITS_DIR: &str = "_all";
 /// Sub-directory under `snapshot_dir` that holds manifest-cached remote shard files.
-pub const PARQUET_MANIFEST_DIR: &str = "_parquet_manifest";
+pub const HF_PARQUET_MANIFEST_DIR: &str = "_parquet_manifest";
 /// Path separator component used to extract a local path suffix from HF CDN resolve URLs.
 pub const HF_RESOLVE_URL_SEPARATOR: &str = "/resolve/";
 /// Fallback relative path used when a CDN resolve URL cannot yield a valid suffix.
@@ -74,19 +74,19 @@ pub const HF_JSON_KEY_LABEL_NAMES: &str = "names";
 pub const HF_CLASSLABEL_TYPE: &str = "ClassLabel";
 /// Default base URL for the datasets-server parquet-manifest endpoint.
 ///
-/// Can be overridden at runtime with the `TRIPLETS_HF_PARQUET_ENDPOINT`
+/// Can be overridden at runtime with the `ENV_TRIPLETS_HF_PARQUET_ENDPOINT`
 /// environment variable (useful for test doubles or on-premises deployments).
 pub const HF_PARQUET_DEFAULT_ENDPOINT: &str = "https://datasets-server.huggingface.co/parquet";
 
 /// Default base URL for the datasets-server size endpoint.
 ///
-/// Can be overridden at runtime with the `TRIPLETS_HF_SIZE_ENDPOINT`
+/// Can be overridden at runtime with the `ENV_TRIPLETS_HF_SIZE_ENDPOINT`
 /// environment variable.
 pub const HF_SIZE_DEFAULT_ENDPOINT: &str = "https://datasets-server.huggingface.co/size";
 
 /// Default base URL for the datasets-server info endpoint.
 ///
-/// Can be overridden at runtime with the `TRIPLETS_HF_INFO_ENDPOINT`
+/// Can be overridden at runtime with the `ENV_TRIPLETS_HF_INFO_ENDPOINT`
 /// environment variable.
 pub const HF_INFO_DEFAULT_ENDPOINT: &str = "https://datasets-server.huggingface.co/info";
 
@@ -104,16 +104,16 @@ pub const HF_WHOAMI_DEFAULT_ENDPOINT: &str = "https://huggingface.co/api/whoami-
 // ---------------------------------------------------------------------------
 
 /// Environment variable override for the datasets-server parquet-manifest endpoint URL.
-pub const TRIPLETS_HF_PARQUET_ENDPOINT: &str = "TRIPLETS_HF_PARQUET_ENDPOINT";
+pub const ENV_TRIPLETS_HF_PARQUET_ENDPOINT: &str = "TRIPLETS_HF_PARQUET_ENDPOINT";
 /// Environment variable override for the datasets-server size endpoint URL.
-pub const TRIPLETS_HF_SIZE_ENDPOINT: &str = "TRIPLETS_HF_SIZE_ENDPOINT";
+pub const ENV_TRIPLETS_HF_SIZE_ENDPOINT: &str = "TRIPLETS_HF_SIZE_ENDPOINT";
 /// Environment variable override for the datasets-server info endpoint URL.
-pub const TRIPLETS_HF_INFO_ENDPOINT: &str = "TRIPLETS_HF_INFO_ENDPOINT";
+pub const ENV_TRIPLETS_HF_INFO_ENDPOINT: &str = "TRIPLETS_HF_INFO_ENDPOINT";
 /// Hugging Face API token for authenticating with private datasets.
 pub const HF_TOKEN: &str = "HF_TOKEN";
 /// Dataset repo used by the live private-dataset integration test.
-pub const TRIPLETS_HF_TOKEN_TEST_DATASET: &str = "TRIPLETS_HF_TOKEN_TEST_DATASET";
+pub const ENV_TRIPLETS_HF_TOKEN_TEST_DATASET: &str = "TRIPLETS_HF_TOKEN_TEST_DATASET";
 /// Overrides the Hugging Face whoami endpoint URL used for token validation.
-pub const TRIPLETS_HF_WHOAMI_ENDPOINT: &str = "TRIPLETS_HF_WHOAMI_ENDPOINT";
+pub const ENV_TRIPLETS_HF_WHOAMI_ENDPOINT: &str = "TRIPLETS_HF_WHOAMI_ENDPOINT";
 /// Managed cache group for Hugging Face snapshot-backed sources.
 pub const HF_GROUP: &str = "triplets/huggingface";
