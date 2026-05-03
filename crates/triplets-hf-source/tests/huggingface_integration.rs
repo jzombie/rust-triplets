@@ -1451,64 +1451,28 @@ fn huggingface_live_head_request_matches_manifest_size() {
     config.hf_token = hf_token.clone();
 
     // ── Step 1: fetch the parquet manifest ─────────────────────────────────
-    // Build a source-owned tokio runtime and use the source's own HTTP client
-    // (which carries HF_TOKEN auth for private datasets).
+    // Use the library's own authenticated HTTP client and parquet-endpoint
+    // query construction (including the `split` parameter and Bearer token).
     let runtime =
         HuggingFaceRowSource::build_http_runtime(&config).expect("failed building tokio runtime");
 
-    let (shard_url, manifest_size) = runtime.block_on(async {
-        let mut client_builder =
-            reqwest::Client::builder().timeout(std::time::Duration::from_secs(30));
-        if let Some(token) = &hf_token {
-            let auth_value = format!("Bearer {token}");
-            let mut headers = reqwest::header::HeaderMap::new();
-            headers.insert(
-                reqwest::header::AUTHORIZATION,
-                reqwest::header::HeaderValue::from_str(&auth_value)
-                    .expect("HF_TOKEN contains invalid header chars"),
-            );
-            client_builder = client_builder.default_headers(headers);
-        }
-        let client = client_builder
-            .build()
-            .expect("failed building reqwest client");
+    let (candidates, candidate_sizes, _matched_entries) =
+        HuggingFaceRowSource::list_remote_candidates_from_parquet_manifest(&config)
+            .expect("parquet manifest request failed");
 
-        let manifest_resp = client
-            .get(triplets_hf_source::HF_PARQUET_DEFAULT_ENDPOINT)
-            .query(&[("dataset", dataset.as_str()), ("config", "default")])
-            .send()
-            .await
-            .expect("failed fetching parquet manifest");
-        assert!(
-            manifest_resp.status().is_success(),
-            "parquet manifest request failed: {} for dataset={}",
-            manifest_resp.status(),
-            dataset
-        );
-
-        let manifest: serde_json::Value = manifest_resp
-            .json()
-            .await
-            .expect("failed parsing manifest JSON");
-        let parquet_files = manifest["parquet_files"]
-            .as_array()
-            .expect("manifest missing parquet_files array");
-        assert!(
-            !parquet_files.is_empty(),
-            "manifest has no parquet files for dataset={dataset}"
-        );
-
-        let first_shard = &parquet_files[0];
-        let shard_url = first_shard["url"]
-            .as_str()
-            .expect("shard entry missing url")
-            .to_string();
-        let manifest_size = first_shard["size"]
-            .as_u64()
-            .expect("shard entry missing size");
-        assert!(manifest_size > 0, "manifest reports zero size for shard");
-        (shard_url, manifest_size)
-    });
+    assert!(
+        !candidates.is_empty(),
+        "manifest has no shard candidates for dataset={dataset}"
+    );
+    let first_candidate = &candidates[0];
+    let shard_url = first_candidate
+        .strip_prefix(triplets_hf_source::HF_REMOTE_URL_PREFIX)
+        .expect("candidate should have url:: prefix")
+        .to_string();
+    let manifest_size = *candidate_sizes
+        .get(first_candidate)
+        .expect("first candidate missing from sizes map");
+    assert!(manifest_size > 0, "manifest reports zero size for shard");
 
     // ── Step 2: do the HEAD request through the source's own authenticated
     // infrastructure.  Wrap the shard URL as a url:: candidate so

@@ -2250,8 +2250,7 @@ impl HuggingFaceRowSource {
     }
 
     /// Query datasets-server parquet manifest and derive shard candidates.
-    #[cfg(test)]
-    fn list_remote_candidates_from_parquet_manifest(
+    pub fn list_remote_candidates_from_parquet_manifest(
         config: &HuggingFaceRowsConfig,
     ) -> Result<ParquetManifestCandidates, SamplerError> {
         Self::list_remote_candidates_from_parquet_manifest_with_runtime(config, None)
