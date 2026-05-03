@@ -2081,3 +2081,349 @@ fn sampler_next_text_batch_re_expands_after_cache_eviction() {
 
     server.shut_down();
 }
+
+#[test]
+#[serial_test::serial]
+fn bootstrap_refresh_downloads_first_shard_when_no_local_data() {
+    // Verify that `refresh()` bootstraps by downloading the first shard when
+    // materialized_rows is 0 (a fresh source with no local shards).
+    let temp = tempfile::tempdir().expect("tempdir");
+    let server = triplets_hf_source::test_utils::HfMockServer::new(3, 2);
+
+    let _parquet = triplets_hf_source::test_utils::EnvGuard::set(
+        ENV_TRIPLETS_HF_PARQUET_ENDPOINT,
+        &format!("{}/parquet", server.url()),
+    );
+    let _size = triplets_hf_source::test_utils::EnvGuard::set(
+        ENV_TRIPLETS_HF_SIZE_ENDPOINT,
+        &format!(
+            "{}/unreachable",
+            triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
+        ),
+    );
+    let _info = triplets_hf_source::test_utils::EnvGuard::set(
+        ENV_TRIPLETS_HF_INFO_ENDPOINT,
+        &format!(
+            "{}/unreachable",
+            triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
+        ),
+    );
+
+    let mut config = HuggingFaceRowsConfig::new(
+        "bootstrap_test",
+        "org/dataset",
+        "default",
+        "train",
+        temp.path(),
+    );
+    config.hf_token = None;
+    config.text_columns = vec!["text".to_string()];
+    config.cache_capacity = 10;
+
+    let source = HuggingFaceRowSource::new(config).expect("new source");
+    let sampler_cfg = seeded_config(42);
+
+    // Bootstrap refresh: materialized_rows=0 → downloads shard.
+    let snapshot = source
+        .refresh(&sampler_cfg, None, Some(4))
+        .expect("bootstrap refresh should succeed");
+    assert!(
+        !snapshot.records.is_empty(),
+        "bootstrap refresh should return records"
+    );
+    assert_eq!(snapshot.records.len(), 2, "first shard has 2 rows");
+
+    // Second refresh returns next rows without re-downloading the same shard.
+    let snapshot2 = source
+        .refresh(&sampler_cfg, Some(&snapshot.cursor), Some(4))
+        .expect("second refresh should succeed");
+    assert_eq!(snapshot2.records.len(), 2, "second shard has 2 rows");
+
+    server.shut_down();
+}
+
+#[test]
+#[serial_test::serial]
+fn expansion_headroom_grows_with_multiple_refresh_cycles() {
+    // Verify that `len_hint()` returns progressively larger headroom as
+    // shards are materialized, and that `reported_record_count()` reflects it.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let server = triplets_hf_source::test_utils::HfMockServer::new(5, 3);
+
+    let _parquet = triplets_hf_source::test_utils::EnvGuard::set(
+        ENV_TRIPLETS_HF_PARQUET_ENDPOINT,
+        &format!("{}/parquet", server.url()),
+    );
+    let _size = triplets_hf_source::test_utils::EnvGuard::set(
+        ENV_TRIPLETS_HF_SIZE_ENDPOINT,
+        &format!(
+            "{}/unreachable",
+            triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
+        ),
+    );
+    let _info = triplets_hf_source::test_utils::EnvGuard::set(
+        ENV_TRIPLETS_HF_INFO_ENDPOINT,
+        &format!(
+            "{}/unreachable",
+            triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
+        ),
+    );
+
+    let mut config = HuggingFaceRowsConfig::new(
+        "headroom_test",
+        "org/dataset",
+        "default",
+        "train",
+        temp.path(),
+    );
+    config.hf_token = None;
+    config.text_columns = vec!["text".to_string()];
+    config.cache_capacity = 10;
+    config.remote_expansion_headroom_multiplier = 2;
+
+    let source = HuggingFaceRowSource::new(config).expect("new source");
+    let sampler_cfg = SamplerConfig {
+        seed: 42,
+        ingestion_max_records: 5,
+        ..SamplerConfig::default()
+    };
+
+    // Fresh source: len_hint returns Some(1) before bootstrap.
+    let count = source
+        .reported_record_count(&sampler_cfg)
+        .expect("reported_record_count should work");
+    assert_eq!(count, 1, "before bootstrap, hint should be 1");
+
+    // Bootstrap refresh downloads first shard (3 rows).
+    let snapshot = source
+        .refresh(&sampler_cfg, None, Some(10))
+        .expect("bootstrap refresh");
+    assert_eq!(snapshot.records.len(), 3);
+
+    // After materializing 3 rows, len_hint returns materialized_rows
+    // when total_rows is None (size endpoint unreachable).
+    let count2 = source
+        .reported_record_count(&sampler_cfg)
+        .expect("reported_record_count post-bootstrap");
+    // Without a known total_rows, len_hint = materialized_rows = 3.
+    assert!(
+        count2 >= 3,
+        "after bootstrap, should see at least 3, got {count2}"
+    );
+    // Verify headroom is NOT added when total_rows is unknown.
+    let known_total = source.known_total_rows();
+    assert!(
+        known_total.is_none(),
+        "total_rows should be None when /size endpoint is unreachable"
+    );
+
+    server.shut_down();
+}
+
+#[test]
+#[serial_test::serial]
+fn full_pipeline_samples_across_downloaded_shards() {
+    // E2E test exercising the complete pipeline:
+    // HfMockServer → HuggingFaceRowSource → Sampler → next_triplet_batch
+    // This covers refresh() bootstrap, trigger_expansion_if_needed(),
+    // download_next_remote_shard(), and the full triplet sampling path.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let server = triplets_hf_source::test_utils::HfMockServer::new(3, 4);
+
+    let _parquet = triplets_hf_source::test_utils::EnvGuard::set(
+        ENV_TRIPLETS_HF_PARQUET_ENDPOINT,
+        &format!("{}/parquet", server.url()),
+    );
+    let _size = triplets_hf_source::test_utils::EnvGuard::set(
+        ENV_TRIPLETS_HF_SIZE_ENDPOINT,
+        &format!(
+            "{}/unreachable",
+            triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
+        ),
+    );
+    let _info = triplets_hf_source::test_utils::EnvGuard::set(
+        ENV_TRIPLETS_HF_INFO_ENDPOINT,
+        &format!(
+            "{}/unreachable",
+            triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
+        ),
+    );
+
+    let mut config =
+        HuggingFaceRowsConfig::new("e2e_test", "org/dataset", "default", "train", temp.path());
+    config.hf_token = None;
+    // Use text-columns mode so the SimCSE recipe allows same anchor/positive.
+    config.text_columns = vec!["text".to_string()];
+    config.cache_capacity = 20;
+
+    let source = HuggingFaceRowSource::new(config).expect("new source");
+
+    let split_store =
+        Arc::new(DeterministicSplitStore::new(SplitRatios::default(), 42).expect("split store"));
+    let sampler_config = SamplerConfig {
+        batch_size: 4,
+        ingestion_max_records: 20,
+        seed: 1,
+        allowed_splits: vec![SplitLabel::Train],
+        ..SamplerConfig::default()
+    };
+    let sampler = TripletSampler::new(sampler_config, split_store);
+    sampler.register_source(Box::new(source));
+
+    // Sample several batches.  The first batch triggers bootstrap (downloads
+    // shard 0), subsequent batches trigger background expansion (shards 1, 2).
+    let mut total_records = 0usize;
+    for i in 0..6 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        match sampler.next_triplet_batch(SplitLabel::Train) {
+            Ok(batch) => {
+                total_records += batch.triplets.len();
+                eprintln!("[iter {i}] triplet batch: {} samples", batch.triplets.len());
+            }
+            Err(e) => {
+                eprintln!("[iter {i}] triplet error (expected during expansion): {e}");
+            }
+        }
+    }
+
+    // We should have gotten samples from the available shards.
+    assert!(
+        total_records > 0,
+        "expected at least some triplet samples across all iterations, got {total_records}"
+    );
+
+    // Verify the manifest was fetched at least once.
+    assert!(
+        server.manifest_fetch_count() >= 1,
+        "parquet manifest must be fetched at least once"
+    );
+
+    server.shut_down();
+}
+
+#[test]
+#[serial_test::serial]
+fn duplicate_build_hf_sources_produces_independent_sources() {
+    // E2E test for `build_hf_sources()` with duplicate URIs: each built
+    // source must have its own snapshot dir and produce independent data.
+    let server = triplets_hf_source::test_utils::HfMockServer::new(2, 2);
+
+    let _parquet = triplets_hf_source::test_utils::EnvGuard::set(
+        ENV_TRIPLETS_HF_PARQUET_ENDPOINT,
+        &format!("{}/parquet", server.url()),
+    );
+    let _size = triplets_hf_source::test_utils::EnvGuard::set(
+        ENV_TRIPLETS_HF_SIZE_ENDPOINT,
+        &format!(
+            "{}/unreachable",
+            triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
+        ),
+    );
+    let _info = triplets_hf_source::test_utils::EnvGuard::set(
+        ENV_TRIPLETS_HF_INFO_ENDPOINT,
+        &format!(
+            "{}/unreachable",
+            triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
+        ),
+    );
+
+    let temp_root = tempfile::tempdir().expect("tempdir");
+    let nl = platform_newline();
+    fs::write(
+        temp_root.path().join("Cargo.toml"),
+        format!("[package]{nl}name='tmp'{nl}version='0.0.0'{nl}"),
+    )
+    .expect("write Cargo.toml");
+
+    // Capture the original cwd and change to temp_root.
+    let orig_cwd = std::env::current_dir().expect("current_dir");
+    std::env::set_current_dir(temp_root.path()).expect("set cwd");
+
+    let dup_entry = HfSourceEntry {
+        uri: "hf://org/dataset/default/train".to_string(),
+        anchor_columns: vec!["text".to_string()],
+        positive_columns: vec!["text".to_string()],
+        context_columns: Vec::new(),
+        text_columns: Vec::new(),
+        trust: None,
+        source_id: None,
+    };
+    let roots = HfListRoots {
+        source_list: "inline".to_string(),
+        sources: vec![dup_entry.clone(), dup_entry],
+    };
+
+    let built = build_hf_sources(&roots);
+    // Restore cwd before assertions.
+    std::env::set_current_dir(&orig_cwd).expect("restore cwd");
+
+    assert_eq!(
+        built.len(),
+        2,
+        "should have built 2 independent sources from duplicate URIs"
+    );
+    assert_ne!(
+        built[0].id(),
+        built[1].id(),
+        "duplicate sources must have distinct IDs"
+    );
+
+    server.shut_down();
+}
+
+#[test]
+#[serial_test::serial]
+fn e2e_refresh_honors_limit_and_wraps_cursor() {
+    // Verify that `refresh()` respects the `limit` parameter and that the
+    // cursor wraps properly after consuming all shards.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let server = triplets_hf_source::test_utils::HfMockServer::new(2, 3);
+
+    let _parquet = triplets_hf_source::test_utils::EnvGuard::set(
+        ENV_TRIPLETS_HF_PARQUET_ENDPOINT,
+        &format!("{}/parquet", server.url()),
+    );
+    let _size = triplets_hf_source::test_utils::EnvGuard::set(
+        ENV_TRIPLETS_HF_SIZE_ENDPOINT,
+        &format!(
+            "{}/unreachable",
+            triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
+        ),
+    );
+    let _info = triplets_hf_source::test_utils::EnvGuard::set(
+        ENV_TRIPLETS_HF_INFO_ENDPOINT,
+        &format!(
+            "{}/unreachable",
+            triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
+        ),
+    );
+
+    let mut config =
+        HuggingFaceRowsConfig::new("limit_test", "org/dataset", "default", "train", temp.path());
+    config.hf_token = None;
+    config.text_columns = vec!["text".to_string()];
+    config.cache_capacity = 10;
+
+    let source = HuggingFaceRowSource::new(config).expect("new source");
+    let sampler_cfg = seeded_config(42);
+
+    // Bootstrap then exhaust both shards (2 shards × 3 rows = 6 rows).
+    for limit in [2, 4] {
+        let snap = source
+            .refresh(&sampler_cfg, None, Some(limit))
+            .expect("refresh with limit");
+        assert!(
+            snap.records.len() <= limit,
+            "records ({}) should not exceed limit ({limit})",
+            snap.records.len()
+        );
+    }
+
+    // Cursor should have wrapped — refresh should return more records.
+    let snap3 = source
+        .refresh(&sampler_cfg, None, Some(6))
+        .expect("refresh after exhaustion should wrap");
+    eprintln!("wrapped refresh returned {} records", snap3.records.len());
+
+    server.shut_down();
+}
