@@ -13,10 +13,10 @@ use triplets_core::{
 };
 use triplets_hf_source::{
     ENV_TRIPLETS_HF_INFO_ENDPOINT, ENV_TRIPLETS_HF_PARQUET_ENDPOINT, ENV_TRIPLETS_HF_SIZE_ENDPOINT,
-    ENV_TRIPLETS_HF_TOKEN, ENV_TRIPLETS_HF_TOKEN_TEST_DATASET, HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE,
-    HfListRoots, HfSourceEntry, HuggingFaceRowSource, HuggingFaceRowsConfig, build_hf_sources,
-    load_hf_sources_from_list, parse_csv_fields, parse_hf_source_line, parse_hf_uri,
-    resolve_hf_list_roots,
+    ENV_TRIPLETS_HF_TOKEN, ENV_TRIPLETS_HF_TOKEN_TEST_DATASET, HF_BASE_URL,
+    HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE, HfListRoots, HfSourceEntry, HuggingFaceRowSource,
+    HuggingFaceRowsConfig, build_hf_sources, load_hf_sources_from_list, parse_csv_fields,
+    parse_hf_source_line, parse_hf_uri, resolve_hf_list_roots,
 };
 
 const HF_SHARD_STORE_ROW_PREFIX: &[u8] = b"rowv1|";
@@ -494,7 +494,7 @@ fn huggingface_helper_parsers_cover_success_and_error_paths() {
     assert_eq!(explicit_split.2, "train");
 
     assert!(parse_hf_uri("hf://org").is_err());
-    assert!(parse_hf_uri("https://huggingface.co").is_err());
+    assert!(parse_hf_uri(HF_BASE_URL).is_err());
 }
 
 #[test]
@@ -1971,11 +1971,17 @@ fn sampler_next_text_batch_re_expands_after_cache_eviction() {
     // is non-fatal (warns and returns None).  Point them somewhere harmless.
     let _size_guard = triplets_hf_source::test_utils::EnvGuard::set(
         ENV_TRIPLETS_HF_SIZE_ENDPOINT,
-        "http://127.0.0.1:1/unreachable",
+        &format!(
+            "{}/unreachable",
+            triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
+        ),
     );
     let _info_guard = triplets_hf_source::test_utils::EnvGuard::set(
         ENV_TRIPLETS_HF_INFO_ENDPOINT,
-        "http://127.0.0.1:1/unreachable",
+        &format!(
+            "{}/unreachable",
+            triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
+        ),
     );
 
     // ── Source ───────────────────────────────────────────────────────────

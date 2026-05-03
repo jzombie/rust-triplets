@@ -34,11 +34,11 @@ use walkdir::WalkDir;
 use crate::constants::{
     ENV_TRIPLETS_HF_INFO_ENDPOINT, ENV_TRIPLETS_HF_PARQUET_ENDPOINT, ENV_TRIPLETS_HF_SIZE_ENDPOINT,
     ENV_TRIPLETS_HF_TOKEN, ENV_TRIPLETS_HF_WHOAMI_ENDPOINT, HF_ALL_SPLITS_DIR, HF_CLASSLABEL_TYPE,
-    HF_GROUP, HF_INFO_DEFAULT_ENDPOINT, HF_JSON_KEY_CONFIG, HF_JSON_KEY_CONFIG_NAME,
-    HF_JSON_KEY_CONFIGS, HF_JSON_KEY_DATASET, HF_JSON_KEY_DATASET_INFO, HF_JSON_KEY_FEATURE_TYPE,
-    HF_JSON_KEY_FEATURES, HF_JSON_KEY_LABEL_NAMES, HF_JSON_KEY_NUM_ROWS, HF_JSON_KEY_PARQUET_FILES,
-    HF_JSON_KEY_SIZE, HF_JSON_KEY_SPLIT, HF_JSON_KEY_SPLIT_NAME, HF_JSON_KEY_SPLITS,
-    HF_JSON_KEY_URL, HF_PARQUET_DEFAULT_ENDPOINT, HF_PARQUET_MANIFEST_DIR,
+    HF_DATASETS_BASE_URL, HF_GROUP, HF_INFO_DEFAULT_ENDPOINT, HF_JSON_KEY_CONFIG,
+    HF_JSON_KEY_CONFIG_NAME, HF_JSON_KEY_CONFIGS, HF_JSON_KEY_DATASET, HF_JSON_KEY_DATASET_INFO,
+    HF_JSON_KEY_FEATURE_TYPE, HF_JSON_KEY_FEATURES, HF_JSON_KEY_LABEL_NAMES, HF_JSON_KEY_NUM_ROWS,
+    HF_JSON_KEY_PARQUET_FILES, HF_JSON_KEY_SIZE, HF_JSON_KEY_SPLIT, HF_JSON_KEY_SPLIT_NAME,
+    HF_JSON_KEY_SPLITS, HF_JSON_KEY_URL, HF_PARQUET_DEFAULT_ENDPOINT, HF_PARQUET_MANIFEST_DIR,
     HF_REFRESH_BATCH_MULTIPLIER, HF_REMOTE_BOOTSTRAP_SHARDS,
     HF_REMOTE_EXPANSION_HEADROOM_MULTIPLIER, HF_REMOTE_URL_PREFIX,
     HF_RESOLVE_UNKNOWN_FALLBACK_PATH, HF_RESOLVE_URL_SEPARATOR, HF_SHARD_CANDIDATE_SEED_TAG,
@@ -2349,7 +2349,8 @@ impl HuggingFaceRowSource {
             url.to_string()
         } else {
             format!(
-                "https://huggingface.co/datasets/{}/resolve/main/{}",
+                "{}/{}/resolve/main/{}",
+                HF_DATASETS_BASE_URL,
                 config.dataset,
                 candidate.trim_start_matches('/')
             )
@@ -2910,7 +2911,8 @@ impl HuggingFaceRowSource {
                 return Ok(store_target);
             }
             let remote_url = format!(
-                "https://huggingface.co/datasets/{}/resolve/main/{}",
+                "{}/{}/resolve/main/{}",
+                HF_DATASETS_BASE_URL,
                 config.dataset,
                 remote_path.trim_start_matches('/')
             );
@@ -4935,7 +4937,9 @@ mod tests {
         source
     }
 
-    use crate::test_utils::{TestHttpServer, spawn_manifest_and_shard_http, spawn_one_shot_http};
+    use crate::test_utils::{
+        TEST_UNREACHABLE_URL, TestHttpServer, spawn_manifest_and_shard_http, spawn_one_shot_http,
+    };
 
     fn with_env_var<R>(key: &str, value: &str, run: impl FnOnce() -> R) -> R {
         let previous = env::var(key).ok();
@@ -5215,7 +5219,7 @@ mod tests {
 
         let result = with_env_var(
             ENV_TRIPLETS_HF_PARQUET_ENDPOINT,
-            "http://127.0.0.1:1/parquet",
+            &format!("{TEST_UNREACHABLE_URL}/parquet"),
             || HuggingFaceRowSource::list_remote_candidates(&config),
         );
         assert!(result.is_err());
@@ -7490,17 +7494,17 @@ mod tests {
         let parquet = with_env_var(ENV_TRIPLETS_HF_PARQUET_ENDPOINT, "   ", || {
             HuggingFaceRowSource::parquet_manifest_endpoint()
         });
-        assert_eq!(parquet, "https://datasets-server.huggingface.co/parquet");
+        assert_eq!(parquet, HF_PARQUET_DEFAULT_ENDPOINT);
 
         let size = with_env_var(ENV_TRIPLETS_HF_SIZE_ENDPOINT, "", || {
             HuggingFaceRowSource::size_endpoint()
         });
-        assert_eq!(size, "https://datasets-server.huggingface.co/size");
+        assert_eq!(size, HF_SIZE_DEFAULT_ENDPOINT);
 
         let info = with_env_var(ENV_TRIPLETS_HF_INFO_ENDPOINT, "   ", || {
             HuggingFaceRowSource::info_endpoint()
         });
-        assert_eq!(info, "https://datasets-server.huggingface.co/info");
+        assert_eq!(info, HF_INFO_DEFAULT_ENDPOINT);
     }
 
     #[test]
@@ -7648,7 +7652,7 @@ mod tests {
 
         let result = with_env_var(
             ENV_TRIPLETS_HF_PARQUET_ENDPOINT,
-            "http://127.0.0.1:1",
+            TEST_UNREACHABLE_URL,
             || HuggingFaceRowSource::list_remote_candidates_from_parquet_manifest(&config),
         );
         assert!(result.is_err());
@@ -7660,7 +7664,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
 
-        let result = with_env_var(ENV_TRIPLETS_HF_SIZE_ENDPOINT, "http://127.0.0.1:1", || {
+        let result = with_env_var(ENV_TRIPLETS_HF_SIZE_ENDPOINT, TEST_UNREACHABLE_URL, || {
             HuggingFaceRowSource::fetch_global_row_count(&config)
         });
         assert!(result.is_err());
@@ -7932,9 +7936,9 @@ mod tests {
         let config = test_config(dir.path().to_path_buf());
         let source = test_source(config.clone());
 
-        let candidate =
-            "url::http://127.0.0.1:1/datasets/org/ds/resolve/main/train/pre-cached.ndjson"
-                .to_string();
+        let candidate = format!(
+            "url::{TEST_UNREACHABLE_URL}/datasets/org/ds/resolve/main/train/pre-cached.ndjson"
+        );
         let target = HuggingFaceRowSource::candidate_target_path(&config, &candidate);
         let store_path = HuggingFaceRowSource::shard_store_path_for(&target);
         fs::create_dir_all(store_path.parent().unwrap()).unwrap();
@@ -7981,7 +7985,7 @@ mod tests {
 
         // Create a real .simdr store with source_size = 100.
         let candidate =
-            "url::http://127.0.0.1:1/datasets/org/ds/resolve/main/train/stale.ndjson".to_string();
+            format!("url::{TEST_UNREACHABLE_URL}/datasets/org/ds/resolve/main/train/stale.ndjson");
         let store_path = HuggingFaceRowSource::candidate_store_path(&config, &candidate);
         fs::create_dir_all(store_path.parent().unwrap()).unwrap();
         write_simdr_fixture(&store_path, &[("r0", "row")]);
@@ -8039,7 +8043,7 @@ mod tests {
 
         // Create a store with source_size = 100 and set expected_bytes = 100.
         let candidate =
-            "url::http://127.0.0.1:1/datasets/org/ds/resolve/main/train/fresh.ndjson".to_string();
+            format!("url::{TEST_UNREACHABLE_URL}/datasets/org/ds/resolve/main/train/fresh.ndjson");
         let store_path = HuggingFaceRowSource::candidate_store_path(&config, &candidate);
         fs::create_dir_all(store_path.parent().unwrap()).unwrap();
         write_simdr_fixture(&store_path, &[("r0", "row")]);
@@ -8079,11 +8083,11 @@ mod tests {
         // url:: prefix with full URL: returned as-is.
         let config = test_config(PathBuf::from("/tmp/snap"));
         let full_url =
-            "url::https://huggingface.co/datasets/org/ds/resolve/main/train/part-000.parquet";
-        let result = HuggingFaceRowSource::remote_url_for_candidate(&config, full_url);
+            format!("url::{HF_DATASETS_BASE_URL}/org/ds/resolve/main/train/part-000.parquet");
+        let result = HuggingFaceRowSource::remote_url_for_candidate(&config, &full_url);
         assert_eq!(
             result,
-            "https://huggingface.co/datasets/org/ds/resolve/main/train/part-000.parquet"
+            format!("{HF_DATASETS_BASE_URL}/org/ds/resolve/main/train/part-000.parquet")
         );
 
         // Bare path (hf-hub sibling fallback): CDN prefix is prepended.
@@ -8091,7 +8095,9 @@ mod tests {
         let result = HuggingFaceRowSource::remote_url_for_candidate(&config, bare_path);
         assert_eq!(
             result,
-            "https://huggingface.co/datasets/org/dataset/resolve/main/data/train-00000-of-00001.parquet"
+            format!(
+                "{HF_DATASETS_BASE_URL}/org/dataset/resolve/main/data/train-00000-of-00001.parquet"
+            )
         );
 
         // Bare path with leading slash.
@@ -8099,7 +8105,9 @@ mod tests {
         let result = HuggingFaceRowSource::remote_url_for_candidate(&config, bare_path);
         assert_eq!(
             result,
-            "https://huggingface.co/datasets/org/dataset/resolve/main/data/train-00000-of-00001.parquet"
+            format!(
+                "{HF_DATASETS_BASE_URL}/org/dataset/resolve/main/data/train-00000-of-00001.parquet"
+            )
         );
     }
 
@@ -9138,7 +9146,8 @@ mod tests {
         let source = test_source(config.clone());
 
         // Construct the candidate URL that the manifest will list.
-        let shard_raw_url = "http://127.0.0.1:1/datasets/org/ds/resolve/main/train/a.ndjson";
+        let shard_raw_url =
+            format!("{TEST_UNREACHABLE_URL}/datasets/org/ds/resolve/main/train/a.ndjson");
         let shard_candidate = format!("{HF_REMOTE_URL_PREFIX}{shard_raw_url}");
         let target = HuggingFaceRowSource::candidate_target_path(&config, &shard_candidate);
         let store_path = HuggingFaceRowSource::shard_store_path_for(&target);
@@ -9685,7 +9694,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
         // Port 1 is always unreachable; ureq returns an Err which must be handled.
-        let maps = with_env_var(ENV_TRIPLETS_HF_INFO_ENDPOINT, "http://127.0.0.1:1", || {
+        let maps = with_env_var(ENV_TRIPLETS_HF_INFO_ENDPOINT, TEST_UNREACHABLE_URL, || {
             HuggingFaceRowSource::fetch_classlabel_maps(&config)
         });
         assert!(

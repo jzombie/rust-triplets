@@ -72,6 +72,15 @@ pub const HF_JSON_KEY_FEATURE_TYPE: &str = "_type";
 pub const HF_JSON_KEY_LABEL_NAMES: &str = "names";
 /// Feature type string that identifies a ClassLabel column.
 pub const HF_CLASSLABEL_TYPE: &str = "ClassLabel";
+/// Root base URL for the Hugging Face website.
+pub const HF_BASE_URL: &str = "https://huggingface.co";
+
+/// Base URL for the Hugging Face datasets-resolve endpoint.
+///
+/// Full download URLs are constructed as
+/// `{base}/{dataset}/resolve/main/{relative_path}`.
+pub const HF_DATASETS_BASE_URL: &str = "https://huggingface.co/datasets";
+
 /// Default base URL for the datasets-server parquet-manifest endpoint.
 ///
 /// Can be overridden at runtime with the `ENV_TRIPLETS_HF_PARQUET_ENDPOINT`

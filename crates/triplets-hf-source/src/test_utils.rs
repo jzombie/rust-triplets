@@ -4,6 +4,11 @@
 //! tests in `tests/huggingface_integration.rs` so that mock-server logic is
 //! defined once rather than duplicated in every test module.
 
+/// URL that is guaranteed to be unreachable (port 1 is never bound on any
+/// system).  Used in tests to simulate network failures without running a
+/// server.
+pub const TEST_UNREACHABLE_URL: &str = "http://127.0.0.1:1";
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
