@@ -303,6 +303,20 @@ fn main() {}
 > **Security**: never commit tokens to source control. Use environment variables, a secrets
 > manager, or a credential file listed in `.gitignore`.
 
+#### Cache Management and Eviction
+
+Downloaded shard files are cached on disk under the configured `snapshot_dir`. The source
+enforces a **32 GiB hard cap** on this cache. The cap can be tuned or disabled through
+`HuggingFaceRowsConfig::local_disk_cap_bytes`:
+
+| Config value | Behavior |
+|---|---|
+| `Some(n)` | Enforce a cap of `n` bytes (default: 32 GiB) |
+| `None` | No disk cap — eviction disabled |
+
+When the cap is reached, the least recently accessed shards are evicted first. Evicted shards
+are re-downloaded automatically from Hugging Face on the next access.
+
 ### CSV Source
 
 Load rows from a CSV file with explicit column mappings. The file **must have a named header row** — columns are always selected by name. Supports two modes:

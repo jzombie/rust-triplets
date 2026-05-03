@@ -1,4 +1,9 @@
 /// Prefix added to remote URL shard identifiers to distinguish them from local paths.
+/// Hard cap for local manifest-shard cache bytes (32 GiB).
+/// Enforced by cache-manager policy application on manifest cache roots.
+pub const HF_LOCAL_DISK_CAP_BYTES: u64 = 32 * 1024 * 1024 * 1024;
+
+/// Prefix added to remote URL shard identifiers to distinguish them from local paths.
 pub const HF_REMOTE_URL_PREFIX: &str = "url::";
 /// Extra row-index headroom above currently materialized rows exposed via `len_hint`.
 ///
