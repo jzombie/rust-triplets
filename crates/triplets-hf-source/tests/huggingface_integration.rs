@@ -1395,6 +1395,133 @@ fn huggingface_live_classlabel_resolution_maps_integers_to_label_strings() {
     }
 }
 
+// ── Live network test: HEAD Content-Length matches manifest shard size ─────
+//
+// Verifies that an HTTP HEAD request to a live HF shard URL returns a
+// Content-Length that matches the size reported in the datasets-server
+// parquet manifest.  The HEAD request is made through the source's own
+// `fetch_remote_size_with_runtime` method, which uses the same authenticated
+// HTTP client (respecting `HF_TOKEN` for private datasets).
+//
+// Required env vars:
+//   HF_TOKEN                       — optional (for private datasets)
+//   TRIPLETS_HF_TOKEN_TEST_DATASET — optional; defaults to a public dataset
+//   TRIPLETS_SKIP_LIVE_TESTS=1     — skips this test without failing
+
+#[test]
+fn huggingface_live_head_request_matches_manifest_size() {
+    // ── Guard: respect TRIPLETS_SKIP_LIVE_TESTS ────────────────────────────
+    let skip_live = std::env::var(ENV_TRIPLETS_SKIP_LIVE_TESTS)
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+
+    // Determine which dataset to use: prefer the configured test dataset
+    // (private), fall back to a public one.
+    let dataset = match std::env::var(ENV_TRIPLETS_HF_TOKEN_TEST_DATASET) {
+        Ok(d) if !d.trim().is_empty() => d.trim().to_string(),
+        _ => {
+            if skip_live {
+                eprintln!(
+                    "[skip] {} not set and TRIPLETS_SKIP_LIVE_TESTS is active — \
+                     skipping HEAD size integration test.",
+                    ENV_TRIPLETS_HF_TOKEN_TEST_DATASET
+                );
+                return;
+            }
+            // Public fallback used by the existing live tests.
+            "TimKoornstra/financial-tweets-sentiment".to_string()
+        }
+    };
+
+    let hf_token = std::env::var(ENV_TRIPLETS_HF_TOKEN).ok();
+
+    let temp = tempfile::tempdir().expect("failed creating tempdir");
+
+    // Build a config that mirrors what the source would use, including
+    // token auth when available so the HEAD request uses the same
+    // authenticated HTTP client.
+    let mut config = HuggingFaceRowsConfig::new(
+        "hf_live_head_size",
+        &dataset,
+        "default",
+        "train",
+        temp.path(),
+    );
+    config.text_columns = vec!["sentiment".to_string()];
+    config.hf_token = hf_token.clone();
+
+    // ── Step 1: fetch the parquet manifest ─────────────────────────────────
+    // Build a source-owned tokio runtime and use the source's own HTTP client
+    // (which carries HF_TOKEN auth for private datasets).
+    let runtime =
+        HuggingFaceRowSource::build_http_runtime(&config).expect("failed building tokio runtime");
+
+    let (shard_url, manifest_size) = runtime.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("failed building reqwest client");
+
+        let manifest_resp = client
+            .get(triplets_hf_source::HF_PARQUET_DEFAULT_ENDPOINT)
+            .query(&[("dataset", dataset.as_str()), ("config", "default")])
+            .send()
+            .await
+            .expect("failed fetching parquet manifest");
+        assert!(
+            manifest_resp.status().is_success(),
+            "parquet manifest request failed: {} for dataset={}",
+            manifest_resp.status(),
+            dataset
+        );
+
+        let manifest: serde_json::Value = manifest_resp
+            .json()
+            .await
+            .expect("failed parsing manifest JSON");
+        let parquet_files = manifest["parquet_files"]
+            .as_array()
+            .expect("manifest missing parquet_files array");
+        assert!(
+            !parquet_files.is_empty(),
+            "manifest has no parquet files for dataset={dataset}"
+        );
+
+        let first_shard = &parquet_files[0];
+        let shard_url = first_shard["url"]
+            .as_str()
+            .expect("shard entry missing url")
+            .to_string();
+        let manifest_size = first_shard["size"]
+            .as_u64()
+            .expect("shard entry missing size");
+        assert!(manifest_size > 0, "manifest reports zero size for shard");
+        (shard_url, manifest_size)
+    });
+
+    // ── Step 2: do the HEAD request through the source's own authenticated
+    // infrastructure.  Wrap the shard URL as a url:: candidate so
+    // remote_url_for_candidate can round-trip it.
+    let candidate = format!("url::{shard_url}");
+    let remote_url = HuggingFaceRowSource::remote_url_for_candidate(&config, &candidate);
+    assert_eq!(
+        remote_url, shard_url,
+        "remote_url_for_candidate should round-trip url:: candidate back to original URL"
+    );
+
+    let head_size =
+        HuggingFaceRowSource::fetch_remote_size_with_runtime(&config, &remote_url, &runtime)
+            .expect("HEAD request should succeed")
+            .expect("HEAD response should include Content-Length — HF CDN always returns it");
+
+    assert_eq!(
+        head_size, manifest_size,
+        "HEAD Content-Length ({}) differs from manifest size ({}) \
+         for candidate: {candidate}",
+        head_size, manifest_size,
+    );
+}
+
 // ── trust= and source_id= column tests ─────────────────────────────────────
 
 #[test]
