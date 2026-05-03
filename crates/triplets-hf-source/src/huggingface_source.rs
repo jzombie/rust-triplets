@@ -531,7 +531,7 @@ pub fn build_hf_sources(roots: &HfListRoots) -> Vec<Box<dyn DataSource + 'static
 /// Shared handle to the open-store cache.  Stored on `HuggingFaceRowsConfig`
 /// so all methods have access without passing it separately.
 #[derive(Clone)]
-pub(crate) struct StoreCache(Arc<Mutex<HashMap<PathBuf, Arc<DataStore>>>>);
+pub struct StoreCache(pub(crate) Arc<Mutex<HashMap<PathBuf, Arc<DataStore>>>>);
 
 impl std::fmt::Debug for StoreCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -554,8 +554,6 @@ impl StoreCache {
     fn lock_ok(&self) -> Option<MutexGuard<'_, HashMap<PathBuf, Arc<DataStore>>>> {
         self.0.lock().ok()
     }
-
-
 }
 
 /// Configuration for a bulk Hugging Face row source backed by local snapshot files.
@@ -6660,8 +6658,7 @@ mod tests {
         let config = test_config(dir.path().to_path_buf());
 
         let err = HuggingFaceRowSource::build_shard_index(&config)
-            .err()
-            .expect("build_shard_index should fail");
+            .expect_err("build_shard_index should fail");
         assert!(matches!(
             err,
             SamplerError::SourceUnavailable { ref reason, .. } if reason.contains("no shard files found")
