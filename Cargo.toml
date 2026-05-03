@@ -1,11 +1,12 @@
+
 [package]
 name = "triplets"
-version = "0.19.0-alpha"
-edition = "2024"
 description = "A composable, deterministic text data pipeline for ML. Ingest, denoise, chunk, split, and sample multi-source corpora into reproducible training triplets."
-license = "MIT OR Apache-2.0"
-authors = ["Jeremy Harris <jeremy.harris@zenosmosis.com>"]
-repository = "https://github.com/jzombie/rust-triplets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
 categories = ["algorithms", "artificial-intelligence", "science", "text-processing"]
 keywords = [
     "train-test-split",
@@ -14,36 +15,78 @@ keywords = [
     "preprocessing",
     "bm25",
 ]
+[workspace]
+members = [".", "crates/triplets-core", "crates/triplets-debug", "crates/triplets-hf-source"]
+resolver = "2"
 
-[features]
-default = []
-huggingface = ["dep:serde_json", "dep:hf-hub", "dep:parquet", "dep:reqwest", "dep:tokio"]
-bm25-mining = ["dep:bm25"]
-extended-metrics = []
+[workspace.package]
+version = "0.20.0-alpha"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+authors = ["Jeremy Harris <jeremy.harris@zenosmosis.com>"]
+repository = "https://github.com/jzombie/rust-triplets"
 
-[dependencies]
+[workspace.dependencies]
 bitcode = "0.6.9"
-bm25 = { version = "2.3.2", optional = true, features = ["parallelism"] }
+bm25 = { version = "2.3.2", features = ["parallelism"] }
 cache-manager = "0.4.0"
 chrono = { version = "0.4.44", features = ["serde"] }
-clap = { version = "4.6.0", features = ["derive"] }
+clap = { version = "4.6.1", features = ["derive"] }
 csv = "1.4.0"
-hf-hub = { version = "0.5.0", optional = true, default-features = false, features = ["tokio", "rustls-tls"] }
+hf-hub = { version = "0.5.0", default-features = false, features = ["tokio", "rustls-tls"] }
 indexmap = "2.14.0"
+indoc = "2.0.7"
 line-ending = "1.5.1"
-parquet = { version = "58.1.0", optional = true, features = ["json"] }
+parquet = { version = "58.1.0", features = ["json"] }
 rand = { version = "0.9.3", features = ["std", "small_rng"] }
-rayon = "1.11.0"
-reqwest = { version = "0.12.28", optional = true, default-features = false, features = ["rustls-tls", "stream", "json"] }
+rayon = "1.12.0"
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls", "stream", "json"] }
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = { version = "1.0.149", optional = true }
+serde_json = "1.0.149"
+serial_test = "3.4.0"
 simd-r-drive = "0.16.1-alpha"
 tempfile = "3.27.0"
 thiserror = "2.0.18"
-tokio = { version = "1.51.1", optional = true, features = ["rt", "fs", "io-util"] }
+tokio = { version = "1.52.1", features = ["rt", "fs", "io-util"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+triplets-core = { path = "crates/triplets-core", version = "0.20.0-alpha" }
+triplets-debug = { path = "crates/triplets-debug", version = "0.20.0-alpha" }
+triplets-hf-source = { path = "crates/triplets-hf-source", version = "0.20.0-alpha" }
 walkdir = "2.5.0"
 
+[features]
+default = []
+huggingface = ["dep:triplets-hf-source"]
+bm25-mining = ["dep:bm25", "triplets-core/bm25-mining"]
+extended-metrics = ["triplets-core/extended-metrics"]
+
+[dependencies]
+bitcode = { workspace = true }
+bm25 = { workspace = true, optional = true }
+cache-manager = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+csv = { workspace = true }
+hf-hub = { workspace = true, optional = true }
+indexmap = { workspace = true }
+line-ending = { workspace = true }
+parquet = { workspace = true, optional = true }
+rand = { workspace = true }
+rayon = { workspace = true }
+reqwest = { workspace = true, optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true, optional = true }
+simd-r-drive = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, optional = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+triplets-core = { workspace = true }
+triplets-debug = { workspace = true }
+triplets-hf-source = { workspace = true, optional = true }
+walkdir = { workspace = true }
+
 [dev-dependencies]
-indoc = "2.0.7"
+serde_json = { workspace = true }

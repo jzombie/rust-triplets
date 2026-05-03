@@ -1,23 +1,21 @@
-#![cfg(feature = "huggingface")]
-
 use serde::Serialize;
 use simd_r_drive::storage_engine::DataStore;
 use simd_r_drive::storage_engine::traits::DataStoreWriter;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
-use triplets::constants::env_vars::{
-    HF_TOKEN, TRIPLETS_HF_TOKEN_TEST_DATASET, TRIPLETS_SKIP_LIVE_TESTS,
+use triplets_core::constants::env_vars::ENV_TRIPLETS_SKIP_LIVE_TESTS;
+use triplets_core::constants::sampler::AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME;
+use triplets_core::utils::platform_newline;
+use triplets_core::{
+    ChunkingStrategy, DataSource, DeterministicSplitStore, Sampler, SamplerConfig, SplitLabel,
+    SplitRatios, TripletSampler,
 };
-use triplets::constants::sampler::AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME;
-use triplets::source::backends::huggingface_source::{
-    HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE, load_hf_sources_from_list,
-};
-use triplets::utils::platform_newline;
-use triplets::{
-    ChunkingStrategy, DataSource, DeterministicSplitStore, HfListRoots, HfSourceEntry,
-    HuggingFaceRowSource, HuggingFaceRowsConfig, Sampler, SamplerConfig, SplitLabel, SplitRatios,
-    TripletSampler, build_hf_sources, parse_csv_fields, parse_hf_source_line, parse_hf_uri,
+use triplets_hf_source::{
+    ENV_TRIPLETS_HF_INFO_ENDPOINT, ENV_TRIPLETS_HF_PARQUET_ENDPOINT, ENV_TRIPLETS_HF_SIZE_ENDPOINT,
+    ENV_TRIPLETS_HF_TOKEN, ENV_TRIPLETS_HF_TOKEN_TEST_DATASET, HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE,
+    HfListRoots, HfSourceEntry, HuggingFaceRowSource, HuggingFaceRowsConfig, build_hf_sources,
+    load_hf_sources_from_list, parse_csv_fields, parse_hf_source_line, parse_hf_uri,
     resolve_hf_list_roots,
 };
 
@@ -277,11 +275,11 @@ fn huggingface_text_mode_triplets_can_use_different_anchor_positive_windows() {
         assert_eq!(triplet.anchor.record_id, triplet.positive.record_id);
 
         let anchor_window = match &triplet.anchor.view {
-            triplets::data::ChunkView::Window { index, .. } => Some(*index),
+            triplets_core::data::ChunkView::Window { index, .. } => Some(*index),
             _ => None,
         };
         let positive_window = match &triplet.positive.view {
-            triplets::data::ChunkView::Window { index, .. } => Some(*index),
+            triplets_core::data::ChunkView::Window { index, .. } => Some(*index),
             _ => None,
         };
         if let (Some(a), Some(p)) = (anchor_window, positive_window)
@@ -377,13 +375,13 @@ fn huggingface_role_columns_mode_and_synthetic_ids_work() {
         record
             .sections
             .iter()
-            .any(|section| matches!(section.role, triplets::SectionRole::Anchor))
+            .any(|section| matches!(section.role, triplets_core::SectionRole::Anchor))
     }));
     assert!(snapshot.records.iter().all(|record| {
         record
             .sections
             .iter()
-            .filter(|section| matches!(section.role, triplets::SectionRole::Context))
+            .filter(|section| matches!(section.role, triplets_core::SectionRole::Context))
             .count()
             >= 2
     }));
@@ -561,7 +559,7 @@ fn huggingface_refresh_cursor_wraps_and_limit_none_reads_all() {
     let wrapped = source
         .refresh(
             &seed,
-            Some(&triplets::SourceCursor {
+            Some(&triplets_core::SourceCursor {
                 last_seen: chrono::Utc::now(),
                 revision: 99,
             }),
@@ -1701,11 +1699,11 @@ fn hf_token_private_dataset_access() {
     // credentials produce a silent skip.  Otherwise missing credentials are a
     // hard failure so the test cannot be accidentally omitted.
 
-    let skip_live = std::env::var(TRIPLETS_SKIP_LIVE_TESTS)
+    let skip_live = std::env::var(ENV_TRIPLETS_SKIP_LIVE_TESTS)
         .map(|v| !v.trim().is_empty())
         .unwrap_or(false);
 
-    let token = match std::env::var(HF_TOKEN) {
+    let token = match std::env::var(ENV_TRIPLETS_HF_TOKEN) {
         Ok(t) if !t.trim().is_empty() => t,
         _ => {
             if skip_live {
@@ -1723,14 +1721,14 @@ fn hf_token_private_dataset_access() {
         }
     };
 
-    let dataset = match std::env::var(TRIPLETS_HF_TOKEN_TEST_DATASET) {
+    let dataset = match std::env::var(ENV_TRIPLETS_HF_TOKEN_TEST_DATASET) {
         Ok(d) if !d.trim().is_empty() => d,
         _ => {
             if skip_live {
                 eprintln!(
                     "[skip] {} not set and TRIPLETS_SKIP_LIVE_TESTS is active — \
                      skipping private dataset integration test.",
-                    TRIPLETS_HF_TOKEN_TEST_DATASET
+                    ENV_TRIPLETS_HF_TOKEN_TEST_DATASET
                 );
                 return;
             }
@@ -1738,7 +1736,7 @@ fn hf_token_private_dataset_access() {
                 "{} is not set. This test requires a private HF dataset repo. \
                  Set it to run the test, or set TRIPLETS_SKIP_LIVE_TESTS=1 to skip it. \
                  See the comment above this test for setup instructions.",
-                TRIPLETS_HF_TOKEN_TEST_DATASET
+                ENV_TRIPLETS_HF_TOKEN_TEST_DATASET
             );
         }
     };
@@ -1802,4 +1800,154 @@ fn hf_token_private_dataset_access() {
         has_content,
         "expected at least one record with non-empty text content from columns a or b"
     );
+}
+
+#[test]
+#[serial_test::serial]
+fn sampler_next_text_batch_re_expands_after_cache_eviction() {
+    // E2E test verifying that when the cache manager automatically evicts
+    // shards during background expansion, the source re-fetches the HF
+    // parquet manifest and re-downloads evicted shards on the next cycle.
+    //
+    // The test uses ONLY the public Sampler API (`next_text_batch`) and
+    // exercises the full production code path:
+    //   next_text_batch -> Sampler -> source.refresh -> trigger_expansion_if_needed
+    //   -> expansion thread -> download_next_remote_shard
+    //   -> enforce_disk_cap_locked -> sync_shard_state_from_disk_locked
+    //   -> remote_candidates nulled -> next cycle re-fetches manifest
+    //
+    // The mock server's manifest counter proves the manifest is re-queried.
+
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    // ── Mock HF server ───────────────────────────────────────────────────
+    //
+    // Returns a manifest listing 5 shards, each containing 1 row of text.
+    // The tight cap (room for ~2 shards) causes automatic eviction once
+    // more than 2 shards have been downloaded.
+    //
+    // Shard payload: {"id":"s{shard}_r{row}","text":"txt_{shard}_{row}"}
+    // Roughly 33 bytes each.  2 shards ≈ 66 bytes, cap = 70 bytes.
+    // The manifest server also counts how many times /parquet is queried.
+    let server = triplets_hf_source::test_utils::HfMockServer::new(5, 1);
+
+    // ── Env var guards ──────────────────────────────────────────────────
+    //
+    // Set env vars for the test duration.  The triggers MUST outlive
+    // the source and sampler so that async expansion threads can still
+    // resolve the mock endpoints when they make HTTP requests.
+    let _parquet_guard = triplets_hf_source::test_utils::EnvGuard::set(
+        ENV_TRIPLETS_HF_PARQUET_ENDPOINT,
+        &format!("{}/parquet", server.url()),
+    );
+    // The /size and /info endpoints are NOT mocked; failing to query them
+    // is non-fatal (warns and returns None).  Point them somewhere harmless.
+    let _size_guard = triplets_hf_source::test_utils::EnvGuard::set(
+        ENV_TRIPLETS_HF_SIZE_ENDPOINT,
+        "http://127.0.0.1:1/unreachable",
+    );
+    let _info_guard = triplets_hf_source::test_utils::EnvGuard::set(
+        ENV_TRIPLETS_HF_INFO_ENDPOINT,
+        "http://127.0.0.1:1/unreachable",
+    );
+
+    // ── Source ───────────────────────────────────────────────────────────
+    let mut config = HuggingFaceRowsConfig::new(
+        "hf_re_expand_test",
+        "org/dataset",
+        "default",
+        "train",
+        temp.path(),
+    );
+    config.hf_token = None;
+    config.text_columns = vec!["text".to_string()];
+    // Tight cap: room for ~2 shards.  After 3+ shards are downloaded the
+    // oldest get evicted by the cache manager.
+    config.local_disk_cap_bytes = Some(70);
+    // Small capacity so the in-memory row cache doesn't mask any eviction.
+    config.cache_capacity = 2;
+
+    let source = HuggingFaceRowSource::new(config).expect("failed creating HuggingFaceRowSource");
+
+    // ── Sampler ──────────────────────────────────────────────────────────
+    let split_store =
+        Arc::new(DeterministicSplitStore::new(SplitRatios::default(), 42).expect("split store"));
+    let sampler_config = SamplerConfig {
+        batch_size: 1,
+        ingestion_max_records: 10,
+        seed: 1,
+        allowed_splits: vec![SplitLabel::Train],
+        ..SamplerConfig::default()
+    };
+    let sampler = TripletSampler::new(sampler_config, split_store);
+    sampler.register_source(Box::new(source));
+
+    // ── Drain shards through next_text_batch ────────────────────────────
+    //
+    // Each call to `next_text_batch`:
+    //   1. Calls `source.refresh()` which bootsraps (materialized_rows == 0)
+    //      → fetches manifest → downloads shard 0.
+    //   2. Reads rows from materialized shards.
+    //   3. Calls `trigger_expansion_if_needed()` which spawns a thread to
+    //      download the next shard in the background → cap exceeded → old
+    //      shard evicted → `remote_candidates` nulled.
+    //
+    // The expansion thread is async so we call many times, allowing the
+    // background downloads to complete between iterations.
+    let total_batches = 20;
+    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut empty_batches = 0usize;
+    let mut errors = 0usize;
+
+    for i in 0..total_batches {
+        // Brief sleep so the async expansion thread from the PRIOR call
+        // has time to finish downloading the shard before we read again.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let batch = match sampler.next_text_batch(SplitLabel::Train) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("[iter {i}] next_text_batch error: {e}");
+                errors += 1;
+                continue;
+            }
+        };
+
+        if batch.samples.is_empty() {
+            empty_batches += 1;
+            continue;
+        }
+
+        for sample in &batch.samples {
+            seen_ids.insert(sample.chunk.record_id.to_string());
+        }
+    }
+
+    // The sampler may return empty or error batches while the source is
+    // expanding.  But we must have seen at least some unique record IDs
+    // from eviction-surviving shards.
+    let survivors = seen_ids.len();
+    eprintln!(
+        "results: {total_batches} iters, {survivors} unique ids, {empty_batches} empty, {errors} errors, ids={seen_ids:?}"
+    );
+    assert!(
+        survivors >= 1,
+        "no unique record IDs observed — expansion never produced surviving rows; \
+         empty={empty_batches} errors={errors}"
+    );
+
+    // ── Verify the manifest was re-fetched after eviction ───────────────
+    //
+    // The counter increments every time a /parquet request lands on the
+    // mock server.  The bootstrap path fetches it once; re-expansion after
+    // eviction fetches it again.  We expect >= 2.
+    let fetch_count = server.manifest_fetch_count();
+    eprintln!("parquet manifest fetched {fetch_count} times (expected >= 2)");
+    assert!(
+        fetch_count >= 2,
+        "parquet manifest must be re-fetched after eviction-driven re-expansion; \
+         fetched {fetch_count} times, expected >= 2",
+    );
+
+    server.shut_down();
 }

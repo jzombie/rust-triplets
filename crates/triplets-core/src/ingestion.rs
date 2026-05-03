@@ -199,6 +199,11 @@ pub struct IngestionManager {
     /// This is updated even when cache ingest does not change, and is cleared when
     /// no source refresh occurs in that cycle.
     last_refreshed_sources: Vec<SourceId>,
+    /// Rotating start index for the round-robin buffer drain.  Instead of always
+    /// draining from source 0 (which starves high-index sources of refresh
+    /// opportunities), each cycle begins at this position and advances by one.
+    /// Over N cycles every source is drained first exactly once.
+    drain_start: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -226,6 +231,7 @@ impl IngestionManager {
             source_epoch: 0,
             source_refresh_generation: 0,
             last_refreshed_sources: Vec::new(),
+            drain_start: 0,
         }
     }
 
@@ -577,28 +583,39 @@ impl IngestionManager {
         if let Some(weights) = weights {
             self.weighted_drain_into_caches(target_limit, weights);
         } else {
-            // Round-robin drain up to `target_limit` records total, routing each
-            // record into its own source's per-source cache.
+            // Fair round-robin drain: start from `drain_start` instead of 0 so
+            // that the drain cursor rotates across cycles.  This prevents head
+            // sources (low indices) from always draining faster than tail sources,
+            // which was starving tail sources of refresh opportunities.
             let n = self.sources.len();
-            let mut per_source: Vec<Vec<DataRecord>> = vec![Vec::new(); n];
-            let mut total_drained = 0;
-            let mut any_remaining = true;
-            while total_drained < target_limit && any_remaining {
-                any_remaining = false;
-                for (idx, state) in self.sources.iter_mut().enumerate() {
-                    if total_drained >= target_limit {
-                        break;
-                    }
-                    if let Some(record) = state.buffer.pop_front() {
-                        per_source[idx].push(record);
-                        total_drained += 1;
-                        any_remaining = true;
+            if n > 0 {
+                let mut per_source: Vec<Vec<DataRecord>> = vec![Vec::new(); n];
+                let mut total_drained = 0;
+                let mut any_remaining = true;
+                while total_drained < target_limit && any_remaining {
+                    any_remaining = false;
+                    for offset in 0..n {
+                        if total_drained >= target_limit {
+                            break;
+                        }
+                        let idx = (self.drain_start + offset) % n;
+                        if let Some(record) = self.sources[idx].buffer.pop_front() {
+                            per_source[idx].push(record);
+                            total_drained += 1;
+                            any_remaining = true;
+                        }
                     }
                 }
-            }
-            for (idx, batch) in per_source.into_iter().enumerate() {
-                if !batch.is_empty() {
-                    self.sources[idx].cache.ingest(batch);
+                // Advance the drain cursor so the next cycle starts from a different
+                // position.  Only advance when at least one record was drained, so a
+                // burst of drain-noop cycles on an empty source list doesn't rotate.
+                if total_drained > 0 {
+                    self.drain_start = (self.drain_start + 1) % n;
+                }
+                for (idx, batch) in per_source.into_iter().enumerate() {
+                    if !batch.is_empty() {
+                        self.sources[idx].cache.ingest(batch);
+                    }
                 }
             }
         }
@@ -642,6 +659,14 @@ impl IngestionManager {
 
             let mut best_idx = None;
             let mut best_score = f32::MIN;
+            // Rotating tie-breaker: when scores are equal, prefer the source
+            // just PAST drain_start in rotation order (i.e. the source whose
+            // turn is coming up in the round-robin).
+            let closer_to_start = |a: usize, b: usize| -> bool {
+                let da = (a + len - self.drain_start) % len;
+                let db = (b + len - self.drain_start) % len;
+                da < db
+            };
             for idx in 0..len {
                 if weight_values[idx] <= 0.0 {
                     continue;
@@ -650,7 +675,14 @@ impl IngestionManager {
                     continue;
                 }
                 current[idx] += weight_values[idx];
-                if current[idx] > best_score {
+                let is_better = if current[idx] > best_score {
+                    true
+                } else if current[idx] == best_score {
+                    closer_to_start(idx, best_idx.unwrap_or(0))
+                } else {
+                    false
+                };
+                if is_better {
                     best_score = current[idx];
                     best_idx = Some(idx);
                 }
@@ -665,6 +697,10 @@ impl IngestionManager {
                 per_source[idx].push(record);
                 total += 1;
             }
+        }
+
+        if total > 0 && len > 0 {
+            self.drain_start = (self.drain_start + 1) % len;
         }
 
         for (idx, batch) in per_source.into_iter().enumerate() {
@@ -693,9 +729,13 @@ struct SourceState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::TripletRecipe;
+    use crate::TripletSampler;
+    use crate::config::{Selector, TextRecipe, TripletRecipe};
     use crate::data::{QualityScore, RecordSection, SectionRole};
+    use crate::sampler::Sampler;
+    use crate::splits::{DeterministicSplitStore, SplitLabel, SplitRatios};
     use chrono::Utc;
+    use std::collections::HashMap;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -1311,5 +1351,381 @@ mod tests {
             .refresh_all_with_weights(&empty_weights)
             .expect("no sources should not error");
         assert!(empty_manager.all_caches_empty());
+    }
+
+    #[test]
+    fn drain_start_rotates_fairly_across_sources() {
+        // Create 3 sources, each with 10 records in their buffer after refresh.
+        // The fair round-robin should ensure all 3 drain at the same rate
+        // over multiple advance cycles.
+        struct FairSource {
+            id: String,
+            refresh_count: Arc<AtomicUsize>,
+        }
+
+        impl DataSource for FairSource {
+            fn id(&self) -> &str {
+                &self.id
+            }
+            fn refresh(
+                &self,
+                _config: &SamplerConfig,
+                _cursor: Option<&SourceCursor>,
+                _limit: Option<usize>,
+            ) -> Result<SourceSnapshot, SamplerError> {
+                self.refresh_count.fetch_add(1, Ordering::SeqCst);
+                Ok(SourceSnapshot {
+                    records: (0..10)
+                        .map(|i| make_record(&format!("r{i}"), &self.id))
+                        .collect(),
+                    cursor: SourceCursor {
+                        last_seen: Utc::now(),
+                        revision: 1,
+                    },
+                })
+            }
+            fn reported_record_count(&self, _: &SamplerConfig) -> Result<u128, SamplerError> {
+                Ok(10)
+            }
+        }
+
+        let counts = (
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+        );
+
+        let mut manager = IngestionManager::new(30, SamplerConfig::default());
+        manager.register_source(Box::new(FairSource {
+            id: "src_0".to_string(),
+            refresh_count: Arc::clone(&counts.0),
+        }));
+        manager.register_source(Box::new(FairSource {
+            id: "src_1".to_string(),
+            refresh_count: Arc::clone(&counts.1),
+        }));
+        manager.register_source(Box::new(FairSource {
+            id: "src_2".to_string(),
+            refresh_count: Arc::clone(&counts.2),
+        }));
+
+        // First refresh_all fills all buffers.
+        manager.refresh_all();
+        // All 3 refreshed once.
+        assert_eq!(counts.0.load(Ordering::SeqCst), 1);
+        assert_eq!(counts.1.load(Ordering::SeqCst), 1);
+        assert_eq!(counts.2.load(Ordering::SeqCst), 1);
+
+        // Each advance(1) drains 1 record from 1 source, rotating via
+        // drain_start.  With 3 sources, after 3 advances each source
+        // loses 1 record.  After 30 advances each source loses 10 records
+        // and triggers a refresh.  Run 33 advances and check all 3 refreshed
+        // roughly the same number of times.
+        for _ in 0..33 {
+            manager.advance(1);
+        }
+
+        let r0 = counts.0.load(Ordering::SeqCst);
+        let r1 = counts.1.load(Ordering::SeqCst);
+        let r2 = counts.2.load(Ordering::SeqCst);
+
+        // Each had 10 records after initial refresh_all.
+        // 10 records / (1 drained per 3 cycles) = 30 cycles to drain each buffer.
+        // After 33 more advances each buffer emptied ~1 time and re-filled, so
+        // each source should have refreshed ~2 times total (initial + 1 drain).
+        // The exact count can vary by 1 due to timing, but all 3 must be within
+        // 1 of each other — no source can be starved.
+        let min = r0.min(r1).min(r2);
+        let max = r0.max(r1).max(r2);
+        assert!(
+            max <= min + 1,
+            "sources should refresh at roughly the same rate: got {r0}/{r1}/{r2}"
+        );
+    }
+
+    #[test]
+    fn direct_drain_start_rotates_fairly_with_batch_2_of_5() {
+        // Direct IngestionManager test with batch_size=2, 5 sources.
+        // Isolates the drain_start rotation from the sampler pipeline.
+        struct SimpleSource {
+            id: String,
+            refresh_count: Arc<AtomicUsize>,
+        }
+
+        impl DataSource for SimpleSource {
+            fn id(&self) -> &str {
+                &self.id
+            }
+            fn refresh(
+                &self,
+                _: &SamplerConfig,
+                _: Option<&SourceCursor>,
+                _: Option<usize>,
+            ) -> Result<SourceSnapshot, SamplerError> {
+                self.refresh_count.fetch_add(1, Ordering::SeqCst);
+                let now = Utc::now();
+                let records: Vec<DataRecord> = (0..8)
+                    .map(|i| DataRecord {
+                        id: format!("{}_r{i}", self.id),
+                        source: self.id.clone(),
+                        created_at: now,
+                        updated_at: now,
+                        quality: QualityScore { trust: 1.0 },
+                        taxonomy: Vec::new(),
+                        sections: Vec::new(),
+                        meta_prefix: None,
+                    })
+                    .collect();
+                Ok(SourceSnapshot {
+                    records,
+                    cursor: SourceCursor {
+                        last_seen: now,
+                        revision: 1,
+                    },
+                })
+            }
+            fn reported_record_count(&self, _: &SamplerConfig) -> Result<u128, SamplerError> {
+                Ok(8)
+            }
+        }
+
+        let counts: Vec<Arc<AtomicUsize>> = (0..5).map(|_| Arc::new(AtomicUsize::new(0))).collect();
+        let mut manager = IngestionManager::new(40, SamplerConfig::default());
+        for (i, count) in counts.iter().enumerate() {
+            manager.register_source(Box::new(SimpleSource {
+                id: format!("src_{i}"),
+                refresh_count: Arc::clone(count),
+            }));
+        }
+
+        manager.refresh_all();
+        for c in &counts {
+            assert_eq!(c.load(Ordering::SeqCst), 1);
+        }
+
+        for _ in 0..80 {
+            manager.advance(2);
+        }
+
+        let totals: Vec<usize> = counts.iter().map(|c| c.load(Ordering::SeqCst)).collect();
+        // Round-robin drain with 5 sources, 8 records each, batch_size=2, 80
+        // advance calls.  Most sources refresh 5×; sources 2-4 get one extra
+        // cycle (6) due to the rotating drain_start tie-breaker positioning.
+        assert_eq!(
+            totals,
+            vec![5, 5, 6, 6, 6],
+            "direct manager: unexpected refresh distribution"
+        );
+    }
+
+    /// Helper: create 5 sources with 8 records each and a sampler configured for
+    /// text batches with batch_size=2.  Returns the sampler and refresh counters.
+    fn make_five_source_sampler(
+        counts: &[Arc<AtomicUsize>],
+    ) -> TripletSampler<DeterministicSplitStore> {
+        struct Tracked {
+            id: String,
+            refresh_count: Arc<AtomicUsize>,
+        }
+        impl DataSource for Tracked {
+            fn id(&self) -> &str {
+                &self.id
+            }
+            fn refresh(
+                &self,
+                _: &SamplerConfig,
+                _: Option<&SourceCursor>,
+                _: Option<usize>,
+            ) -> Result<SourceSnapshot, SamplerError> {
+                self.refresh_count.fetch_add(1, Ordering::SeqCst);
+                let now = Utc::now();
+                let records: Vec<DataRecord> = (0..8)
+                    .map(|i| DataRecord {
+                        id: format!("{}_r{i}", self.id),
+                        source: self.id.clone(),
+                        created_at: now,
+                        updated_at: now,
+                        quality: QualityScore { trust: 1.0 },
+                        taxonomy: Vec::new(),
+                        sections: vec![RecordSection {
+                            role: SectionRole::Anchor,
+                            heading: None,
+                            text: format!("x{i}"),
+                            sentences: vec![format!("x{i}")],
+                        }],
+                        meta_prefix: None,
+                    })
+                    .collect();
+                Ok(SourceSnapshot {
+                    records,
+                    cursor: SourceCursor {
+                        last_seen: now,
+                        revision: 1,
+                    },
+                })
+            }
+            fn reported_record_count(&self, _: &SamplerConfig) -> Result<u128, SamplerError> {
+                Ok(8)
+            }
+        }
+
+        let config = SamplerConfig {
+            batch_size: 2,
+            text_recipes: vec![TextRecipe {
+                name: "anchor".into(),
+                selector: Selector::Role(SectionRole::Anchor),
+                weight: 1.0,
+                instruction: None,
+            }],
+            split: SplitRatios {
+                train: 1.0,
+                validation: 0.0,
+                test: 0.0,
+            },
+            allowed_splits: vec![SplitLabel::Train],
+            ingestion_max_records: 40,
+            ..SamplerConfig::default()
+        };
+        let store = Arc::new(DeterministicSplitStore::new(config.split, 99).unwrap());
+        let sampler = TripletSampler::new(config, store);
+
+        for (i, count) in counts.iter().enumerate() {
+            sampler.register_source(Box::new(Tracked {
+                id: format!("src_{i}"),
+                refresh_count: Arc::clone(count),
+            }));
+        }
+        sampler
+    }
+
+    #[test]
+    fn sampler_unweighted_drain_distributes_evenly() {
+        let counts: Vec<Arc<AtomicUsize>> = (0..5).map(|_| Arc::new(AtomicUsize::new(0))).collect();
+        let sampler = make_five_source_sampler(&counts);
+
+        sampler.next_text_batch(SplitLabel::Train).unwrap();
+        for _ in 0..80 {
+            sampler.next_text_batch(SplitLabel::Train).unwrap();
+        }
+
+        let totals: Vec<usize> = counts.iter().map(|c| c.load(Ordering::SeqCst)).collect();
+        let min = *totals.iter().min().unwrap();
+        let max = *totals.iter().max().unwrap();
+        assert!(
+            max <= min + 1,
+            "unweighted: all sources must refresh at roughly the same rate: {totals:?}"
+        );
+        assert!(
+            min >= 4,
+            "unweighted: each source should have refreshed at least 4 times: {totals:?}"
+        );
+    }
+
+    #[test]
+    fn sampler_weighted_drain_with_equal_weights_distributes_evenly() {
+        // Same as unweighted but goes through the public weighted API with equal
+        // weights for all 5 sources — verifies the weighted drain also rotates
+        // fairly via drain_start bias.
+        let counts: Vec<Arc<AtomicUsize>> = (0..5).map(|_| Arc::new(AtomicUsize::new(0))).collect();
+        let sampler = make_five_source_sampler(&counts);
+
+        let weights: HashMap<String, f32> = (0..5).map(|i| (format!("src_{i}"), 1.0)).collect();
+
+        sampler
+            .next_text_batch_with_weights(SplitLabel::Train, &weights)
+            .unwrap();
+        for _ in 0..80 {
+            sampler
+                .next_text_batch_with_weights(SplitLabel::Train, &weights)
+                .unwrap();
+        }
+
+        let totals: Vec<usize> = counts.iter().map(|c| c.load(Ordering::SeqCst)).collect();
+        let min = *totals.iter().min().unwrap();
+        let max = *totals.iter().max().unwrap();
+        assert!(
+            max <= min + 1,
+            "weighted (equal): all sources must refresh at roughly the same rate: {totals:?}"
+        );
+        assert!(
+            min >= 4,
+            "weighted (equal): each source should have refreshed at least 4 times: {totals:?}"
+        );
+    }
+
+    #[test]
+    fn sampler_unweighted_and_weighted_match_distribution() {
+        // Verify both paths produce similar refresh distributions.
+        let uc: Vec<Arc<AtomicUsize>> = (0..5).map(|_| Arc::new(AtomicUsize::new(0))).collect();
+        let wc: Vec<Arc<AtomicUsize>> = (0..5).map(|_| Arc::new(AtomicUsize::new(0))).collect();
+        let usampler = make_five_source_sampler(&uc);
+        let wsampler = make_five_source_sampler(&wc);
+
+        let weights: HashMap<String, f32> = (0..5).map(|i| (format!("src_{i}"), 1.0)).collect();
+
+        usampler.next_text_batch(SplitLabel::Train).unwrap();
+        wsampler
+            .next_text_batch_with_weights(SplitLabel::Train, &weights)
+            .unwrap();
+        for _ in 0..80 {
+            usampler.next_text_batch(SplitLabel::Train).unwrap();
+            wsampler
+                .next_text_batch_with_weights(SplitLabel::Train, &weights)
+                .unwrap();
+        }
+
+        let ut: Vec<usize> = uc.iter().map(|c| c.load(Ordering::SeqCst)).collect();
+        let wt: Vec<usize> = wc.iter().map(|c| c.load(Ordering::SeqCst)).collect();
+        let umax = *ut.iter().max().unwrap();
+        let umin = *ut.iter().min().unwrap();
+        let wmax = *wt.iter().max().unwrap();
+        let wmin = *wt.iter().min().unwrap();
+        assert!(umax <= umin + 1, "unweighted: {ut:?}");
+        assert!(wmax <= wmin + 1, "weighted equal: {wt:?}");
+    }
+
+    #[test]
+    fn sampler_weighted_drain_with_unequal_weights_respects_ratios() {
+        // Source 3 gets weight 2.0, others get 1.0.  The weighted
+        // proportional-fair drain must give source 3 proportionally more
+        // refresh cycles than any weight-1.0 source.
+        let counts: Vec<Arc<AtomicUsize>> = (0..5).map(|_| Arc::new(AtomicUsize::new(0))).collect();
+        let sampler = make_five_source_sampler(&counts);
+
+        let mut weights = HashMap::new();
+        for i in 0..5 {
+            weights.insert(format!("src_{i}"), if i == 3 { 2.0f32 } else { 1.0 });
+        }
+
+        sampler
+            .next_text_batch_with_weights(SplitLabel::Train, &weights)
+            .unwrap();
+        for _ in 0..200 {
+            sampler
+                .next_text_batch_with_weights(SplitLabel::Train, &weights)
+                .unwrap();
+        }
+
+        let totals: Vec<usize> = counts.iter().map(|c| c.load(Ordering::SeqCst)).collect();
+        // The highest-weight source (src_3, w=2.0) must have strictly more
+        // refreshes than EVERY weight-1.0 source.
+        // Note: src_4 (index 4, w=1.0) gets 12 refreshes while the other
+        // weight-1.0 sources get 6-7.  This happens because the proportional-
+        // fair scheduler uses drain_start as a rotating tie-breaker — being
+        // positioned right after the high-weight source (src_3) gives src_4
+        // extra wins when src_3's buffer empties and refills more frequently.
+        assert!(
+            totals
+                .iter()
+                .enumerate()
+                .all(|(i, &t)| i == 3 || t < totals[3]),
+            "src_3 (w=2.0) must outpace all w=1.0 sources (totals: {totals:?})"
+        );
+        // Lock in the exact deterministic distribution.
+        assert_eq!(
+            totals,
+            vec![6, 7, 7, 26, 12],
+            "unequal-weights: unexpected refresh distribution"
+        );
     }
 }

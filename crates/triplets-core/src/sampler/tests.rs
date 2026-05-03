@@ -22,33 +22,33 @@ pub const FNV1A64_PRIME: u64 = 0x100000001b3;
 /// Number of batches sampled for deterministic sequence hash assertions.
 pub const FULL_SEQUENCE_LEN: usize = 45;
 /// Expected hash for deterministic text batch sequence.
-pub const TEXT_BATCH_SEQUENCE_HASH: u64 = 5827731891827072441;
+pub const TEXT_BATCH_SEQUENCE_HASH: u64 = 7962444922980597149;
 /// Expected hash for deterministic triplet batch sequence.
 #[cfg(not(feature = "bm25-mining"))]
-pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 6137236445130287036;
+pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 7521776225374240393;
 /// Expected hash for deterministic triplet batch sequence when bm25-mining is enabled.
 #[cfg(feature = "bm25-mining")]
-pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 3567297114780411140;
+pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 6309523434799430941;
 /// Expected hash for deterministic pair batch sequence.
 #[cfg(not(feature = "bm25-mining"))]
-pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 1325935229386486484;
+pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 17832018185824582948;
 /// Expected hash for deterministic pair batch sequence when bm25-mining is enabled.
 #[cfg(feature = "bm25-mining")]
-pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 9645472812115896860;
+pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 3528525448544850669;
 /// Expected hash for deterministic prefetch text batch sequence.
-pub const PREFETCH_TEXT_BATCH_SEQUENCE_HASH: u64 = 5061724971919995465;
+pub const PREFETCH_TEXT_BATCH_SEQUENCE_HASH: u64 = 15593577537707362833;
 /// Expected hash for deterministic prefetch triplet batch sequence.
 #[cfg(not(feature = "bm25-mining"))]
-pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 13549723595682255368;
+pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 11869075277114531356;
 /// Expected hash for deterministic prefetch triplet batch sequence when bm25-mining is enabled.
 #[cfg(feature = "bm25-mining")]
-pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 17421456775178077384;
+pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 7938957505253979512;
 /// Expected hash for deterministic prefetch pair batch sequence.
 #[cfg(not(feature = "bm25-mining"))]
-pub const PREFETCH_PAIR_BATCH_SEQUENCE_HASH: u64 = 2535655529758418680;
+pub const PREFETCH_PAIR_BATCH_SEQUENCE_HASH: u64 = 15225298178093196000;
 /// Expected hash for deterministic prefetch pair batch sequence when bm25-mining is enabled.
 #[cfg(feature = "bm25-mining")]
-pub const PREFETCH_PAIR_BATCH_SEQUENCE_HASH: u64 = 6906345832975851973;
+pub const PREFETCH_PAIR_BATCH_SEQUENCE_HASH: u64 = 7551928633021118805;
 
 /// Expected readable wrong-article sequence without BM25 mining.
 pub const READABLE_NON_BM25_TITLES: [&str; 8] = [
@@ -2534,9 +2534,9 @@ fn split_order_is_train_val_test_for_text_batches() {
             "source_c::record_03".to_string(),
             "source_b::record_03".to_string(),
             "source_b::record_03".to_string(),
-            "source_c::record_03".to_string(),
             "source_c::record_02".to_string(),
-            "source_b::record_03".to_string(),
+            "source_c::record_06".to_string(),
+            "source_b::record_07".to_string(),
             "source_c::record_03".to_string()
         ]
     );
@@ -2558,13 +2558,13 @@ fn split_order_is_train_val_test_for_triplet_batches() {
         vec![
             "source_c::record_02".to_string(),
             "source_c::record_04".to_string(),
-            "source_a::record_02".to_string(),
-            "source_b::record_00".to_string(),
-            "source_c::record_02".to_string(),
             "source_b::record_04".to_string(),
-            "source_c::record_04".to_string(),
-            "source_a::record_06".to_string(),
-            "source_a::record_02".to_string()
+            "source_c::record_02".to_string(),
+            "source_a::record_02".to_string(),
+            "source_a::record_07".to_string(),
+            "source_c::record_02".to_string(),
+            "source_a::record_02".to_string(),
+            "source_a::record_04".to_string()
         ]
     );
 }
@@ -2581,14 +2581,14 @@ fn split_order_is_train_val_test_for_pair_batches() {
         record_ids,
         vec![
             "source_b::record_04".to_string(),
-            "source_c::record_02".to_string(),
-            "source_a::record_06".to_string(),
             "source_c::record_04".to_string(),
+            "source_a::record_06".to_string(),
+            "source_c::record_02".to_string(),
             "source_b::record_04".to_string(),
             "source_a::record_07".to_string(),
             "source_b::record_08".to_string(),
             "source_a::record_02".to_string(),
-            "source_c::record_01".to_string()
+            "source_c::record_05".to_string()
         ]
     );
 }
@@ -2608,13 +2608,13 @@ fn prefetch_text_batches_preserve_split_order() {
         vec![
             "source_c::record_03".to_string(),
             "source_a::record_04".to_string(),
-            "source_a::record_07".to_string(),
+            "source_a::record_05".to_string(),
             "source_c::record_02".to_string(),
             "source_c::record_04".to_string(),
-            "source_a::record_08".to_string(),
-            "source_a::record_07".to_string(),
-            "source_c::record_02".to_string(),
-            "source_c::record_04".to_string()
+            "source_a::record_05".to_string(),
+            "source_c::record_05".to_string(),
+            "source_b::record_07".to_string(),
+            "source_a::record_05".to_string()
         ]
     );
 }
@@ -2639,8 +2639,8 @@ fn prefetch_triplet_batches_preserve_split_order() {
             "source_a::record_00".to_string(),
             "source_c::record_02".to_string(),
             "source_c::record_03".to_string(),
-            "source_c::record_00".to_string(),
-            "source_b::record_01".to_string()
+            "source_b::record_01".to_string(),
+            "source_a::record_04".to_string()
         ]
     );
 }
@@ -2659,14 +2659,14 @@ fn prefetch_pair_batches_preserve_split_order() {
         record_ids,
         vec![
             "source_c::record_02".to_string(),
-            "source_b::record_06".to_string(),
+            "source_a::record_06".to_string(),
             "source_a::record_02".to_string(),
             "source_b::record_06".to_string(),
-            "source_a::record_02".to_string(),
+            "source_a::record_06".to_string(),
             "source_c::record_02".to_string(),
-            "source_b::record_10".to_string(),
-            "source_c::record_02".to_string(),
-            "source_a::record_09".to_string()
+            "source_b::record_06".to_string(),
+            "source_c::record_06".to_string(),
+            "source_a::record_08".to_string()
         ]
     );
 }

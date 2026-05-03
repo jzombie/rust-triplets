@@ -328,7 +328,7 @@ impl SamplerConfig {
     /// struct update syntax to customize other fields at the same time:
     ///
     /// ```rust,no_run
-    /// use triplets::{SamplerConfig, config::DenoiserConfig};
+    /// use triplets_core::{SamplerConfig, config::DenoiserConfig};
     ///
     /// // Enable denoiser with all other fields at their defaults:
     /// let config = SamplerConfig::default()
