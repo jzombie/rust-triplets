@@ -1300,6 +1300,18 @@ fn huggingface_reads_live_remote_dataset() {
 #[test]
 #[ignore = "network integration test — verifies /size endpoint returns a plausible row count"]
 fn huggingface_live_size_endpoint_reports_dataset_row_count() {
+    // ── Guard: respect TRIPLETS_SKIP_LIVE_TESTS ────────────────────────────
+    let skip_live = std::env::var(ENV_TRIPLETS_SKIP_LIVE_TESTS)
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    if skip_live {
+        eprintln!(
+            "[skip] TRIPLETS_SKIP_LIVE_TESTS is active — \
+             skipping /size endpoint integration test."
+        );
+        return;
+    }
+
     // Exercises the datasets-server /size endpoint called inside new().
     // If the endpoint changes its response schema, fetch_global_row_count()
     // returns None and known_total_rows() will be None — the first assert fails.
@@ -1341,6 +1353,18 @@ fn huggingface_live_size_endpoint_reports_dataset_row_count() {
 #[test]
 #[ignore = "network integration test — verifies /info endpoint ClassLabel resolution end-to-end"]
 fn huggingface_live_classlabel_resolution_maps_integers_to_label_strings() {
+    // ── Guard: respect TRIPLETS_SKIP_LIVE_TESTS ────────────────────────────
+    let skip_live = std::env::var(ENV_TRIPLETS_SKIP_LIVE_TESTS)
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    if skip_live {
+        eprintln!(
+            "[skip] TRIPLETS_SKIP_LIVE_TESTS is active — \
+             skipping ClassLabel resolution integration test."
+        );
+        return;
+    }
+
     // Exercises three live endpoints in sequence:
     //   1. /info  — called in new() to resolve ClassLabel column names
     //   2. /parquet — called in refresh() to obtain the shard manifest
