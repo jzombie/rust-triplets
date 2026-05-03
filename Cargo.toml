@@ -73,14 +73,19 @@ cache-manager = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
 csv = { workspace = true }
+hf-hub = { workspace = true, optional = true }
 indexmap = { workspace = true }
 line-ending = { workspace = true }
+parquet = { workspace = true, optional = true }
 rand = { workspace = true }
 rayon = { workspace = true }
+reqwest = { workspace = true, optional = true }
 serde = { workspace = true }
+serde_json = { workspace = true, optional = true }
 simd-r-drive = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true, optional = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 triplets-core = { workspace = true }
@@ -89,5 +94,4 @@ triplets-hf-source = { workspace = true, optional = true }
 walkdir = { workspace = true }
 
 [dev-dependencies]
-indoc = { workspace = true }
 serde_json = { workspace = true }
