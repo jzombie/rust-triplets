@@ -190,10 +190,16 @@ impl IndexablePager {
         }
 
         use rayon::prelude::*;
-        // Only process the first `max` entries in parallel. Since almost
-        // all index positions return Some, this fills the quota in a single
-        // parallel pass. Any residual shortage (from None returns) is
-        // handled by a short sequential sweep of the remaining entries.
+        // The permutation `seq` covers all `total` positions.  We try up to
+        // `max` positions in parallel first (rayon's global pool keeps
+        // in-flight requests at `num_cpus`).  For dense sources (every index
+        // returns a record) this single parallel batch fills the quota and
+        // the rest of the loop body below is a no-op.
+        //
+        // If the source is sparse (some positions return None), the parallel
+        // batch may come up short.  We then walk the remaining positions
+        // sequentially to find enough records.  In practice this fallback
+        // rarely runs and only for a handful of positions.
         let par_end = max.min(total);
         let results: Vec<Result<Option<DataRecord>, SamplerError>> = seq[..par_end]
             .par_iter()
@@ -210,7 +216,7 @@ impl IndexablePager {
             }
             final_cursor = cursor_after;
         }
-        // Sequential fallback for any shortage caused by None returns.
+        // Sparse-source fallback: sequential walk through remaining positions.
         for &(idx, cursor_after) in &seq[par_end..] {
             if records.len() >= max {
                 break;

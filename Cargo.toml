@@ -16,7 +16,12 @@ keywords = [
     "bm25",
 ]
 [workspace]
-members = [".", "crates/triplets-core", "crates/triplets-debug", "crates/triplets-hf-source"]
+members = [
+    ".",
+    "crates/triplets-core",
+    "crates/triplets-debug",
+    "crates/triplets-hf-source",
+]
 resolver = "2"
 
 [workspace.package]
