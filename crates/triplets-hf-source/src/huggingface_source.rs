@@ -22,7 +22,7 @@ use std::path::PathBuf;
 #[cfg(test)]
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
@@ -505,9 +505,9 @@ pub fn build_hf_sources(roots: &HfListRoots) -> Vec<Box<dyn DataSource + 'static
             hf.trust_override = source.trust;
             println!(
                 "source {idx}: hf://{}/{}/{} -> anchor={:?}, positive={:?}, context={:?}, text_columns={:?}",
-                hf.dataset,
-                hf.config,
-                hf.split,
+                hf.dataset_name,
+                hf.config_name,
+                hf.split_name,
                 hf.anchor_columns,
                 hf.positive_columns,
                 hf.context_columns,
@@ -528,17 +528,47 @@ pub fn build_hf_sources(roots: &HfListRoots) -> Vec<Box<dyn DataSource + 'static
         .collect()
 }
 
+/// Shared handle to the open-store cache.  Stored on `HuggingFaceRowsConfig`
+/// so all methods have access without passing it separately.
+#[derive(Clone)]
+pub(crate) struct StoreCache(Arc<Mutex<HashMap<PathBuf, Arc<DataStore>>>>);
+
+impl std::fmt::Debug for StoreCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoreCache").finish_non_exhaustive()
+    }
+}
+
+impl StoreCache {
+    fn new() -> Self {
+        StoreCache(Arc::new(Mutex::new(HashMap::new())))
+    }
+
+    fn lock(&self) -> Result<MutexGuard<'_, HashMap<PathBuf, Arc<DataStore>>>, SamplerError> {
+        self.0.lock().map_err(|_| SamplerError::SourceUnavailable {
+            source_id: "store_cache".to_string(),
+            reason: "row-store cache lock poisoned".to_string(),
+        })
+    }
+
+    fn lock_ok(&self) -> Option<MutexGuard<'_, HashMap<PathBuf, Arc<DataStore>>>> {
+        self.0.lock().ok()
+    }
+
+
+}
+
 /// Configuration for a bulk Hugging Face row source backed by local snapshot files.
 #[derive(Clone, Debug)]
 pub struct HuggingFaceRowsConfig {
     /// Stable sampler source id used in record ids and metrics.
     pub source_id: String,
     /// Hugging Face dataset id, e.g. `HuggingFaceFW/fineweb`.
-    pub dataset: String,
+    pub dataset_name: String,
     /// Dataset config name, e.g. `default`.
-    pub config: String,
+    pub config_name: String,
     /// Split name, e.g. `train`.
-    pub split: String,
+    pub split_name: String,
     /// Local path to a snapshot directory for this split.
     pub snapshot_dir: PathBuf,
     /// File extensions accepted as shard files.
@@ -631,6 +661,8 @@ pub struct HuggingFaceRowsConfig {
     /// automatically from the `HF_TOKEN` environment variable at construction
     /// time; callers may also set this field directly.
     pub hf_token: Option<String>,
+    /// Shared store cache — ensures at most one `DataStore` handle per path.
+    pub store_cache: StoreCache,
 }
 
 impl HuggingFaceRowsConfig {
@@ -644,9 +676,9 @@ impl HuggingFaceRowsConfig {
     ) -> Self {
         Self {
             source_id: source_id.into(),
-            dataset: dataset.into(),
-            config: config.into(),
-            split: split.into(),
+            dataset_name: dataset.into(),
+            config_name: config.into(),
+            split_name: split.into(),
             snapshot_dir: snapshot_dir.into(),
             shard_extensions: vec![
                 "parquet".to_string(),
@@ -670,6 +702,7 @@ impl HuggingFaceRowsConfig {
             hf_token: std::env::var(ENV_TRIPLETS_HF_TOKEN)
                 .ok()
                 .filter(|t| !t.trim().is_empty()),
+            store_cache: StoreCache::new(),
         }
     }
 
@@ -906,7 +939,6 @@ pub struct HuggingFaceRowSource {
     state: Arc<Mutex<SourceState>>,
     cache: Arc<Mutex<RowCache>>,
     parquet_cache: Arc<Mutex<ParquetCache>>,
-    store_cache: Arc<Mutex<HashMap<PathBuf, Arc<DataStore>>>>,
     eligible_index: Arc<Mutex<EligibleIndexCache>>,
     /// Handle to the running background shard-expansion thread, if any.
     /// `is_finished()` returns true once the thread exits for any reason
@@ -924,7 +956,6 @@ impl Clone for HuggingFaceRowSource {
             state: Arc::clone(&self.state),
             cache: Arc::clone(&self.cache),
             parquet_cache: Arc::clone(&self.parquet_cache),
-            store_cache: Arc::clone(&self.store_cache),
             eligible_index: Arc::clone(&self.eligible_index),
             expansion_thread: Arc::clone(&self.expansion_thread),
         }
@@ -950,7 +981,7 @@ struct SourceState {
 type ParquetGroupKey = (PathBuf, usize);
 type ParquetGroupRequest = (usize, usize, ShardIndex);
 type ParquetManifestCandidates = (Vec<String>, HashMap<String, u64>, usize);
-type ShardIndexResult = (Vec<ShardIndex>, usize, HashMap<PathBuf, Arc<DataStore>>);
+type ShardIndexResult = (Vec<ShardIndex>, usize);
 
 impl HuggingFaceRowSource {
     /// Build a new source by indexing local shard files.
@@ -995,8 +1026,7 @@ impl HuggingFaceRowSource {
             config.source_id,
             config.snapshot_dir.display()
         );
-        let (shards, discovered, initial_store_cache) =
-            Self::build_shard_index(&config).unwrap_or_default();
+        let (shards, discovered) = Self::build_shard_index(&config).unwrap_or_default();
         if discovered == 0 {
             info!(
                 "[triplets:hf] {} no local shards found in {} — lazy remote download enabled",
@@ -1050,7 +1080,6 @@ impl HuggingFaceRowSource {
             })),
             cache: Arc::new(Mutex::new(RowCache::default())),
             parquet_cache: Arc::new(Mutex::new(ParquetCache::default())),
-            store_cache: Arc::new(Mutex::new(initial_store_cache)),
             eligible_index: Arc::new(Mutex::new(EligibleIndexCache::default())),
             expansion_thread: Arc::new(Mutex::new(None)),
         })
@@ -1110,27 +1139,11 @@ impl HuggingFaceRowSource {
         &self,
         shard_store_path: &Path,
     ) -> Result<Arc<DataStore>, SamplerError> {
-        if let Some(store) = self
-            .store_cache
-            .lock()
-            .map_err(|_| SamplerError::SourceUnavailable {
-                source_id: self.config.source_id.clone(),
-                reason: "huggingface row-store cache lock poisoned".to_string(),
-            })?
-            .get(shard_store_path)
-            .cloned()
-        {
+        let mut cache = self.config.store_cache.lock()?;
+        if let Some(store) = cache.get(shard_store_path).cloned() {
             return Ok(store);
         }
-
         let store = Arc::new(Self::open_shard_store(&self.config, shard_store_path)?);
-        let mut cache = self
-            .store_cache
-            .lock()
-            .map_err(|_| SamplerError::SourceUnavailable {
-                source_id: self.config.source_id.clone(),
-                reason: "huggingface row-store cache lock poisoned".to_string(),
-            })?;
         let entry = cache
             .entry(shard_store_path.to_path_buf())
             .or_insert_with(|| store.clone());
@@ -1142,8 +1155,40 @@ impl HuggingFaceRowSource {
             .iter()
             .map(|shard| shard.path.clone())
             .collect::<HashSet<_>>();
-        if let Ok(mut cache) = self.store_cache.lock() {
+        if let Some(mut cache) = self.config.store_cache.lock_ok() {
             cache.retain(|path, _| keep.contains(path));
+        }
+    }
+
+    /// Get or open a store through the shared cache.  Never opens a duplicate
+    /// handle — if the path is already in `store_cache`, returns the cached
+    /// `Arc`; otherwise opens and inserts it.
+    fn open_store_via_cache(
+        config: &HuggingFaceRowsConfig,
+        path: &Path,
+    ) -> Result<Arc<DataStore>, SamplerError> {
+        let mut cache = config.store_cache.lock()?;
+        if let Some(store) = cache.get(path).cloned() {
+            return Ok(store);
+        }
+        let store = Arc::new(Self::open_shard_store(config, path)?);
+        cache.insert(path.to_path_buf(), store.clone());
+        Ok(store)
+    }
+
+    /// Evict a stale store from the cache and unlink the file so the shard
+    /// gets re-downloaded on the next cycle.
+    fn remove_stale_store(config: &HuggingFaceRowsConfig, path: &Path) {
+        let _ = config
+            .store_cache
+            .lock_ok()
+            .map(|mut cache| cache.remove(path));
+        if let Err(err) = fs::remove_file(path) {
+            warn!(
+                "[triplets:hf] failed to remove stale store {}: {}",
+                path.display(),
+                err
+            );
         }
     }
 
@@ -1621,10 +1666,10 @@ impl HuggingFaceRowSource {
         //            fallback — queuing other splits' uncached files would be wrong.
         let mut split_matched_any_accepted = false;
         for remote_path in siblings {
-            if respect_split && !config.split.is_empty() {
-                let split_tag = format!("{}/", config.split);
-                let split_token = format!("-{}-", config.split);
-                let split_prefix = format!("{}-", config.split);
+            if respect_split && !config.split_name.is_empty() {
+                let split_tag = format!("{}/", config.split_name);
+                let split_token = format!("-{}-", config.split_name);
+                let split_prefix = format!("{}-", config.split_name);
                 // Flat-table layout: some repositories store each table as a
                 // single file whose stem IS the logical split name rather than
                 // using a `split/shard-NNNNN.parquet` directory hierarchy.
@@ -1634,7 +1679,7 @@ impl HuggingFaceRowSource {
                 let stem_match = Path::new(remote_path)
                     .file_stem()
                     .and_then(|s| s.to_str())
-                    .is_some_and(|s| s == config.split.as_str());
+                    .is_some_and(|s| s == config.split_name.as_str());
                 if !remote_path.contains(&split_tag)
                     && !remote_path.contains(&split_token)
                     && !Path::new(remote_path)
@@ -1684,13 +1729,13 @@ impl HuggingFaceRowSource {
         // files are already on disk — that would cause all other undownloaded splits'
         // files to be queued on resume (e.g. after stock_news.simdr is already cached,
         // a fallback would start downloading stock_prices.parquet, etc.).
-        if candidates.is_empty() && !config.split.is_empty() && !split_matched_any_accepted {
+        if candidates.is_empty() && !config.split_name.is_empty() && !split_matched_any_accepted {
             let (fallback_candidates, fallback_saw_parquet, _) =
                 Self::collect_candidates_from_siblings(config, siblings, accepted, false);
             if !fallback_candidates.is_empty() {
                 warn!(
                     "[triplets:hf] split filter '{}' matched no remote files; falling back to extension-only remote candidate scan",
-                    config.split
+                    config.split_name
                 );
                 candidates = fallback_candidates;
                 saw_parquet = fallback_saw_parquet;
@@ -1715,13 +1760,13 @@ impl HuggingFaceRowSource {
                     source_id: config.source_id.clone(),
                     reason: format!(
                         "dataset '{}' appears to be parquet-only, but shard_extensions does not include parquet ({:?}).",
-                        config.dataset, config.shard_extensions
+                        config.dataset_name, config.shard_extensions
                     ),
                 });
             }
             warn!(
                 "[triplets:hf] no remote candidates found for dataset='{}' split='{}' extensions={:?}; source will be treated as exhausted",
-                config.dataset, config.split, config.shard_extensions
+                config.dataset_name, config.split_name, config.shard_extensions
             );
             return Ok((Vec::new(), HashMap::new()));
         }
@@ -1845,9 +1890,9 @@ impl HuggingFaceRowSource {
                     "[triplets:hf] remote parquet manifest: {} shard(s) for dataset='{}' \
                          config='{}' split='{}'",
                     candidates.len(),
-                    config.dataset,
-                    config.config,
-                    config.split
+                    config.dataset_name,
+                    config.config_name,
+                    config.split_name
                 );
                 return Ok((candidates.clone(), candidate_sizes.clone()));
             }
@@ -1858,7 +1903,7 @@ impl HuggingFaceRowSource {
                     "[triplets:hf] datasets-server parquet manifest has no entries for \
                      dataset='{}' config='{}' split='{}'; falling back to hf-hub \
                      repository listing",
-                    config.dataset, config.config, config.split
+                    config.dataset_name, config.config_name, config.split_name
                 );
             }
             Err(err) => {
@@ -1868,14 +1913,14 @@ impl HuggingFaceRowSource {
                     "[triplets:hf] datasets-server parquet manifest unavailable for \
                      dataset='{}' (datasets viewer may be disabled); falling back to \
                      hf-hub repository listing: {}",
-                    config.dataset, err
+                    config.dataset_name, err
                 );
             }
         }
 
         info!(
             "[triplets:hf] reading remote file list for dataset {}",
-            config.dataset
+            config.dataset_name
         );
         let info = Self::block_on_http_with_runtime(runtime, config, async {
             let api = ApiBuilder::new()
@@ -1887,7 +1932,7 @@ impl HuggingFaceRowSource {
                     reason: format!("failed building hf-hub client: {err}"),
                 })?;
 
-            let repo = Repo::new(config.dataset.clone(), RepoType::Dataset);
+            let repo = Repo::new(config.dataset_name.clone(), RepoType::Dataset);
             let repo_api = api.repo(repo);
             repo_api
                 .info()
@@ -1987,9 +2032,9 @@ impl HuggingFaceRowSource {
         HF_SHARD_CANDIDATE_SEED_TAG.hash(&mut hasher);
         sampler_seed.hash(&mut hasher);
         config.source_id.hash(&mut hasher);
-        config.dataset.hash(&mut hasher);
-        config.config.hash(&mut hasher);
-        config.split.hash(&mut hasher);
+        config.dataset_name.hash(&mut hasher);
+        config.config_name.hash(&mut hasher);
+        config.split_name.hash(&mut hasher);
         total_candidates.hash(&mut hasher);
         hasher.finish()
     }
@@ -2173,8 +2218,8 @@ impl HuggingFaceRowSource {
                 config,
                 &endpoint,
                 &[
-                    (HF_JSON_KEY_DATASET, &config.dataset),
-                    (HF_JSON_KEY_CONFIG, &config.config),
+                    (HF_JSON_KEY_DATASET, &config.dataset_name),
+                    (HF_JSON_KEY_CONFIG, &config.config_name),
                 ],
                 "datasets-server info endpoint",
             ),
@@ -2267,16 +2312,16 @@ impl HuggingFaceRowSource {
         let endpoint = Self::parquet_manifest_endpoint();
         info!(
             "[triplets:hf] reading datasets-server parquet manifest for dataset {}",
-            config.dataset
+            config.dataset_name
         );
         let mut query = vec![
-            (HF_JSON_KEY_DATASET, config.dataset.as_str()),
-            (HF_JSON_KEY_CONFIG, config.config.as_str()),
+            (HF_JSON_KEY_DATASET, config.dataset_name.as_str()),
+            (HF_JSON_KEY_CONFIG, config.config_name.as_str()),
         ];
         // When split is empty (all-splits mode) omit the split query param so the
         // datasets-server returns shards for every split in the config.
-        if !config.split.is_empty() {
-            query.push((HF_JSON_KEY_SPLIT, config.split.as_str()));
+        if !config.split_name.is_empty() {
+            query.push((HF_JSON_KEY_SPLIT, config.split_name.as_str()));
         }
         let body = Self::block_on_http_with_runtime(
             runtime,
@@ -2354,7 +2399,7 @@ impl HuggingFaceRowSource {
             format!(
                 "{}/{}/resolve/main/{}",
                 HF_DATASETS_BASE_URL,
-                config.dataset,
+                config.dataset_name,
                 candidate.trim_start_matches('/')
             )
         }
@@ -2488,17 +2533,17 @@ impl HuggingFaceRowSource {
         let endpoint = Self::size_endpoint();
         info!(
             "[triplets:hf] requesting global row count dataset='{}' config='{}' split='{}'",
-            config.dataset, config.config, config.split
+            config.dataset_name, config.config_name, config.split_name
         );
 
         let mut query = vec![
-            (HF_JSON_KEY_DATASET, config.dataset.as_str()),
-            (HF_JSON_KEY_CONFIG, config.config.as_str()),
+            (HF_JSON_KEY_DATASET, config.dataset_name.as_str()),
+            (HF_JSON_KEY_CONFIG, config.config_name.as_str()),
         ];
         // When split is empty (all-splits mode) omit the split query param so the
         // server returns the total row count for the whole config.
-        if !config.split.is_empty() {
-            query.push((HF_JSON_KEY_SPLIT, config.split.as_str()));
+        if !config.split_name.is_empty() {
+            query.push((HF_JSON_KEY_SPLIT, config.split_name.as_str()));
         }
         let body = Self::block_on_http_with_runtime(
             runtime,
@@ -2519,8 +2564,11 @@ impl HuggingFaceRowSource {
                 reason: format!("failed parsing datasets-server size response: {err}"),
             })?;
 
-        let count =
-            Self::extract_split_row_count_from_size_response(&json, &config.config, &config.split);
+        let count = Self::extract_split_row_count_from_size_response(
+            &json,
+            &config.config_name,
+            &config.split_name,
+        );
         Ok(count)
     }
 
@@ -2916,7 +2964,7 @@ impl HuggingFaceRowSource {
             let remote_url = format!(
                 "{}/{}/resolve/main/{}",
                 HF_DATASETS_BASE_URL,
-                config.dataset,
+                config.dataset_name,
                 remote_path.trim_start_matches('/')
             );
             let temp_target = Self::allocate_temp_download_path(config, remote_path, "parquet")?;
@@ -2941,7 +2989,7 @@ impl HuggingFaceRowSource {
                     reason: format!("failed building hf-hub client: {err}"),
                 })?;
 
-            let repo = Repo::new(config.dataset.clone(), RepoType::Dataset);
+            let repo = Repo::new(config.dataset_name.clone(), RepoType::Dataset);
             let repo_api = api.repo(repo);
             repo_api
                 .get(remote_path)
@@ -2962,7 +3010,7 @@ impl HuggingFaceRowSource {
                             source_id: config.source_id.clone(),
                             reason: format!("failed building hf-hub client: {err}"),
                         })?;
-                    let repo = Repo::new(config.dataset.clone(), RepoType::Dataset);
+                    let repo = Repo::new(config.dataset_name.clone(), RepoType::Dataset);
                     let repo_api = api.repo(repo);
                     repo_api.download(remote_path).await.map_err(|err| {
                         SamplerError::SourceUnavailable {
@@ -3000,7 +3048,18 @@ impl HuggingFaceRowSource {
         Ok(target)
     }
 
-    /// Build shard metadata for a single local file.
+    /// Build shard metadata for a single local file.  All store handles are
+    /// fetched through `store_cache` (get-or-create), so there is never more
+    /// than one `DataStore` handle open for the same path.
+    #[cfg(test)]
+    fn index_single_shard_for_test(
+        config: &HuggingFaceRowsConfig,
+        path: &Path,
+        global_start: usize,
+    ) -> Result<(Option<ShardIndex>, Option<Arc<DataStore>>), SamplerError> {
+        Self::index_single_shard(config, path, global_start)
+    }
+
     fn index_single_shard(
         config: &HuggingFaceRowsConfig,
         path: &Path,
@@ -3015,7 +3074,7 @@ impl HuggingFaceRowSource {
             .is_some_and(|ext| ext.eq_ignore_ascii_case("parquet"));
 
         let (rows, parquet_row_groups, checkpoints, maybe_store) = if is_store {
-            let store = Arc::new(Self::open_shard_store(config, path)?);
+            let store = Self::open_store_via_cache(config, path)?;
             let rows = if let Some(entry) =
                 store.read(HF_SHARD_STORE_META_ROWS_KEY).map_err(|err| {
                     SamplerError::SourceUnavailable {
@@ -3051,13 +3110,7 @@ impl HuggingFaceRowSource {
                             rows,
                             path.display()
                         );
-                        if let Err(err) = fs::remove_file(path) {
-                            warn!(
-                                "[triplets:hf] failed to delete corrupted store {}: {}",
-                                path.display(),
-                                err
-                            );
-                        }
+                        Self::remove_stale_store(config, path);
                         return Ok((None, None));
                     }
                 }
@@ -3404,9 +3457,9 @@ impl HuggingFaceRowSource {
                         // If the handle isn't cached yet, the store was just loaded
                         // and we'll catch staleness on the next cycle.
                         let stale = self
+                            .config
                             .store_cache
-                            .lock()
-                            .ok()
+                            .lock_ok()
                             .and_then(|cache| cache.get(&store_path).cloned())
                             .and_then(|store| {
                                 let entry = store.read(HF_SHARD_STORE_SOURCE_SIZE_KEY).ok()??;
@@ -3432,13 +3485,7 @@ impl HuggingFaceRowSource {
                                 stale,
                                 expected,
                             );
-                            if let Err(err) = fs::remove_file(&store_path) {
-                                warn!(
-                                    "[triplets:hf] failed to delete stale store {}: {}",
-                                    store_path.display(),
-                                    err
-                                );
-                            }
+                            Self::remove_stale_store(&self.config, &store_path);
                         }
                     }
 
@@ -3607,7 +3654,7 @@ impl HuggingFaceRowSource {
         if source_size > 0 {
             // Write to the already-cached store handle (opened during transcode)
             // to avoid opening a second handle to the same file.
-            if let Ok(cache) = self.store_cache.lock()
+            if let Ok(cache) = self.config.store_cache.lock()
                 && let Some(store) = cache.get(&shard.path)
             {
                 let _ = store.write(HF_SHARD_STORE_SOURCE_SIZE_KEY, &source_size.to_le_bytes());
@@ -3842,8 +3889,7 @@ impl HuggingFaceRowSource {
 
         let mut shards = Vec::new();
         let mut running_total = 0usize;
-        let mut store_cache: HashMap<PathBuf, Arc<DataStore>> = HashMap::new();
-        for (_, (maybe_shard, maybe_store)) in indexed_shards {
+        for (_, (maybe_shard, _maybe_store)) in indexed_shards {
             let Some(mut shard) = maybe_shard else {
                 continue;
             };
@@ -3852,9 +3898,6 @@ impl HuggingFaceRowSource {
                 continue;
             }
 
-            if let Some(store) = maybe_store {
-                store_cache.insert(shard.path.clone(), store);
-            }
             shard.global_start = running_total;
             running_total = running_total.saturating_add(shard.row_count);
             shards.push(shard);
@@ -3867,7 +3910,7 @@ impl HuggingFaceRowSource {
             shards.len()
         );
 
-        Ok((shards, running_total, store_cache))
+        Ok((shards, running_total))
     }
 
     /// Locate containing shard and local offset for a global row index.
@@ -4070,7 +4113,7 @@ impl HuggingFaceRowSource {
             .unwrap_or_else(|| {
                 format!(
                     "{}:{}:{}",
-                    self.config.dataset, self.config.split, absolute_idx
+                    self.config.dataset_name, self.config.split_name, absolute_idx
                 )
             });
 
@@ -4257,9 +4300,9 @@ impl HuggingFaceRowSource {
                 .trust_override
                 .map_or_else(QualityScore::default, |t| QualityScore { trust: t }),
             taxonomy: vec![
-                format!("dataset={}", self.config.dataset),
-                format!("config={}", self.config.config),
-                format!("split={}", self.config.split),
+                format!("dataset={}", self.config.dataset_name),
+                format!("config={}", self.config.config_name),
+                format!("split={}", self.config.split_name),
             ],
             sections,
             meta_prefix: None,
@@ -4928,7 +4971,6 @@ mod tests {
             })),
             cache: Arc::new(Mutex::new(RowCache::default())),
             parquet_cache: Arc::new(Mutex::new(ParquetCache::default())),
-            store_cache: Arc::new(Mutex::new(HashMap::new())),
             eligible_index: Arc::new(Mutex::new(EligibleIndexCache::default())),
             expansion_thread: Arc::new(Mutex::new(None)),
         };
@@ -5218,7 +5260,7 @@ mod tests {
     fn list_remote_candidates_falls_back_when_manifest_query_fails() {
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path().to_path_buf());
-        config.dataset = "invalid///dataset".to_string();
+        config.dataset_name = "invalid///dataset".to_string();
 
         let result = with_env_var(
             ENV_TRIPLETS_HF_PARQUET_ENDPOINT,
@@ -5704,7 +5746,7 @@ mod tests {
 
         let _third = source.get_or_open_shard_store(&store_b).unwrap();
         {
-            let cache = source.store_cache.lock().unwrap();
+            let cache = source.config.store_cache.lock().unwrap();
             assert!(cache.contains_key(&store_a));
             assert!(cache.contains_key(&store_b));
         }
@@ -5719,7 +5761,7 @@ mod tests {
             remote_candidate: None,
         }]);
 
-        let cache = source.store_cache.lock().unwrap();
+        let cache = source.config.store_cache.lock().unwrap();
         assert!(cache.contains_key(&store_a));
         assert!(!cache.contains_key(&store_b));
     }
@@ -6173,7 +6215,7 @@ mod tests {
         let mut config = test_config(dir.path().to_path_buf());
         config.checkpoint_stride = 1;
         let source = test_source(config.clone());
-        let mut shard = HuggingFaceRowSource::index_single_shard(&config, &path, 0)
+        let mut shard = HuggingFaceRowSource::index_single_shard_for_test(&config, &path, 0)
             .unwrap()
             .0
             .unwrap();
@@ -6492,7 +6534,6 @@ mod tests {
             })),
             cache: Arc::new(Mutex::new(RowCache::default())),
             parquet_cache: Arc::new(Mutex::new(ParquetCache::default())),
-            store_cache: Arc::new(Mutex::new(HashMap::new())),
             eligible_index: Arc::new(Mutex::new(EligibleIndexCache::default())),
             expansion_thread: Arc::new(Mutex::new(None)),
         };
@@ -6579,7 +6620,7 @@ mod tests {
 
         let parsed = HuggingFaceRowSource::parse_global_row_count_response(
             &HuggingFaceRowsConfig {
-                split: "".to_string(),
+                split_name: "".to_string(),
                 ..config
             },
             &body,
@@ -6646,7 +6687,7 @@ mod tests {
     fn download_and_materialize_shard_hf_hub_branch_returns_error_for_invalid_repo() {
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path().to_path_buf());
-        config.dataset = "invalid///dataset".to_string();
+        config.dataset_name = "invalid///dataset".to_string();
 
         let err = HuggingFaceRowSource::download_and_materialize_shard(
             &config,
@@ -6664,7 +6705,7 @@ mod tests {
         let config = test_config(dir.path().to_path_buf());
         let missing = dir.path().join("missing.ndjson");
 
-        let err = HuggingFaceRowSource::index_single_shard(&config, &missing, 0)
+        let err = HuggingFaceRowSource::index_single_shard_for_test(&config, &missing, 0)
             .err()
             .expect("index_single_shard should fail");
         assert!(matches!(err, SamplerError::SourceUnavailable { .. }));
@@ -6687,8 +6728,8 @@ mod tests {
 
         // index_single_shard should detect the gap, delete the corrupt file,
         // and return None.
-        let (maybe_shard, _) = HuggingFaceRowSource::index_single_shard(&config, &store_path, 0)
-            .expect(
+        let (maybe_shard, _) =
+            HuggingFaceRowSource::index_single_shard_for_test(&config, &store_path, 0).expect(
                 "corrupted store should not produce a hard error — it deletes and returns None",
             );
         assert!(maybe_shard.is_none(), "corrupt store should be skipped");
@@ -6707,7 +6748,7 @@ mod tests {
         let mut config = test_config(dir.path().to_path_buf());
         config.checkpoint_stride = 2;
 
-        let shard = HuggingFaceRowSource::index_single_shard(&config, &path, 5)
+        let shard = HuggingFaceRowSource::index_single_shard_for_test(&config, &path, 5)
             .unwrap()
             .0
             .unwrap();
@@ -6961,7 +7002,7 @@ mod tests {
         config.checkpoint_stride = 256;
         config.refresh_batch_multiplier = 1;
         let source = test_source(config.clone());
-        let shard = HuggingFaceRowSource::index_single_shard(&config, &path, 0)
+        let shard = HuggingFaceRowSource::index_single_shard_for_test(&config, &path, 0)
             .unwrap()
             .0
             .unwrap();
@@ -7023,7 +7064,7 @@ mod tests {
         let mut config = test_config(dir.path().to_path_buf());
         config.checkpoint_stride = 1;
         let source = test_source(config.clone());
-        let mut shard = HuggingFaceRowSource::index_single_shard(&config, &path, 0)
+        let mut shard = HuggingFaceRowSource::index_single_shard_for_test(&config, &path, 0)
             .unwrap()
             .0
             .unwrap();
@@ -7095,7 +7136,7 @@ mod tests {
         config.checkpoint_stride = 1;
         config.refresh_batch_multiplier = 1;
         let source = test_source(config.clone());
-        let shard = HuggingFaceRowSource::index_single_shard(&config, &path, 0)
+        let shard = HuggingFaceRowSource::index_single_shard_for_test(&config, &path, 0)
             .unwrap()
             .0
             .unwrap();
@@ -7177,7 +7218,7 @@ mod tests {
         assert_eq!(total_rows, 3);
         assert!(!groups.is_empty());
 
-        let shard = HuggingFaceRowSource::index_single_shard(&config, &path, 0)
+        let shard = HuggingFaceRowSource::index_single_shard_for_test(&config, &path, 0)
             .unwrap()
             .0
             .unwrap();
@@ -7194,7 +7235,7 @@ mod tests {
 
         let config = test_config(dir.path().to_path_buf());
         let source = test_source(config.clone());
-        let shard = HuggingFaceRowSource::index_single_shard(&config, &path, 0)
+        let shard = HuggingFaceRowSource::index_single_shard_for_test(&config, &path, 0)
             .unwrap()
             .0
             .unwrap();
@@ -7273,7 +7314,7 @@ mod tests {
         fs::write(dir.path().join("b.ndjson"), b"{\"text\":\"x\"}\n").unwrap();
         let config = test_config(dir.path().to_path_buf());
 
-        let (shards, discovered, _) = HuggingFaceRowSource::build_shard_index(&config).unwrap();
+        let (shards, discovered) = HuggingFaceRowSource::build_shard_index(&config).unwrap();
         assert_eq!(discovered, 1);
         assert_eq!(shards.len(), 1);
         assert_eq!(shards[0].row_count, 1);
@@ -7291,7 +7332,7 @@ mod tests {
         );
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path().to_path_buf());
-        config.split = "train".to_string();
+        config.split_name = "train".to_string();
         let accepted = HuggingFaceRowSource::normalized_shard_extensions(&config);
         let siblings = vec![
             "validation/file-a.ndjson".to_string(),
@@ -7514,7 +7555,7 @@ mod tests {
     fn resolve_remote_candidates_respects_split_prefix_in_filename() {
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path().to_path_buf());
-        config.split = "train".to_string();
+        config.split_name = "train".to_string();
         let accepted = HuggingFaceRowSource::normalized_shard_extensions(&config);
         let siblings = vec![
             "train-part-000.ndjson".to_string(),
@@ -8003,6 +8044,7 @@ mod tests {
         // check can read source_size from it without opening a second handle.
         let cached_store = Arc::new(DataStore::open(&store_path).unwrap());
         source
+            .config
             .store_cache
             .lock()
             .unwrap()
@@ -8060,6 +8102,7 @@ mod tests {
         // Populate the store cache for the stale check.
         let cached_store = Arc::new(DataStore::open(&store_path).unwrap());
         source
+            .config
             .store_cache
             .lock()
             .unwrap()
@@ -8193,6 +8236,7 @@ mod tests {
 
         let cached_store = Arc::new(DataStore::open(&store_path).unwrap());
         source
+            .config
             .store_cache
             .lock()
             .unwrap()
@@ -8255,6 +8299,7 @@ mod tests {
 
         let cached_store = Arc::new(DataStore::open(&store_path).unwrap());
         source
+            .config
             .store_cache
             .lock()
             .unwrap()
@@ -8308,6 +8353,7 @@ mod tests {
 
         let cached_store = Arc::new(DataStore::open(&store_path).unwrap());
         source
+            .config
             .store_cache
             .lock()
             .unwrap()
@@ -8366,6 +8412,7 @@ mod tests {
 
         let cached_store = Arc::new(DataStore::open(&store_path).unwrap());
         source
+            .config
             .store_cache
             .lock()
             .unwrap()
@@ -8501,7 +8548,7 @@ mod tests {
         fs::create_dir_all(manifest_meta.parent().unwrap()).unwrap();
         fs::write(&manifest_meta, b"{\"id\":\"r1\",\"text\":\"y\"}\n").unwrap();
 
-        let (shards, discovered, _) = HuggingFaceRowSource::build_shard_index(&config).unwrap();
+        let (shards, discovered) = HuggingFaceRowSource::build_shard_index(&config).unwrap();
         assert_eq!(discovered, 1);
         assert_eq!(shards.len(), 1);
         assert_eq!(shards[0].path, local);
@@ -8532,7 +8579,7 @@ mod tests {
             .join("_sequence_state.json");
         fs::write(&seq_state_path, b"{}").unwrap();
 
-        let (shards, discovered, _) = HuggingFaceRowSource::build_shard_index(&config).unwrap();
+        let (shards, discovered) = HuggingFaceRowSource::build_shard_index(&config).unwrap();
         assert_eq!(discovered, 2, "simdr store rows should be indexed");
         assert_eq!(shards.len(), 1);
         assert_eq!(shards[0].path, store_path);
@@ -8776,10 +8823,11 @@ mod tests {
 
         let appended_path = dir.path().join("append.ndjson");
         fs::write(&appended_path, b"{\"id\":\"r1\",\"text\":\"hello\"}\n").unwrap();
-        let appended = HuggingFaceRowSource::index_single_shard(&config, &appended_path, 1)
-            .unwrap()
-            .0
-            .unwrap();
+        let appended =
+            HuggingFaceRowSource::index_single_shard_for_test(&config, &appended_path, 1)
+                .unwrap()
+                .0
+                .unwrap();
 
         let baseline = ShardIndex {
             path: dir.path().join("missing-baseline.ndjson"),
@@ -8823,7 +8871,7 @@ mod tests {
         let mut config = test_config(dir.path().to_path_buf());
         config.checkpoint_stride = 1;
         let source = test_source(config.clone());
-        let shard = HuggingFaceRowSource::index_single_shard(&config, &path, 0)
+        let shard = HuggingFaceRowSource::index_single_shard_for_test(&config, &path, 0)
             .unwrap()
             .0
             .unwrap();
@@ -8841,7 +8889,7 @@ mod tests {
         let mut config = test_config(dir.path().to_path_buf());
         config.checkpoint_stride = 1;
         let source = test_source(config.clone());
-        let mut shard = HuggingFaceRowSource::index_single_shard(&config, &path, 0)
+        let mut shard = HuggingFaceRowSource::index_single_shard_for_test(&config, &path, 0)
             .unwrap()
             .0
             .unwrap();
@@ -8964,7 +9012,7 @@ mod tests {
         fs::write(root.join("b.ndjson"), b"{\"text\":\"b\"}\n").unwrap();
 
         let config = test_config(root.clone());
-        let (shards, discovered, _) = HuggingFaceRowSource::build_shard_index(&config).unwrap();
+        let (shards, discovered) = HuggingFaceRowSource::build_shard_index(&config).unwrap();
         assert_eq!(discovered, 2);
         assert_eq!(shards.len(), 2);
     }
@@ -8975,7 +9023,7 @@ mod tests {
         let config = test_config(dir.path().to_path_buf());
         let path = dir.path().join("empty.jsonl");
         fs::write(&path, b"").unwrap();
-        let shard = HuggingFaceRowSource::index_single_shard(&config, &path, 0).unwrap();
+        let shard = HuggingFaceRowSource::index_single_shard_for_test(&config, &path, 0).unwrap();
         assert!(shard.0.is_none());
     }
 
@@ -8993,7 +9041,7 @@ mod tests {
         config.checkpoint_stride = 1;
         config.refresh_batch_multiplier = 1;
         let source = test_source(config.clone());
-        let shard = HuggingFaceRowSource::index_single_shard(&config, &path, 0)
+        let shard = HuggingFaceRowSource::index_single_shard_for_test(&config, &path, 0)
             .unwrap()
             .0
             .unwrap();
@@ -9363,7 +9411,7 @@ mod tests {
         let mut config = test_config(dir.path().to_path_buf());
         config.checkpoint_stride = 1;
         let source = test_source(config.clone());
-        let shard = HuggingFaceRowSource::index_single_shard(&config, &path, 0)
+        let shard = HuggingFaceRowSource::index_single_shard_for_test(&config, &path, 0)
             .unwrap()
             .0
             .unwrap();
@@ -9412,7 +9460,7 @@ mod tests {
         let mut cfg2 = config;
         cfg2.checkpoint_stride = 1;
         let source2 = test_source(cfg2.clone());
-        let shard = HuggingFaceRowSource::index_single_shard(&cfg2, &path, 0)
+        let shard = HuggingFaceRowSource::index_single_shard_for_test(&cfg2, &path, 0)
             .unwrap()
             .0
             .unwrap();
@@ -9511,7 +9559,7 @@ mod tests {
         let source_a = test_source(config.clone());
         let source_b = test_source(config.clone());
         let source_c = test_source(config.clone());
-        let shard = HuggingFaceRowSource::index_single_shard(&config, &path, 0)
+        let shard = HuggingFaceRowSource::index_single_shard_for_test(&config, &path, 0)
             .unwrap()
             .0
             .unwrap();
@@ -9923,7 +9971,7 @@ mod tests {
         // connection counting:
         //
         //   Phase 1 — new(): one-shot /info server returning a real ClassLabel
-        //             mapping.  After new(), source.config.label_maps must reflect
+        //             mapping.  After new(), source.config_name.label_maps must reflect
         //             the mock response (proves /info was called) and joining the
         //             server thread proves it was called exactly once.
         //
@@ -9944,7 +9992,7 @@ mod tests {
         .unwrap();
 
         // Phase 1: /info during new().  Return a non-trivial ClassLabel response so
-        // source.config.label_maps is populated and the assertion can verify the call.
+        // source.config_name.label_maps is populated and the assertion can verify the call.
         let info_payload_1 = serde_json::json!({
             "dataset_info": {
                 "features": {
@@ -9991,10 +10039,11 @@ mod tests {
         // Set remote_candidates = Some(vec![]) so trigger_expansion_if_needed
         // treats this source as having no remote shards — no background network
         // thread is spawned from refresh().
-        let shard = HuggingFaceRowSource::index_single_shard(&config_for_index, &shard_path, 0)
-            .unwrap()
-            .0
-            .unwrap();
+        let shard =
+            HuggingFaceRowSource::index_single_shard_for_test(&config_for_index, &shard_path, 0)
+                .unwrap()
+                .0
+                .unwrap();
         {
             let mut state = source.state.lock().unwrap();
             state.shards = vec![shard.clone()];
