@@ -5,9 +5,7 @@ use std::error::Error;
 #[cfg(feature = "huggingface")]
 use clap::Parser;
 #[cfg(feature = "huggingface")]
-use triplets::source::backends::huggingface_source::{
-    HfListRoots, build_hf_sources, resolve_hf_list_roots,
-};
+use triplets::{HfListRoots, build_hf_sources, resolve_hf_list_roots};
 
 #[cfg(feature = "huggingface")]
 #[derive(Debug, Parser)]
@@ -45,7 +43,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let roots = resolve_hf_list_roots(parsed.source_list.clone())
         .map_err(|err| -> Box<dyn Error> { err.into() })?;
 
-    println!("== hf_source_list_demo (example_apps integration) ==");
+    println!("== hf_source_list_demo (debug integration) ==");
     println!("source_list: {}", roots.source_list);
     println!("sources: {}", roots.sources.len());
     println!(
@@ -53,7 +51,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         parsed.passthrough
     );
 
-    triplets::example_apps::run_multi_source_demo(
+    triplets::debug::run_multi_source_demo(
         parsed.passthrough.into_iter(),
         move |_source_roots| Ok::<HfListRoots, Box<dyn Error>>(roots.clone()),
         build_hf_sources,

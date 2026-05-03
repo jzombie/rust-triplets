@@ -16,8 +16,8 @@ use crate::types::SourceId;
 /// ```
 /// use std::sync::Arc;
 /// use chrono::Utc;
-/// use triplets::{DataRecord, DeterministicSplitStore, InMemorySource, SamplerConfig, SplitRatios, TripletSampler};
-/// use triplets::data::{RecordSection, SectionRole};
+/// use triplets_core::{DataRecord, DeterministicSplitStore, InMemorySource, SamplerConfig, SplitRatios, TripletSampler};
+/// use triplets_core::data::{RecordSection, SectionRole};
 ///
 /// let mut source = InMemorySource::new("my_source");
 /// source.add_record(DataRecord {

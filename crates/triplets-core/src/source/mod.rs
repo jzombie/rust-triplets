@@ -25,11 +25,7 @@ pub use backends::file_source::{
     FileSource, FileSourceConfig, SectionBuilder, TaxonomyBuilder, anchor_context_sections,
     taxonomy_from_path,
 };
-#[cfg(feature = "huggingface")]
-pub use backends::huggingface_source::{
-    HuggingFaceRowSource, HuggingFaceRowsConfig, managed_hf_list_snapshot_dir,
-    managed_hf_snapshot_dir,
-};
+
 pub use backends::in_memory_source::InMemorySource;
 
 /// Source-owned incremental refresh position.
@@ -194,10 +190,16 @@ impl IndexablePager {
         }
 
         use rayon::prelude::*;
-        // Only process the first `max` entries in parallel. Since almost
-        // all index positions return Some, this fills the quota in a single
-        // parallel pass. Any residual shortage (from None returns) is
-        // handled by a short sequential sweep of the remaining entries.
+        // The permutation `seq` covers all `total` positions.  We try up to
+        // `max` positions in parallel first (rayon's global pool keeps
+        // in-flight requests at `num_cpus`).  For dense sources (every index
+        // returns a record) this single parallel batch fills the quota and
+        // the rest of the loop body below is a no-op.
+        //
+        // If the source is sparse (some positions return None), the parallel
+        // batch may come up short.  We then walk the remaining positions
+        // sequentially to find enough records.  In practice this fallback
+        // rarely runs and only for a handful of positions.
         let par_end = max.min(total);
         let results: Vec<Result<Option<DataRecord>, SamplerError>> = seq[..par_end]
             .par_iter()
@@ -214,7 +216,7 @@ impl IndexablePager {
             }
             final_cursor = cursor_after;
         }
-        // Sequential fallback for any shortage caused by None returns.
+        // Sparse-source fallback: sequential walk through remaining positions.
         for &(idx, cursor_after) in &seq[par_end..] {
             if records.len() >= max {
                 break;
@@ -255,8 +257,7 @@ impl IndexablePager {
     }
 
     /// Build a deterministic seed for a source/total pair with explicit sampler seed.
-    #[cfg(any(test, feature = "huggingface"))]
-    pub(crate) fn seed_for_sampler(source_id: &SourceId, total: usize, sampler_seed: u64) -> u64 {
+    pub fn seed_for_sampler(source_id: &SourceId, total: usize, sampler_seed: u64) -> u64 {
         Self::seed_for(source_id, total)
             ^ stable_hash_with(|hasher| {
                 "triplets_sampler_seed".hash(hasher);
@@ -313,7 +314,7 @@ impl<T: IndexableSource> DataSource for IndexableAdapter<T> {
 }
 
 /// Internal permutation used by `IndexablePager`.
-pub(crate) struct IndexPermutation {
+pub struct IndexPermutation {
     total: u64,
     domain_bits: u32,
     domain_size: u64,
@@ -322,7 +323,8 @@ pub(crate) struct IndexPermutation {
 }
 
 impl IndexPermutation {
-    fn new(total: usize, seed: u64, counter: u64) -> Self {
+    /// Creates a new deterministic permutation over `[0, total)`.
+    pub fn new(total: usize, seed: u64, counter: u64) -> Self {
         let total_u64 = total as u64;
         let domain_bits = (64 - (total_u64 - 1).leading_zeros()).max(1);
         let domain_size = 1u64 << domain_bits;
@@ -335,7 +337,12 @@ impl IndexPermutation {
         }
     }
 
-    fn next(&mut self) -> usize {
+    /// Returns the next permuted index, staying within `[0, total)`.
+    ///
+    /// Each call advances the internal counter and returns a deterministic
+    /// pseudo-random index that is guaranteed to be less than `total`.
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> usize {
         loop {
             let v =
                 Self::permute_bits(self.counter % self.domain_size, self.domain_bits, self.seed);
@@ -346,7 +353,8 @@ impl IndexPermutation {
         }
     }
 
-    fn cursor(&self) -> usize {
+    /// Current consumption cursor position.
+    pub fn cursor(&self) -> usize {
         (self.counter as usize) % (self.total as usize)
     }
     fn permute_bits(value: u64, bits: u32, seed: u64) -> u64 {
