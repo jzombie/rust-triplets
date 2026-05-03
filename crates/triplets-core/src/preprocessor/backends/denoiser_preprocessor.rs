@@ -279,7 +279,7 @@ pub fn denoise_text(text: &str, config: &DenoiserConfig) -> Option<String> {
 /// # Example
 ///
 /// ```rust
-/// use triplets::{ChunkingStrategy, DenoiserConfig, DenoiserPreprocessor};
+/// use triplets_core::{ChunkingStrategy, DenoiserConfig, DenoiserPreprocessor};
 ///
 /// let mut strategy = ChunkingStrategy::default();
 /// strategy.register_preprocessor(DenoiserPreprocessor::new(DenoiserConfig {
@@ -501,11 +501,11 @@ mod tests {
         let cfg = denoiser_enabled();
         let input = indoc! {"
             ### User Demographics
-            
+
             | Name | Age |
             |------|-----|
             | Alice | 30 |
-            
+
             Some bold **text** and `code` here.
         "};
         let expected = indoc! {"

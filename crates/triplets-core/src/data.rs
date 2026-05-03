@@ -53,7 +53,7 @@ impl DataRecord {
     /// # Example
     ///
     /// ```
-    /// use triplets::DataRecord;
+    /// use triplets_core::DataRecord;
     ///
     /// let record = DataRecord::from_text("doc-0", "my_corpus", "The quick brown fox.");
     /// assert_eq!(record.id.as_str(), "doc-0");
@@ -72,7 +72,7 @@ impl DataRecord {
     /// # Example
     ///
     /// ```
-    /// use triplets::{DataRecord, SectionRole};
+    /// use triplets_core::{DataRecord, SectionRole};
     ///
     /// let record = DataRecord::from_text_with_role(
     ///     "doc-0", "my_corpus", "What is the capital of France?", SectionRole::Anchor,

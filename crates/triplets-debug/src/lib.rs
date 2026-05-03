@@ -1,4 +1,5 @@
-// TODO: Consider extracting to a debug crate
+#![doc = include_str!("../README.md")]
+#![warn(missing_docs)]
 
 use std::collections::HashMap;
 use std::error::Error;
@@ -14,19 +15,19 @@ use tempfile::TempDir;
 use cache_manager::CacheRoot;
 use clap::{Parser, ValueEnum, error::ErrorKind};
 
-use crate::config::{ChunkingStrategy, SamplerConfig, TripletRecipe};
-use crate::constants::cache::{MULTI_SOURCE_DEMO_GROUP, MULTI_SOURCE_DEMO_STORE_FILENAME};
-use crate::data::ChunkView;
-use crate::heuristics::{
+use triplets_core::config::{ChunkingStrategy, SamplerConfig, TripletRecipe};
+use triplets_core::constants::cache::{MULTI_SOURCE_DEMO_GROUP, MULTI_SOURCE_DEMO_STORE_FILENAME};
+use triplets_core::data::ChunkView;
+use triplets_core::heuristics::{
     CapacityTotals, EFFECTIVE_NEGATIVES_PER_ANCHOR, EFFECTIVE_POSITIVES_PER_ANCHOR,
     estimate_source_split_capacity_from_counts, format_replay_factor, format_u128_with_commas,
     resolve_text_recipes_for_source, split_counts_for_total,
 };
-use crate::metrics::{chunk_proximity_score, source_skew, window_chunk_distance};
-use crate::sampler::chunk_weight;
-use crate::source::DataSource;
-use crate::splits::{FileSplitStore, SplitLabel, SplitRatios, SplitStore};
-use crate::{
+use triplets_core::metrics::{chunk_proximity_score, source_skew, window_chunk_distance};
+use triplets_core::sampler::chunk_weight;
+use triplets_core::source::DataSource;
+use triplets_core::splits::{FileSplitStore, SplitLabel, SplitRatios, SplitStore};
+use triplets_core::{
     RecordChunk, SampleBatch, Sampler, SamplerError, SourceId, TextBatch, TextRecipe, TripletBatch,
     TripletSampler,
 };
@@ -694,7 +695,7 @@ where
                     );
                     #[cfg(feature = "extended-metrics")]
                     {
-                        use crate::metrics::lexical_similarity_scores;
+                        use triplets_core::metrics::lexical_similarity_scores;
                         for triplet in &batch.triplets {
                             let (pj, pc) = lexical_similarity_scores(
                                 &triplet.anchor.text,
@@ -923,7 +924,7 @@ fn print_triplet_batch(
         let pos_distance = window_chunk_distance(&triplet.anchor, &triplet.positive);
         #[cfg(feature = "extended-metrics")]
         let (pos_sim, neg_sim) = {
-            use crate::metrics::lexical_similarity_scores;
+            use triplets_core::metrics::lexical_similarity_scores;
             (
                 Some(lexical_similarity_scores(
                     &triplet.anchor.text,
@@ -1402,13 +1403,13 @@ fn extract_source(record_id: &str) -> SourceId {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::DataRecord;
-    use crate::DeterministicSplitStore;
-    use crate::data::{QualityScore, RecordSection, SectionRole};
-    use crate::source::{SourceCursor, SourceSnapshot};
-    use crate::utils::make_section;
     use chrono::{TimeZone, Utc};
     use tempfile::tempdir;
+    use triplets_core::DataRecord;
+    use triplets_core::DeterministicSplitStore;
+    use triplets_core::data::{QualityScore, RecordSection, SectionRole};
+    use triplets_core::source::{SourceCursor, SourceSnapshot};
+    use triplets_core::utils::make_section;
 
     fn empty_dyn_sources(_: &()) -> Vec<DynSource> {
         Vec::new()
@@ -1639,10 +1640,10 @@ mod tests {
     fn default_recipe(name: &str) -> TripletRecipe {
         TripletRecipe {
             name: name.to_string().into(),
-            anchor: crate::config::Selector::Role(SectionRole::Anchor),
-            positive_selector: crate::config::Selector::Role(SectionRole::Context),
-            negative_selector: crate::config::Selector::Role(SectionRole::Context),
-            negative_strategy: crate::config::NegativeStrategy::WrongArticle,
+            anchor: triplets_core::config::Selector::Role(SectionRole::Anchor),
+            positive_selector: triplets_core::config::Selector::Role(SectionRole::Context),
+            negative_selector: triplets_core::config::Selector::Role(SectionRole::Context),
+            negative_strategy: triplets_core::config::NegativeStrategy::WrongArticle,
             weight: 1.0,
             instruction: None,
             allow_same_anchor_positive: false,
@@ -1936,7 +1937,7 @@ mod tests {
     }
 
     #[test]
-    fn run_example_apps_invalid_cli_args_return_errors() {
+    fn run_debug_invalid_cli_args_return_errors() {
         let estimate = run_estimate_capacity(
             ["--unknown".to_string()].into_iter(),
             ok_unit_roots,
@@ -2265,7 +2266,7 @@ mod tests {
             },
             text: "anchor text".to_string(),
             tokens_estimate: 8,
-            quality: crate::data::QualityScore { trust: 0.9 },
+            quality: triplets_core::data::QualityScore { trust: 0.9 },
             kvp_meta: [(
                 "date".to_string(),
                 vec!["2025-01-01".to_string(), "Jan 1, 2025".to_string()],
@@ -2282,7 +2283,7 @@ mod tests {
             },
             text: "positive text".to_string(),
             tokens_estimate: 6,
-            quality: crate::data::QualityScore { trust: 0.8 },
+            quality: triplets_core::data::QualityScore { trust: 0.8 },
             kvp_meta: Default::default(),
         };
         let negative = RecordChunk {
@@ -2295,12 +2296,12 @@ mod tests {
             },
             text: "negative text".to_string(),
             tokens_estimate: 7,
-            quality: crate::data::QualityScore { trust: 0.5 },
+            quality: triplets_core::data::QualityScore { trust: 0.5 },
             kvp_meta: Default::default(),
         };
 
         let triplet_batch = TripletBatch {
-            triplets: vec![crate::SampleTriplet {
+            triplets: vec![triplets_core::SampleTriplet {
                 recipe: "triplet_recipe".to_string(),
                 anchor: anchor.clone(),
                 positive: positive.clone(),
@@ -2312,20 +2313,20 @@ mod tests {
         print_triplet_batch(&strategy, &triplet_batch, &store);
 
         let pair_batch = SampleBatch {
-            pairs: vec![crate::SamplePair {
+            pairs: vec![triplets_core::SamplePair {
                 recipe: "pair_recipe".to_string(),
                 anchor: anchor.clone(),
                 positive: positive.clone(),
                 weight: 1.0,
                 instruction: None,
-                label: crate::PairLabel::Positive,
+                label: triplets_core::PairLabel::Positive,
                 reason: Some("same topic".to_string()),
             }],
         };
         print_pair_batch(&strategy, &pair_batch, &store);
 
         let text_batch = TextBatch {
-            samples: vec![crate::TextSample {
+            samples: vec![triplets_core::TextSample {
                 recipe: "text_recipe".to_string(),
                 chunk: negative,
                 weight: 0.8,
@@ -2336,7 +2337,7 @@ mod tests {
 
         let recipes = vec![TextRecipe {
             name: "recipe_name".into(),
-            selector: crate::config::Selector::Role(SectionRole::Context),
+            selector: triplets_core::config::Selector::Role(SectionRole::Context),
             instruction: Some("instruction".into()),
             weight: 1.0,
         }];

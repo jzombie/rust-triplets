@@ -1,8 +1,8 @@
 //! Shared mock HTTP servers and test utilities for HuggingFace source tests.
 //!
-//! Used by both unit tests inside the `triplets` crate and integration tests
-//! in `tests/huggingface_integration.rs` so that mock-server logic is defined
-//! once rather than duplicated in every test module.
+//! Used by both unit tests inside the `triplets-hf` crate and integration
+//! tests in `tests/huggingface_integration.rs` so that mock-server logic is
+//! defined once rather than duplicated in every test module.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};

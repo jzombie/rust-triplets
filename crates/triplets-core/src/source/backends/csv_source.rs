@@ -126,7 +126,7 @@ impl CsvSourceConfig {
 /// single text column (text mode):
 ///
 /// ```rust,no_run
-/// use triplets::source::{CsvSource, CsvSourceConfig};
+/// use triplets_core::source::{CsvSource, CsvSourceConfig};
 ///
 /// // Role mode: explicit anchor + positive columns.
 /// let config = CsvSourceConfig::new("my_qna", "data/qna.csv")

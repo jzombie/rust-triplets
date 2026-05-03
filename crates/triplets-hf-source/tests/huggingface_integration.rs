@@ -1,24 +1,21 @@
-#![cfg(feature = "huggingface")]
-
 use serde::Serialize;
 use simd_r_drive::storage_engine::DataStore;
 use simd_r_drive::storage_engine::traits::DataStoreWriter;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
-use triplets::constants::env_vars::{
-    HF_TOKEN, TRIPLETS_HF_INFO_ENDPOINT, TRIPLETS_HF_PARQUET_ENDPOINT, TRIPLETS_HF_SIZE_ENDPOINT,
-    TRIPLETS_HF_TOKEN_TEST_DATASET, TRIPLETS_SKIP_LIVE_TESTS,
+use triplets_core::constants::env_vars::ENV_TRIPLETS_SKIP_LIVE_TESTS;
+use triplets_core::constants::sampler::AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME;
+use triplets_core::utils::platform_newline;
+use triplets_core::{
+    ChunkingStrategy, DataSource, DeterministicSplitStore, Sampler, SamplerConfig, SplitLabel,
+    SplitRatios, TripletSampler,
 };
-use triplets::constants::sampler::AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME;
-use triplets::source::backends::huggingface_source::{
-    HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE, load_hf_sources_from_list,
-};
-use triplets::utils::platform_newline;
-use triplets::{
-    ChunkingStrategy, DataSource, DeterministicSplitStore, HfListRoots, HfSourceEntry,
-    HuggingFaceRowSource, HuggingFaceRowsConfig, Sampler, SamplerConfig, SplitLabel, SplitRatios,
-    TripletSampler, build_hf_sources, parse_csv_fields, parse_hf_source_line, parse_hf_uri,
+use triplets_hf_source::{
+    ENV_TRIPLETS_HF_INFO_ENDPOINT, ENV_TRIPLETS_HF_PARQUET_ENDPOINT, ENV_TRIPLETS_HF_SIZE_ENDPOINT,
+    ENV_TRIPLETS_HF_TOKEN, ENV_TRIPLETS_HF_TOKEN_TEST_DATASET, HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE,
+    HfListRoots, HfSourceEntry, HuggingFaceRowSource, HuggingFaceRowsConfig, build_hf_sources,
+    load_hf_sources_from_list, parse_csv_fields, parse_hf_source_line, parse_hf_uri,
     resolve_hf_list_roots,
 };
 
@@ -278,11 +275,11 @@ fn huggingface_text_mode_triplets_can_use_different_anchor_positive_windows() {
         assert_eq!(triplet.anchor.record_id, triplet.positive.record_id);
 
         let anchor_window = match &triplet.anchor.view {
-            triplets::data::ChunkView::Window { index, .. } => Some(*index),
+            triplets_core::data::ChunkView::Window { index, .. } => Some(*index),
             _ => None,
         };
         let positive_window = match &triplet.positive.view {
-            triplets::data::ChunkView::Window { index, .. } => Some(*index),
+            triplets_core::data::ChunkView::Window { index, .. } => Some(*index),
             _ => None,
         };
         if let (Some(a), Some(p)) = (anchor_window, positive_window)
@@ -378,13 +375,13 @@ fn huggingface_role_columns_mode_and_synthetic_ids_work() {
         record
             .sections
             .iter()
-            .any(|section| matches!(section.role, triplets::SectionRole::Anchor))
+            .any(|section| matches!(section.role, triplets_core::SectionRole::Anchor))
     }));
     assert!(snapshot.records.iter().all(|record| {
         record
             .sections
             .iter()
-            .filter(|section| matches!(section.role, triplets::SectionRole::Context))
+            .filter(|section| matches!(section.role, triplets_core::SectionRole::Context))
             .count()
             >= 2
     }));
@@ -562,7 +559,7 @@ fn huggingface_refresh_cursor_wraps_and_limit_none_reads_all() {
     let wrapped = source
         .refresh(
             &seed,
-            Some(&triplets::SourceCursor {
+            Some(&triplets_core::SourceCursor {
                 last_seen: chrono::Utc::now(),
                 revision: 99,
             }),
@@ -1702,11 +1699,11 @@ fn hf_token_private_dataset_access() {
     // credentials produce a silent skip.  Otherwise missing credentials are a
     // hard failure so the test cannot be accidentally omitted.
 
-    let skip_live = std::env::var(TRIPLETS_SKIP_LIVE_TESTS)
+    let skip_live = std::env::var(ENV_TRIPLETS_SKIP_LIVE_TESTS)
         .map(|v| !v.trim().is_empty())
         .unwrap_or(false);
 
-    let token = match std::env::var(HF_TOKEN) {
+    let token = match std::env::var(ENV_TRIPLETS_HF_TOKEN) {
         Ok(t) if !t.trim().is_empty() => t,
         _ => {
             if skip_live {
@@ -1724,14 +1721,14 @@ fn hf_token_private_dataset_access() {
         }
     };
 
-    let dataset = match std::env::var(TRIPLETS_HF_TOKEN_TEST_DATASET) {
+    let dataset = match std::env::var(ENV_TRIPLETS_HF_TOKEN_TEST_DATASET) {
         Ok(d) if !d.trim().is_empty() => d,
         _ => {
             if skip_live {
                 eprintln!(
                     "[skip] {} not set and TRIPLETS_SKIP_LIVE_TESTS is active — \
                      skipping private dataset integration test.",
-                    TRIPLETS_HF_TOKEN_TEST_DATASET
+                    ENV_TRIPLETS_HF_TOKEN_TEST_DATASET
                 );
                 return;
             }
@@ -1739,7 +1736,7 @@ fn hf_token_private_dataset_access() {
                 "{} is not set. This test requires a private HF dataset repo. \
                  Set it to run the test, or set TRIPLETS_SKIP_LIVE_TESTS=1 to skip it. \
                  See the comment above this test for setup instructions.",
-                TRIPLETS_HF_TOKEN_TEST_DATASET
+                ENV_TRIPLETS_HF_TOKEN_TEST_DATASET
             );
         }
     };
@@ -1832,25 +1829,25 @@ fn sampler_next_text_batch_re_expands_after_cache_eviction() {
     // Shard payload: {"id":"s{shard}_r{row}","text":"txt_{shard}_{row}"}
     // Roughly 33 bytes each.  2 shards ≈ 66 bytes, cap = 70 bytes.
     // The manifest server also counts how many times /parquet is queried.
-    let server = triplets_hf_test_tools::HfMockServer::new(5, 1);
+    let server = triplets_hf_source::test_utils::HfMockServer::new(5, 1);
 
     // ── Env var guards ──────────────────────────────────────────────────
     //
     // Set env vars for the test duration.  The triggers MUST outlive
     // the source and sampler so that async expansion threads can still
     // resolve the mock endpoints when they make HTTP requests.
-    let _parquet_guard = triplets_hf_test_tools::EnvGuard::set(
-        TRIPLETS_HF_PARQUET_ENDPOINT,
+    let _parquet_guard = triplets_hf_source::test_utils::EnvGuard::set(
+        ENV_TRIPLETS_HF_PARQUET_ENDPOINT,
         &format!("{}/parquet", server.url()),
     );
     // The /size and /info endpoints are NOT mocked; failing to query them
     // is non-fatal (warns and returns None).  Point them somewhere harmless.
-    let _size_guard = triplets_hf_test_tools::EnvGuard::set(
-        TRIPLETS_HF_SIZE_ENDPOINT,
+    let _size_guard = triplets_hf_source::test_utils::EnvGuard::set(
+        ENV_TRIPLETS_HF_SIZE_ENDPOINT,
         "http://127.0.0.1:1/unreachable",
     );
-    let _info_guard = triplets_hf_test_tools::EnvGuard::set(
-        TRIPLETS_HF_INFO_ENDPOINT,
+    let _info_guard = triplets_hf_source::test_utils::EnvGuard::set(
+        ENV_TRIPLETS_HF_INFO_ENDPOINT,
         "http://127.0.0.1:1/unreachable",
     );
 
