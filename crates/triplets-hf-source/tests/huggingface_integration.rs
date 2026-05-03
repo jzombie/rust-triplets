@@ -13,8 +13,8 @@ use triplets_core::{
 };
 use triplets_hf_source::{
     ENV_TRIPLETS_HF_INFO_ENDPOINT, ENV_TRIPLETS_HF_PARQUET_ENDPOINT, ENV_TRIPLETS_HF_SIZE_ENDPOINT,
-    ENV_TRIPLETS_HF_TOKEN_TEST_DATASET, HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE, HF_TOKEN, HfListRoots,
-    HfSourceEntry, HuggingFaceRowSource, HuggingFaceRowsConfig, build_hf_sources,
+    ENV_TRIPLETS_HF_TOKEN, ENV_TRIPLETS_HF_TOKEN_TEST_DATASET, HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE,
+    HfListRoots, HfSourceEntry, HuggingFaceRowSource, HuggingFaceRowsConfig, build_hf_sources,
     load_hf_sources_from_list, parse_csv_fields, parse_hf_source_line, parse_hf_uri,
     resolve_hf_list_roots,
 };
@@ -1703,7 +1703,7 @@ fn hf_token_private_dataset_access() {
         .map(|v| !v.trim().is_empty())
         .unwrap_or(false);
 
-    let token = match std::env::var(HF_TOKEN) {
+    let token = match std::env::var(ENV_TRIPLETS_HF_TOKEN) {
         Ok(t) if !t.trim().is_empty() => t,
         _ => {
             if skip_live {

@@ -33,16 +33,17 @@ use walkdir::WalkDir;
 
 use crate::constants::{
     ENV_TRIPLETS_HF_INFO_ENDPOINT, ENV_TRIPLETS_HF_PARQUET_ENDPOINT, ENV_TRIPLETS_HF_SIZE_ENDPOINT,
-    ENV_TRIPLETS_HF_WHOAMI_ENDPOINT, HF_ALL_SPLITS_DIR, HF_CLASSLABEL_TYPE, HF_GROUP,
-    HF_INFO_DEFAULT_ENDPOINT, HF_JSON_KEY_CONFIG, HF_JSON_KEY_CONFIG_NAME, HF_JSON_KEY_CONFIGS,
-    HF_JSON_KEY_DATASET, HF_JSON_KEY_DATASET_INFO, HF_JSON_KEY_FEATURE_TYPE, HF_JSON_KEY_FEATURES,
-    HF_JSON_KEY_LABEL_NAMES, HF_JSON_KEY_NUM_ROWS, HF_JSON_KEY_PARQUET_FILES, HF_JSON_KEY_SIZE,
-    HF_JSON_KEY_SPLIT, HF_JSON_KEY_SPLIT_NAME, HF_JSON_KEY_SPLITS, HF_JSON_KEY_URL,
-    HF_PARQUET_DEFAULT_ENDPOINT, HF_PARQUET_MANIFEST_DIR, HF_REFRESH_BATCH_MULTIPLIER,
-    HF_REMOTE_BOOTSTRAP_SHARDS, HF_REMOTE_EXPANSION_HEADROOM_MULTIPLIER, HF_REMOTE_URL_PREFIX,
+    ENV_TRIPLETS_HF_TOKEN, ENV_TRIPLETS_HF_WHOAMI_ENDPOINT, HF_ALL_SPLITS_DIR, HF_CLASSLABEL_TYPE,
+    HF_GROUP, HF_INFO_DEFAULT_ENDPOINT, HF_JSON_KEY_CONFIG, HF_JSON_KEY_CONFIG_NAME,
+    HF_JSON_KEY_CONFIGS, HF_JSON_KEY_DATASET, HF_JSON_KEY_DATASET_INFO, HF_JSON_KEY_FEATURE_TYPE,
+    HF_JSON_KEY_FEATURES, HF_JSON_KEY_LABEL_NAMES, HF_JSON_KEY_NUM_ROWS, HF_JSON_KEY_PARQUET_FILES,
+    HF_JSON_KEY_SIZE, HF_JSON_KEY_SPLIT, HF_JSON_KEY_SPLIT_NAME, HF_JSON_KEY_SPLITS,
+    HF_JSON_KEY_URL, HF_PARQUET_DEFAULT_ENDPOINT, HF_PARQUET_MANIFEST_DIR,
+    HF_REFRESH_BATCH_MULTIPLIER, HF_REMOTE_BOOTSTRAP_SHARDS,
+    HF_REMOTE_EXPANSION_HEADROOM_MULTIPLIER, HF_REMOTE_URL_PREFIX,
     HF_RESOLVE_UNKNOWN_FALLBACK_PATH, HF_RESOLVE_URL_SEPARATOR, HF_SHARD_CANDIDATE_SEED_TAG,
     HF_SHARD_STORE_EXTENSION, HF_SHARD_STORE_META_ROWS_KEY, HF_SHARD_STORE_ROW_PREFIX,
-    HF_SHARD_STORE_SOURCE_SIZE_KEY, HF_SIZE_DEFAULT_ENDPOINT, HF_TOKEN, HF_WHOAMI_DEFAULT_ENDPOINT,
+    HF_SHARD_STORE_SOURCE_SIZE_KEY, HF_SIZE_DEFAULT_ENDPOINT, HF_WHOAMI_DEFAULT_ENDPOINT,
 };
 use chrono::{DateTime, Utc};
 use triplets_core::SamplerError;
@@ -666,7 +667,7 @@ impl HuggingFaceRowsConfig {
             context_columns: Vec::new(),
             trust_override: None,
             label_maps: HashMap::new(),
-            hf_token: std::env::var(HF_TOKEN)
+            hf_token: std::env::var(ENV_TRIPLETS_HF_TOKEN)
                 .ok()
                 .filter(|t| !t.trim().is_empty()),
         }
@@ -5274,7 +5275,7 @@ mod tests {
                         ENV_TRIPLETS_HF_SIZE_ENDPOINT,
                         &format!("{size_base_url}/size"),
                     ),
-                    (HF_TOKEN, ""),
+                    (ENV_TRIPLETS_HF_TOKEN, ""),
                 ],
                 || {
                     let built = build_hf_sources(&roots);
@@ -5336,7 +5337,7 @@ mod tests {
                         ENV_TRIPLETS_HF_SIZE_ENDPOINT,
                         &format!("{size_base_url_a}/size"),
                     ),
-                    (HF_TOKEN, ""),
+                    (ENV_TRIPLETS_HF_TOKEN, ""),
                 ],
                 || {
                     let built = build_hf_sources(&roots);

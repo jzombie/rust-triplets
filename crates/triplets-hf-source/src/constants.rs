@@ -110,7 +110,7 @@ pub const ENV_TRIPLETS_HF_SIZE_ENDPOINT: &str = "TRIPLETS_HF_SIZE_ENDPOINT";
 /// Environment variable override for the datasets-server info endpoint URL.
 pub const ENV_TRIPLETS_HF_INFO_ENDPOINT: &str = "TRIPLETS_HF_INFO_ENDPOINT";
 /// Hugging Face API token for authenticating with private datasets.
-pub const HF_TOKEN: &str = "HF_TOKEN";
+pub const ENV_TRIPLETS_HF_TOKEN: &str = "HF_TOKEN";
 /// Dataset repo used by the live private-dataset integration test.
 pub const ENV_TRIPLETS_HF_TOKEN_TEST_DATASET: &str = "TRIPLETS_HF_TOKEN_TEST_DATASET";
 /// Overrides the Hugging Face whoami endpoint URL used for token validation.
