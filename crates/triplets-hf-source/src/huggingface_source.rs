@@ -32,18 +32,17 @@ use tracing::{debug, info, warn};
 use walkdir::WalkDir;
 
 use crate::constants::{
-    ALL_SPLITS_DIR, HF_CLASSLABEL_TYPE, HF_INFO_DEFAULT_ENDPOINT, HF_JSON_KEY_CONFIG,
+    ALL_SPLITS_DIR, HF_CLASSLABEL_TYPE, HF_GROUP, HF_INFO_DEFAULT_ENDPOINT, HF_JSON_KEY_CONFIG,
     HF_JSON_KEY_CONFIG_NAME, HF_JSON_KEY_CONFIGS, HF_JSON_KEY_DATASET, HF_JSON_KEY_DATASET_INFO,
     HF_JSON_KEY_FEATURE_TYPE, HF_JSON_KEY_FEATURES, HF_JSON_KEY_LABEL_NAMES, HF_JSON_KEY_NUM_ROWS,
     HF_JSON_KEY_PARQUET_FILES, HF_JSON_KEY_SIZE, HF_JSON_KEY_SPLIT, HF_JSON_KEY_SPLIT_NAME,
-    HF_JSON_KEY_SPLITS, HF_JSON_KEY_URL, HF_PARQUET_DEFAULT_ENDPOINT,
+    HF_JSON_KEY_SPLITS, HF_JSON_KEY_URL, HF_PARQUET_DEFAULT_ENDPOINT, HF_REFRESH_BATCH_MULTIPLIER,
     HF_RESOLVE_UNKNOWN_FALLBACK_PATH, HF_RESOLVE_URL_SEPARATOR, HF_SHARD_CANDIDATE_SEED_TAG,
     HF_SHARD_STORE_EXTENSION, HF_SHARD_STORE_META_ROWS_KEY, HF_SHARD_STORE_ROW_PREFIX,
-    HF_SHARD_STORE_SOURCE_SIZE_KEY, HF_SIZE_DEFAULT_ENDPOINT, HF_TOKEN, HF_WHOAMI_ENDPOINT,
-    HUGGINGFACE_GROUP, HUGGINGFACE_REFRESH_BATCH_MULTIPLIER, PARQUET_MANIFEST_DIR,
-    REMOTE_BOOTSTRAP_SHARDS, REMOTE_EXPANSION_HEADROOM_MULTIPLIER, REMOTE_URL_PREFIX,
-    TRIPLETS_HF_INFO_ENDPOINT, TRIPLETS_HF_PARQUET_ENDPOINT, TRIPLETS_HF_SIZE_ENDPOINT,
-    TRIPLETS_HF_WHOAMI_ENDPOINT,
+    HF_SHARD_STORE_SOURCE_SIZE_KEY, HF_SIZE_DEFAULT_ENDPOINT, HF_TOKEN, HF_WHOAMI_DEFAULT_ENDPOINT,
+    PARQUET_MANIFEST_DIR, REMOTE_BOOTSTRAP_SHARDS, REMOTE_EXPANSION_HEADROOM_MULTIPLIER,
+    REMOTE_URL_PREFIX, TRIPLETS_HF_INFO_ENDPOINT, TRIPLETS_HF_PARQUET_ENDPOINT,
+    TRIPLETS_HF_SIZE_ENDPOINT, TRIPLETS_HF_WHOAMI_ENDPOINT,
 };
 use chrono::{DateTime, Utc};
 use triplets_core::SamplerError;
@@ -107,7 +106,7 @@ pub fn managed_hf_list_snapshot_dir(
         split
     };
     ensure_cache_group(
-        PathBuf::from(HUGGINGFACE_GROUP)
+        PathBuf::from(HF_GROUP)
             .join("source-list")
             .join(dataset.replace('/', "__"))
             .join(config)
@@ -128,7 +127,7 @@ pub fn managed_hf_snapshot_dir(
         split
     };
     ensure_cache_group(
-        PathBuf::from(HUGGINGFACE_GROUP)
+        PathBuf::from(HF_GROUP)
             .join(dataset.replace('/', "__"))
             .join(config)
             .join(split_dir),
@@ -657,7 +656,7 @@ impl HuggingFaceRowsConfig {
             checkpoint_stride: 4096,
             cache_capacity: SamplerConfig::default().ingestion_max_records,
             parquet_row_group_cache_capacity: 8,
-            refresh_batch_multiplier: HUGGINGFACE_REFRESH_BATCH_MULTIPLIER,
+            refresh_batch_multiplier: HF_REFRESH_BATCH_MULTIPLIER,
             remote_expansion_headroom_multiplier: REMOTE_EXPANSION_HEADROOM_MULTIPLIER,
             local_disk_cap_bytes: Some(32 * 1024 * 1024 * 1024),
             id_column: Some("id".to_string()),
@@ -2024,7 +2023,7 @@ impl HuggingFaceRowSource {
         {
             return value;
         }
-        HF_WHOAMI_ENDPOINT.to_string()
+        HF_WHOAMI_DEFAULT_ENDPOINT.to_string()
     }
 
     fn build_http_runtime(
@@ -5014,11 +5013,11 @@ mod tests {
             assert!(listed.exists());
             assert!(single.ends_with(PathBuf::from(format!(
                 "{}/org__dataset/default/train",
-                HUGGINGFACE_GROUP
+                HF_GROUP
             ))));
             assert!(listed.ends_with(PathBuf::from(format!(
                 "{}/source-list/org__dataset/default/train/replica_7",
-                HUGGINGFACE_GROUP
+                HF_GROUP
             ))));
             assert!(listed.ends_with("replica_7"));
         });
@@ -5045,7 +5044,7 @@ mod tests {
             assert!(
                 single.ends_with(PathBuf::from(format!(
                     "{}/org__dataset/default/{}",
-                    HUGGINGFACE_GROUP, ALL_SPLITS_DIR
+                    HF_GROUP, ALL_SPLITS_DIR
                 ))),
                 "expected single-source path to end with ALL_SPLITS_DIR, got: {}",
                 single.display()
@@ -5053,7 +5052,7 @@ mod tests {
             assert!(
                 listed.ends_with(PathBuf::from(format!(
                     "{}/source-list/org__dataset/default/{}/replica_0",
-                    HUGGINGFACE_GROUP, ALL_SPLITS_DIR
+                    HF_GROUP, ALL_SPLITS_DIR
                 ))),
                 "expected list-source path to end with ALL_SPLITS_DIR, got: {}",
                 listed.display()

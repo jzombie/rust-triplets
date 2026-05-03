@@ -14,7 +14,7 @@ pub const REMOTE_BOOTSTRAP_SHARDS: usize = 1;
 /// Multiplies the source `refresh` limit passed by `IngestionManager`
 /// (`step.unwrap_or(max_records)`) to set this source's internal row-read
 /// batch target for each refresh pass.
-pub const HUGGINGFACE_REFRESH_BATCH_MULTIPLIER: usize = 8;
+pub const HF_REFRESH_BATCH_MULTIPLIER: usize = 8;
 
 /// Extension used by persisted per-shard row-store files.
 pub const HF_SHARD_STORE_EXTENSION: &str = "simdr";
@@ -96,7 +96,7 @@ pub const HF_INFO_DEFAULT_ENDPOINT: &str = "https://datasets-server.huggingface.
 /// returns `200 OK`; an invalid or expired token yields `401 Unauthorized`.
 /// Used by `HuggingFaceRowSource::new()` to fail fast when an `HF_TOKEN`
 /// is provided but cannot authenticate.
-pub const HF_WHOAMI_ENDPOINT: &str = "https://huggingface.co/api/whoami-v2";
+pub const HF_WHOAMI_DEFAULT_ENDPOINT: &str = "https://huggingface.co/api/whoami-v2";
 
 // ---------------------------------------------------------------------------
 // Environment variable name constants (moved from triplets-core to keep the
@@ -116,4 +116,4 @@ pub const TRIPLETS_HF_TOKEN_TEST_DATASET: &str = "TRIPLETS_HF_TOKEN_TEST_DATASET
 /// Overrides the Hugging Face whoami endpoint URL used for token validation.
 pub const TRIPLETS_HF_WHOAMI_ENDPOINT: &str = "TRIPLETS_HF_WHOAMI_ENDPOINT";
 /// Managed cache group for Hugging Face snapshot-backed sources.
-pub const HUGGINGFACE_GROUP: &str = "triplets/huggingface";
+pub const HF_GROUP: &str = "triplets/huggingface";
