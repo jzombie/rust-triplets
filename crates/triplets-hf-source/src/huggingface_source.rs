@@ -8283,6 +8283,121 @@ mod tests {
     }
 
     #[test]
+    #[serial(global_state)]
+    fn download_next_remote_shard_keeps_store_when_head_returns_error() {
+        // When the manifest does NOT provide expected_bytes (hf-hub sibling
+        // fallback) AND the HTTP HEAD request fails (network error), the
+        // staleness check is skipped and the cached store is preserved as-is.
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config.clone());
+
+        // Candidate pointing at an unreachable address — HEAD will Err.
+        let candidate = format!(
+            "url::{TEST_UNREACHABLE_URL}/resolve/main/train/head-err.ndjson"
+        );
+        let store_path = HuggingFaceRowSource::candidate_store_path(&config, &candidate);
+        fs::create_dir_all(store_path.parent().unwrap()).unwrap();
+        write_simdr_fixture(&store_path, &[("r0", "row")]);
+        {
+            let store = DataStore::open(&store_path).unwrap();
+            store
+                .write(HF_SHARD_STORE_SOURCE_SIZE_KEY, &100u64.to_le_bytes())
+                .unwrap();
+        }
+
+        let original_content = fs::read(&store_path).unwrap();
+
+        let cached_store = Arc::new(DataStore::open(&store_path).unwrap());
+        source
+            .store_cache
+            .lock()
+            .unwrap()
+            .insert(store_path.clone(), cached_store);
+
+        {
+            let mut state = source.state.lock().unwrap();
+            state.remote_candidates = Some(vec![candidate.clone()]);
+            state.remote_candidate_order = vec![0];
+            // No expected_bytes — simulates hf-hub fallback.
+            state.next_remote_idx = 0;
+        }
+
+        // HEAD fails (Err) → effective_expected = None → stale check
+        // skipped → store preserved as-is.
+        let result = source.download_next_remote_shard();
+        assert!(
+            result.is_ok(),
+            "expected Ok even when HEAD fails, got: {err:?}",
+            err = result.as_ref().unwrap_err()
+        );
+        assert!(
+            fs::read(&store_path).ok().as_deref() == Some(&original_content),
+            "store should be preserved when HEAD fails"
+        );
+    }
+
+    #[test]
+    #[serial(global_state)]
+    fn download_next_remote_shard_keeps_store_when_head_returns_none() {
+        // When the manifest does NOT provide expected_bytes AND the HEAD
+        // request returns Ok(None) (e.g. 500 status, or missing
+        // Content-Length), the staleness check is skipped and the cached
+        // store is preserved.
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config.clone());
+
+        // Mock server returning 500 — HEAD will succeed but return
+        // Ok(None) because the status is not 2xx.
+        let server = TestHttpServer::new(500, b"Internal Server Error".to_vec());
+        let base_url = server.url().to_string();
+
+        let candidate = format!(
+            "url::{base_url}/resolve/main/train/head-none.ndjson"
+        );
+        let store_path = HuggingFaceRowSource::candidate_store_path(&config, &candidate);
+        fs::create_dir_all(store_path.parent().unwrap()).unwrap();
+        write_simdr_fixture(&store_path, &[("r0", "row")]);
+        {
+            let store = DataStore::open(&store_path).unwrap();
+            store
+                .write(HF_SHARD_STORE_SOURCE_SIZE_KEY, &100u64.to_le_bytes())
+                .unwrap();
+        }
+
+        let original_content = fs::read(&store_path).unwrap();
+
+        let cached_store = Arc::new(DataStore::open(&store_path).unwrap());
+        source
+            .store_cache
+            .lock()
+            .unwrap()
+            .insert(store_path.clone(), cached_store);
+
+        {
+            let mut state = source.state.lock().unwrap();
+            state.remote_candidates = Some(vec![candidate.clone()]);
+            state.remote_candidate_order = vec![0];
+            // No expected_bytes — simulates hf-hub fallback.
+            state.next_remote_idx = 0;
+        }
+
+        // HEAD returns 500 → fetch_remote_size_with_runtime returns
+        // Ok(None) → effective_expected = None → stale check skipped.
+        let result = source.download_next_remote_shard();
+        assert!(
+            result.is_ok(),
+            "expected Ok even when HEAD returns None, got: {err:?}",
+            err = result.as_ref().unwrap_err()
+        );
+        assert!(
+            fs::read(&store_path).ok().as_deref() == Some(&original_content),
+            "store should be preserved when HEAD returns None"
+        );
+    }
+
+    #[test]
     fn extract_split_row_count_reads_split_entries() {
         let payload = json!({
             "size": {
