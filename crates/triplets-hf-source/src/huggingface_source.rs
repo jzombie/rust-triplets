@@ -10893,7 +10893,7 @@ mod tests {
     fn remote_shard_permutation_is_deterministic() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
-        let c = vec!["a", "b", "c", "d", "e"];
+        let c = ["a", "b", "c", "d", "e"];
         let c1: Vec<String> = c.iter().map(|s| s.to_string()).collect();
         let c2: Vec<String> = c.iter().map(|s| s.to_string()).collect();
         let o1 = HuggingFaceRowSource::build_candidate_order(&config, &c1, 42);
