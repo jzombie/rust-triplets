@@ -2334,6 +2334,54 @@ impl HuggingFaceRowSource {
         fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
     }
 
+    /// Build the full HTTP(S) remote URL for a candidate identifier.
+    ///
+    /// Candidates from the parquet manifest carry the `url::` prefix followed
+    /// by a full URL.  Candidates from the hf-hub sibling fallback are bare
+    /// repository-relative paths that need the HF CDN prefix.
+    fn remote_url_for_candidate(config: &HuggingFaceRowsConfig, candidate: &str) -> String {
+        if let Some(url) = candidate.strip_prefix(HF_REMOTE_URL_PREFIX) {
+            url.to_string()
+        } else {
+            format!(
+                "https://huggingface.co/datasets/{}/resolve/main/{}",
+                config.dataset,
+                candidate.trim_start_matches('/')
+            )
+        }
+    }
+
+    /// Fetch the remote file size via an HTTP HEAD request.
+    ///
+    /// Returns `Ok(Some(size))` when the server responds with a `Content-Length`
+    /// header, `Ok(None)` for non-2xx responses or missing `Content-Length`,
+    /// and `Err` for network / configuration failures.
+    fn fetch_remote_size_with_runtime(
+        config: &HuggingFaceRowsConfig,
+        remote_url: &str,
+        runtime: &tokio::runtime::Runtime,
+    ) -> Result<Option<u64>, SamplerError> {
+        runtime.block_on(async {
+            let client = Self::http_client(config)?;
+            let response = client.head(remote_url).send().await.map_err(|err| {
+                SamplerError::SourceUnavailable {
+                    source_id: config.source_id.clone(),
+                    reason: format!("HEAD request failed for shard URL '{}': {err}", remote_url),
+                }
+            })?;
+
+            if !response.status().is_success() {
+                return Ok(None);
+            }
+
+            Ok(response
+                .headers()
+                .get(reqwest::header::CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok()))
+        })
+    }
+
     /// Return root directory used for manifest-cached remote shards.
     fn manifest_cache_root(&self) -> PathBuf {
         self.config.snapshot_dir.join(HF_PARQUET_MANIFEST_DIR)
@@ -3303,9 +3351,43 @@ impl HuggingFaceRowSource {
                 // However, if the remote manifest reports a source size and the cached
                 // store carries a different stored value, the upstream shard was replaced
                 // (newer version).  Delete the stale store so it gets redownloaded.
+                //
+                // When the manifest does not provide a size (hf-hub sibling fallback),
+                // a lightweight HTTP HEAD request is used to retrieve the current file
+                // size from `Content-Length` so that staleness detection still works
+                // without depending on the datasets-server API.
                 let store_path = Self::candidate_store_path(&self.config, &remote_path);
                 if store_path.exists() {
-                    if let Some(expected) = expected_bytes {
+                    // Resolve the expected remote size: prefer the manifest-provided
+                    // value, but fall back to an HTTP HEAD request so staleness
+                    // detection works even when the datasets-server is unavailable.
+                    let effective_expected = if let Some(bytes) = expected_bytes {
+                        Some(bytes)
+                    } else {
+                        let remote_url = Self::remote_url_for_candidate(&self.config, &remote_path);
+                        match Self::fetch_remote_size_with_runtime(
+                            &self.config,
+                            &remote_url,
+                            &self.http_runtime,
+                        ) {
+                            Ok(Some(size)) if size > 0 => Some(size),
+                            Ok(_) => None,
+                            Err(err) => {
+                                warn!(
+                                    "[triplets:hf] {} {} HEAD size stale check failed: {err}",
+                                    self.config.source_id,
+                                    Self::format_shard_label(
+                                        remote_path.as_str(),
+                                        candidate_idx,
+                                        remote_total
+                                    ),
+                                );
+                                None
+                            }
+                        }
+                    };
+
+                    if let Some(expected) = effective_expected {
                         // Only read the stored source size from the cache — never
                         // call get_or_open_shard_store purely to check, because it
                         // creates an empty store file if the path doesn't exist.
@@ -7985,6 +8067,203 @@ mod tests {
             "should return true (candidate consumed)"
         );
         assert!(store_path.exists(), "fresh store should NOT be deleted");
+    }
+
+    #[test]
+    fn remote_url_for_candidate_constructs_correct_urls() {
+        // url:: prefix with full URL: returned as-is.
+        let config = test_config(PathBuf::from("/tmp/snap"));
+        let full_url =
+            "url::https://huggingface.co/datasets/org/ds/resolve/main/train/part-000.parquet";
+        let result = HuggingFaceRowSource::remote_url_for_candidate(&config, full_url);
+        assert_eq!(
+            result,
+            "https://huggingface.co/datasets/org/ds/resolve/main/train/part-000.parquet"
+        );
+
+        // Bare path (hf-hub sibling fallback): CDN prefix is prepended.
+        let bare_path = "data/train-00000-of-00001.parquet";
+        let result = HuggingFaceRowSource::remote_url_for_candidate(&config, bare_path);
+        assert_eq!(
+            result,
+            "https://huggingface.co/datasets/org/dataset/resolve/main/data/train-00000-of-00001.parquet"
+        );
+
+        // Bare path with leading slash.
+        let bare_path = "/data/train-00000-of-00001.parquet";
+        let result = HuggingFaceRowSource::remote_url_for_candidate(&config, bare_path);
+        assert_eq!(
+            result,
+            "https://huggingface.co/datasets/org/dataset/resolve/main/data/train-00000-of-00001.parquet"
+        );
+    }
+
+    #[test]
+    #[serial(global_state)]
+    fn fetch_remote_size_with_runtime_returns_content_length() {
+        // A mock HTTP server that responds to HEAD with Content-Length.
+        let payload = b"this is the shard content".to_vec();
+        let server = TestHttpServer::new(200, payload.clone());
+        let base_url = server.url().to_string();
+
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.hf_token = None;
+
+        let runtime = HuggingFaceRowSource::build_http_runtime(&config).unwrap();
+        let size =
+            HuggingFaceRowSource::fetch_remote_size_with_runtime(&config, &base_url, &runtime)
+                .unwrap();
+        // Content-Length should match the payload size.
+        assert_eq!(size, Some(payload.len() as u64));
+    }
+
+    #[test]
+    #[serial(global_state)]
+    fn fetch_remote_size_with_runtime_returns_none_on_non_success() {
+        // A mock server returning 404 — HEAD should return Ok(None).
+        let server = TestHttpServer::new(404, b"Not Found".to_vec());
+        let base_url = server.url().to_string();
+
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.hf_token = None;
+
+        let runtime = HuggingFaceRowSource::build_http_runtime(&config).unwrap();
+        let size =
+            HuggingFaceRowSource::fetch_remote_size_with_runtime(&config, &base_url, &runtime)
+                .unwrap();
+        assert_eq!(size, None, "non-2xx response should yield None");
+    }
+
+    #[test]
+    #[serial(global_state)]
+    fn download_next_remote_shard_detects_stale_shard_via_head() {
+        // When the manifest does NOT provide expected_bytes (hf-hub sibling
+        // fallback), but a cached store exists on disk with a stored source_size
+        // that differs from the remote Content-Length (obtained via HTTP HEAD),
+        // the store should be deleted so the shard gets re-downloaded.
+        //
+        // This test verifies that staleness is detected correctly by checking
+        // the behaviour after the HEAD request:
+        //   • stored source_size = 100
+        //   • HEAD Content-Length = 200  (mismatch → store is deleted)
+        //
+        // The mock server serves the GET response body directly, so the
+        // re-download may succeed.  The critical assertion is that the
+        // original store is gone.
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config.clone());
+
+        // Start a mock HTTP server — must stay alive for HEAD + any GET.
+        let server = TestHttpServer::new(200, vec![0u8; 200]);
+        let base_url = server.url().to_string();
+
+        // Candidate uses url:: prefix so the HEAD targets the mock server.
+        let candidate = format!("url::{base_url}/resolve/main/train/stale-shard.ndjson");
+        let store_path = HuggingFaceRowSource::candidate_store_path(&config, &candidate);
+        fs::create_dir_all(store_path.parent().unwrap()).unwrap();
+        write_simdr_fixture(&store_path, &[("r0", "row")]);
+        {
+            let store = DataStore::open(&store_path).unwrap();
+            store
+                .write(HF_SHARD_STORE_SOURCE_SIZE_KEY, &100u64.to_le_bytes())
+                .unwrap();
+        }
+
+        // Snapshot the on-disk content so we can detect replacement.
+        let original_content = fs::read(&store_path).unwrap();
+
+        let cached_store = Arc::new(DataStore::open(&store_path).unwrap());
+        source
+            .store_cache
+            .lock()
+            .unwrap()
+            .insert(store_path.clone(), cached_store);
+
+        {
+            let mut state = source.state.lock().unwrap();
+            state.remote_candidates = Some(vec![candidate.clone()]);
+            state.remote_candidate_order = vec![0];
+            // No expected_bytes in remote_candidate_sizes — simulates the
+            // hf-hub sibling fallback where sizes are unknown.
+            state.next_remote_idx = 0;
+        }
+
+        // The HEAD request returns Content-Length: 200.  The stored
+        // source_size is 100, so the staleness check should delete the
+        // store and re-download.  The old store MUST be gone.
+        let result = source.download_next_remote_shard();
+
+        // The old store was deleted (HEAD detected mismatch).
+        // A new store may or may not have been created depending on
+        // whether the GET download + transcode succeeded.
+        assert!(
+            fs::read(&store_path).ok().as_deref() != Some(&original_content),
+            "stale store content should have been replaced (HEAD detected size mismatch)"
+        );
+
+        // The candidate should have been consumed either way.
+        assert!(
+            result.is_ok(),
+            "download may fail or succeed; the candidate should be consumed: {err:?}",
+            err = result.as_ref().unwrap_err()
+        );
+    }
+
+    #[test]
+    #[serial(global_state)]
+    fn download_next_remote_shard_preserves_fresh_shard_via_head() {
+        // When the manifest does NOT provide expected_bytes, but a cached
+        // store exists with a stored size that matches the remote Content-Length
+        // from HEAD, the store should be preserved and the download skipped.
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config.clone());
+
+        // Create a store with source_size matching the mock server's payload.
+        let server = TestHttpServer::new(200, vec![0u8; 100]);
+        let base_url = server.url().to_string();
+
+        let candidate = format!("url::{base_url}/resolve/main/train/fresh-shard.ndjson");
+        let store_path = HuggingFaceRowSource::candidate_store_path(&config, &candidate);
+        fs::create_dir_all(store_path.parent().unwrap()).unwrap();
+        write_simdr_fixture(&store_path, &[("r0", "row")]);
+        {
+            let store = DataStore::open(&store_path).unwrap();
+            store
+                .write(HF_SHARD_STORE_SOURCE_SIZE_KEY, &100u64.to_le_bytes())
+                .unwrap();
+        }
+
+        let cached_store = Arc::new(DataStore::open(&store_path).unwrap());
+        source
+            .store_cache
+            .lock()
+            .unwrap()
+            .insert(store_path.clone(), cached_store);
+
+        {
+            let mut state = source.state.lock().unwrap();
+            state.remote_candidates = Some(vec![candidate.clone()]);
+            state.remote_candidate_order = vec![0];
+            // No expected_bytes in remote_candidate_sizes.
+            state.next_remote_idx = 0;
+        }
+
+        // Sizes match (100 == 100) — should skip without download.
+        let result = source.download_next_remote_shard();
+        assert!(
+            result.is_ok(),
+            "expected Ok, got: {err:?}",
+            err = result.as_ref().unwrap_err()
+        );
+        assert!(result.unwrap(), "should return true (candidate consumed)");
+        assert!(
+            store_path.exists(),
+            "fresh store should NOT be deleted when sizes match via HEAD"
+        );
     }
 
     #[test]
