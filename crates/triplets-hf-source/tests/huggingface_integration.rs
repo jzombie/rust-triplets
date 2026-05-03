@@ -12,7 +12,6 @@ use triplets_core::{
     SplitRatios, TripletSampler,
 };
 use triplets_hf_source::{
-    ENV_TRIPLETS_HF_INFO_ENDPOINT, ENV_TRIPLETS_HF_PARQUET_ENDPOINT, ENV_TRIPLETS_HF_SIZE_ENDPOINT,
     ENV_TRIPLETS_HF_TOKEN, ENV_TRIPLETS_HF_TOKEN_TEST_DATASET, HF_BASE_URL, HF_PUBLIC_TEST_DATASET,
     HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE, HfListRoots, HfSourceEntry, HuggingFaceRowSource,
     HuggingFaceRowsConfig, build_hf_sources, load_hf_sources_from_list, parse_csv_fields,
@@ -104,6 +103,7 @@ fn write_simdr_fixture(path: &Path, rows: &[(&str, &str)]) {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn huggingface_reads_local_jsonl_snapshot() {
     let temp = tempfile::tempdir().expect("failed creating tempdir");
     let shard_path = temp.path().join("part-00000.jsonl");
@@ -154,6 +154,7 @@ fn huggingface_reads_local_jsonl_snapshot() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn huggingface_reads_local_ndjson_snapshot() {
     let temp = tempfile::tempdir().expect("failed creating tempdir");
     let shard_path = temp.path().join("part-00000.ndjson");
@@ -199,6 +200,7 @@ fn huggingface_reads_local_ndjson_snapshot() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn huggingface_text_mode_triplets_can_use_different_anchor_positive_windows() {
     let temp = tempfile::tempdir().expect("failed creating tempdir");
     let shard_path = temp.path().join("part-00000.ndjson");
@@ -301,6 +303,7 @@ fn huggingface_text_mode_triplets_can_use_different_anchor_positive_windows() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn huggingface_reads_local_text_lines_snapshot() {
     let temp = tempfile::tempdir().expect("failed creating tempdir");
     let shard_path = temp.path().join("part-00000.txt");
@@ -333,6 +336,7 @@ fn huggingface_reads_local_text_lines_snapshot() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn huggingface_role_columns_mode_and_synthetic_ids_work() {
     let temp = tempfile::tempdir().expect("failed creating tempdir");
     let shard_path = temp.path().join("part-00001.ndjson");
@@ -388,6 +392,7 @@ fn huggingface_role_columns_mode_and_synthetic_ids_work() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn huggingface_role_columns_mode_skips_missing_rows_and_keeps_valid() {
     let temp = tempfile::tempdir().expect("failed creating tempdir");
     let shard_path = temp.path().join("part-00001.ndjson");
@@ -428,6 +433,7 @@ fn huggingface_role_columns_mode_skips_missing_rows_and_keeps_valid() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn huggingface_parses_source_list_with_explicit_mappings() {
     let temp = tempfile::tempdir().expect("failed creating tempdir");
     let list_path = temp.path().join("hf_sources.txt");
@@ -455,6 +461,7 @@ fn huggingface_parses_source_list_with_explicit_mappings() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn huggingface_helper_parsers_cover_success_and_error_paths() {
     assert_eq!(
         parse_csv_fields(" title, body , , tags "),
@@ -498,6 +505,7 @@ fn huggingface_helper_parsers_cover_success_and_error_paths() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn huggingface_list_root_and_builder_helpers_cover_invalid_inputs() {
     let temp = tempfile::tempdir().expect("failed creating tempdir");
     let list_path = temp.path().join("hf_sources_invalid.txt");
@@ -525,6 +533,7 @@ fn huggingface_list_root_and_builder_helpers_cover_invalid_inputs() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn huggingface_refresh_cursor_wraps_and_limit_none_reads_all() {
     let temp = tempfile::tempdir().expect("failed creating tempdir");
     let shard_path = temp.path().join("part-00002.ndjson");
@@ -570,6 +579,7 @@ fn huggingface_refresh_cursor_wraps_and_limit_none_reads_all() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn huggingface_refresh_surfaces_invalid_json_rows_as_errors() {
     let temp = tempfile::tempdir().expect("failed creating tempdir");
     let shard_path = temp.path().join("part-00003.ndjson");
@@ -595,6 +605,7 @@ fn huggingface_refresh_surfaces_invalid_json_rows_as_errors() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn huggingface_reported_count_returns_file_count() {
     let temp = tempfile::tempdir().expect("failed creating tempdir");
     let shard_path = temp.path().join("part-00004.ndjson");
@@ -627,6 +638,7 @@ fn huggingface_reported_count_returns_file_count() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn huggingface_reads_local_parquet_snapshot() {
     let temp = tempfile::tempdir().expect("failed creating tempdir");
     let shard_path = temp.path().join("part-00005.simdr");
@@ -665,6 +677,7 @@ fn huggingface_reads_local_parquet_snapshot() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn huggingface_role_columns_mode_skips_when_context_missing() {
     let temp = tempfile::tempdir().expect("failed creating tempdir");
     let shard_path = temp.path().join("part-00006.ndjson");
@@ -694,6 +707,7 @@ fn huggingface_role_columns_mode_skips_when_context_missing() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn huggingface_text_columns_mode_skips_when_all_candidates_missing() {
     let temp = tempfile::tempdir().expect("failed creating tempdir");
     let shard_path = temp.path().join("part-00007.ndjson");
@@ -723,6 +737,7 @@ fn huggingface_text_columns_mode_skips_when_all_candidates_missing() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn huggingface_text_columns_coalesces_to_first_nonempty_candidate() {
     let temp = tempfile::tempdir().expect("failed creating tempdir");
     let shard_path = temp.path().join("part-00009.ndjson");
@@ -775,6 +790,7 @@ fn huggingface_text_columns_coalesces_to_first_nonempty_candidate() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn huggingface_positive_columns_coalesces_to_first_nonempty_candidate() {
     let temp = tempfile::tempdir().expect("failed creating tempdir");
     let shard_path = temp.path().join("part-00010.ndjson");
@@ -829,6 +845,7 @@ fn huggingface_positive_columns_coalesces_to_first_nonempty_candidate() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn huggingface_parquet_role_columns_skip_missing_context_without_error() {
     let temp = tempfile::tempdir().expect("failed creating tempdir");
     let shard_path = temp.path().join("part-00008.simdr");
@@ -856,6 +873,7 @@ fn huggingface_parquet_role_columns_skip_missing_context_without_error() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn huggingface_record_ids_are_stable_across_independent_source_instances() {
     // The same row in the same shard file must produce the same record ID
     // regardless of which source instance reads it. This is what makes split
@@ -901,6 +919,7 @@ fn huggingface_record_ids_are_stable_across_independent_source_instances() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn huggingface_cursor_advances_between_refreshes() {
     // The cursor returned from refresh() must cause the next call to start
     // from a different position, not restart from row 0 every time.
@@ -946,6 +965,7 @@ fn huggingface_cursor_advances_between_refreshes() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn huggingface_refresh_limit_is_strictly_respected() {
     // refresh(..., Some(limit)) must never return more than `limit` records.
     let temp = tempfile::tempdir().expect("failed creating tempdir");
@@ -984,6 +1004,7 @@ fn huggingface_refresh_limit_is_strictly_respected() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn huggingface_both_local_shards_are_sampled() {
     // When two shard files exist, records from both must appear across a
     // full refresh so that shard expansion actually increases coverage.
@@ -1033,6 +1054,7 @@ fn huggingface_both_local_shards_are_sampled() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn huggingface_refresh_wraps_correctly_after_all_rows_consumed() {
     // After reading all materialized rows, a second refresh must wrap the
     // cursor back to the start and return records — it must not panic or
@@ -1077,6 +1099,7 @@ fn huggingface_refresh_wraps_correctly_after_all_rows_consumed() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn huggingface_different_epoch_seeds_produce_different_record_orderings() {
     // Guarantee: calling refresh() with a seed derived from epoch N must yield
     // a different record ordering than epoch 0, end-to-end through the HF
@@ -1100,9 +1123,7 @@ fn huggingface_different_epoch_seeds_produce_different_record_orderings() {
     let temp = tempfile::tempdir().expect("failed creating tempdir");
 
     let n_records: usize = 20;
-    let rows: Vec<String> = (0..n_records)
-        .map(|i| format!(r#"{{"id":"epoch_row_{i:02}","text":"body {i}"}}"#))
-        .collect();
+    let rows: Vec<String> = (0..n_records).map(|i| i.to_string()).collect();
     let row_refs: Vec<&str> = rows.iter().map(|s| s.as_str()).collect();
     write_lines(&temp.path().join("part-00000.ndjson"), &row_refs);
 
@@ -1202,6 +1223,7 @@ fn huggingface_different_epoch_seeds_produce_different_record_orderings() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn huggingface_empty_split_discovers_all_splits() {
     // Guarantee: when `split` is an empty string (no split component in the URI),
     // refresh() must return records from every split present in the snapshot
@@ -1267,6 +1289,7 @@ fn huggingface_empty_split_discovers_all_splits() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 #[ignore = "network integration test against live Hugging Face dataset"]
 fn huggingface_reads_live_remote_dataset() {
     let temp = tempfile::tempdir().expect("failed creating tempdir");
@@ -1298,6 +1321,7 @@ fn huggingface_reads_live_remote_dataset() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 #[ignore = "network integration test — verifies /size endpoint returns a plausible row count"]
 fn huggingface_live_size_endpoint_reports_dataset_row_count() {
     // ── Guard: respect TRIPLETS_SKIP_LIVE_TESTS ────────────────────────────
@@ -1351,6 +1375,7 @@ fn huggingface_live_size_endpoint_reports_dataset_row_count() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 #[ignore = "network integration test — verifies /info endpoint ClassLabel resolution end-to-end"]
 fn huggingface_live_classlabel_resolution_maps_integers_to_label_strings() {
     // ── Guard: respect TRIPLETS_SKIP_LIVE_TESTS ────────────────────────────
@@ -1441,6 +1466,7 @@ fn huggingface_live_classlabel_resolution_maps_integers_to_label_strings() {
 //   TRIPLETS_SKIP_LIVE_TESTS=1     — skips this test without failing
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn huggingface_live_e2e_candidate_and_shard_download() {
     // ── Guard: respect TRIPLETS_SKIP_LIVE_TESTS ────────────────────────────
     let skip_live = std::env::var(ENV_TRIPLETS_SKIP_LIVE_TESTS)
@@ -1546,6 +1572,7 @@ fn huggingface_live_e2e_candidate_and_shard_download() {
 // ── trust= and source_id= column tests ─────────────────────────────────────
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn parse_hf_source_line_accepts_trust_override() {
     let entry =
         parse_hf_source_line("hf://org/dataset/default/train anchor=title positive=text trust=0.8")
@@ -1561,6 +1588,7 @@ fn parse_hf_source_line_accepts_trust_override() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn parse_hf_source_line_accepts_trust_boundary_values() {
     let zero = parse_hf_source_line("hf://org/dataset/default/train text=body trust=0.0")
         .expect("trust=0.0 should parse");
@@ -1572,6 +1600,7 @@ fn parse_hf_source_line_accepts_trust_boundary_values() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn parse_hf_source_line_rejects_trust_above_one() {
     let err = parse_hf_source_line("hf://org/dataset/default/train text=body trust=1.1")
         .expect_err("trust > 1.0 should be rejected");
@@ -1582,6 +1611,7 @@ fn parse_hf_source_line_rejects_trust_above_one() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn parse_hf_source_line_rejects_negative_trust() {
     let err = parse_hf_source_line("hf://org/dataset/default/train text=body trust=-0.1")
         .expect_err("negative trust should be rejected");
@@ -1592,6 +1622,7 @@ fn parse_hf_source_line_rejects_negative_trust() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn parse_hf_source_line_rejects_non_float_trust() {
     let err = parse_hf_source_line("hf://org/dataset/default/train text=body trust=high")
         .expect_err("non-float trust value should be rejected");
@@ -1602,6 +1633,7 @@ fn parse_hf_source_line_rejects_non_float_trust() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn parse_hf_source_line_accepts_source_id_override() {
     let entry =
         parse_hf_source_line("hf://org/dataset/default/train text=body source_id=my_custom_source")
@@ -1614,6 +1646,7 @@ fn parse_hf_source_line_accepts_source_id_override() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn parse_hf_source_line_rejects_empty_source_id() {
     let err = parse_hf_source_line("hf://org/dataset/default/train text=body source_id=")
         .expect_err("empty source_id should be rejected");
@@ -1624,6 +1657,7 @@ fn parse_hf_source_line_rejects_empty_source_id() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn parse_hf_source_line_accepts_trust_and_source_id_together() {
     let entry = parse_hf_source_line(
         "hf://org/dataset/default/train anchor=title positive=text trust=0.9 source_id=wiki-en",
@@ -1638,6 +1672,7 @@ fn parse_hf_source_line_accepts_trust_and_source_id_together() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn parse_hf_source_line_defaults_trust_and_source_id_to_none() {
     let entry = parse_hf_source_line("hf://org/dataset/default/train anchor=title")
         .expect("line without trust= or source_id= should parse");
@@ -1649,6 +1684,7 @@ fn parse_hf_source_line_defaults_trust_and_source_id_to_none() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn parse_hf_source_line_rejects_unknown_key_typo() {
     // "positve" is a typo for "positive" — the parser must reject it, not silently ignore
     // or fall back to a default, since accepting unknown keys would mask configuration mistakes.
@@ -1661,6 +1697,7 @@ fn parse_hf_source_line_rejects_unknown_key_typo() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn parse_hf_source_line_rejects_arbitrary_unknown_key() {
     let err = parse_hf_source_line("hf://org/dataset/default/train iajfaijww=body")
         .expect_err("arbitrary unknown key 'iajfaijww' should be rejected");
@@ -1671,6 +1708,7 @@ fn parse_hf_source_line_rejects_arbitrary_unknown_key() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn huggingface_rows_config_trust_override_propagates_to_records() {
     let temp = tempfile::tempdir().expect("failed creating tempdir");
     let shard_path = temp.path().join("part-00000.ndjson");
@@ -1710,6 +1748,7 @@ fn huggingface_rows_config_trust_override_propagates_to_records() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn huggingface_rows_config_without_trust_override_uses_default_trust() {
     let temp = tempfile::tempdir().expect("failed creating tempdir");
     let shard_path = temp.path().join("part-00000.ndjson");
@@ -1741,6 +1780,7 @@ fn huggingface_rows_config_without_trust_override_uses_default_trust() {
 }
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn huggingface_source_list_file_parses_trust_and_source_id() {
     let temp = tempfile::tempdir().expect("failed creating tempdir");
     let list_path = temp.path().join("hf_sources_trust.txt");
@@ -1840,6 +1880,7 @@ fn huggingface_source_list_file_parses_trust_and_source_id() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
+#[serial_test::serial(all_integration)]
 fn hf_token_private_dataset_access() {
     // ── Guard: require env vars (or explicit opt-out) ────────────────────────
     //
@@ -1951,7 +1992,7 @@ fn hf_token_private_dataset_access() {
 }
 
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(all_integration)]
 fn sampler_next_text_batch_re_expands_after_cache_eviction() {
     // E2E test verifying that when the cache manager automatically evicts
     // shards during background expansion, the source re-fetches the HF
@@ -1979,39 +2020,27 @@ fn sampler_next_text_batch_re_expands_after_cache_eviction() {
     // The manifest server also counts how many times /parquet is queried.
     let server = triplets_hf_source::test_utils::HfMockServer::new(5, 1);
 
-    // ── Env var guards ──────────────────────────────────────────────────
-    //
-    // Set env vars for the test duration.  The triggers MUST outlive
-    // the source and sampler so that async expansion threads can still
-    // resolve the mock endpoints when they make HTTP requests.
-    let _parquet_guard = triplets_hf_source::test_utils::EnvGuard::set(
-        ENV_TRIPLETS_HF_PARQUET_ENDPOINT,
-        &format!("{}/parquet", server.url()),
-    );
-    // The /size and /info endpoints are NOT mocked; failing to query them
-    // is non-fatal (warns and returns None).  Point them somewhere harmless.
-    let _size_guard = triplets_hf_source::test_utils::EnvGuard::set(
-        ENV_TRIPLETS_HF_SIZE_ENDPOINT,
-        &format!(
-            "{}/unreachable",
-            triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
-        ),
-    );
-    let _info_guard = triplets_hf_source::test_utils::EnvGuard::set(
-        ENV_TRIPLETS_HF_INFO_ENDPOINT,
-        &format!(
-            "{}/unreachable",
-            triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
-        ),
-    );
-
     // ── Source ───────────────────────────────────────────────────────────
+    //
+    // The endpoint URLs are set directly on the config before constructing
+    // the source so they are captured once at construction time.  The /size
+    // and /info endpoints are NOT mocked; failing to query them is non-fatal
+    // (warns and returns None).  Point them somewhere harmless.
     let mut config = HuggingFaceRowsConfig::new(
         "hf_re_expand_test",
         "org/dataset",
         "default",
         "train",
         temp.path(),
+    );
+    config.parquet_endpoint = format!("{}/parquet", server.url());
+    config.size_endpoint = format!(
+        "{}/unreachable",
+        triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
+    );
+    config.info_endpoint = format!(
+        "{}/unreachable",
+        triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
     );
     config.hf_token = None;
     config.text_columns = vec!["text".to_string()];
@@ -2094,7 +2123,7 @@ fn sampler_next_text_batch_re_expands_after_cache_eviction() {
     //
     // The counter increments every time a /parquet request lands on the
     // mock server.  The bootstrap path fetches it once; re-expansion after
-    // eviction fetches it again.  We expect >= 2.
+    // eviction fetches it again.
     let fetch_count = server.manifest_fetch_count();
     eprintln!("parquet manifest fetched {fetch_count} times (expected >= 2)");
     assert!(
@@ -2107,31 +2136,12 @@ fn sampler_next_text_batch_re_expands_after_cache_eviction() {
 }
 
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(all_integration)]
 fn bootstrap_refresh_downloads_first_shard_when_no_local_data() {
     // Verify that `refresh()` bootstraps by downloading the first shard when
     // materialized_rows is 0 (a fresh source with no local shards).
     let temp = tempfile::tempdir().expect("tempdir");
     let server = triplets_hf_source::test_utils::HfMockServer::new(3, 2);
-
-    let _parquet = triplets_hf_source::test_utils::EnvGuard::set(
-        ENV_TRIPLETS_HF_PARQUET_ENDPOINT,
-        &format!("{}/parquet", server.url()),
-    );
-    let _size = triplets_hf_source::test_utils::EnvGuard::set(
-        ENV_TRIPLETS_HF_SIZE_ENDPOINT,
-        &format!(
-            "{}/unreachable",
-            triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
-        ),
-    );
-    let _info = triplets_hf_source::test_utils::EnvGuard::set(
-        ENV_TRIPLETS_HF_INFO_ENDPOINT,
-        &format!(
-            "{}/unreachable",
-            triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
-        ),
-    );
 
     let mut config = HuggingFaceRowsConfig::new(
         "bootstrap_test",
@@ -2139,6 +2149,15 @@ fn bootstrap_refresh_downloads_first_shard_when_no_local_data() {
         "default",
         "train",
         temp.path(),
+    );
+    config.parquet_endpoint = format!("{}/parquet", server.url());
+    config.size_endpoint = format!(
+        "{}/unreachable",
+        triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
+    );
+    config.info_endpoint = format!(
+        "{}/unreachable",
+        triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
     );
     config.hf_token = None;
     config.text_columns = vec!["text".to_string()];
@@ -2167,31 +2186,12 @@ fn bootstrap_refresh_downloads_first_shard_when_no_local_data() {
 }
 
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(all_integration)]
 fn expansion_headroom_grows_with_multiple_refresh_cycles() {
     // Verify that `len_hint()` returns progressively larger headroom as
     // shards are materialized, and that `reported_record_count()` reflects it.
     let temp = tempfile::tempdir().expect("tempdir");
     let server = triplets_hf_source::test_utils::HfMockServer::new(5, 3);
-
-    let _parquet = triplets_hf_source::test_utils::EnvGuard::set(
-        ENV_TRIPLETS_HF_PARQUET_ENDPOINT,
-        &format!("{}/parquet", server.url()),
-    );
-    let _size = triplets_hf_source::test_utils::EnvGuard::set(
-        ENV_TRIPLETS_HF_SIZE_ENDPOINT,
-        &format!(
-            "{}/unreachable",
-            triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
-        ),
-    );
-    let _info = triplets_hf_source::test_utils::EnvGuard::set(
-        ENV_TRIPLETS_HF_INFO_ENDPOINT,
-        &format!(
-            "{}/unreachable",
-            triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
-        ),
-    );
 
     let mut config = HuggingFaceRowsConfig::new(
         "headroom_test",
@@ -2199,6 +2199,15 @@ fn expansion_headroom_grows_with_multiple_refresh_cycles() {
         "default",
         "train",
         temp.path(),
+    );
+    config.parquet_endpoint = format!("{}/parquet", server.url());
+    config.size_endpoint = format!(
+        "{}/unreachable",
+        triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
+    );
+    config.info_endpoint = format!(
+        "{}/unreachable",
+        triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
     );
     config.hf_token = None;
     config.text_columns = vec!["text".to_string()];
@@ -2245,7 +2254,7 @@ fn expansion_headroom_grows_with_multiple_refresh_cycles() {
 }
 
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(all_integration)]
 fn full_pipeline_samples_across_downloaded_shards() {
     // E2E test exercising the complete pipeline:
     // HfMockServer → HuggingFaceRowSource → Sampler → next_triplet_batch
@@ -2254,27 +2263,17 @@ fn full_pipeline_samples_across_downloaded_shards() {
     let temp = tempfile::tempdir().expect("tempdir");
     let server = triplets_hf_source::test_utils::HfMockServer::new(3, 4);
 
-    let _parquet = triplets_hf_source::test_utils::EnvGuard::set(
-        ENV_TRIPLETS_HF_PARQUET_ENDPOINT,
-        &format!("{}/parquet", server.url()),
-    );
-    let _size = triplets_hf_source::test_utils::EnvGuard::set(
-        ENV_TRIPLETS_HF_SIZE_ENDPOINT,
-        &format!(
-            "{}/unreachable",
-            triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
-        ),
-    );
-    let _info = triplets_hf_source::test_utils::EnvGuard::set(
-        ENV_TRIPLETS_HF_INFO_ENDPOINT,
-        &format!(
-            "{}/unreachable",
-            triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
-        ),
-    );
-
     let mut config =
         HuggingFaceRowsConfig::new("e2e_test", "org/dataset", "default", "train", temp.path());
+    config.parquet_endpoint = format!("{}/parquet", server.url());
+    config.size_endpoint = format!(
+        "{}/unreachable",
+        triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
+    );
+    config.info_endpoint = format!(
+        "{}/unreachable",
+        triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
+    );
     config.hf_token = None;
     // Use text-columns mode so the SimCSE recipe allows same anchor/positive.
     config.text_columns = vec!["text".to_string()];
@@ -2326,30 +2325,10 @@ fn full_pipeline_samples_across_downloaded_shards() {
 }
 
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(all_integration)]
 fn duplicate_build_hf_sources_produces_independent_sources() {
     // E2E test for `build_hf_sources()` with duplicate URIs: each built
     // source must have its own snapshot dir and produce independent data.
-    let server = triplets_hf_source::test_utils::HfMockServer::new(2, 2);
-
-    let _parquet = triplets_hf_source::test_utils::EnvGuard::set(
-        ENV_TRIPLETS_HF_PARQUET_ENDPOINT,
-        &format!("{}/parquet", server.url()),
-    );
-    let _size = triplets_hf_source::test_utils::EnvGuard::set(
-        ENV_TRIPLETS_HF_SIZE_ENDPOINT,
-        &format!(
-            "{}/unreachable",
-            triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
-        ),
-    );
-    let _info = triplets_hf_source::test_utils::EnvGuard::set(
-        ENV_TRIPLETS_HF_INFO_ENDPOINT,
-        &format!(
-            "{}/unreachable",
-            triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
-        ),
-    );
 
     let temp_root = tempfile::tempdir().expect("tempdir");
     let nl = platform_newline();
@@ -2391,39 +2370,27 @@ fn duplicate_build_hf_sources_produces_independent_sources() {
         built[1].id(),
         "duplicate sources must have distinct IDs"
     );
-
-    server.shut_down();
 }
 
 #[test]
-#[serial_test::serial]
+#[serial_test::serial(all_integration)]
 fn e2e_refresh_honors_limit_and_wraps_cursor() {
     // Verify that `refresh()` respects the `limit` parameter and that the
     // cursor wraps properly after consuming all shards.
     let temp = tempfile::tempdir().expect("tempdir");
     let server = triplets_hf_source::test_utils::HfMockServer::new(2, 3);
 
-    let _parquet = triplets_hf_source::test_utils::EnvGuard::set(
-        ENV_TRIPLETS_HF_PARQUET_ENDPOINT,
-        &format!("{}/parquet", server.url()),
-    );
-    let _size = triplets_hf_source::test_utils::EnvGuard::set(
-        ENV_TRIPLETS_HF_SIZE_ENDPOINT,
-        &format!(
-            "{}/unreachable",
-            triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
-        ),
-    );
-    let _info = triplets_hf_source::test_utils::EnvGuard::set(
-        ENV_TRIPLETS_HF_INFO_ENDPOINT,
-        &format!(
-            "{}/unreachable",
-            triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
-        ),
-    );
-
     let mut config =
         HuggingFaceRowsConfig::new("limit_test", "org/dataset", "default", "train", temp.path());
+    config.parquet_endpoint = format!("{}/parquet", server.url());
+    config.size_endpoint = format!(
+        "{}/unreachable",
+        triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
+    );
+    config.info_endpoint = format!(
+        "{}/unreachable",
+        triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
+    );
     config.hf_token = None;
     config.text_columns = vec!["text".to_string()];
     config.cache_capacity = 10;

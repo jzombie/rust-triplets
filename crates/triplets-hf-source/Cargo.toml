@@ -15,9 +15,6 @@ keywords = [
     "preprocessing",
 ]
 
-[features]
-test-utils = []
-
 [dependencies]
 cache-manager = { workspace = true }
 chrono = { workspace = true }
@@ -38,5 +35,4 @@ walkdir = { workspace = true }
 serial_test = { workspace = true }
 tracing-subscriber = { workspace = true }
 
-# Enable `test-utils` feature (EnvGuard) for integration tests.
-triplets-hf-source = { path = ".", features = ["test-utils"] }
+triplets-hf-source = { path = "." }

@@ -659,7 +659,18 @@ pub struct HuggingFaceRowsConfig {
     /// automatically from the `HF_TOKEN` environment variable at construction
     /// time; callers may also set this field directly.
     pub hf_token: Option<String>,
-    /// Shared store cache — ensures at most one `DataStore` handle per path.
+    /// Resolved datasets-server parquet manifest endpoint URL.
+    /// Populated at construction time from `TRIPLETS_HF_PARQUET_ENDPOINT` env var
+    /// or `HF_PARQUET_DEFAULT_ENDPOINT`.
+    pub parquet_endpoint: String,
+    /// Resolved datasets-server size endpoint URL.
+    /// Populated at construction time from `TRIPLETS_HF_SIZE_ENDPOINT` env var
+    /// or `HF_SIZE_DEFAULT_ENDPOINT`.
+    pub size_endpoint: String,
+    /// Resolved datasets-server info endpoint URL.
+    /// Populated at construction time from `TRIPLETS_HF_INFO_ENDPOINT` env var
+    /// or `HF_INFO_DEFAULT_ENDPOINT`.
+    pub info_endpoint: String,
     pub store_cache: StoreCache,
 }
 
@@ -700,6 +711,9 @@ impl HuggingFaceRowsConfig {
             hf_token: std::env::var(ENV_TRIPLETS_HF_TOKEN)
                 .ok()
                 .filter(|t| !t.trim().is_empty()),
+            parquet_endpoint: HF_PARQUET_DEFAULT_ENDPOINT.to_string(),
+            size_endpoint: HF_SIZE_DEFAULT_ENDPOINT.to_string(),
+            info_endpoint: HF_INFO_DEFAULT_ENDPOINT.to_string(),
             store_cache: StoreCache::new(),
         }
     }
@@ -931,7 +945,7 @@ impl RowCache {
 /// `SamplerError::SourceUnavailable` to the caller; the global row-count request
 /// is non-fatal and only produces a warning.
 pub struct HuggingFaceRowSource {
-    config: HuggingFaceRowsConfig,
+    pub(crate) config: HuggingFaceRowsConfig,
     http_runtime: Arc<tokio::runtime::Runtime>,
     sampler_config: Arc<Mutex<Option<SamplerConfig>>>,
     state: Arc<Mutex<SourceState>>,
@@ -2037,33 +2051,6 @@ impl HuggingFaceRowSource {
         hasher.finish()
     }
 
-    fn parquet_manifest_endpoint() -> String {
-        if let Ok(value) = std::env::var(ENV_TRIPLETS_HF_PARQUET_ENDPOINT)
-            && !value.trim().is_empty()
-        {
-            return value;
-        }
-        HF_PARQUET_DEFAULT_ENDPOINT.to_string()
-    }
-
-    fn size_endpoint() -> String {
-        if let Ok(value) = std::env::var(ENV_TRIPLETS_HF_SIZE_ENDPOINT)
-            && !value.trim().is_empty()
-        {
-            return value;
-        }
-        HF_SIZE_DEFAULT_ENDPOINT.to_string()
-    }
-
-    fn info_endpoint() -> String {
-        if let Ok(value) = std::env::var(ENV_TRIPLETS_HF_INFO_ENDPOINT)
-            && !value.trim().is_empty()
-        {
-            return value;
-        }
-        HF_INFO_DEFAULT_ENDPOINT.to_string()
-    }
-
     fn whoami_endpoint() -> String {
         if let Ok(value) = std::env::var(ENV_TRIPLETS_HF_WHOAMI_ENDPOINT)
             && !value.trim().is_empty()
@@ -2208,7 +2195,7 @@ impl HuggingFaceRowSource {
         config: &HuggingFaceRowsConfig,
         runtime: Option<&tokio::runtime::Runtime>,
     ) -> HashMap<String, Vec<String>> {
-        let endpoint = Self::info_endpoint();
+        let endpoint = &config.info_endpoint;
         let body = match Self::block_on_http_with_runtime(
             runtime,
             config,
@@ -2307,7 +2294,7 @@ impl HuggingFaceRowSource {
         config: &HuggingFaceRowsConfig,
         runtime: Option<&tokio::runtime::Runtime>,
     ) -> Result<ParquetManifestCandidates, SamplerError> {
-        let endpoint = Self::parquet_manifest_endpoint();
+        let endpoint = &config.parquet_endpoint;
         info!(
             "[triplets:hf] reading datasets-server parquet manifest for dataset {}",
             config.dataset_name
@@ -2528,7 +2515,7 @@ impl HuggingFaceRowSource {
         config: &HuggingFaceRowsConfig,
         runtime: Option<&tokio::runtime::Runtime>,
     ) -> Result<Option<usize>, SamplerError> {
-        let endpoint = Self::size_endpoint();
+        let endpoint = &config.size_endpoint;
         info!(
             "[triplets:hf] requesting global row count dataset='{}' config='{}' split='{}'",
             config.dataset_name, config.config_name, config.split_name
@@ -7461,7 +7448,7 @@ mod tests {
     #[serial(global_state)]
     fn list_remote_candidates_from_parquet_manifest_uses_test_endpoint_override() {
         let dir = tempdir().unwrap();
-        let config = test_config(dir.path().to_path_buf());
+        let mut config = test_config(dir.path().to_path_buf());
         let body = serde_json::to_vec(&json!({
             "parquet_files": [
                 {"url": "https://host/datasets/x/resolve/main/train/0.parquet", "size": 5}
@@ -7471,11 +7458,9 @@ mod tests {
         let server = spawn_one_shot_http(body);
         let base_url = server.url().to_string();
 
+        config.parquet_endpoint = base_url;
         let (candidates, sizes, matched) =
-            with_env_var(ENV_TRIPLETS_HF_PARQUET_ENDPOINT, &base_url, || {
-                HuggingFaceRowSource::list_remote_candidates_from_parquet_manifest(&config)
-            })
-            .unwrap();
+            HuggingFaceRowSource::list_remote_candidates_from_parquet_manifest(&config).unwrap();
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(sizes.len(), 1);
@@ -7486,7 +7471,7 @@ mod tests {
     #[serial(global_state)]
     fn fetch_global_row_count_uses_test_endpoint_override() {
         let dir = tempdir().unwrap();
-        let config = test_config(dir.path().to_path_buf());
+        let mut config = test_config(dir.path().to_path_buf());
         let body = serde_json::to_vec(&json!({
             "size": {
                 "splits": [
@@ -7498,10 +7483,8 @@ mod tests {
         let server = spawn_one_shot_http(body);
         let base_url = server.url().to_string();
 
-        let rows = with_env_var(ENV_TRIPLETS_HF_SIZE_ENDPOINT, &base_url, || {
-            HuggingFaceRowSource::fetch_global_row_count(&config)
-        })
-        .unwrap();
+        config.size_endpoint = base_url.clone();
+        let rows = HuggingFaceRowSource::fetch_global_row_count(&config).unwrap();
         assert_eq!(rows, Some(12));
     }
 
@@ -7509,7 +7492,7 @@ mod tests {
     #[serial(global_state)]
     fn fetch_global_row_count_with_runtime_uses_test_endpoint_override() {
         let dir = tempdir().unwrap();
-        let config = test_config(dir.path().to_path_buf());
+        let mut config = test_config(dir.path().to_path_buf());
         let runtime = HuggingFaceRowSource::build_http_runtime(&config).unwrap();
         let body = serde_json::to_vec(&json!({
             "size": {
@@ -7522,28 +7505,33 @@ mod tests {
         let server = spawn_one_shot_http(body);
         let base_url = server.url().to_string();
 
-        let rows = with_env_var(ENV_TRIPLETS_HF_SIZE_ENDPOINT, &base_url, || {
+        config.size_endpoint = base_url;
+        let rows =
             HuggingFaceRowSource::fetch_global_row_count_with_runtime(&config, Some(&runtime))
-        })
-        .unwrap();
+                .unwrap();
         assert_eq!(rows, Some(34));
     }
 
     #[test]
     #[serial(global_state)]
-    fn endpoint_helpers_fallback_for_empty_env_values() {
+    fn config_endpoint_fallback_for_empty_env_values() {
+        let dir = tempdir().unwrap();
+
         let parquet = with_env_var(ENV_TRIPLETS_HF_PARQUET_ENDPOINT, "   ", || {
-            HuggingFaceRowSource::parquet_manifest_endpoint()
+            let c = test_config(dir.path().to_path_buf());
+            c.parquet_endpoint
         });
         assert_eq!(parquet, HF_PARQUET_DEFAULT_ENDPOINT);
 
         let size = with_env_var(ENV_TRIPLETS_HF_SIZE_ENDPOINT, "", || {
-            HuggingFaceRowSource::size_endpoint()
+            let c = test_config(dir.path().to_path_buf());
+            c.size_endpoint
         });
         assert_eq!(size, HF_SIZE_DEFAULT_ENDPOINT);
 
         let info = with_env_var(ENV_TRIPLETS_HF_INFO_ENDPOINT, "   ", || {
-            HuggingFaceRowSource::info_endpoint()
+            let c = test_config(dir.path().to_path_buf());
+            c.info_endpoint
         });
         assert_eq!(info, HF_INFO_DEFAULT_ENDPOINT);
     }
@@ -7571,7 +7559,7 @@ mod tests {
     #[serial(global_state)]
     fn fetch_global_row_count_returns_none_when_split_not_present() {
         let dir = tempdir().unwrap();
-        let config = test_config(dir.path().to_path_buf());
+        let mut config = test_config(dir.path().to_path_buf());
         let body = serde_json::to_vec(&json!({
             "size": {
                 "splits": [
@@ -7583,10 +7571,8 @@ mod tests {
         let server = spawn_one_shot_http(body);
         let base_url = server.url().to_string();
 
-        let rows = with_env_var(ENV_TRIPLETS_HF_SIZE_ENDPOINT, &base_url, || {
-            HuggingFaceRowSource::fetch_global_row_count(&config)
-        })
-        .unwrap();
+        config.size_endpoint = base_url;
+        let rows = HuggingFaceRowSource::fetch_global_row_count(&config).unwrap();
         assert_eq!(rows, None);
     }
 
@@ -7594,7 +7580,7 @@ mod tests {
     #[serial(global_state)]
     fn list_remote_candidates_returns_manifest_candidates_before_repo_fallback() {
         let dir = tempdir().unwrap();
-        let config = test_config(dir.path().to_path_buf());
+        let mut config = test_config(dir.path().to_path_buf());
         let body = serde_json::to_vec(&json!({
             "parquet_files": [
                 {"url": "https://host/datasets/x/resolve/main/train/1.ndjson", "size": 9}
@@ -7604,10 +7590,8 @@ mod tests {
         let server = spawn_one_shot_http(body);
         let base_url = server.url().to_string();
 
-        let (candidates, sizes) = with_env_var(ENV_TRIPLETS_HF_PARQUET_ENDPOINT, &base_url, || {
-            HuggingFaceRowSource::list_remote_candidates(&config)
-        })
-        .unwrap();
+        config.parquet_endpoint = base_url;
+        let (candidates, sizes) = HuggingFaceRowSource::list_remote_candidates(&config).unwrap();
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(sizes.len(), 1);
@@ -7618,7 +7602,7 @@ mod tests {
     #[serial(global_state)]
     fn list_remote_candidates_with_runtime_returns_manifest_candidates() {
         let dir = tempdir().unwrap();
-        let config = test_config(dir.path().to_path_buf());
+        let mut config = test_config(dir.path().to_path_buf());
         let runtime = HuggingFaceRowSource::build_http_runtime(&config).unwrap();
         let body = serde_json::to_vec(&json!({
             "parquet_files": [
@@ -7629,10 +7613,10 @@ mod tests {
         let server = spawn_one_shot_http(body);
         let base_url = server.url().to_string();
 
-        let (candidates, sizes) = with_env_var(ENV_TRIPLETS_HF_PARQUET_ENDPOINT, &base_url, || {
+        config.parquet_endpoint = base_url;
+        let (candidates, sizes) =
             HuggingFaceRowSource::list_remote_candidates_with_runtime(&config, Some(&runtime))
-        })
-        .unwrap();
+                .unwrap();
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(sizes.len(), 1);
@@ -7651,7 +7635,7 @@ mod tests {
         // .fr, .de, …).  The guard is `matched_manifest_entries > 0`, which is
         // independent of cache state.
         let dir = tempdir().unwrap();
-        let config = test_config(dir.path().to_path_buf());
+        let mut config = test_config(dir.path().to_path_buf());
 
         // Pre-create the .simdr store target so the manifest entry is "fully cached".
         let shard_url = "https://host/datasets/org/ds/resolve/main/train/part-000.ndjson";
@@ -7671,10 +7655,8 @@ mod tests {
         let base_url = server.url().to_string();
 
         // Must return the full manifest candidate list without falling through to hf-hub.
-        let (candidates, sizes) = with_env_var(ENV_TRIPLETS_HF_PARQUET_ENDPOINT, &base_url, || {
-            HuggingFaceRowSource::list_remote_candidates(&config)
-        })
-        .unwrap();
+        config.parquet_endpoint = base_url;
+        let (candidates, sizes) = HuggingFaceRowSource::list_remote_candidates(&config).unwrap();
 
         assert_eq!(
             candidates.len(),
@@ -7715,7 +7697,7 @@ mod tests {
     #[serial(global_state)]
     fn fetch_classlabel_maps_with_runtime_resolves_columns_from_info_response() {
         let dir = tempdir().unwrap();
-        let config = test_config(dir.path().to_path_buf());
+        let mut config = test_config(dir.path().to_path_buf());
         let runtime = HuggingFaceRowSource::build_http_runtime(&config).unwrap();
         let body = serde_json::to_vec(&json!({
             "dataset_info": {
@@ -7731,9 +7713,9 @@ mod tests {
         let server = spawn_one_shot_http(body);
         let base_url = server.url().to_string();
 
-        let maps = with_env_var(ENV_TRIPLETS_HF_INFO_ENDPOINT, &base_url, || {
-            HuggingFaceRowSource::fetch_classlabel_maps_with_runtime(&config, Some(&runtime))
-        });
+        config.info_endpoint = base_url;
+        let maps =
+            HuggingFaceRowSource::fetch_classlabel_maps_with_runtime(&config, Some(&runtime));
 
         assert_eq!(maps.len(), 1);
         assert_eq!(maps["sentiment"], vec!["neutral", "bullish", "bearish"]);
@@ -9276,20 +9258,15 @@ mod tests {
     fn ensure_row_available_bootstraps_from_manifest_candidates() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
-        let source = test_source(config);
+        let mut source = test_source(config);
         let (base_url, _, server) =
             spawn_manifest_and_shard_http(2, b"{\"text\":\"hello\"}\n".to_vec());
 
         // Reset to None so ensure_row_available triggers the manifest-fetch path.
         source.state.lock().unwrap().remote_candidates = None;
+        source.config.parquet_endpoint = format!("{base_url}/parquet");
 
-        with_env_var(
-            ENV_TRIPLETS_HF_PARQUET_ENDPOINT,
-            &format!("{base_url}/parquet"),
-            || {
-                assert!(source.ensure_row_available(0).unwrap());
-            },
-        );
+        assert!(source.ensure_row_available(0).unwrap());
 
         server.join().unwrap();
     }
@@ -9302,7 +9279,7 @@ mod tests {
         // and ensure_row_available returns Ok(false) without any download attempt.
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
-        let source = test_source(config.clone());
+        let mut source = test_source(config.clone());
 
         // Construct the candidate URL that the manifest will list.
         let shard_raw_url =
@@ -9339,10 +9316,8 @@ mod tests {
 
         // Row 1 is not yet materialised; this triggers the candidate-init path.
         // all candidates are already on disk → next_remote_idx = candidates.len() → Ok(false).
-        let result = with_env_var(ENV_TRIPLETS_HF_PARQUET_ENDPOINT, &base_url, || {
-            source.ensure_row_available(1)
-        })
-        .unwrap();
+        source.config.parquet_endpoint = base_url;
+        let result = source.ensure_row_available(1).unwrap();
 
         assert!(
             !result,
@@ -9900,7 +9875,7 @@ mod tests {
     #[serial(global_state)]
     fn fetch_classlabel_maps_resolves_classlabel_columns_from_info_response() {
         let dir = tempdir().unwrap();
-        let config = test_config(dir.path().to_path_buf());
+        let mut config = test_config(dir.path().to_path_buf());
         let body = serde_json::to_vec(&json!({
             "dataset_info": {
                 "features": {
@@ -9916,9 +9891,8 @@ mod tests {
         let server = spawn_one_shot_http(body);
         let base_url = server.url().to_string();
 
-        let maps = with_env_var(ENV_TRIPLETS_HF_INFO_ENDPOINT, &base_url, || {
-            HuggingFaceRowSource::fetch_classlabel_maps(&config)
-        });
+        config.info_endpoint = base_url;
+        let maps = HuggingFaceRowSource::fetch_classlabel_maps(&config);
         assert_eq!(maps.len(), 1);
         assert_eq!(maps["sentiment"], vec!["neutral", "bullish", "bearish"]);
     }
@@ -10012,13 +9986,9 @@ mod tests {
         let size_url = size_server.url().to_string();
 
         let config_for_index = config.clone();
-        let source = with_env_vars(
-            &[
-                (ENV_TRIPLETS_HF_INFO_ENDPOINT, info_url_1.as_str()),
-                (ENV_TRIPLETS_HF_SIZE_ENDPOINT, size_url.as_str()),
-            ],
-            || HuggingFaceRowSource::new(config).unwrap(),
-        );
+        config.info_endpoint = info_url_1;
+        config.size_endpoint = size_url;
+        let mut source = HuggingFaceRowSource::new(config).unwrap();
 
         // Verify /info was actually called: label_maps must match the mock response.
         assert_eq!(
@@ -10058,11 +10028,9 @@ mod tests {
         let info_server_2 = spawn_one_shot_http(info_payload_2);
         let info_url_2 = info_server_2.url().to_string();
 
+        source.config.info_endpoint = info_url_2;
         for _ in 0..3 {
-            let _ = with_env_vars(
-                &[(ENV_TRIPLETS_HF_INFO_ENDPOINT, info_url_2.as_str())],
-                || source.refresh(None, Some(1)),
-            );
+            let _ = source.refresh(None, Some(1));
         }
 
         assert!(
@@ -10083,7 +10051,7 @@ mod tests {
         // recorded and the final assertion would catch it.
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
-        let source = test_source(config);
+        let mut source = test_source(config);
         // Reset to None so the first ensure_row_available() triggers the lazy fetch.
         source.state.lock().unwrap().remote_candidates = None;
 
@@ -10093,11 +10061,8 @@ mod tests {
             spawn_manifest_and_shard_http(4, shard_payload);
 
         // First call: remote_candidates is None → fetches manifest (counter→1) → downloads shard.
-        let first_available = with_env_var(
-            ENV_TRIPLETS_HF_PARQUET_ENDPOINT,
-            &format!("{base_url}/parquet"),
-            || source.ensure_row_available(0).unwrap(),
-        );
+        source.config.parquet_endpoint = format!("{base_url}/parquet");
+        let first_available = source.ensure_row_available(0).unwrap();
         assert!(first_available);
         assert_eq!(
             manifest_counter.load(AtomicOrdering::SeqCst),
@@ -10106,11 +10071,7 @@ mod tests {
         );
 
         // Second call: remote_candidates is now Some(...) → must NOT re-fetch manifest.
-        let _ = with_env_var(
-            ENV_TRIPLETS_HF_PARQUET_ENDPOINT,
-            &format!("{base_url}/parquet"),
-            || source.ensure_row_available(0),
-        );
+        let _ = source.ensure_row_available(0);
         assert_eq!(
             manifest_counter.load(AtomicOrdering::SeqCst),
             1,
@@ -10179,7 +10140,7 @@ mod tests {
         let mut config = test_config(dir.path().to_path_buf());
         // Tight cap: existing shard fills it, so every new download triggers eviction.
         config.local_disk_cap_bytes = Some(10);
-        let source = test_source(config.clone());
+        let mut source = test_source(config.clone());
 
         // Create an existing shard on disk that fills the entire cap.
         let manifest_root = source.manifest_cache_root();
@@ -10226,15 +10187,10 @@ mod tests {
         // first download does not satisfy idx < materialized_rows.
         // Append /parquet so spawn_manifest_and_shard_http can route the
         // manifest re-fetch to the manifest body (see first_line.contains("/parquet")).
-        with_env_var(
-            ENV_TRIPLETS_HF_PARQUET_ENDPOINT,
-            &format!("{base_url}/parquet"),
-            || {
-                assert!(
-                    source.ensure_row_available(1).unwrap(),
-                    "ensure_row_available must return Ok(true)"
-                );
-            },
+        source.config.parquet_endpoint = format!("{base_url}/parquet");
+        assert!(
+            source.ensure_row_available(1).unwrap(),
+            "ensure_row_available must return Ok(true)"
         );
 
         // With the fix: manifest re-fetched once, shards downloaded exactly
