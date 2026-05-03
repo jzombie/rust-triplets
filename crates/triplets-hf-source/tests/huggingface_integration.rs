@@ -4,7 +4,7 @@ use simd_r_drive::storage_engine::traits::DataStoreWriter;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
-use triplets_core::constants::env_vars::TRIPLETS_SKIP_LIVE_TESTS;
+use triplets_core::constants::env_vars::ENV_TRIPLETS_SKIP_LIVE_TESTS;
 use triplets_core::constants::sampler::AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME;
 use triplets_core::utils::platform_newline;
 use triplets_core::{
@@ -1699,7 +1699,7 @@ fn hf_token_private_dataset_access() {
     // credentials produce a silent skip.  Otherwise missing credentials are a
     // hard failure so the test cannot be accidentally omitted.
 
-    let skip_live = std::env::var(TRIPLETS_SKIP_LIVE_TESTS)
+    let skip_live = std::env::var(ENV_TRIPLETS_SKIP_LIVE_TESTS)
         .map(|v| !v.trim().is_empty())
         .unwrap_or(false);
 

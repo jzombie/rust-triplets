@@ -9,7 +9,7 @@ pub mod env_vars {
     /// When set to any non-empty value, live network tests that require HF
     /// credentials will skip silently rather than panicking.  Intended for
     /// CI jobs that run without secrets (e.g. fork pull requests).
-    pub const TRIPLETS_SKIP_LIVE_TESTS: &str = "TRIPLETS_SKIP_LIVE_TESTS";
+    pub const ENV_TRIPLETS_SKIP_LIVE_TESTS: &str = "TRIPLETS_SKIP_LIVE_TESTS";
 }
 
 /// Constants used by capacity estimation heuristics.
