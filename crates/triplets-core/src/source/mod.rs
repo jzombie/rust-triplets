@@ -190,9 +190,10 @@ impl IndexablePager {
         }
 
         use rayon::prelude::*;
-        // Only process the first `max` entries in parallel. Since almost
-        // all index positions return Some, this fills the quota in a single
-        // parallel pass. Any residual shortage (from None returns) is
+        // Only process the first `max` entries in parallel. Concurrency is
+        // bounded by the global rayon pool (one thread per CPU core), so a
+        // remote-backed source sees at most `num_cpus` in-flight requests.
+        // Any residual shortage (from sparse indexes returning None) is
         // handled by a short sequential sweep of the remaining entries.
         let par_end = max.min(total);
         let results: Vec<Result<Option<DataRecord>, SamplerError>> = seq[..par_end]
