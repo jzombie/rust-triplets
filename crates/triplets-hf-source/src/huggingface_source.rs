@@ -2027,7 +2027,12 @@ impl HuggingFaceRowSource {
         HF_WHOAMI_DEFAULT_ENDPOINT.to_string()
     }
 
-    fn build_http_runtime(
+    /// Build a single-threaded tokio runtime for running async HTTP operations.
+    ///
+    /// The runtime enables all I/O and timer drivers.  Each source creates one
+    /// such runtime at construction time and reuses it for all HTTP calls,
+    /// avoiding the cost of building a new runtime per request.
+    pub fn build_http_runtime(
         config: &HuggingFaceRowsConfig,
     ) -> Result<tokio::runtime::Runtime, SamplerError> {
         tokio::runtime::Builder::new_current_thread()
@@ -2339,7 +2344,7 @@ impl HuggingFaceRowSource {
     /// Candidates from the parquet manifest carry the `url::` prefix followed
     /// by a full URL.  Candidates from the hf-hub sibling fallback are bare
     /// repository-relative paths that need the HF CDN prefix.
-    fn remote_url_for_candidate(config: &HuggingFaceRowsConfig, candidate: &str) -> String {
+    pub fn remote_url_for_candidate(config: &HuggingFaceRowsConfig, candidate: &str) -> String {
         if let Some(url) = candidate.strip_prefix(HF_REMOTE_URL_PREFIX) {
             url.to_string()
         } else {
@@ -2356,7 +2361,7 @@ impl HuggingFaceRowSource {
     /// Returns `Ok(Some(size))` when the server responds with a `Content-Length`
     /// header, `Ok(None)` for non-2xx responses or missing `Content-Length`,
     /// and `Err` for network / configuration failures.
-    fn fetch_remote_size_with_runtime(
+    pub fn fetch_remote_size_with_runtime(
         config: &HuggingFaceRowsConfig,
         remote_url: &str,
         runtime: &tokio::runtime::Runtime,
