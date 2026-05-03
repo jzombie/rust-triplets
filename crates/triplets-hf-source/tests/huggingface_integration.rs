@@ -1415,31 +1415,25 @@ fn huggingface_live_head_request_matches_manifest_size() {
         .map(|v| !v.trim().is_empty())
         .unwrap_or(false);
 
-    // Determine which dataset to use: prefer the configured test dataset
-    // (private), fall back to a public one.
-    let dataset = match std::env::var(ENV_TRIPLETS_HF_TOKEN_TEST_DATASET) {
-        Ok(d) if !d.trim().is_empty() => d.trim().to_string(),
-        _ => {
-            if skip_live {
-                eprintln!(
-                    "[skip] {} not set and TRIPLETS_SKIP_LIVE_TESTS is active — \
-                     skipping HEAD size integration test.",
-                    ENV_TRIPLETS_HF_TOKEN_TEST_DATASET
-                );
-                return;
-            }
-            // Public fallback used by the existing live tests.
-            HF_PUBLIC_TEST_DATASET.to_string()
-        }
-    };
-
-    let hf_token = std::env::var(ENV_TRIPLETS_HF_TOKEN).ok();
+    // This test requires a dataset where the datasets-server /parquet endpoint
+    // returns shard sizes (the hf-hub fallback does not provide sizes — returns
+    // an empty HashMap).  Always use the public dataset; the private test dataset
+    // may not support the parquet endpoint.
+    if skip_live {
+        eprintln!(
+            "[skip] TRIPLETS_SKIP_LIVE_TESTS is active — skipping HEAD size integration test."
+        );
+        return;
+    }
+    let dataset = HF_PUBLIC_TEST_DATASET.to_string();
 
     let temp = tempfile::tempdir().expect("failed creating tempdir");
 
     // Build a config that mirrors what the source would use, including
     // token auth when available so the HEAD request uses the same
-    // authenticated HTTP client.
+    // authenticated HTTP client.  `new()` already reads `HF_TOKEN` from
+    // the environment and filters empty values, so no manual override is
+    // needed.
     let mut config = HuggingFaceRowsConfig::new(
         "hf_live_head_size",
         &dataset,
@@ -1448,7 +1442,6 @@ fn huggingface_live_head_request_matches_manifest_size() {
         temp.path(),
     );
     config.text_columns = vec!["sentiment".to_string()];
-    config.hf_token = hf_token.clone();
 
     // ── Step 1: fetch the parquet manifest ─────────────────────────────────
     // Use the library's own authenticated HTTP client and parquet-endpoint
@@ -1456,9 +1449,9 @@ fn huggingface_live_head_request_matches_manifest_size() {
     let runtime =
         HuggingFaceRowSource::build_http_runtime(&config).expect("failed building tokio runtime");
 
-    let (candidates, candidate_sizes, _matched_entries) =
-        HuggingFaceRowSource::list_remote_candidates_from_parquet_manifest(&config)
-            .expect("parquet manifest request failed");
+    let (candidates, candidate_sizes) =
+        HuggingFaceRowSource::list_remote_candidates_with_runtime(&config, Some(&runtime))
+            .expect("remote candidate discovery failed");
 
     assert!(
         !candidates.is_empty(),

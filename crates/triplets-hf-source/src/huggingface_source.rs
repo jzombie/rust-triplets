@@ -1822,7 +1822,10 @@ impl HuggingFaceRowSource {
         Self::list_remote_candidates_with_runtime(config, None)
     }
 
-    fn list_remote_candidates_with_runtime(
+    /// Resolve and filter remote shard candidates from the datasets-server parquet
+    /// manifest, falling back to hf-hub repository listing when the parquet endpoint
+    /// is unavailable or returns no entries for the dataset/config.
+    pub fn list_remote_candidates_with_runtime(
         config: &HuggingFaceRowsConfig,
         runtime: Option<&tokio::runtime::Runtime>,
     ) -> Result<(Vec<String>, HashMap<String, u64>), SamplerError> {
@@ -2250,7 +2253,8 @@ impl HuggingFaceRowSource {
     }
 
     /// Query datasets-server parquet manifest and derive shard candidates.
-    pub fn list_remote_candidates_from_parquet_manifest(
+    #[cfg(test)]
+    pub(crate) fn list_remote_candidates_from_parquet_manifest(
         config: &HuggingFaceRowsConfig,
     ) -> Result<ParquetManifestCandidates, SamplerError> {
         Self::list_remote_candidates_from_parquet_manifest_with_runtime(config, None)
