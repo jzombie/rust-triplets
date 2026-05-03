@@ -1181,12 +1181,25 @@ impl HuggingFaceRowSource {
         config: &HuggingFaceRowsConfig,
         path: &Path,
     ) -> Result<Arc<DataStore>, SamplerError> {
-        let mut cache = config.store_cache.lock()?;
-        if let Some(store) = cache.get(path).cloned() {
-            return Ok(store);
+        // Fast path: check the cache while holding the lock briefly.
+        {
+            let cache = config.store_cache.lock()?;
+            if let Some(store) = cache.get(path).cloned() {
+                return Ok(store);
+            }
         }
+        // Open the store outside the lock so that concurrent calls (e.g. from
+        // rayon's parallel iteration in build_shard_index) can proceed in
+        // parallel instead of being serialized on the mutex.
         let store = Arc::new(Self::open_shard_store(config, path)?);
-        cache.insert(path.to_path_buf(), store.clone());
+        // Re-acquire the lock and insert into the cache.  If another thread
+        // already inserted the same path, our duplicate handle is harmless
+        // (the cache retains the first one).  We return our handle either way
+        // — both point to the same underlying file.
+        let mut cache = config.store_cache.lock()?;
+        cache
+            .entry(path.to_path_buf())
+            .or_insert_with(|| store.clone());
         Ok(store)
     }
 
