@@ -32,17 +32,17 @@ use tracing::{debug, info, warn};
 use walkdir::WalkDir;
 
 use crate::constants::{
-    HF_ALL_SPLITS_DIR, HF_CLASSLABEL_TYPE, HF_GROUP, HF_INFO_DEFAULT_ENDPOINT, HF_JSON_KEY_CONFIG,
-    HF_JSON_KEY_CONFIG_NAME, HF_JSON_KEY_CONFIGS, HF_JSON_KEY_DATASET, HF_JSON_KEY_DATASET_INFO,
-    HF_JSON_KEY_FEATURE_TYPE, HF_JSON_KEY_FEATURES, HF_JSON_KEY_LABEL_NAMES, HF_JSON_KEY_NUM_ROWS,
-    HF_JSON_KEY_PARQUET_FILES, HF_JSON_KEY_SIZE, HF_JSON_KEY_SPLIT, HF_JSON_KEY_SPLIT_NAME,
-    HF_JSON_KEY_SPLITS, HF_JSON_KEY_URL, HF_PARQUET_DEFAULT_ENDPOINT, HF_REFRESH_BATCH_MULTIPLIER,
+    ENV_TRIPLETS_HF_INFO_ENDPOINT, ENV_TRIPLETS_HF_PARQUET_ENDPOINT, ENV_TRIPLETS_HF_SIZE_ENDPOINT,
+    ENV_TRIPLETS_HF_WHOAMI_ENDPOINT, HF_ALL_SPLITS_DIR, HF_CLASSLABEL_TYPE, HF_GROUP,
+    HF_INFO_DEFAULT_ENDPOINT, HF_JSON_KEY_CONFIG, HF_JSON_KEY_CONFIG_NAME, HF_JSON_KEY_CONFIGS,
+    HF_JSON_KEY_DATASET, HF_JSON_KEY_DATASET_INFO, HF_JSON_KEY_FEATURE_TYPE, HF_JSON_KEY_FEATURES,
+    HF_JSON_KEY_LABEL_NAMES, HF_JSON_KEY_NUM_ROWS, HF_JSON_KEY_PARQUET_FILES, HF_JSON_KEY_SIZE,
+    HF_JSON_KEY_SPLIT, HF_JSON_KEY_SPLIT_NAME, HF_JSON_KEY_SPLITS, HF_JSON_KEY_URL,
+    HF_PARQUET_DEFAULT_ENDPOINT, HF_PARQUET_MANIFEST_DIR, HF_REFRESH_BATCH_MULTIPLIER,
+    HF_REMOTE_BOOTSTRAP_SHARDS, HF_REMOTE_EXPANSION_HEADROOM_MULTIPLIER, HF_REMOTE_URL_PREFIX,
     HF_RESOLVE_UNKNOWN_FALLBACK_PATH, HF_RESOLVE_URL_SEPARATOR, HF_SHARD_CANDIDATE_SEED_TAG,
     HF_SHARD_STORE_EXTENSION, HF_SHARD_STORE_META_ROWS_KEY, HF_SHARD_STORE_ROW_PREFIX,
     HF_SHARD_STORE_SOURCE_SIZE_KEY, HF_SIZE_DEFAULT_ENDPOINT, HF_TOKEN, HF_WHOAMI_DEFAULT_ENDPOINT,
-    HF_PARQUET_MANIFEST_DIR, HF_REMOTE_BOOTSTRAP_SHARDS, HF_REMOTE_EXPANSION_HEADROOM_MULTIPLIER,
-    HF_REMOTE_URL_PREFIX, ENV_TRIPLETS_HF_INFO_ENDPOINT, ENV_TRIPLETS_HF_PARQUET_ENDPOINT,
-    ENV_TRIPLETS_HF_SIZE_ENDPOINT, ENV_TRIPLETS_HF_WHOAMI_ENDPOINT,
 };
 use chrono::{DateTime, Utc};
 use triplets_core::SamplerError;
@@ -2305,7 +2305,10 @@ impl HuggingFaceRowSource {
                 .map(|value| value.trim_start_matches('/'))
                 .filter(|value| !value.is_empty())
                 .unwrap_or(HF_RESOLVE_UNKNOWN_FALLBACK_PATH);
-            return config.snapshot_dir.join(HF_PARQUET_MANIFEST_DIR).join(suffix);
+            return config
+                .snapshot_dir
+                .join(HF_PARQUET_MANIFEST_DIR)
+                .join(suffix);
         }
         config.snapshot_dir.join(candidate)
     }
@@ -5267,7 +5270,10 @@ mod tests {
         with_current_dir(temp_root.path(), || {
             with_env_vars(
                 &[
-                    (ENV_TRIPLETS_HF_SIZE_ENDPOINT, &format!("{size_base_url}/size")),
+                    (
+                        ENV_TRIPLETS_HF_SIZE_ENDPOINT,
+                        &format!("{size_base_url}/size"),
+                    ),
                     (HF_TOKEN, ""),
                 ],
                 || {
@@ -7552,9 +7558,11 @@ mod tests {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
 
-        let result = with_env_var(ENV_TRIPLETS_HF_PARQUET_ENDPOINT, "http://127.0.0.1:1", || {
-            HuggingFaceRowSource::list_remote_candidates_from_parquet_manifest(&config)
-        });
+        let result = with_env_var(
+            ENV_TRIPLETS_HF_PARQUET_ENDPOINT,
+            "http://127.0.0.1:1",
+            || HuggingFaceRowSource::list_remote_candidates_from_parquet_manifest(&config),
+        );
         assert!(result.is_err());
     }
 
@@ -9597,9 +9605,10 @@ mod tests {
         let info_url_2 = info_server_2.url().to_string();
 
         for _ in 0..3 {
-            let _ = with_env_vars(&[(ENV_TRIPLETS_HF_INFO_ENDPOINT, info_url_2.as_str())], || {
-                source.refresh(None, Some(1))
-            });
+            let _ = with_env_vars(
+                &[(ENV_TRIPLETS_HF_INFO_ENDPOINT, info_url_2.as_str())],
+                || source.refresh(None, Some(1)),
+            );
         }
 
         assert!(
