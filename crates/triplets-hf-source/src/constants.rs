@@ -82,21 +82,12 @@ pub const HF_BASE_URL: &str = "https://huggingface.co";
 pub const HF_DATASETS_BASE_URL: &str = "https://huggingface.co/datasets";
 
 /// Default base URL for the datasets-server parquet-manifest endpoint.
-///
-/// Can be overridden at runtime with the `ENV_TRIPLETS_HF_PARQUET_ENDPOINT`
-/// environment variable (useful for test doubles or on-premises deployments).
 pub const HF_PARQUET_DEFAULT_ENDPOINT: &str = "https://datasets-server.huggingface.co/parquet";
 
 /// Default base URL for the datasets-server size endpoint.
-///
-/// Can be overridden at runtime with the `ENV_TRIPLETS_HF_SIZE_ENDPOINT`
-/// environment variable.
 pub const HF_SIZE_DEFAULT_ENDPOINT: &str = "https://datasets-server.huggingface.co/size";
 
 /// Default base URL for the datasets-server info endpoint.
-///
-/// Can be overridden at runtime with the `ENV_TRIPLETS_HF_INFO_ENDPOINT`
-/// environment variable.
 pub const HF_INFO_DEFAULT_ENDPOINT: &str = "https://datasets-server.huggingface.co/info";
 
 /// Public Hugging Face dataset used as a fallback in live integration tests.
@@ -116,16 +107,8 @@ pub const HF_PUBLIC_TEST_DATASET: &str = "TimKoornstra/financial-tweets-sentimen
 pub const HF_WHOAMI_DEFAULT_ENDPOINT: &str = "https://huggingface.co/api/whoami-v2";
 
 // ---------------------------------------------------------------------------
-// Environment variable name constants (moved from triplets-core to keep the
-// core crate HF-agnostic).
-// ---------------------------------------------------------------------------
+// ── Environment variable name constants ─────────────────────────────────────
 
-/// Environment variable override for the datasets-server parquet-manifest endpoint URL.
-pub const ENV_TRIPLETS_HF_PARQUET_ENDPOINT: &str = "TRIPLETS_HF_PARQUET_ENDPOINT";
-/// Environment variable override for the datasets-server size endpoint URL.
-pub const ENV_TRIPLETS_HF_SIZE_ENDPOINT: &str = "TRIPLETS_HF_SIZE_ENDPOINT";
-/// Environment variable override for the datasets-server info endpoint URL.
-pub const ENV_TRIPLETS_HF_INFO_ENDPOINT: &str = "TRIPLETS_HF_INFO_ENDPOINT";
 /// Hugging Face API token for authenticating with private datasets.
 pub const ENV_TRIPLETS_HF_TOKEN: &str = "HF_TOKEN";
 /// Dataset repo used by the live private-dataset integration test.

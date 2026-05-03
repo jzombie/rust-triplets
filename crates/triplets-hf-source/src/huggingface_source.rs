@@ -32,7 +32,6 @@ use tracing::{debug, info, warn};
 use walkdir::WalkDir;
 
 use crate::constants::{
-    ENV_TRIPLETS_HF_INFO_ENDPOINT, ENV_TRIPLETS_HF_PARQUET_ENDPOINT, ENV_TRIPLETS_HF_SIZE_ENDPOINT,
     ENV_TRIPLETS_HF_TOKEN, ENV_TRIPLETS_HF_WHOAMI_ENDPOINT, HF_ALL_SPLITS_DIR, HF_CLASSLABEL_TYPE,
     HF_DATASETS_BASE_URL, HF_GROUP, HF_INFO_DEFAULT_ENDPOINT, HF_JSON_KEY_CONFIG,
     HF_JSON_KEY_CONFIG_NAME, HF_JSON_KEY_CONFIGS, HF_JSON_KEY_DATASET, HF_JSON_KEY_DATASET_INFO,
@@ -671,6 +670,9 @@ pub struct HuggingFaceRowsConfig {
     /// Populated at construction time from `TRIPLETS_HF_INFO_ENDPOINT` env var
     /// or `HF_INFO_DEFAULT_ENDPOINT`.
     pub info_endpoint: String,
+    /// In-memory cache of opened `DataStore` instances, keyed by shard path.
+    /// Populated lazily as shards are accessed and cleared when the cache grows
+    /// beyond the configured capacity.
     pub store_cache: StoreCache,
 }
 
@@ -2201,7 +2203,7 @@ impl HuggingFaceRowSource {
             config,
             Self::fetch_http_body_text(
                 config,
-                &endpoint,
+                endpoint,
                 &[
                     (HF_JSON_KEY_DATASET, &config.dataset_name),
                     (HF_JSON_KEY_CONFIG, &config.config_name),
@@ -2313,7 +2315,7 @@ impl HuggingFaceRowSource {
             config,
             Self::fetch_http_body_text(
                 config,
-                &endpoint,
+                endpoint,
                 &query,
                 "datasets-server parquet endpoint",
             ),
@@ -2533,7 +2535,7 @@ impl HuggingFaceRowSource {
         let body = Self::block_on_http_with_runtime(
             runtime,
             config,
-            Self::fetch_http_body_text(config, &endpoint, &query, "datasets-server size endpoint"),
+            Self::fetch_http_body_text(config, endpoint, &query, "datasets-server size endpoint"),
         )?;
 
         Self::parse_global_row_count_response(config, &body)
@@ -5246,12 +5248,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path().to_path_buf());
         config.dataset_name = "invalid///dataset".to_string();
+        config.parquet_endpoint = format!("{TEST_UNREACHABLE_URL}/parquet");
 
-        let result = with_env_var(
-            ENV_TRIPLETS_HF_PARQUET_ENDPOINT,
-            &format!("{TEST_UNREACHABLE_URL}/parquet"),
-            || HuggingFaceRowSource::list_remote_candidates(&config),
-        );
+        let result = HuggingFaceRowSource::list_remote_candidates(&config);
         assert!(result.is_err());
     }
 
@@ -5329,20 +5328,15 @@ mod tests {
         let info_url = info_server.url().to_string();
         let size_server = TestHttpServer::new(501, viewer_disabled);
         let size_url = size_server.url().to_string();
-        with_env_vars(
-            &[
-                (ENV_TRIPLETS_HF_WHOAMI_ENDPOINT, &whoami_url),
-                (ENV_TRIPLETS_HF_INFO_ENDPOINT, &info_url),
-                (ENV_TRIPLETS_HF_SIZE_ENDPOINT, &size_url),
-            ],
-            || {
-                let result = HuggingFaceRowSource::new(config.clone());
-                assert!(
-                    result.is_ok(),
-                    "new() should succeed when mock whoami returns 200"
-                );
-            },
-        );
+        config.info_endpoint = info_url;
+        config.size_endpoint = size_url;
+        with_env_vars(&[(ENV_TRIPLETS_HF_WHOAMI_ENDPOINT, &whoami_url)], || {
+            let result = HuggingFaceRowSource::new(config.clone());
+            assert!(
+                result.is_ok(),
+                "new() should succeed when mock whoami returns 200"
+            );
+        });
     }
 
     #[test]
@@ -5381,28 +5375,11 @@ mod tests {
         .unwrap();
         fs::write(temp_root.path().join(".cache"), b"blocking-file").unwrap();
 
-        // Serve a valid empty-splits response so fetch_global_row_count returns
-        // None cleanly without printing a WARN about a 401 from the real API.
-        let size_payload = serde_json::json!({"size": {"splits": []}})
-            .to_string()
-            .into_bytes();
-        let size_server = spawn_one_shot_http(size_payload);
-        let size_base_url = size_server.url().to_string();
-
         with_current_dir(temp_root.path(), || {
-            with_env_vars(
-                &[
-                    (
-                        ENV_TRIPLETS_HF_SIZE_ENDPOINT,
-                        &format!("{size_base_url}/size"),
-                    ),
-                    (ENV_TRIPLETS_HF_TOKEN, ""),
-                ],
-                || {
-                    let built = build_hf_sources(&roots);
-                    assert_eq!(built.len(), 1);
-                },
-            );
+            with_env_vars(&[(ENV_TRIPLETS_HF_TOKEN, "")], || {
+                let built = build_hf_sources(&roots);
+                assert_eq!(built.len(), 1);
+            });
         });
     }
 
@@ -5434,65 +5411,39 @@ mod tests {
         )
         .unwrap();
 
-        // Two sources → two size-endpoint calls; serve both responses.
-        let size_payload = || {
-            serde_json::json!({"size": {"splits": []}})
-                .to_string()
-                .into_bytes()
-        };
-        let size_server_a = spawn_one_shot_http(size_payload());
-        let size_base_url_a = size_server_a.url().to_string();
-        let size_server_b = spawn_one_shot_http(size_payload());
-        let size_base_url_b = size_server_b.url().to_string();
-        // Both servers share the same base URL pattern; use the first for the env-var
-        // (the second call may hit a different port, but both start with the same host).
-        // In practice each spawn_one_shot_http binds its own ephemeral port, so we
-        // point the env-var at either — what matters is that both succeed and the
-        // test doesn't make real network calls.
-        let _ = size_base_url_b; // second URL not needed since we assert on IDs, not rows
-
         with_current_dir(temp_root.path(), || {
-            with_env_vars(
-                &[
-                    (
-                        ENV_TRIPLETS_HF_SIZE_ENDPOINT,
-                        &format!("{size_base_url_a}/size"),
-                    ),
-                    (ENV_TRIPLETS_HF_TOKEN, ""),
-                ],
-                || {
-                    let built = build_hf_sources(&roots);
-                    assert_eq!(built.len(), 2, "both duplicate sources should be built");
+            with_env_vars(&[(ENV_TRIPLETS_HF_TOKEN, "")], || {
+                let built = build_hf_sources(&roots);
+                assert_eq!(built.len(), 2, "both duplicate sources should be built");
 
-                    let id_0 = built[0].id().to_string();
-                    let id_1 = built[1].id().to_string();
-                    assert_ne!(
-                        id_0, id_1,
-                        "duplicate sources must have distinct source IDs"
-                    );
-                    assert!(
-                        id_0.ends_with(".0"),
-                        "first duplicate should have .0 suffix, got: {id_0}"
-                    );
-                    assert!(
-                        id_1.ends_with(".1"),
-                        "second duplicate should have .1 suffix, got: {id_1}"
-                    );
+                let id_0 = built[0].id().to_string();
+                let id_1 = built[1].id().to_string();
+                assert_ne!(
+                    id_0, id_1,
+                    "duplicate sources must have distinct source IDs"
+                );
+                assert!(
+                    id_0.ends_with(".0"),
+                    "first duplicate should have .0 suffix, got: {id_0}"
+                );
+                assert!(
+                    id_1.ends_with(".1"),
+                    "second duplicate should have .1 suffix, got: {id_1}"
+                );
 
-                    // Snapshot dirs are derived from managed_hf_list_snapshot_dir with
-                    // the list index, so replica_0 and replica_1 must differ.
-                    let dir_0 =
-                        managed_hf_list_snapshot_dir("org/dataset", "default", "train", 0).unwrap();
-                    let dir_1 =
-                        managed_hf_list_snapshot_dir("org/dataset", "default", "train", 1).unwrap();
-                    assert_ne!(
-                        dir_0, dir_1,
-                        "duplicate sources must have distinct snapshot dirs"
-                    );
-                    assert!(dir_0.ends_with("replica_0"));
-                    assert!(dir_1.ends_with("replica_1"));
-                },
-            );
+                // Snapshot dirs are derived from managed_hf_list_snapshot_dir with
+                // the list index, so replica_0 and replica_1 must differ.
+                let dir_0 =
+                    managed_hf_list_snapshot_dir("org/dataset", "default", "train", 0).unwrap();
+                let dir_1 =
+                    managed_hf_list_snapshot_dir("org/dataset", "default", "train", 1).unwrap();
+                assert_ne!(
+                    dir_0, dir_1,
+                    "duplicate sources must have distinct snapshot dirs"
+                );
+                assert!(dir_0.ends_with("replica_0"));
+                assert!(dir_1.ends_with("replica_1"));
+            });
         });
     }
 
@@ -7517,23 +7468,10 @@ mod tests {
     fn config_endpoint_fallback_for_empty_env_values() {
         let dir = tempdir().unwrap();
 
-        let parquet = with_env_var(ENV_TRIPLETS_HF_PARQUET_ENDPOINT, "   ", || {
-            let c = test_config(dir.path().to_path_buf());
-            c.parquet_endpoint
-        });
-        assert_eq!(parquet, HF_PARQUET_DEFAULT_ENDPOINT);
-
-        let size = with_env_var(ENV_TRIPLETS_HF_SIZE_ENDPOINT, "", || {
-            let c = test_config(dir.path().to_path_buf());
-            c.size_endpoint
-        });
-        assert_eq!(size, HF_SIZE_DEFAULT_ENDPOINT);
-
-        let info = with_env_var(ENV_TRIPLETS_HF_INFO_ENDPOINT, "   ", || {
-            let c = test_config(dir.path().to_path_buf());
-            c.info_endpoint
-        });
-        assert_eq!(info, HF_INFO_DEFAULT_ENDPOINT);
+        let c = test_config(dir.path().to_path_buf());
+        assert_eq!(c.parquet_endpoint, HF_PARQUET_DEFAULT_ENDPOINT);
+        assert_eq!(c.size_endpoint, HF_SIZE_DEFAULT_ENDPOINT);
+        assert_eq!(c.info_endpoint, HF_INFO_DEFAULT_ENDPOINT);
     }
 
     #[test]
@@ -7671,13 +7609,10 @@ mod tests {
     #[serial(global_state)]
     fn list_remote_candidates_from_parquet_manifest_errors_when_endpoint_unreachable() {
         let dir = tempdir().unwrap();
-        let config = test_config(dir.path().to_path_buf());
+        let mut config = test_config(dir.path().to_path_buf());
+        config.parquet_endpoint = TEST_UNREACHABLE_URL.to_string();
 
-        let result = with_env_var(
-            ENV_TRIPLETS_HF_PARQUET_ENDPOINT,
-            TEST_UNREACHABLE_URL,
-            || HuggingFaceRowSource::list_remote_candidates_from_parquet_manifest(&config),
-        );
+        let result = HuggingFaceRowSource::list_remote_candidates_from_parquet_manifest(&config);
         assert!(result.is_err());
     }
 
@@ -7685,11 +7620,10 @@ mod tests {
     #[serial(global_state)]
     fn fetch_global_row_count_errors_when_endpoint_unreachable() {
         let dir = tempdir().unwrap();
-        let config = test_config(dir.path().to_path_buf());
+        let mut config = test_config(dir.path().to_path_buf());
+        config.size_endpoint = TEST_UNREACHABLE_URL.to_string();
 
-        let result = with_env_var(ENV_TRIPLETS_HF_SIZE_ENDPOINT, TEST_UNREACHABLE_URL, || {
-            HuggingFaceRowSource::fetch_global_row_count(&config)
-        });
+        let result = HuggingFaceRowSource::fetch_global_row_count(&config);
         assert!(result.is_err());
     }
 
@@ -9826,11 +9760,10 @@ mod tests {
     #[serial(global_state)]
     fn fetch_classlabel_maps_returns_empty_when_endpoint_unreachable() {
         let dir = tempdir().unwrap();
-        let config = test_config(dir.path().to_path_buf());
+        let mut config = test_config(dir.path().to_path_buf());
+        config.info_endpoint = TEST_UNREACHABLE_URL.to_string();
         // Port 1 is always unreachable; ureq returns an Err which must be handled.
-        let maps = with_env_var(ENV_TRIPLETS_HF_INFO_ENDPOINT, TEST_UNREACHABLE_URL, || {
-            HuggingFaceRowSource::fetch_classlabel_maps(&config)
-        });
+        let maps = HuggingFaceRowSource::fetch_classlabel_maps(&config);
         assert!(
             maps.is_empty(),
             "unreachable endpoint must yield empty map, got: {maps:?}"
@@ -9841,13 +9774,12 @@ mod tests {
     #[serial(global_state)]
     fn fetch_classlabel_maps_returns_empty_on_non_200_response() {
         let dir = tempdir().unwrap();
-        let config = test_config(dir.path().to_path_buf());
+        let mut config = test_config(dir.path().to_path_buf());
         let server = TestHttpServer::new(404, b"not found".to_vec());
         let base_url = server.url().to_string();
 
-        let maps = with_env_var(ENV_TRIPLETS_HF_INFO_ENDPOINT, &base_url, || {
-            HuggingFaceRowSource::fetch_classlabel_maps(&config)
-        });
+        config.info_endpoint = base_url;
+        let maps = HuggingFaceRowSource::fetch_classlabel_maps(&config);
         assert!(
             maps.is_empty(),
             "HTTP 404 response must yield empty map, got: {maps:?}"
@@ -9858,13 +9790,12 @@ mod tests {
     #[serial(global_state)]
     fn fetch_classlabel_maps_returns_empty_on_malformed_json() {
         let dir = tempdir().unwrap();
-        let config = test_config(dir.path().to_path_buf());
+        let mut config = test_config(dir.path().to_path_buf());
         let server = spawn_one_shot_http(b"this is not json".to_vec());
         let base_url = server.url().to_string();
 
-        let maps = with_env_var(ENV_TRIPLETS_HF_INFO_ENDPOINT, &base_url, || {
-            HuggingFaceRowSource::fetch_classlabel_maps(&config)
-        });
+        config.info_endpoint = base_url;
+        let maps = HuggingFaceRowSource::fetch_classlabel_maps(&config);
         assert!(
             maps.is_empty(),
             "malformed JSON must yield empty map, got: {maps:?}"
@@ -10102,16 +10033,15 @@ mod tests {
         // fetch_global_row_count propagates the Err (so the caller can log it)
         // rather than panicking or returning a spurious row count.
         let dir = tempdir().unwrap();
-        let config = test_config(dir.path().to_path_buf());
+        let mut config = test_config(dir.path().to_path_buf());
         let body =
             br#"{"error":"Not supported: dataset viewer is disabled in org/dataset configuration."}"#
                 .to_vec();
         let server = TestHttpServer::new(501, body);
         let base_url = server.url().to_string();
 
-        let result = with_env_var(ENV_TRIPLETS_HF_SIZE_ENDPOINT, &base_url, || {
-            HuggingFaceRowSource::fetch_global_row_count(&config)
-        });
+        config.size_endpoint = base_url;
+        let result = HuggingFaceRowSource::fetch_global_row_count(&config);
 
         // The 501 surfaces as an Err so the caller (new()) can emit a warning;
         // it must not be silently swallowed as Ok(Some(0)) or similar.
@@ -10210,16 +10140,15 @@ mod tests {
         // A 501 from /info means "viewer disabled"; ClassLabel resolution must
         // gracefully degrade to an empty map so raw integers are used instead.
         let dir = tempdir().unwrap();
-        let config = test_config(dir.path().to_path_buf());
+        let mut config = test_config(dir.path().to_path_buf());
         let body =
             br#"{"error":"Not supported: dataset viewer is disabled in org/dataset configuration."}"#
                 .to_vec();
         let server = TestHttpServer::new(501, body);
         let base_url = server.url().to_string();
 
-        let maps = with_env_var(ENV_TRIPLETS_HF_INFO_ENDPOINT, &base_url, || {
-            HuggingFaceRowSource::fetch_classlabel_maps(&config)
-        });
+        config.info_endpoint = base_url;
+        let maps = HuggingFaceRowSource::fetch_classlabel_maps(&config);
 
         assert!(
             maps.is_empty(),
@@ -10235,16 +10164,15 @@ mod tests {
         // list_remote_candidates_with_runtime.  Verify the error is returned
         // (not swallowed as an empty manifest) so the caller can branch on it.
         let dir = tempdir().unwrap();
-        let config = test_config(dir.path().to_path_buf());
+        let mut config = test_config(dir.path().to_path_buf());
         let body =
             br#"{"error":"Not supported: dataset viewer is disabled in org/dataset configuration."}"#
                 .to_vec();
         let server = TestHttpServer::new(501, body);
         let base_url = server.url().to_string();
 
-        let result = with_env_var(ENV_TRIPLETS_HF_PARQUET_ENDPOINT, &base_url, || {
-            HuggingFaceRowSource::list_remote_candidates_from_parquet_manifest(&config)
-        });
+        config.parquet_endpoint = base_url;
+        let result = HuggingFaceRowSource::list_remote_candidates_from_parquet_manifest(&config);
 
         assert!(
             result.is_err(),
