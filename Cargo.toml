@@ -94,4 +94,5 @@ triplets-hf-source = { workspace = true, optional = true }
 walkdir = { workspace = true }
 
 [dev-dependencies]
+indoc = { workspace = true }
 serde_json = { workspace = true }

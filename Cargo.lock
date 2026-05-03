@@ -2436,6 +2436,7 @@ dependencies = [
  "csv",
  "hf-hub",
  "indexmap",
+ "indoc",
  "line-ending",
  "parquet",
  "rand",
