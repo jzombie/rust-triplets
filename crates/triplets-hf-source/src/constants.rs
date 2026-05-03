@@ -72,6 +72,15 @@ pub const HF_JSON_KEY_FEATURE_TYPE: &str = "_type";
 pub const HF_JSON_KEY_LABEL_NAMES: &str = "names";
 /// Feature type string that identifies a ClassLabel column.
 pub const HF_CLASSLABEL_TYPE: &str = "ClassLabel";
+/// Root base URL for the Hugging Face website.
+pub const HF_BASE_URL: &str = "https://huggingface.co";
+
+/// Base URL for the Hugging Face datasets-resolve endpoint.
+///
+/// Full download URLs are constructed as
+/// `{base}/{dataset}/resolve/main/{relative_path}`.
+pub const HF_DATASETS_BASE_URL: &str = "https://huggingface.co/datasets";
+
 /// Default base URL for the datasets-server parquet-manifest endpoint.
 ///
 /// Can be overridden at runtime with the `ENV_TRIPLETS_HF_PARQUET_ENDPOINT`
@@ -89,6 +98,14 @@ pub const HF_SIZE_DEFAULT_ENDPOINT: &str = "https://datasets-server.huggingface.
 /// Can be overridden at runtime with the `ENV_TRIPLETS_HF_INFO_ENDPOINT`
 /// environment variable.
 pub const HF_INFO_DEFAULT_ENDPOINT: &str = "https://datasets-server.huggingface.co/info";
+
+/// Public Hugging Face dataset used as a fallback in live integration tests.
+///
+/// When `TRIPLETS_HF_TOKEN_TEST_DATASET` is not set (or is empty), live tests
+/// fall back to this public dataset.  It has a `sentiment` column declared as
+/// `ClassLabel` with names `["neutral", "bullish", "bearish"]`, making it
+/// suitable for end-to-end tests of `/info` endpoint ClassLabel resolution.
+pub const HF_PUBLIC_TEST_DATASET: &str = "TimKoornstra/financial-tweets-sentiment";
 
 /// Endpoint used to validate a Hugging Face API token.
 ///
