@@ -312,7 +312,7 @@ struct TripletSamplerInner<S: SplitStore + EpochStateStore + SamplerStateStore +
         /// Tracks (record_id, text) pairs already emitted by the text batch path
     /// within the current cache epoch.  Cleared on every sync_records_from_cache.
     /// Prevents the same text from being sampled again regardless of source wrapping.
-    consumed_text: HashSet<(String, String)>,
+    consumed_text: HashSet<u64>,
     /// Round-robin index for text recipe cycling.
     text_recipe_rr_idx: usize,
     /// Epoch counter for per-source deterministic shuffling (seed ^ epoch).
@@ -2287,7 +2287,10 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                     // (Anchor and Context sections with identical text) cannot produce
                     // duplicate text content in the same batch.
                     let key = text_dedup_key(&sample.chunk);
-                    if seen.insert(key.clone()) && self.consumed_text.insert(key) {
+                    if seen.insert(key) && self.consumed_text.insert({
+                    let h = stable_hash_str(0, &sample.chunk.record_id);
+                    stable_hash_str(h, &sample.chunk.text)
+                }) {
                         samples.push(sample);
                     }
                 }
@@ -2374,7 +2377,10 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 // (Anchor and Context sections with identical text) cannot produce
                 // duplicate text content in the same batch.
                 let key = text_dedup_key(&sample.chunk);
-                if seen.insert(key.clone()) && self.consumed_text.insert(key) {
+                if seen.insert(key) && self.consumed_text.insert({
+                    let h = stable_hash_str(0, &sample.chunk.record_id);
+                    stable_hash_str(h, &sample.chunk.text)
+                }) {
                     samples.push(sample);
                 }
             }
