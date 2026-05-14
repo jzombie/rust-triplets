@@ -1499,11 +1499,15 @@ fn huggingface_live_e2e_candidate_and_shard_download() {
     // This is the same method called internally by `ensure_row_available()`.
     // We cache the result here so the HEAD assertion below has an expected
     // size to compare against.
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(5))
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .expect("test reqwest client should build");
+    let client = {
+        use reqwest_drive::ClientBuilder;
+        let inner = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .expect("test reqwest client should build");
+        ClientBuilder::new(inner).build()
+    };
     let runtime =
         HuggingFaceRowSource::build_http_runtime(&config).expect("failed building tokio runtime");
     let (candidates, candidate_sizes) =

@@ -43,13 +43,17 @@ use crate::constants::{
     HF_REMOTE_EXPANSION_HEADROOM_MULTIPLIER, HF_REMOTE_URL_PREFIX,
     HF_RESOLVE_UNKNOWN_FALLBACK_PATH, HF_RESOLVE_URL_SEPARATOR, HF_SHARD_CANDIDATE_SEED_TAG,
     HF_SHARD_STORE_EXTENSION, HF_SHARD_STORE_META_ROWS_KEY, HF_SHARD_STORE_ROW_PREFIX,
-    HF_SHARD_STORE_SOURCE_SIZE_KEY, HF_SIZE_DEFAULT_ENDPOINT, HF_WHOAMI_DEFAULT_ENDPOINT,
+    HF_SHARD_STORE_SOURCE_SIZE_KEY, HF_SIZE_DEFAULT_ENDPOINT, HF_THROTTLE_ADAPTIVE_JITTER_MS,
+    HF_THROTTLE_BASE_DELAY_MS, HF_THROTTLE_MAX_CONCURRENT, HF_THROTTLE_MAX_RETRIES,
+    HF_WHOAMI_DEFAULT_ENDPOINT,
 };
 use chrono::{DateTime, Utc};
 use triplets_core::SamplerError;
 use triplets_core::config::{NegativeStrategy, SamplerConfig, Selector, TripletRecipe};
 use triplets_core::data::{DataRecord, QualityScore, SectionRole};
 use triplets_core::utils::make_section;
+
+use reqwest_drive::ClientWithMiddleware;
 
 use triplets_core::source::{DataSource, SourceCursor, SourceSnapshot};
 
@@ -950,15 +954,18 @@ impl RowCache {
 pub struct HuggingFaceRowSource {
     pub(crate) config: HuggingFaceRowsConfig,
     http_runtime: Arc<tokio::runtime::Runtime>,
-    /// Reusable `reqwest::Client` with a pooled TCP/TLS connection manager.
+    /// Reusable HTTP client with pooled TCP/TLS connections, throttling, and
+    /// exponential backoff for retries.
     ///
     /// Built once in [`HuggingFaceRowSource::new`] and cloned (internally
     /// reference-counted) wherever an HTTP request is issued.  Sharing the
     /// same client across all downloads, HEAD checks, and API queries avoids
-    /// the per-request TCP/TLS handshake overhead and eliminates the noisy
+    /// the per-request TCP/TLS handshake overhead and the noisy
     /// `CloseNotify`/`BrokenPipe` DEBUG traces from dropping short-lived
-    /// connection pools.
-    http_client: reqwest::Client,
+    /// connection pools.  The embedded [`reqwest_drive::DriveThrottleBackoff`]
+    /// applies configurable backoff when HF responds with 429 or transient
+    /// failures.
+    http_client: ClientWithMiddleware,
     sampler_config: Arc<Mutex<Option<SamplerConfig>>>,
     state: Arc<Mutex<SourceState>>,
     cache: Arc<Mutex<RowCache>>,
@@ -1909,7 +1916,7 @@ impl HuggingFaceRowSource {
     /// Resolve and filter remote shard candidates from manifest or repository listing.
     #[cfg(test)]
     fn list_remote_candidates(
-        http_client: &reqwest::Client,
+        http_client: &ClientWithMiddleware,
         config: &HuggingFaceRowsConfig,
     ) -> Result<(Vec<String>, HashMap<String, u64>), SamplerError> {
         Self::list_remote_candidates_with_runtime(http_client, config, None)
@@ -1919,7 +1926,7 @@ impl HuggingFaceRowSource {
     /// manifest, falling back to hf-hub repository listing when the parquet endpoint
     /// is unavailable or returns no entries for the dataset/config.
     pub fn list_remote_candidates_with_runtime(
-        http_client: &reqwest::Client,
+        http_client: &ClientWithMiddleware,
         config: &HuggingFaceRowsConfig,
         runtime: Option<&tokio::runtime::Runtime>,
     ) -> Result<(Vec<String>, HashMap<String, u64>), SamplerError> {
@@ -2137,7 +2144,7 @@ impl HuggingFaceRowSource {
     /// callers get a clear error at construction time rather than silent failures
     /// on later API calls.
     fn validate_token_with_runtime(
-        http_client: &reqwest::Client,
+        http_client: &ClientWithMiddleware,
         config: &HuggingFaceRowsConfig,
         runtime: &tokio::runtime::Runtime,
     ) -> Result<(), SamplerError> {
@@ -2163,15 +2170,19 @@ impl HuggingFaceRowSource {
         })
     }
 
-    /// Build a `reqwest::Client` from the config's connection and auth settings.
+    /// Build a throttled `ClientWithMiddleware` from the config's connection
+    /// and auth settings, including exponential-backoff retry for rate limits
+    /// and transient failures.
     ///
-    /// Creates a fresh client every call.  Callers that want connection pooling
-    /// (i.e. all production paths) should build the client **once** inside
-    /// [`HuggingFaceRowSource::new`] and reuse it by cloning — the client is
-    /// internally reference-counted so cloning shares the same connection pool.
+    /// Callers that want connection pooling (i.e. all production paths) should
+    /// build the client **once** inside [`HuggingFaceRowSource::new`] and reuse
+    /// it by cloning — the client is internally reference-counted so cloning
+    /// shares the same connection pool and throttle state.
     pub(crate) fn build_http_client(
         config: &HuggingFaceRowsConfig,
-    ) -> Result<reqwest::Client, SamplerError> {
+    ) -> Result<ClientWithMiddleware, SamplerError> {
+        use reqwest_drive::{ClientBuilder, ThrottlePolicy, init_throttle};
+
         let mut builder = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(HF_HTTP_CONNECT_TIMEOUT_SECS))
             .timeout(Duration::from_secs(HF_HTTP_REQUEST_TIMEOUT_SECS));
@@ -2185,25 +2196,42 @@ impl HuggingFaceRowSource {
             headers.insert(reqwest::header::AUTHORIZATION, header_value);
             builder = builder.default_headers(headers);
         }
-        builder
+        let inner = builder
             .build()
             .map_err(|err| SamplerError::SourceUnavailable {
                 source_id: config.source_id.clone(),
                 reason: format!("failed building reqwest client: {err}"),
-            })
+            })?;
+
+        let throttle = init_throttle(ThrottlePolicy {
+            base_delay_ms: HF_THROTTLE_BASE_DELAY_MS,
+            adaptive_jitter_ms: HF_THROTTLE_ADAPTIVE_JITTER_MS,
+            max_concurrent: HF_THROTTLE_MAX_CONCURRENT,
+            max_retries: HF_THROTTLE_MAX_RETRIES,
+        });
+
+        Ok(ClientBuilder::new(inner).with_arc(throttle).build())
     }
 
     async fn fetch_http_body_text(
-        http_client: &reqwest::Client,
+        http_client: &ClientWithMiddleware,
         source_id: &str,
         endpoint: &str,
         query: &[(&str, &str)],
         endpoint_label: &str,
     ) -> Result<String, SamplerError> {
-        let response = http_client
+        // Build the request with a plain reqwest client for .query() support,
+        // then execute it through the middleware client for throttling/retry.
+        let request = reqwest::Client::new()
             .get(endpoint)
             .query(query)
-            .send()
+            .build()
+            .map_err(|err| SamplerError::SourceUnavailable {
+                source_id: source_id.to_string(),
+                reason: format!("failed building request to {endpoint_label}: {err}"),
+            })?;
+        let response = http_client
+            .execute(request)
             .await
             .map_err(|err| SamplerError::SourceUnavailable {
                 source_id: source_id.to_string(),
@@ -2236,14 +2264,14 @@ impl HuggingFaceRowSource {
     /// continues normally with raw integer strings as a fallback.
     #[cfg(test)]
     fn fetch_classlabel_maps(
-        http_client: &reqwest::Client,
+        http_client: &ClientWithMiddleware,
         config: &HuggingFaceRowsConfig,
     ) -> HashMap<String, Vec<String>> {
         Self::fetch_classlabel_maps_with_runtime(http_client, config, None)
     }
 
     fn fetch_classlabel_maps_with_runtime(
-        http_client: &reqwest::Client,
+        http_client: &ClientWithMiddleware,
         config: &HuggingFaceRowsConfig,
         runtime: Option<&tokio::runtime::Runtime>,
     ) -> HashMap<String, Vec<String>> {
@@ -2338,14 +2366,14 @@ impl HuggingFaceRowSource {
     /// Query datasets-server parquet manifest and derive shard candidates.
     #[cfg(test)]
     pub(crate) fn list_remote_candidates_from_parquet_manifest(
-        http_client: &reqwest::Client,
+        http_client: &ClientWithMiddleware,
         config: &HuggingFaceRowsConfig,
     ) -> Result<ParquetManifestCandidates, SamplerError> {
         Self::list_remote_candidates_from_parquet_manifest_with_runtime(http_client, config, None)
     }
 
     fn list_remote_candidates_from_parquet_manifest_with_runtime(
-        http_client: &reqwest::Client,
+        http_client: &ClientWithMiddleware,
         config: &HuggingFaceRowsConfig,
         runtime: Option<&tokio::runtime::Runtime>,
     ) -> Result<ParquetManifestCandidates, SamplerError> {
@@ -2452,7 +2480,7 @@ impl HuggingFaceRowSource {
     /// header, `Ok(None)` for non-2xx responses or missing `Content-Length`,
     /// and `Err` for network / configuration failures.
     pub fn fetch_remote_size_with_runtime(
-        http_client: &reqwest::Client,
+        http_client: &ClientWithMiddleware,
         config: &HuggingFaceRowsConfig,
         remote_url: &str,
         runtime: &tokio::runtime::Runtime,
@@ -2562,14 +2590,14 @@ impl HuggingFaceRowSource {
     /// Fetch exact split row count metadata from datasets-server size endpoint.
     #[cfg(test)]
     fn fetch_global_row_count(
-        http_client: &reqwest::Client,
+        http_client: &ClientWithMiddleware,
         config: &HuggingFaceRowsConfig,
     ) -> Result<Option<usize>, SamplerError> {
         Self::fetch_global_row_count_with_runtime(http_client, config, None)
     }
 
     fn fetch_global_row_count_with_runtime(
-        http_client: &reqwest::Client,
+        http_client: &ClientWithMiddleware,
         config: &HuggingFaceRowsConfig,
         runtime: Option<&tokio::runtime::Runtime>,
     ) -> Result<Option<usize>, SamplerError> {
@@ -2659,7 +2687,7 @@ impl HuggingFaceRowSource {
     }
 
     fn download_remote_url_to_target_with_runtime(
-        http_client: &reqwest::Client,
+        http_client: &ClientWithMiddleware,
         config: &HuggingFaceRowsConfig,
         remote_url: &str,
         target: &Path,
@@ -2929,7 +2957,7 @@ impl HuggingFaceRowSource {
     /// Download a shard (URL or hf-hub path) and materialize it under snapshot dir.
     #[cfg(test)]
     fn download_and_materialize_shard(
-        http_client: &reqwest::Client,
+        http_client: &ClientWithMiddleware,
         config: &HuggingFaceRowsConfig,
         remote_path: &str,
         expected_bytes: Option<u64>,
@@ -2946,7 +2974,7 @@ impl HuggingFaceRowSource {
     }
 
     fn download_and_materialize_shard_with_runtime(
-        http_client: &reqwest::Client,
+        http_client: &ClientWithMiddleware,
         config: &HuggingFaceRowsConfig,
         remote_path: &str,
         expected_bytes: Option<u64>,
@@ -5008,12 +5036,15 @@ mod tests {
         config
     }
 
-    fn test_http_client() -> reqwest::Client {
-        reqwest::Client::builder()
+    fn test_http_client() -> ClientWithMiddleware {
+        use reqwest_drive::ClientBuilder;
+
+        let inner = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(15))
             .build()
-            .expect("test reqwest client should build")
+            .expect("test reqwest client should build");
+        ClientBuilder::new(inner).build()
     }
 
     fn test_source(config: HuggingFaceRowsConfig) -> HuggingFaceRowSource {
