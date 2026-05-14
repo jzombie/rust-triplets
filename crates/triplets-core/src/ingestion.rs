@@ -1583,7 +1583,12 @@ mod tests {
                 test: 0.0,
             },
             allowed_splits: vec![SplitLabel::Train],
-            ingestion_max_records: 40,
+            // Small enough that the cache slides on every advance, changing
+            // the record pool each batch.  Without this, all 40 records fit in
+            // the cache permanently and the cross-batch text dedup would never
+            // clear `emitted_texts`, causing early Exhausted after only a few
+            // batches (only 8 unique texts across 40 records).
+            ingestion_max_records: 4,
             ..SamplerConfig::default()
         };
         let store = Arc::new(DeterministicSplitStore::new(config.split, 99).unwrap());
@@ -1724,7 +1729,7 @@ mod tests {
         // Lock in the exact deterministic distribution.
         assert_eq!(
             totals,
-            vec![6, 7, 7, 26, 12],
+            vec![6, 6, 6, 26, 11],
             "unequal-weights: unexpected refresh distribution"
         );
     }

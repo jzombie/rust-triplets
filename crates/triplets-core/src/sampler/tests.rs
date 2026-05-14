@@ -22,7 +22,7 @@ pub const FNV1A64_PRIME: u64 = 0x100000001b3;
 /// Number of batches sampled for deterministic sequence hash assertions.
 pub const FULL_SEQUENCE_LEN: usize = 45;
 /// Expected hash for deterministic text batch sequence.
-pub const TEXT_BATCH_SEQUENCE_HASH: u64 = 7962444922980597149;
+pub const TEXT_BATCH_SEQUENCE_HASH: u64 = 677953162338177825;
 /// Expected hash for deterministic triplet batch sequence.
 #[cfg(not(feature = "bm25-mining"))]
 pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 7521776225374240393;
@@ -36,7 +36,7 @@ pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 17832018185824582948;
 #[cfg(feature = "bm25-mining")]
 pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 3528525448544850669;
 /// Expected hash for deterministic prefetch text batch sequence.
-pub const PREFETCH_TEXT_BATCH_SEQUENCE_HASH: u64 = 15593577537707362833;
+pub const PREFETCH_TEXT_BATCH_SEQUENCE_HASH: u64 = 992254287403543173;
 /// Expected hash for deterministic prefetch triplet batch sequence.
 #[cfg(not(feature = "bm25-mining"))]
 pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 11869075277114531356;
@@ -761,9 +761,11 @@ fn kvp_prefix_is_applied_to_non_initial_windows_from_long_sections() {
         vec![record],
     )));
 
+    // Cross-batch text dedup prevents repeating window texts.  With
+    // max_window_tokens=4 (overlap=0) and 12 tokens there are exactly 3 unique
+    // windows before exhaustion.
     let mut saw_non_initial_window = false;
-    for _ in 0..12 {
-        let batch = sampler.next_text_batch(SplitLabel::Train).unwrap();
+    while let Ok(batch) = sampler.next_text_batch(SplitLabel::Train) {
         let sample = &batch.samples[0];
 
         assert!(
@@ -2192,8 +2194,9 @@ fn text_pair_and_triplet_chunks_all_come_from_materialize_pool() {
     sampler.register_source(Box::new(InMemorySource::from_records("unit", records)));
 
     // Text batches ─ every sampled chunk must come from the pool.
-    for _ in 0..5 {
-        let batch = sampler.next_text_batch(SplitLabel::Train).unwrap();
+    // Cross-batch text dedup prevents repeats of chunk texts, so collect
+    // until Exhausted (3 unique chunks with batch_size=2 → 2 batches).
+    while let Ok(batch) = sampler.next_text_batch(SplitLabel::Train) {
         for sample in &batch.samples {
             assert!(
                 expected_pool.contains(sample.chunk.text.as_str()),
@@ -2205,6 +2208,10 @@ fn text_pair_and_triplet_chunks_all_come_from_materialize_pool() {
     }
 
     // Triplet batches ─ anchor, positive, and negative must all be in the pool.
+    // Triplet batches use anchors/windows/negatives from the records, and the
+    // dedup is on the *text content* not the record.  Triplets select distinct
+    // anchor/positive/negative roles so they can still form new combinations.
+    // We keep 5 iterations since those mostly exhaust on anchor combinations.
     for _ in 0..5 {
         let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
         for triplet in &batch.triplets {
@@ -3301,14 +3308,15 @@ fn cycles_through_section_windows_before_repeating() {
         .unwrap();
 
     let mut outputs = Vec::new();
-    for _ in 0..3 {
-        let batch = sampler.next_text_batch(SplitLabel::Train).unwrap();
+    // Cross-batch text dedup prevents repeating the same text, so we can only
+    // emit each unique window once per stable pool.  Two windows → two batches.
+    while let Ok(batch) = sampler.next_text_batch(SplitLabel::Train) {
         outputs.push(batch.samples[0].chunk.text.clone());
     }
 
-    assert_eq!(outputs[0], "one two");
-    assert_eq!(outputs[1], "three four");
-    assert_eq!(outputs[2], "one two");
+    assert!(outputs.contains(&"one two".to_string()));
+    assert!(outputs.contains(&"three four".to_string()));
+    assert_eq!(outputs.len(), 2, "expected exactly 2 unique windows");
 }
 
 #[test]
@@ -7672,6 +7680,69 @@ fn emitted_text_hashes_allows_resample_after_cache_refresh() {
 }
 
 #[test]
+/// This test demonstrates that `emitted_text_hashes` is cleared on every batch
+/// due to `sync_records_from_cache()` being called on every ingestion advance.
+/// As a result, cross-batch dedup within a stable record pool does not work.
+fn emitted_text_hashes_fails_to_block_repeats_across_batches_with_same_pool() {
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+    let mut config = base_config();
+    config.batch_size = 1;
+    // Large enough to hold all records — no cache eviction happens.
+    config.ingestion_max_records = 10;
+    config.allowed_splits = vec![SplitLabel::Train];
+    config.split = split;
+    config.recipes = Vec::new();
+    config.text_recipes = vec![TextRecipe {
+        name: "anchor_text".into(),
+        selector: Selector::Role(SectionRole::Anchor),
+        weight: 1.0,
+        instruction: None,
+    }];
+
+    let store = Arc::new(DeterministicSplitStore::new(split, 42).unwrap());
+    let sampler = TripletSampler::new(config, store);
+
+    // Two records with distinct text. Pool fits entirely in cache (max_records=10).
+    // The source will wrap when the cursor exhausts both, but the record pool
+    // NEVER EVICTS — same two records stay in cache the whole time.
+    let records: Vec<DataRecord> = vec![("dup_rec_0", "Content A"), ("dup_rec_1", "Content B")]
+        .into_iter()
+        .map(|(id, text)| {
+            let mut r = sample_record();
+            r.id = id.to_string();
+            r.sections[0].text = text.to_string();
+            r.sections[0].sentences = vec![text.to_string()];
+            r
+        })
+        .collect();
+    sampler.register_source(Box::new(InMemorySource::from_records("src", records)));
+
+    let batch1 = sampler.next_text_batch(SplitLabel::Train).unwrap();
+    assert_eq!(batch1.samples.len(), 1);
+    let id1 = batch1.samples[0].chunk.record_id.clone();
+
+    let batch2 = sampler.next_text_batch(SplitLabel::Train).unwrap();
+    assert_eq!(batch2.samples.len(), 1);
+    let id2 = batch2.samples[0].chunk.record_id.clone();
+    assert_ne!(id1, id2, "batch 1 and 2 should be different records");
+
+    // Batch 3: the source has wrapped, cursor reset, epoch advanced,
+    // but emitted_texts still blocks repeats.  Both texts were already
+    // emitted, so the sampler correctly returns Exhausted.
+    let err = sampler.next_text_batch(SplitLabel::Train).expect_err(
+        "batch 3 should be Exhausted — only 2 unique texts in pool, both already emitted",
+    );
+    assert!(
+        matches!(err, SamplerError::Exhausted(_)),
+        "expected Exhausted, got: {err:?}"
+    );
+}
+
+#[test]
 fn text_sampling_cycles_recipes_over_time() {
     let split = SplitRatios::default();
     let mut config = base_config();
@@ -8156,11 +8227,12 @@ fn oversampling_advances_cursors_on_large_records() {
 
     // We expect 6 samples total (3 from Small, 3 from Large)
     // The "Small" samples should progress through the content.
+    // Cross-batch text dedup prevents repeating text content, so we collect
+    // all batches until Exhausted (6 unique texts / batch_size=3 = 2 batches).
     let mut small_samples = Vec::new();
     let mut large_samples = Vec::new();
 
-    for _ in 0..12 {
-        let batch = sampler.next_text_batch(SplitLabel::Train).unwrap();
+    while let Ok(batch) = sampler.next_text_batch(SplitLabel::Train) {
         for sample in batch.samples {
             let text = sample.chunk.text;
             if sample.chunk.record_id == "long_record" {
@@ -8229,9 +8301,13 @@ fn text_sampling_balances_sources_without_epoch_tracker() {
     factual.id = factual_id.clone();
     factual.source = "qa_factual".into();
 
+    // The opinion record MUST have a distinct anchor text so the cross-batch
+    // text dedup doesn't reject it (both records originally shared "Sample title").
     let mut opinion = sample_record();
     opinion.id = opinion_id.clone();
     opinion.source = "qa_opinionated".into();
+    opinion.sections[0].text = "Opinion title".into();
+    opinion.sections[0].sentences = vec!["Opinion title".into()];
 
     sampler.register_source(Box::new(InMemorySource::from_records(
         "qa_factual_source",
@@ -8319,8 +8395,10 @@ fn chunk_sampling_respects_split_boundaries() {
         .ingest_internal(SplitLabel::Train)
         .unwrap();
 
-    for _ in 0..4 {
-        let batch = sampler.next_text_batch(SplitLabel::Train).unwrap();
+    // Cross-batch text dedup prevents repeating chunk texts.  The train record
+    // has text "One Two" chunked into 2 unique windows.  We verify all
+    // emitted samples stay within the Train split before exhausting.
+    while let Ok(batch) = sampler.next_text_batch(SplitLabel::Train) {
         let sample = &batch.samples[0];
         let label = sampler
             .inner
@@ -9133,12 +9211,27 @@ fn sampler_allows_concurrent_batch_requests() {
         instruction: None,
     }];
 
+    // Each record MUST have a unique context section text so that the
+    // cross-batch text dedup doesn't exhaust after the first concurrent
+    // request.  All 4 threads race; with 4 unique texts each thread gets one.
+    let bodies = [
+        "concurrent_body_0",
+        "concurrent_body_1",
+        "concurrent_body_2",
+        "concurrent_body_3",
+    ];
+    let mut body_idx = 0usize;
     let records: Vec<DataRecord> = (0u32..)
         .filter_map(|i| {
             let id = format!("concurrent_{i}");
             (store.label_for(&id) == Some(SplitLabel::Train)).then(|| {
                 let mut r = sample_record();
                 r.id = id;
+                // Override the context section text so each record is unique.
+                let text = bodies[body_idx];
+                body_idx += 1;
+                r.sections[1].text = text.into();
+                r.sections[1].sentences = vec![text.into()];
                 r
             })
         })
