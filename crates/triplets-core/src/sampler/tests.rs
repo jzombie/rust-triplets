@@ -7680,10 +7680,11 @@ fn emitted_text_hashes_allows_resample_after_cache_refresh() {
 }
 
 #[test]
-/// This test demonstrates that `emitted_text_hashes` is cleared on every batch
-/// due to `sync_records_from_cache()` being called on every ingestion advance.
-/// As a result, cross-batch dedup within a stable record pool does not work.
-fn emitted_text_hashes_fails_to_block_repeats_across_batches_with_same_pool() {
+/// Verify cross-batch dedup blocks repeats within a stable record pool.
+/// Two records, batch_size=1, three batch calls.  The third call returns
+/// Exhausted because both texts were already emitted and the pool hasn't
+/// changed (no eviction).
+fn emitted_text_hashes_blocks_repeats_across_batches_with_same_pool() {
     let split = SplitRatios {
         train: 1.0,
         validation: 0.0,
