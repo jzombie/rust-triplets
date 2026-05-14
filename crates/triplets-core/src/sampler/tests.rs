@@ -7299,6 +7299,17 @@ fn text_batch_dedupes_identical_chunks() {
 }
 
 #[test]
+/// Regression test for duplicate text content when text-columns mode sources
+/// (Anchor and Context sections share identical text) are sampled with derived
+/// text recipes (_anchor selects Anchor, _positive selects Context).
+///
+/// Before the fix the dedup key was chunk_key = (record_id, section_idx, window_index).
+/// Since Anchor (idx=0) and Context (idx=1) are different sections, they produced
+/// different keys even though the text content was identical, allowing the same
+/// text from the same record to enter the batch twice.
+///
+/// The fix uses (record_id, text) as the dedup key, which correctly collapses
+/// duplicate text content regardless of which section it came from.
 fn text_batch_prevents_duplicate_text_per_record_from_text_columns() {
     let split = SplitRatios {
         train: 0.7,
@@ -7329,12 +7340,19 @@ fn text_batch_prevents_duplicate_text_per_record_from_text_columns() {
             })
             .unwrap()
     };
+    // Find 4 records whose split label is Train so they are eligible for sampling.
     let r1 = find_train_id("tc_rec");
     let r2 = find_train_id("tc_other_a");
     let r3 = find_train_id("tc_other_b");
     let r4 = find_train_id("tc_other_c");
     let sampler = TripletSampler::new(config, store);
 
+    // Create 4 records where each has the SAME text in BOTH its Anchor and Context
+    // sections — mimicking HF text-columns mode (e.g. C4, SlimPajama with text=text).
+    // The derived text recipes (simcse_anchor → Anchor, simcse_positive → Context)
+    // will select different section indices but produce identical text from the same record.
+    // The fix deduplicates by (record_id, text) so this should yield exactly 4 unique samples
+    // (one per record), not 8 (one per section).
     let records = vec![
         text_columns_record(&r1, "Content A identical in both sections."),
         text_columns_record(&r2, "Content B identical in both sections."),
