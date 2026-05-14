@@ -7744,6 +7744,108 @@ fn emitted_text_hashes_blocks_repeats_across_batches_with_same_pool() {
 }
 
 #[test]
+/// Verify that text batch dedup (`emitted_text_hashes`) is completely isolated
+/// from triplet and pair batch handling.  Exhaust text batches first, then
+/// confirm triplet/pair batches still work independently.
+fn text_dedup_isolation_does_not_affect_triplet_or_pair_batches() {
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+    let mut config = base_config();
+    config.batch_size = 2;
+    config.ingestion_max_records = 10;
+    config.allowed_splits = vec![SplitLabel::Train];
+    config.split = split;
+    config.recipes = vec![TripletRecipe {
+        name: "iso_triplet".into(),
+        anchor: Selector::Role(SectionRole::Anchor),
+        positive_selector: Selector::Role(SectionRole::Context),
+        negative_selector: Selector::Role(SectionRole::Context),
+        negative_strategy: NegativeStrategy::WrongArticle,
+        weight: 1.0,
+        instruction: None,
+        allow_same_anchor_positive: false,
+    }];
+    config.text_recipes = vec![TextRecipe {
+        name: "iso_text".into(),
+        selector: Selector::Role(SectionRole::Context),
+        weight: 1.0,
+        instruction: None,
+    }];
+
+    let store = Arc::new(DeterministicSplitStore::new(split, 42).unwrap());
+    let sampler = TripletSampler::new(config, store);
+
+    // Three records with distinct text in Anchor section (title) and
+    // Context section (body).  Text dedup will see 3 unique texts.
+    let records: Vec<DataRecord> = vec![
+        trader_record("iso_rec_a", "2025-06-01", "Title A", "Body A content here."),
+        trader_record("iso_rec_b", "2025-06-01", "Title B", "Body B content here."),
+        trader_record("iso_rec_c", "2025-06-01", "Title C", "Body C content here."),
+    ];
+    sampler.register_source(Box::new(InMemorySource::from_records("iso", records)));
+
+    // ── Phase 1: exhaust text batches ──────────────────────────────────
+    // 3 unique texts with batch_size=2 → 2 batches (2 texts + 1 text + padding).
+    let text_batch1 = sampler
+        .next_text_batch(SplitLabel::Train)
+        .expect("first text batch should succeed");
+    assert_eq!(text_batch1.samples.len(), 2);
+
+    let text_batch2 = sampler
+        .next_text_batch(SplitLabel::Train)
+        .expect("second text batch should succeed");
+    assert_eq!(text_batch2.samples.len(), 2);
+
+    // Third call: all 3 texts already emitted, pool unchanged → Exhausted.
+    let text_err = sampler
+        .next_text_batch(SplitLabel::Train)
+        .expect_err("third text batch should be Exhausted");
+    assert!(
+        matches!(text_err, SamplerError::Exhausted(_)),
+        "expected text Exhausted, got: {text_err:?}"
+    );
+
+    // ── Phase 2: triplet batch still works ─────────────────────────────
+    // Triplet dedup uses its own per-batch (RecordId, RecordId, RecordId)
+    // set, completely separate from emitted_text_hashes.
+    let triplet_batch = sampler
+        .next_triplet_batch(SplitLabel::Train)
+        .expect("triplet batch must still succeed after text exhaustion");
+    assert_eq!(
+        triplet_batch.triplets.len(),
+        2,
+        "triplet batch should return full batch_size"
+    );
+    // Verify triplets have distinct structural keys (not text deduped).
+    let mut triplet_seen: std::collections::HashSet<(String, String, String)> =
+        std::collections::HashSet::new();
+    for t in &triplet_batch.triplets {
+        let key = (
+            t.anchor.record_id.clone(),
+            t.positive.record_id.clone(),
+            t.negative.record_id.clone(),
+        );
+        assert!(
+            triplet_seen.insert(key),
+            "triplet batch should not contain duplicate triplets"
+        );
+    }
+
+    // ── Phase 3: pair batch still works ────────────────────────────────
+    let pair_batch = sampler
+        .next_pair_batch(SplitLabel::Train)
+        .expect("pair batch must still succeed after text exhaustion");
+    assert_eq!(
+        pair_batch.pairs.len(),
+        2,
+        "pair batch should return full batch_size"
+    );
+}
+
+#[test]
 fn text_sampling_cycles_recipes_over_time() {
     let split = SplitRatios::default();
     let mut config = base_config();
