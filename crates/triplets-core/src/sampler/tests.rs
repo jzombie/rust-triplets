@@ -6392,6 +6392,168 @@ fn bm25_cursor_state_is_cleared_on_each_record_snapshot_sync() {
 }
 
 #[test]
+/// Verify that `prune_cursor_state()` removes stale chunk and role cursor
+/// entries for records that are no longer in the record pool.  Without this,
+/// chunk_cursors and role_cursors would accumulate entries across cache syncs,
+/// leading to unbounded memory growth.
+fn chunk_and_role_cursors_are_pruned_when_records_are_removed() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 42).unwrap());
+    let mut inner = TripletSamplerInner::new(base_config(), store);
+
+    // No records loaded yet — every cursor entry is stale.
+    assert!(inner.records.is_empty());
+
+    inner
+        .chunk_cursors
+        .insert(("stale_record".to_string(), 0_usize), 3_usize);
+    inner
+        .role_cursors
+        .insert(("stale_record".to_string(), "Anchor".to_string()), 5_usize);
+    assert_eq!(inner.chunk_cursors.len(), 1);
+    assert_eq!(inner.role_cursors.len(), 1);
+
+    // prune_cursor_state() must remove entries whose record IDs are absent.
+    inner.prune_cursor_state();
+    assert!(
+        inner.chunk_cursors.is_empty(),
+        "chunk_cursors should be pruned when their record is gone"
+    );
+    assert!(
+        inner.role_cursors.is_empty(),
+        "role_cursors should be pruned when their record is gone"
+    );
+
+    // Now add a valid record and entries for it, plus another stale entry.
+    let mut record = sample_record();
+    record.id = "valid_record".to_string();
+    inner
+        .records
+        .insert("valid_record".to_string(), Arc::new(record));
+
+    inner
+        .chunk_cursors
+        .insert(("valid_record".to_string(), 0_usize), 3_usize);
+    inner
+        .chunk_cursors
+        .insert(("another_stale".to_string(), 0_usize), 7_usize);
+    inner
+        .role_cursors
+        .insert(("valid_record".to_string(), "Anchor".to_string()), 5_usize);
+    inner
+        .role_cursors
+        .insert(("another_stale".to_string(), "Anchor".to_string()), 9_usize);
+    assert_eq!(inner.chunk_cursors.len(), 2);
+    assert_eq!(inner.role_cursors.len(), 2);
+
+    inner.prune_cursor_state();
+
+    // Stale entries removed, valid entries kept.
+    assert_eq!(
+        inner.chunk_cursors.len(),
+        1,
+        "chunk_cursors should keep valid entries and drop stale ones"
+    );
+    assert_eq!(
+        inner.role_cursors.len(),
+        1,
+        "role_cursors should keep valid entries and drop stale ones"
+    );
+    assert!(
+        inner
+            .chunk_cursors
+            .contains_key(&("valid_record".to_string(), 0_usize))
+    );
+    assert!(
+        inner
+            .role_cursors
+            .contains_key(&("valid_record".to_string(), "Anchor".to_string()))
+    );
+}
+
+#[test]
+/// Verify that `sync_records_from_cache()` prunes chunk and role cursor
+/// entries for records that are no longer in the record pool, while retaining
+/// entries for records that survive the sync.  Follows the same pattern as
+/// `bm25_cursor_state_is_cleared_on_each_record_snapshot_sync`.
+fn chunk_and_role_cursors_are_pruned_across_cache_sync() {
+    let split = SplitRatios {
+        train: 0.7,
+        validation: 0.2,
+        test: 0.1,
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 2024).unwrap());
+    let sync_id = (0u32..)
+        .find_map(|i| {
+            let id = format!("strict_sync_anchor_{i}");
+            (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+        })
+        .unwrap();
+    let sampler = TripletSampler::new(base_config(), Arc::clone(&store));
+    sampler.register_source(Box::new(InMemorySource::from_records(
+        "strict_sync_source",
+        vec![trader_record(&sync_id, "2025-01-01", "Anchor", "body")],
+    )));
+
+    let mut inner = sampler.inner.lock().unwrap();
+    inner.ingest_internal(SplitLabel::Train).unwrap();
+
+    // Verify sync_id is present in the record pool.
+    assert!(inner.records.contains_key(&sync_id));
+
+    // Insert cursor entries for both a valid record and a stale record.
+    inner
+        .chunk_cursors
+        .insert((sync_id.clone(), 0_usize), 3_usize);
+    inner
+        .chunk_cursors
+        .insert(("stale_record".to_string(), 0_usize), 7_usize);
+    inner
+        .role_cursors
+        .insert((sync_id.clone(), "Anchor".to_string()), 5_usize);
+    inner
+        .role_cursors
+        .insert(("stale_record".to_string(), "Anchor".to_string()), 9_usize);
+    assert_eq!(inner.chunk_cursors.len(), 2);
+    assert_eq!(inner.role_cursors.len(), 2);
+
+    // sync_records_from_cache must prune stale cursor entries.
+    inner.sync_records_from_cache().unwrap();
+
+    // Cursor for sync_id survives; cursor for stale_record is gone.
+    assert_eq!(
+        inner.chunk_cursors.len(),
+        1,
+        "chunk_cursors should keep valid entry and drop stale one"
+    );
+    assert_eq!(
+        inner.role_cursors.len(),
+        1,
+        "role_cursors should keep valid entry and drop stale one"
+    );
+    assert!(
+        inner
+            .chunk_cursors
+            .contains_key(&(sync_id.clone(), 0_usize))
+    );
+    assert!(
+        inner
+            .role_cursors
+            .contains_key(&(sync_id.clone(), "Anchor".to_string()))
+    );
+    assert!(
+        !inner
+            .chunk_cursors
+            .contains_key(&("stale_record".to_string(), 0_usize))
+    );
+    assert!(
+        !inner
+            .role_cursors
+            .contains_key(&("stale_record".to_string(), "Anchor".to_string()))
+    );
+}
+
+#[test]
 fn wrong_publication_date_falls_back_within_same_split() {
     let split = SplitRatios {
         train: 0.34,
