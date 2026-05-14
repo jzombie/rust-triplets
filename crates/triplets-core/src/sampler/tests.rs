@@ -7496,6 +7496,17 @@ fn emitted_text_hashes_allows_resample_after_cache_refresh() {
         id3, "rec_c",
         "batch 3 should sample the newly arrived record even though its text 'hello' was already emitted in batch 1"
     );
+
+    // Verify boundedness: records should not accumulate stale entries across syncs.
+    // Cache holds 2 records, so records should have at most 2 entries.
+    {
+        let guard = sampler.inner.lock().unwrap();
+        assert!(
+            guard.records.len() <= 2,
+            "records contains {} entries; should be at most 2 after cache slide",
+            guard.records.len()
+        );
+    }
 }
 
 #[test]
