@@ -317,6 +317,14 @@ enforces a **32 GiB hard cap** on this cache. The cap can be tuned or disabled t
 When the cap is reached, the least recently accessed shards are evicted first. Evicted shards
 are re-downloaded automatically from Hugging Face on the next access.
 
+#### Throttling & Retry
+
+Release builds include an exponential-backoff throttle middleware
+([`reqwest-drive`](https://docs.rs/reqwest-drive/latest/reqwest_drive/)) that retries
+rate-limited (429) and transient failures up to 3 times with jittered delays. Debug builds
+(including `cargo test`) skip the middleware so tests against mock servers aren't slowed by
+retry delays. Compile with `--release` to enable automatic retry in production.
+
 ### CSV Source
 
 Load rows from a CSV file with explicit column mappings. The file **must have a named header row** — columns are always selected by name. Supports two modes:

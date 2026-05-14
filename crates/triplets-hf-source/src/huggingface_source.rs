@@ -968,6 +968,13 @@ pub struct HuggingFaceRowSource {
     /// connection pools.  The embedded [`reqwest_drive::DriveThrottleBackoff`]
     /// applies configurable backoff when HF responds with 429 or transient
     /// failures.
+    ///
+    /// **Note:** The throttle/backoff middleware is only compiled in
+    /// **release builds** (`#[cfg(not(debug_assertions))]`).  Debug builds
+    /// (including `cargo test`) skip it so that tests against mock servers
+    /// aren't slowed by retry delays.  If you run a debug binary in
+    /// production, you won't get automatic retry — compile with `--release`
+    /// to enable it.
     http_client: ClientWithMiddleware,
     sampler_config: Arc<Mutex<Option<SamplerConfig>>>,
     state: Arc<Mutex<SourceState>>,
