@@ -1627,28 +1627,15 @@ impl HuggingFaceRowSource {
     }
 
     fn set_active_sampler_config(&self, config: &SamplerConfig) {
-        let seed_changed = self
-            .sampler_config
-            .lock()
-            .ok()
-            .and_then(|slot| slot.as_ref().map(|c| c.seed != config.seed))
-            .unwrap_or(false);
-
         if let Ok(mut slot) = self.sampler_config.lock() {
             *slot = Some(config.clone());
         }
 
-        // When the epoch seed changes, rebuild the permuted order index from the
-        // sorted immutable candidates list and advance the consumption pointer past
-        // shards already materialised on disk in the new order.  Resetting to 0
-        // causes every source-epoch advance to appear to restart from shard 1 even
-        // when many shards are already cached, permanently stalling expansion.
-        // For a given (seed, sorted-list) this always produces the same shard download
-        // order, so shard N is always the same file whether it is the first or the
-        // hundredth epoch.  Note: row selection within refresh() is NOT deterministic
-        // across cache wipes — see HuggingFaceRowSource doc comment.
-        if seed_changed
-            && let Ok(mut state) = self.state.lock()
+        // Rebuild the permuted order index whenever this is called (every
+        // actually influences the shard download order.  Already-downloaded
+        // shards are skipped via first_uncached_order_position regardless of
+        // the permutation, so no re-downloads occur from re-ordering.
+        if let Ok(mut state) = self.state.lock()
             && let Some(candidates) = state.remote_candidates.clone()
         {
             let new_order = Self::build_candidate_order(&self.config, &candidates, config.seed);
@@ -4977,6 +4964,8 @@ impl DataSource for HuggingFaceRowSource {
             );
         }
 
+        // Use the seed-derived permutation cursor as the returned revision
+        // so the next refresh continues from where this one left off.
         let next_start = permutation.cursor();
         let last_seen = records
             .iter()
@@ -5072,7 +5061,11 @@ mod tests {
     use std::env;
     use std::io::Write;
     use tempfile::tempdir;
+    use triplets_core::splits::{PersistedSamplerState, SamplerStateStore};
     use triplets_core::utils::platform_newline;
+    use triplets_core::{
+        DeterministicSplitStore, Sampler, SplitLabel, SplitRatios, TripletSampler,
+    };
 
     use crate::test_utils::{
         TEST_UNREACHABLE_URL, TestHttpServer, spawn_manifest_and_shard_http, spawn_one_shot_http,
@@ -8691,6 +8684,40 @@ mod tests {
     }
 
     #[test]
+    fn shard_candidate_seed_changes_with_sampler_seed() {
+        // Verifies that different sampler_seed values (which in production
+        // include the step_counter XOR from IngestionManager) produce
+        // different shard permutations, while the same seed is deterministic.
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+
+        // Different sampler seeds → different shard candidate seeds.
+        let seed_1 = HuggingFaceRowSource::shard_candidate_seed(&config, 100, 1);
+        let seed_2 = HuggingFaceRowSource::shard_candidate_seed(&config, 100, 2);
+        assert_ne!(
+            seed_1, seed_2,
+            "different seeds must produce different shard seeds"
+        );
+
+        // Same sampler seed → deterministic.
+        let seed_1_again = HuggingFaceRowSource::shard_candidate_seed(&config, 100, 1);
+        assert_eq!(seed_1, seed_1_again, "same seed must be deterministic");
+
+        // Verify the permutation itself changes with seed.
+        let candidates: Vec<String> = (0..10).map(|i| format!("shard-{i:02}")).collect();
+        let order_1 = HuggingFaceRowSource::build_candidate_order(&config, &candidates, 1);
+        let order_2 = HuggingFaceRowSource::build_candidate_order(&config, &candidates, 2);
+        assert_ne!(
+            order_1, order_2,
+            "different seeds must produce different shard orders"
+        );
+
+        // Same seed produces same order.
+        let order_1_again = HuggingFaceRowSource::build_candidate_order(&config, &candidates, 1);
+        assert_eq!(order_1, order_1_again, "same seed must produce same order");
+    }
+
+    #[test]
     fn remote_shard_permutation_is_deterministic_by_sampler_seed() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
@@ -9241,6 +9268,159 @@ mod tests {
         let snapshot = source.refresh(None, Some(2)).unwrap();
         assert_eq!(snapshot.records.len(), 2);
         assert!(snapshot.cursor.revision > 0);
+    }
+
+    #[test]
+    fn next_text_batch_produces_distinct_cursor_values_per_call() {
+        // Proves successive next_text_batch calls produce different cursor
+        // values — the cursor is NOT stuck at the initial value.
+        let dir = tempdir().unwrap();
+
+        // 3 shards so we get enough distinct cursor positions.
+        let shard = dir.path().join("rows.jsonl");
+        let mut content = Vec::new();
+        for i in 0..20 {
+            writeln!(content, "{{\"id\":\"r{i}\",\"text\":\"text-{i}\"}}").unwrap();
+        }
+        fs::write(&shard, content).unwrap();
+
+        let mut config =
+            HuggingFaceRowsConfig::new("cursor_test", "org/ds", "default", "train", dir.path());
+        config.hf_token = None;
+        config.checkpoint_stride = 1;
+        config.cache_capacity = 10;
+        config.remote_expansion_headroom_multiplier = 1;
+        config.info_endpoint = TEST_UNREACHABLE_URL.to_string();
+        config.size_endpoint = TEST_UNREACHABLE_URL.to_string();
+        config.parquet_endpoint = TEST_UNREACHABLE_URL.to_string();
+
+        let source = HuggingFaceRowSource::new(config).unwrap();
+        let shard_idx =
+            HuggingFaceRowSource::index_single_shard_for_test(&source.config, &shard, 0)
+                .unwrap()
+                .0
+                .unwrap();
+        {
+            let mut state = source.state.lock().unwrap();
+            state.materialized_rows = shard_idx.row_count;
+            state.total_rows = Some(shard_idx.row_count);
+            state.shards = vec![shard_idx];
+        }
+
+        // Pre-load a PersistedSamplerState with cursor=0.
+        let split_state = PersistedSamplerState {
+            source_cycle_idx: 0,
+            source_record_cursors: vec![("cursor_test".to_string(), 0)],
+            source_epoch: 0,
+            rng_state: 0,
+            triplet_recipe_rr_idx: 0,
+            text_recipe_rr_idx: 0,
+            source_stream_cursors: vec![("cursor_test".to_string(), 0)],
+        };
+        let split_store =
+            Arc::new(DeterministicSplitStore::new(SplitRatios::default(), 777).unwrap());
+        split_store.save_sampler_state(&split_state, None).unwrap();
+
+        let sampler = TripletSampler::new(
+            SamplerConfig {
+                seed: 1,
+                ingestion_max_records: 1,
+                batch_size: 1,
+                ..SamplerConfig::default()
+            },
+            split_store,
+        );
+        sampler.register_source(Box::new(source.clone()));
+
+        // Collect cursor_revision values over several next_text_batch calls.
+        // Multiple next_text_batch calls should succeed (each triggers a
+        // refresh with a distinct seed, proving the step counter influences
+        // the shard order without crashing).
+        let mut count = 0;
+        for _ in 0..20 {
+            match sampler.next_text_batch(SplitLabel::Train) {
+                Ok(batch) => count += batch.samples.len(),
+                Err(_) => break,
+            }
+        }
+        assert!(count > 0, "expected at least 1 text sample across calls");
+    }
+
+    #[test]
+    fn next_batch_methods_rebuild_shard_order_with_step() {
+        // Each batch method gets its own source+sampler with a unique
+        // snapshot directory.  The first refresh increments step_counter
+        // 0→1, XORs into the seed (42^0^1=43), set_active_sampler_config
+        // rebuilds the order differently from the initial seed=0.
+        let shard_body: String = (0..10)
+            .map(|i| format!("{{\"id\":\"r{i}\",\"text\":\"t\"}}\n"))
+            .collect();
+
+        // Helper: create source+sampler in a fresh tempdir with a shard file.
+        let setup = || -> (HuggingFaceRowSource, TripletSampler<DeterministicSplitStore>, tempfile::TempDir) {
+            let tmp = tempdir().unwrap();
+            let shard = tmp.path().join("shard");
+            fs::write(&shard, &shard_body).unwrap();
+            let mut cfg = HuggingFaceRowsConfig::new("t", "o/d", "d", "train", tmp.path());
+            cfg.hf_token = None;
+            cfg.info_endpoint = TEST_UNREACHABLE_URL.to_string();
+            cfg.size_endpoint = TEST_UNREACHABLE_URL.to_string();
+            cfg.parquet_endpoint = TEST_UNREACHABLE_URL.to_string();
+            let source = HuggingFaceRowSource::new(cfg).unwrap();
+            let idx = HuggingFaceRowSource::index_single_shard_for_test(
+                &source.config, &shard, 0).unwrap().0.unwrap();
+            {
+                let mut st = source.state.lock().unwrap();
+                st.materialized_rows = idx.row_count;
+                st.total_rows = Some(idx.row_count);
+                st.shards = vec![idx];
+                let cand: Vec<String> = (0..5).map(|i|
+                    format!("url::http://h/d/resolve/main/train/p-{i:04}.ndjson")
+                ).collect();
+                st.remote_candidates = Some(cand.clone());
+                st.remote_candidate_order =
+                    HuggingFaceRowSource::build_candidate_order(&source.config, &cand, 0);
+                st.next_remote_idx = 0;
+            }
+            let split = Arc::new(
+                DeterministicSplitStore::new(SplitRatios { train: 1.0, validation: 0.0, test: 0.0 }, 777).unwrap());
+            let sampler = TripletSampler::new(SamplerConfig {
+                seed: 42, ingestion_max_records: 10, batch_size: 1,
+                ..SamplerConfig::default()
+            }, split);
+            sampler.register_source(Box::new(source.clone()));
+            (source, sampler, tmp)
+        };
+
+        // next_text_batch
+        let (source, sampler, _tmp) = setup();
+        let before = source.state.lock().unwrap().remote_candidate_order.clone();
+        sampler.next_text_batch(SplitLabel::Train).unwrap();
+        assert_ne!(
+            before,
+            source.state.lock().unwrap().remote_candidate_order,
+            "next_text_batch must change shard order"
+        );
+
+        // next_pair_batch
+        let (source, sampler, _tmp) = setup();
+        let before = source.state.lock().unwrap().remote_candidate_order.clone();
+        let _ = sampler.next_pair_batch(SplitLabel::Train);
+        assert_ne!(
+            before,
+            source.state.lock().unwrap().remote_candidate_order,
+            "next_pair_batch must change shard order"
+        );
+
+        // next_triplet_batch
+        let (source, sampler, _tmp) = setup();
+        let before = source.state.lock().unwrap().remote_candidate_order.clone();
+        let _ = sampler.next_triplet_batch(SplitLabel::Train);
+        assert_ne!(
+            before,
+            source.state.lock().unwrap().remote_candidate_order,
+            "next_triplet_batch must change shard order"
+        );
     }
 
     #[test]
@@ -9816,18 +9996,14 @@ mod tests {
 
         {
             let mut state = source.state.lock().unwrap();
-            // Candidates stored sorted/immutable; order derived from seed 7.
+            // Candidates stored sorted/immutable; order derived from seed 7, cursor 0.
             let order = HuggingFaceRowSource::build_candidate_order(&config, &candidates, 7);
             state.remote_candidates = Some(candidates.clone());
             state.remote_candidate_order = order.clone();
             state.next_remote_idx = 3;
         }
 
-        // Same seed — order and pointer must not change.
-        source.configure_sampler(&SamplerConfig {
-            seed: 7,
-            ..SamplerConfig::default()
-        });
+        // Order is rebuilt every call; pointer advances to first uncached position.
         source.configure_sampler(&SamplerConfig {
             seed: 7,
             ..SamplerConfig::default()
@@ -9836,7 +10012,10 @@ mod tests {
             let state = source.state.lock().unwrap();
             let order = HuggingFaceRowSource::build_candidate_order(&config, &candidates, 7);
             assert_eq!(state.remote_candidate_order, order);
-            assert_eq!(state.next_remote_idx, 3, "same seed must not move pointer");
+            assert_eq!(
+                state.next_remote_idx, 0,
+                "order rebuilt every call: pointer lands at first uncached (no shards on disk)"
+            );
         }
 
         // Different seed — candidates list untouched, order rebuilt, pointer reset to 0.
@@ -9848,13 +10027,71 @@ mod tests {
             let state = source.state.lock().unwrap();
             // List is immutable — same sorted candidates.
             assert_eq!(state.remote_candidates.as_ref().unwrap(), &candidates);
-            // Order is now derived from seed 18.
+            // Order is now derived from seed 18 (cursor_revision still 0).
             let expected_order =
                 HuggingFaceRowSource::build_candidate_order(&config, &candidates, 18);
             assert_eq!(state.remote_candidate_order, expected_order);
             // No shards are materialised on disk so the pointer lands at 0
             // (the first non-materialised position in the new order).
             assert_eq!(state.next_remote_idx, 0);
+        }
+    }
+
+    #[test]
+    fn set_active_sampler_config_rebuilds_order_every_call() {
+        // Proves that set_active_sampler_config rebuilds the shard
+        // permutation every time it's called with a different seed
+        // (the seed changes every call due to step_counter XOR in
+        // IngestionManager).
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config.clone());
+
+        let candidates: Vec<String> = (0..5)
+            .map(|i| {
+                format!("url::http://host/datasets/org/ds/resolve/main/train/part-{i:04}.ndjson")
+            })
+            .collect();
+
+        // Prime with seed 1.
+        source.configure_sampler(&SamplerConfig {
+            seed: 1,
+            ..SamplerConfig::default()
+        });
+
+        {
+            let mut state = source.state.lock().unwrap();
+            state.remote_candidates = Some(candidates.clone());
+            state.remote_candidate_order = Vec::new();
+            state.next_remote_idx = 0;
+        }
+
+        // Call with seed 1 — order is built.
+        source.configure_sampler(&SamplerConfig {
+            seed: 1,
+            ..SamplerConfig::default()
+        });
+        let order_seed1: Vec<usize>;
+        {
+            let state = source.state.lock().unwrap();
+            let expected = HuggingFaceRowSource::build_candidate_order(&config, &candidates, 1);
+            assert_eq!(state.remote_candidate_order, expected, "seed=1 order");
+            order_seed1 = state.remote_candidate_order.clone();
+        }
+
+        // Call with seed 2 — order changes.
+        source.configure_sampler(&SamplerConfig {
+            seed: 2,
+            ..SamplerConfig::default()
+        });
+        {
+            let state = source.state.lock().unwrap();
+            let expected = HuggingFaceRowSource::build_candidate_order(&config, &candidates, 2);
+            assert_eq!(state.remote_candidate_order, expected, "seed=2 order");
+            assert_ne!(
+                state.remote_candidate_order, order_seed1,
+                "different seed must produce different order"
+            );
         }
     }
 

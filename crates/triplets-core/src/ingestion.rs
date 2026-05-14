@@ -204,6 +204,9 @@ pub struct IngestionManager {
     /// opportunities), each cycle begins at this position and advances by one.
     /// Over N cycles every source is drained first exactly once.
     drain_start: usize,
+    /// Monotonic step counter incremented on every advance/refresh_all and set
+    /// on SourceCursor.step so all sources can observe per-call progress.
+    step_counter: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -232,6 +235,7 @@ impl IngestionManager {
             source_refresh_generation: 0,
             last_refreshed_sources: Vec::new(),
             drain_start: 0,
+            step_counter: 0,
         }
     }
 
@@ -255,6 +259,9 @@ impl IngestionManager {
     /// leading slice of the source on every epoch boundary).
     pub(crate) fn set_source_epoch(&mut self, epoch: u64) {
         self.source_epoch = epoch;
+        // Reset the step counter so each epoch starts from step 0,
+        // giving deterministic per-epoch step sequences.
+        self.step_counter = 0;
     }
 
     /// Return the current source epoch.
@@ -454,6 +461,7 @@ impl IngestionManager {
         }
 
         if !refresh_plan.is_empty() {
+            self.step_counter = self.step_counter.saturating_add(1);
             self.source_refresh_generation = self.source_refresh_generation.saturating_add(1);
             self.last_refreshed_sources = refresh_plan
                 .iter()
@@ -465,6 +473,7 @@ impl IngestionManager {
             results.resize_with(self.sources.len(), || None);
             let fetch_limit = self.max_records;
             let sampler_config = self.sampler_config.clone();
+            let step = self.step_counter;
             thread::scope(|scope| {
                 let mut handles = Vec::with_capacity(refresh_plan.len());
                 for (idx, cursor) in &refresh_plan {
@@ -478,8 +487,11 @@ impl IngestionManager {
                             let start = std::time::Instant::now();
                             // XOR the source epoch into the seed so each epoch
                             // produces a distinct permutation within the source.
+                            // XOR the step counter into the seed so every
+                            // advance/refresh call gets a distinct seed, which
+                            // sources can use for e.g. shard ordering.
                             let epoch_config = SamplerConfig {
-                                seed: derive_epoch_seed(sampler_config.seed, source_epoch),
+                                seed: derive_epoch_seed(sampler_config.seed, source_epoch) ^ step,
                                 ..sampler_config
                             };
                             let result =
@@ -1272,15 +1284,54 @@ mod tests {
         );
 
         // They must match the expected derive_epoch_seed values.
+        // The step_counter starts at 0 and is incremented to 1 before
+        // refresh_all passes the seed.  So each seed is epoch-seed XOR 1.
         assert_eq!(
             seed_at_epoch0,
-            derive_epoch_seed(base_seed, 0),
-            "epoch-0 seed mismatch"
+            derive_epoch_seed(base_seed, 0) ^ 1,
+            "epoch-0 seed mismatch (step_counter=1)"
         );
         assert_eq!(
             seed_at_epoch1,
-            derive_epoch_seed(base_seed, 1),
-            "epoch-1 seed mismatch"
+            derive_epoch_seed(base_seed, 1) ^ 1,
+            "epoch-1 seed mismatch (step_counter=1)"
+        );
+    }
+
+    #[test]
+    fn step_counter_resets_on_epoch_change() {
+        // Proves that set_source_epoch resets step_counter to 0 so each
+        // epoch produces the same step sequence starting from step 1.
+        let config = SamplerConfig::default();
+        let seeds = Arc::new(Mutex::new(Vec::new()));
+
+        let mut manager = IngestionManager::new(4, config.clone());
+        manager.register_source(Box::new(SeedCapturingSource::new(
+            "src",
+            Arc::clone(&seeds),
+        )));
+
+        // Epoch 0, first refresh: step_counter goes 0→1, seed = derive(A, 0) ^ 1
+        manager.refresh_all();
+        let step1_seed = seeds.lock().unwrap()[0];
+        assert_eq!(
+            step1_seed,
+            derive_epoch_seed(config.seed, 0) ^ 1,
+            "epoch 0 step 1 seed"
+        );
+
+        // Advance epoch — step_counter must reset to 0.
+        manager.set_source_epoch(1);
+        seeds.lock().unwrap().clear();
+
+        // Epoch 1, first refresh: step_counter goes 0→1 again.
+        // WITHOUT reset it would be 2.
+        manager.refresh_all();
+        let step1_epoch1 = seeds.lock().unwrap()[0];
+        assert_eq!(
+            step1_epoch1,
+            derive_epoch_seed(config.seed, 1) ^ 1,
+            "epoch 1 step 1 seed (must be ^1, not ^2)"
         );
     }
 
