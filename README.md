@@ -325,6 +325,26 @@ rate-limited (429) and transient failures up to 3 times with jittered delays. De
 (including `cargo test`) skip the middleware so tests against mock servers aren't slowed by
 retry delays. Compile with `--release` to enable automatic retry in production.
 
+**Client sharing.**  When using a [source-list file](#source-list-file-format) via
+`build_hf_sources`, a single throttled client is built automatically and shared across all
+sources in the list — one connection pool, one throttle state governing all outbound traffic.
+
+If you construct sources manually with `HuggingFaceRowSource::new()`, each source gets its
+own client with its own throttle.  Ten sources would allow up to 40 concurrent requests,
+potentially defeating rate-limit protection.  To share a client manually, pre-build it and
+set it on each config:
+
+```rust
+let client = HuggingFaceRowSource::build_http_client(&config)?;
+
+for dataset in datasets {
+    let mut cfg = HuggingFaceRowsConfig::new(...);
+    cfg.http_client = Some(client.clone());  // clone is cheap (Arc'd)
+    let source = HuggingFaceRowSource::new(cfg)?;
+    sampler.register_source(Box::new(source));
+}
+```
+
 ### CSV Source
 
 Load rows from a CSV file with explicit column mappings. The file **must have a named header row** — columns are always selected by name. Supports two modes:

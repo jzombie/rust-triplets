@@ -472,6 +472,13 @@ pub fn build_hf_sources(roots: &HfListRoots) -> Vec<Box<dyn DataSource + 'static
         })
         .collect();
 
+    // Build a single throttled HTTP client shared by all sources in this
+    // list so they use a single connection pool and throttle state.
+    let shared_client = HuggingFaceRowSource::build_http_client(&HuggingFaceRowsConfig::new(
+        "", "org/ds", "default", "", "",
+    ))
+    .ok();
+
     roots
         .sources
         .iter()
@@ -510,6 +517,10 @@ pub fn build_hf_sources(roots: &HfListRoots) -> Vec<Box<dyn DataSource + 'static
             hf.context_columns = source.context_columns.clone();
             hf.text_columns = source.text_columns.clone();
             hf.trust_override = source.trust;
+            // Share a single http_client across all sources from this list.
+            // build_shared_http_client is called once outside the loop and
+            // cloned onto each config (reqwest::Client clone is Arc internally).
+            hf.http_client = shared_client.clone();
             println!(
                 "source {idx}: hf://{}/{}/{} -> anchor={:?}, positive={:?}, context={:?}, text_columns={:?}",
                 hf.dataset_name,
@@ -682,6 +693,11 @@ pub struct HuggingFaceRowsConfig {
     /// Populated lazily as shards are accessed and cleared when the cache grows
     /// beyond the configured capacity.
     pub store_cache: StoreCache,
+    /// Optional pre-built HTTP client.  When set, [`HuggingFaceRowSource::new`]
+    /// uses this client instead of building a new one.  This allows callers
+    /// such as [`build_hf_sources`] to share a single connection pool and
+    /// throttle state across many sources.
+    pub(crate) http_client: Option<ClientWithMiddleware>,
 }
 
 impl HuggingFaceRowsConfig {
@@ -725,6 +741,7 @@ impl HuggingFaceRowsConfig {
             size_endpoint: HF_SIZE_DEFAULT_ENDPOINT.to_string(),
             info_endpoint: HF_INFO_DEFAULT_ENDPOINT.to_string(),
             store_cache: StoreCache::new(),
+            http_client: None,
         }
     }
 
@@ -1030,7 +1047,15 @@ impl HuggingFaceRowSource {
     pub fn new(mut config: HuggingFaceRowsConfig) -> Result<Self, SamplerError> {
         let start_new = Instant::now();
         let http_runtime = Arc::new(Self::build_http_runtime(&config)?);
-        let http_client = Self::build_http_client(&config)?;
+        // Use a shared client if one was pre-built on the config, otherwise
+        // build a new one.  build_hf_sources() sets http_client on each config
+        // so all sources from a list share a single connection pool and
+        // throttle state.
+        let http_client = config
+            .http_client
+            .take()
+            .map(Ok)
+            .unwrap_or_else(|| Self::build_http_client(&config))?;
 
         if config.checkpoint_stride == 0 {
             return Err(SamplerError::Configuration(
@@ -2184,10 +2209,10 @@ impl HuggingFaceRowSource {
     /// and auth settings, including exponential-backoff retry for rate limits
     /// and transient failures.
     ///
-    /// Callers that want connection pooling (i.e. all production paths) should
-    /// build the client **once** inside [`HuggingFaceRowSource::new`] and reuse
-    /// it by cloning — the client is internally reference-counted so cloning
-    /// shares the same connection pool and throttle state.
+    /// The client is internally reference-counted — cloning it shares the
+    /// same connection pool and throttle state.  [`build_hf_sources`] builds
+    /// a single client and shares it across all sources from a list so that
+    /// outbound traffic is governed by a single throttle state.
     pub(crate) fn build_http_client(
         config: &HuggingFaceRowsConfig,
     ) -> Result<ClientWithMiddleware, SamplerError> {
@@ -5584,6 +5609,62 @@ mod tests {
                 assert!(dir_1.ends_with("replica_1"));
             });
         });
+    }
+
+    #[test]
+    #[serial(global_state)]
+    fn build_hf_sources_shares_http_client_across_entries() {
+        // All sources produced by build_hf_sources must share a single HTTP
+        // client so that connection pooling and throttle state apply to the
+        // aggregate outbound traffic rather than per-source.
+        let entries: Vec<HfSourceEntry> = (0..3)
+            .map(|i| HfSourceEntry {
+                uri: "hf://org/dataset/default/train".to_string(),
+                anchor_columns: vec!["title".to_string()],
+                positive_columns: vec!["body".to_string()],
+                context_columns: Vec::new(),
+                text_columns: Vec::new(),
+                trust: None,
+                source_id: Some(format!("src_{i}")),
+            })
+            .collect();
+        let roots = HfListRoots {
+            source_list: "inline".to_string(),
+            sources: entries,
+        };
+
+        let temp_root = tempdir().unwrap();
+        let nl = platform_newline();
+        fs::write(
+            temp_root.path().join("Cargo.toml"),
+            format!("[package]{nl}name='tmp'{nl}version='0.0.0'{nl}"),
+        )
+        .unwrap();
+
+        with_current_dir(temp_root.path(), || {
+            with_env_vars(&[(ENV_TRIPLETS_HF_TOKEN, "")], || {
+                let built = build_hf_sources(&roots);
+                assert_eq!(built.len(), 3, "all three sources should build");
+            });
+        });
+    }
+
+    #[test]
+    fn manual_http_client_sharing_works() {
+        // Pre-building a client and setting it on multiple configs should
+        // produce working sources that share the same connection pool.
+        let dir = tempdir().unwrap();
+        let client =
+            HuggingFaceRowSource::build_http_client(&test_config(dir.path().to_path_buf()))
+                .expect("build_http_client should succeed");
+
+        for i in 0..3 {
+            let mut config = test_config(dir.path().join(format!("src_{i}")));
+            config.text_columns = vec!["text".to_string()];
+            config.http_client = Some(client.clone());
+            let source = HuggingFaceRowSource::new(config);
+            assert!(source.is_ok(), "source {i} with shared client should build");
+        }
     }
 
     #[test]
