@@ -2277,7 +2277,10 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 if let Some(sample) =
                     self.make_text_sample_for_split(&recipe, None, target_split, &mut rng)
                 {
-                    let key = chunk_key(&sample.chunk);
+                    // Use (record_id, text) as dedup key so that text-columns mode sources
+                    // (Anchor and Context sections with identical text) cannot produce
+                    // duplicate text content in the same batch.
+                    let key = text_dedup_key(&sample.chunk);
                     if seen.insert(key) {
                         samples.push(sample);
                     }
@@ -2361,7 +2364,10 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 recipe_steps = recipe_steps.saturating_add(order.len());
             }
             if let Some((_recipe, sample)) = sample {
-                let key = chunk_key(&sample.chunk);
+                // Use (record_id, text) as dedup key so that text-columns mode sources
+                // (Anchor and Context sections with identical text) cannot produce
+                // duplicate text content in the same batch.
+                let key = text_dedup_key(&sample.chunk);
                 if seen.insert(key) {
                     samples.push(sample);
                 }
@@ -2811,7 +2817,7 @@ fn same_selector_pair_is_valid(
     positive_chunk: &RecordChunk,
     enforce_window_pair: bool,
 ) -> bool {
-    if chunk_key(anchor_chunk) == chunk_key(positive_chunk) {
+    if triplet_chunk_key(anchor_chunk) == triplet_chunk_key(positive_chunk) {
         return false;
     }
     if !enforce_window_pair {
@@ -3100,7 +3106,18 @@ fn strategy_reason(strategy: &NegativeStrategy) -> &'static str {
     }
 }
 
-fn chunk_key(chunk: &RecordChunk) -> String {
+/// Dedup key for text batch generation: (record_id, text).
+///
+/// Unlike `triplet_chunk_key` which compares structural identity
+/// (record_id, section_idx, window_index), this key compares actual
+/// text content. This prevents text-columns mode sources (where Anchor
+/// and Context sections carry identical text) from producing duplicate
+/// samples from the same record.
+fn text_dedup_key(chunk: &RecordChunk) -> (String, String) {
+    (chunk.record_id.clone(), chunk.text.clone())
+}
+
+fn triplet_chunk_key(chunk: &RecordChunk) -> String {
     match &chunk.view {
         ChunkView::Window { index, .. } => {
             format!("{}|{}|w|{}", chunk.record_id, chunk.section_idx, index)
