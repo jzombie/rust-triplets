@@ -8247,6 +8247,201 @@ fn source_epoch_is_propagated_to_ingestion_on_resume() {
 }
 
 #[test]
+fn resume_restores_epoch_and_step_counter_together() {
+    // Combined regression test covering both epoch and step counter
+    // restoration on resume.  Individual tests cover each dimension
+    // separately, but this is the explicit combined assertion:
+    //
+    //   After save → resume, BOTH source_epoch AND step_counter must
+    //   equal their saved values.  A mismatch in either breaks the
+    //   deterministic seed chain that sources receive on refresh.
+    //
+    // Structure:
+    //   1. Create sampler on a FileSplitStore, register a source.
+    //   2. Drive the ingestion at epoch 0 to advance step_counter.
+    //   3. set_epoch(1) — resets step_counter to 0.
+    //   4. Drive ingestion at epoch 1 to advance step_counter again.
+    //   5. Save state; capture saved_epoch and saved_step.
+    //   6. Create fresh sampler on the same store.
+    //   7. Load state; verify BOTH source_epoch and step_counter restored.
+    let split = SplitRatios {
+        train: 0.7,
+        validation: 0.2,
+        test: 0.1,
+    };
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("epoch_step_resume_store");
+
+    let config = SamplerConfig {
+        seed: 42,
+        split,
+        allowed_splits: vec![SplitLabel::Train],
+        // Use a minimal non-empty config so ingest_internal_for_split
+        // initialises the ingestion layer correctly.
+        recipes: vec![TripletRecipe {
+            name: "ep_step".into(),
+            anchor: Selector::Role(SectionRole::Anchor),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 1.0,
+            instruction: None,
+            allow_same_anchor_positive: false,
+        }],
+        text_recipes: Vec::new(),
+        ..SamplerConfig::default()
+    };
+
+    let records: Vec<DataRecord> = (0..6)
+        .map(|i| {
+            trader_record(
+                &format!("ep_step::rec_{i:02}"),
+                "2025-01-01",
+                &format!("Title {i}"),
+                &format!("Body {i} with enough context for sampling"),
+            )
+        })
+        .collect();
+
+    // Phase 1 — drive ingestion at epoch 0, then epoch 1, save.
+    let (saved_epoch, saved_step) = {
+        let store = Arc::new(FileSplitStore::open(&store_path, split, 42).unwrap());
+        let sampler = TripletSampler::new(config.clone(), Arc::clone(&store));
+        sampler.register_source(Box::new(InMemorySource::from_records(
+            "src",
+            records.clone(),
+        )));
+
+        {
+            let mut inner = sampler.inner.lock().unwrap();
+            // Call ingest_internal_for_split to load cursors and trigger
+            // the first refresh, which increments step from 0 to 1.
+            inner.ingest_internal(SplitLabel::Train).unwrap();
+            // A second call: caches still have data, so advance() is used.
+            // Advance with a rolling refresh increments step from 1 to 2.
+            inner.ingest_internal(SplitLabel::Train).unwrap();
+            // A third call: same pattern, step 2 to 3.
+            inner.ingest_internal(SplitLabel::Train).unwrap();
+        }
+
+        // Advance to epoch 1 — resets step_counter to 0.
+        sampler.set_epoch(1).unwrap();
+
+        {
+            let mut inner = sampler.inner.lock().unwrap();
+            // Each call triggers a refresh (step 0→1, 1→2, 2→3).
+            inner.ingest_internal(SplitLabel::Train).unwrap();
+            inner.ingest_internal(SplitLabel::Train).unwrap();
+            inner.ingest_internal(SplitLabel::Train).unwrap();
+        }
+
+        // Capture step and epoch BEFORE saving.
+        let (pre_save_step, pre_save_epoch) = {
+            let inner = sampler.inner.lock().unwrap();
+            let step = inner
+                .ingestion
+                .snapshot_cursors()
+                .iter()
+                .find(|(k, _)| k == "__step__")
+                .map(|(_, v)| *v)
+                .unwrap();
+            (step, inner.source_epoch)
+        };
+
+        sampler.save_sampler_state(None).unwrap();
+
+        // Read back what was persisted.
+        let persisted = store.load_sampler_state().unwrap().unwrap();
+        let persisted_step = persisted
+            .source_stream_cursors
+            .iter()
+            .find(|(k, _)| k == "__step__")
+            .map(|(_, v)| *v)
+            .unwrap();
+
+        assert_eq!(
+            persisted.source_epoch, pre_save_epoch,
+            "persisted source_epoch must match in-memory value"
+        );
+        assert_eq!(
+            persisted_step, pre_save_step,
+            "persisted __step__ must match in-memory step_counter"
+        );
+        assert!(
+            persisted.source_epoch > 0,
+            "source_epoch must have advanced past 0"
+        );
+        assert!(
+            persisted_step > 0,
+            "step_counter must have advanced past 0 after {} ingest calls",
+            pre_save_step
+        );
+
+        (persisted.source_epoch, persisted_step)
+    };
+
+    // Phase 2 — fresh sampler; verify BOTH are restored from the store.
+    {
+        let store = Arc::new(FileSplitStore::open(&store_path, split, 42).unwrap());
+        // 2a. The persisted payload itself must contain the saved values.
+        let persisted = store.load_sampler_state().unwrap().unwrap();
+        assert_eq!(
+            persisted.source_epoch, saved_epoch,
+            "persisted source_epoch must match saved value"
+        );
+        let persisted_step = persisted
+            .source_stream_cursors
+            .iter()
+            .find(|(k, _)| k == "__step__")
+            .map(|(_, v)| *v)
+            .unwrap();
+        assert_eq!(
+            persisted_step, saved_step,
+            "persisted __step__ must match saved value"
+        );
+
+        // 2b. After loading state into a new sampler, the first ingest call
+        //     triggers a refresh that increments step from saved → saved+1.
+        //     Verifying saved+1 proves the step counter was correctly
+        //     restored before the refresh (it continued, not restarted at 1).
+        let sampler = TripletSampler::new(config, Arc::clone(&store));
+        sampler.register_source(Box::new(InMemorySource::from_records("src", records)));
+
+        let mut inner = sampler.inner.lock().unwrap();
+        // ingest_internal triggers ensure_source_state (loads persisted
+        // epoch+step) before its first refresh.
+        inner.ingest_internal(SplitLabel::Train).unwrap();
+
+        assert_eq!(
+            inner.source_epoch, saved_epoch,
+            "sampler source_epoch must match saved value after resume"
+        );
+        assert_eq!(
+            inner.ingestion.source_epoch(),
+            saved_epoch,
+            "ingestion source_epoch must match saved value after resume"
+        );
+
+        let post_ingest_step = inner
+            .ingestion
+            .snapshot_cursors()
+            .iter()
+            .find(|(k, _)| k == "__step__")
+            .map(|(_, v)| *v)
+            .unwrap();
+        // After restore step ← saved_step, the mandatory first refresh
+        // after cache-wipe increments it: post_ingest = saved + 1.
+        assert_eq!(
+            post_ingest_step,
+            saved_step + 1,
+            "first post-resume refresh must advance step_counter from \
+             {saved_step} to {saved_step}+1, indicating it was restored \
+             rather than reset to 0"
+        );
+    }
+}
+
+#[test]
 fn oversampling_advances_cursors_on_large_records() {
     // All records (long_record, short_A, short_B, short_C) hash to Train
     // with seed=123 and train:0.7 ratios.
