@@ -949,6 +949,15 @@ impl RowCache {
 pub struct HuggingFaceRowSource {
     pub(crate) config: HuggingFaceRowsConfig,
     http_runtime: Arc<tokio::runtime::Runtime>,
+    /// Reusable `reqwest::Client` with a pooled TCP/TLS connection manager.
+    ///
+    /// Built once in [`HuggingFaceRowSource::new`] and cloned (internally
+    /// reference-counted) wherever an HTTP request is issued.  Sharing the
+    /// same client across all downloads, HEAD checks, and API queries avoids
+    /// the per-request TCP/TLS handshake overhead and eliminates the noisy
+    /// `CloseNotify`/`BrokenPipe` DEBUG traces from dropping short-lived
+    /// connection pools.
+    http_client: reqwest::Client,
     sampler_config: Arc<Mutex<Option<SamplerConfig>>>,
     state: Arc<Mutex<SourceState>>,
     cache: Arc<Mutex<RowCache>>,
@@ -966,6 +975,7 @@ impl Clone for HuggingFaceRowSource {
         Self {
             config: self.config.clone(),
             http_runtime: Arc::clone(&self.http_runtime),
+            http_client: self.http_client.clone(),
             sampler_config: Arc::clone(&self.sampler_config),
             state: Arc::clone(&self.state),
             cache: Arc::clone(&self.cache),
@@ -1002,6 +1012,8 @@ impl HuggingFaceRowSource {
     pub fn new(mut config: HuggingFaceRowsConfig) -> Result<Self, SamplerError> {
         let start_new = Instant::now();
         let http_runtime = Arc::new(Self::build_http_runtime(&config)?);
+        let http_client = Self::build_http_client(&config)?;
+
         if config.checkpoint_stride == 0 {
             return Err(SamplerError::Configuration(
                 "huggingface source checkpoint_stride must be > 0".to_string(),
@@ -1017,13 +1029,16 @@ impl HuggingFaceRowSource {
         // Validate the token up-front so callers get a clear error immediately
         // rather than silent degradation on later API calls.
         if config.hf_token.is_some() {
-            Self::validate_token_with_runtime(&config, &http_runtime)?;
+            Self::validate_token_with_runtime(&http_client, &config, &http_runtime)?;
         }
 
         // Auto-resolve ClassLabel columns from the datasets-server /info endpoint.
         // If the fetch fails the label_maps stay empty and raw integers are used.
-        config.label_maps =
-            Self::fetch_classlabel_maps_with_runtime(&config, Some(http_runtime.as_ref()));
+        config.label_maps = Self::fetch_classlabel_maps_with_runtime(
+            &http_client,
+            &config,
+            Some(http_runtime.as_ref()),
+        );
 
         fs::create_dir_all(&config.snapshot_dir).map_err(|err| {
             SamplerError::SourceUnavailable {
@@ -1050,19 +1065,22 @@ impl HuggingFaceRowSource {
         }
 
         let materialized_rows = discovered;
-        let total_rows =
-            match Self::fetch_global_row_count_with_runtime(&config, Some(http_runtime.as_ref())) {
-                Ok(value) => value,
-                Err(err) => {
-                    warn!(
-                        "[triplets:hf] {} global row count unavailable (datasets viewer may be \
+        let total_rows = match Self::fetch_global_row_count_with_runtime(
+            &http_client,
+            &config,
+            Some(http_runtime.as_ref()),
+        ) {
+            Ok(value) => value,
+            Err(err) => {
+                warn!(
+                    "[triplets:hf] {} global row count unavailable (datasets viewer may be \
                      disabled for this dataset); shard download is unaffected but expansion \
                      paging will be driven by local shard discovery only: {}",
-                        config.source_id, err
-                    );
-                    None
-                }
-            };
+                    config.source_id, err
+                );
+                None
+            }
+        };
 
         if let Some(global_total) = total_rows {
             info!(
@@ -1082,6 +1100,7 @@ impl HuggingFaceRowSource {
         Ok(Self {
             config,
             http_runtime,
+            http_client,
             sampler_config: Arc::new(Mutex::new(None)),
             state: Arc::new(Mutex::new(SourceState {
                 materialized_rows,
@@ -1889,20 +1908,25 @@ impl HuggingFaceRowSource {
     /// Resolve and filter remote shard candidates from manifest or repository listing.
     #[cfg(test)]
     fn list_remote_candidates(
+        http_client: &reqwest::Client,
         config: &HuggingFaceRowsConfig,
     ) -> Result<(Vec<String>, HashMap<String, u64>), SamplerError> {
-        Self::list_remote_candidates_with_runtime(config, None)
+        Self::list_remote_candidates_with_runtime(http_client, config, None)
     }
 
     /// Resolve and filter remote shard candidates from the datasets-server parquet
     /// manifest, falling back to hf-hub repository listing when the parquet endpoint
     /// is unavailable or returns no entries for the dataset/config.
     pub fn list_remote_candidates_with_runtime(
+        http_client: &reqwest::Client,
         config: &HuggingFaceRowsConfig,
         runtime: Option<&tokio::runtime::Runtime>,
     ) -> Result<(Vec<String>, HashMap<String, u64>), SamplerError> {
-        let manifest_result =
-            Self::list_remote_candidates_from_parquet_manifest_with_runtime(config, runtime);
+        let manifest_result = Self::list_remote_candidates_from_parquet_manifest_with_runtime(
+            http_client,
+            config,
+            runtime,
+        );
         match &manifest_result {
             Ok((candidates, candidate_sizes, matched_manifest_entries))
                 if *matched_manifest_entries > 0 =>
@@ -2112,12 +2136,12 @@ impl HuggingFaceRowSource {
     /// callers get a clear error at construction time rather than silent failures
     /// on later API calls.
     fn validate_token_with_runtime(
+        http_client: &reqwest::Client,
         config: &HuggingFaceRowsConfig,
         runtime: &tokio::runtime::Runtime,
     ) -> Result<(), SamplerError> {
         runtime.block_on(async {
-            let client = Self::http_client(config)?;
-            client
+            http_client
                 .get(Self::whoami_endpoint())
                 .send()
                 .await
@@ -2138,7 +2162,15 @@ impl HuggingFaceRowSource {
         })
     }
 
-    fn http_client(config: &HuggingFaceRowsConfig) -> Result<reqwest::Client, SamplerError> {
+    /// Build a `reqwest::Client` from the config's connection and auth settings.
+    ///
+    /// Creates a fresh client every call.  Callers that want connection pooling
+    /// (i.e. all production paths) should build the client **once** inside
+    /// [`HuggingFaceRowSource::new`] and reuse it by cloning — the client is
+    /// internally reference-counted so cloning shares the same connection pool.
+    pub(crate) fn build_http_client(
+        config: &HuggingFaceRowsConfig,
+    ) -> Result<reqwest::Client, SamplerError> {
         let mut builder = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(15))
             .timeout(Duration::from_secs(300));
@@ -2161,24 +2193,24 @@ impl HuggingFaceRowSource {
     }
 
     async fn fetch_http_body_text(
-        config: &HuggingFaceRowsConfig,
+        http_client: &reqwest::Client,
+        source_id: &str,
         endpoint: &str,
         query: &[(&str, &str)],
         endpoint_label: &str,
     ) -> Result<String, SamplerError> {
-        let client = Self::http_client(config)?;
-        let response = client
+        let response = http_client
             .get(endpoint)
             .query(query)
             .send()
             .await
             .map_err(|err| SamplerError::SourceUnavailable {
-                source_id: config.source_id.clone(),
+                source_id: source_id.to_string(),
                 reason: format!("failed querying {endpoint_label}: {err}"),
             })?
             .error_for_status()
             .map_err(|err| SamplerError::SourceUnavailable {
-                source_id: config.source_id.clone(),
+                source_id: source_id.to_string(),
                 reason: format!("{endpoint_label} returned non-success response: {err}"),
             })?;
 
@@ -2186,7 +2218,7 @@ impl HuggingFaceRowSource {
             .text()
             .await
             .map_err(|err| SamplerError::SourceUnavailable {
-                source_id: config.source_id.clone(),
+                source_id: source_id.to_string(),
                 reason: format!("failed reading {endpoint_label} response body: {err}"),
             })
     }
@@ -2202,11 +2234,15 @@ impl HuggingFaceRowSource {
     /// invalid JSON) emit a `warn!` log and return an empty map.  The caller
     /// continues normally with raw integer strings as a fallback.
     #[cfg(test)]
-    fn fetch_classlabel_maps(config: &HuggingFaceRowsConfig) -> HashMap<String, Vec<String>> {
-        Self::fetch_classlabel_maps_with_runtime(config, None)
+    fn fetch_classlabel_maps(
+        http_client: &reqwest::Client,
+        config: &HuggingFaceRowsConfig,
+    ) -> HashMap<String, Vec<String>> {
+        Self::fetch_classlabel_maps_with_runtime(http_client, config, None)
     }
 
     fn fetch_classlabel_maps_with_runtime(
+        http_client: &reqwest::Client,
         config: &HuggingFaceRowsConfig,
         runtime: Option<&tokio::runtime::Runtime>,
     ) -> HashMap<String, Vec<String>> {
@@ -2215,7 +2251,8 @@ impl HuggingFaceRowSource {
             runtime,
             config,
             Self::fetch_http_body_text(
-                config,
+                http_client,
+                &config.source_id,
                 endpoint,
                 &[
                     (HF_JSON_KEY_DATASET, &config.dataset_name),
@@ -2300,12 +2337,14 @@ impl HuggingFaceRowSource {
     /// Query datasets-server parquet manifest and derive shard candidates.
     #[cfg(test)]
     pub(crate) fn list_remote_candidates_from_parquet_manifest(
+        http_client: &reqwest::Client,
         config: &HuggingFaceRowsConfig,
     ) -> Result<ParquetManifestCandidates, SamplerError> {
-        Self::list_remote_candidates_from_parquet_manifest_with_runtime(config, None)
+        Self::list_remote_candidates_from_parquet_manifest_with_runtime(http_client, config, None)
     }
 
     fn list_remote_candidates_from_parquet_manifest_with_runtime(
+        http_client: &reqwest::Client,
         config: &HuggingFaceRowsConfig,
         runtime: Option<&tokio::runtime::Runtime>,
     ) -> Result<ParquetManifestCandidates, SamplerError> {
@@ -2327,7 +2366,8 @@ impl HuggingFaceRowSource {
             runtime,
             config,
             Self::fetch_http_body_text(
-                config,
+                http_client,
+                &config.source_id,
                 endpoint,
                 &query,
                 "datasets-server parquet endpoint",
@@ -2411,13 +2451,13 @@ impl HuggingFaceRowSource {
     /// header, `Ok(None)` for non-2xx responses or missing `Content-Length`,
     /// and `Err` for network / configuration failures.
     pub fn fetch_remote_size_with_runtime(
+        http_client: &reqwest::Client,
         config: &HuggingFaceRowsConfig,
         remote_url: &str,
         runtime: &tokio::runtime::Runtime,
     ) -> Result<Option<u64>, SamplerError> {
         runtime.block_on(async {
-            let client = Self::http_client(config)?;
-            let response = client.head(remote_url).send().await.map_err(|err| {
+            let response = http_client.head(remote_url).send().await.map_err(|err| {
                 SamplerError::SourceUnavailable {
                     source_id: config.source_id.clone(),
                     reason: format!("HEAD request failed for shard URL '{}': {err}", remote_url),
@@ -2521,12 +2561,14 @@ impl HuggingFaceRowSource {
     /// Fetch exact split row count metadata from datasets-server size endpoint.
     #[cfg(test)]
     fn fetch_global_row_count(
+        http_client: &reqwest::Client,
         config: &HuggingFaceRowsConfig,
     ) -> Result<Option<usize>, SamplerError> {
-        Self::fetch_global_row_count_with_runtime(config, None)
+        Self::fetch_global_row_count_with_runtime(http_client, config, None)
     }
 
     fn fetch_global_row_count_with_runtime(
+        http_client: &reqwest::Client,
         config: &HuggingFaceRowsConfig,
         runtime: Option<&tokio::runtime::Runtime>,
     ) -> Result<Option<usize>, SamplerError> {
@@ -2548,7 +2590,13 @@ impl HuggingFaceRowSource {
         let body = Self::block_on_http_with_runtime(
             runtime,
             config,
-            Self::fetch_http_body_text(config, endpoint, &query, "datasets-server size endpoint"),
+            Self::fetch_http_body_text(
+                http_client,
+                &config.source_id,
+                endpoint,
+                &query,
+                "datasets-server size endpoint",
+            ),
         )?;
 
         Self::parse_global_row_count_response(config, &body)
@@ -2610,6 +2658,7 @@ impl HuggingFaceRowSource {
     }
 
     fn download_remote_url_to_target_with_runtime(
+        http_client: &reqwest::Client,
         config: &HuggingFaceRowsConfig,
         remote_url: &str,
         target: &Path,
@@ -2638,11 +2687,11 @@ impl HuggingFaceRowSource {
             shard_label,
             target.display()
         );
+        let http_client = http_client.clone();
         let (total_bytes, elapsed) = Self::block_on_http_with_runtime(runtime, config, async {
             use tokio::io::AsyncWriteExt;
 
-            let client = Self::http_client(config)?;
-            let mut response = client
+            let mut response = http_client
                 .get(remote_url)
                 .send()
                 .await
@@ -2879,12 +2928,14 @@ impl HuggingFaceRowSource {
     /// Download a shard (URL or hf-hub path) and materialize it under snapshot dir.
     #[cfg(test)]
     fn download_and_materialize_shard(
+        http_client: &reqwest::Client,
         config: &HuggingFaceRowsConfig,
         remote_path: &str,
         expected_bytes: Option<u64>,
         shard_label: &str,
     ) -> Result<PathBuf, SamplerError> {
         Self::download_and_materialize_shard_with_runtime(
+            http_client,
             config,
             remote_path,
             expected_bytes,
@@ -2894,6 +2945,7 @@ impl HuggingFaceRowSource {
     }
 
     fn download_and_materialize_shard_with_runtime(
+        http_client: &reqwest::Client,
         config: &HuggingFaceRowsConfig,
         remote_path: &str,
         expected_bytes: Option<u64>,
@@ -2914,6 +2966,7 @@ impl HuggingFaceRowSource {
                 let temp_target =
                     Self::allocate_temp_download_path(config, remote_path, "parquet")?;
                 Self::download_remote_url_to_target_with_runtime(
+                    http_client,
                     config,
                     remote_url,
                     &temp_target,
@@ -2941,6 +2994,7 @@ impl HuggingFaceRowSource {
             }
 
             Self::download_remote_url_to_target_with_runtime(
+                http_client,
                 config,
                 remote_url,
                 &target,
@@ -2969,6 +3023,7 @@ impl HuggingFaceRowSource {
             );
             let temp_target = Self::allocate_temp_download_path(config, remote_path, "parquet")?;
             Self::download_remote_url_to_target_with_runtime(
+                http_client,
                 config,
                 &remote_url,
                 &temp_target,
@@ -3289,6 +3344,7 @@ impl HuggingFaceRowSource {
                 if state.remote_candidates.is_none() {
                     let (mut candidates, candidate_sizes) =
                         Self::list_remote_candidates_with_runtime(
+                            &self.http_client,
                             &self.config,
                             Some(self.http_runtime.as_ref()),
                         )?;
@@ -3429,6 +3485,7 @@ impl HuggingFaceRowSource {
                     } else {
                         let remote_url = Self::remote_url_for_candidate(&self.config, &remote_path);
                         match Self::fetch_remote_size_with_runtime(
+                            &self.http_client,
                             &self.config,
                             &remote_url,
                             &self.http_runtime,
@@ -3519,6 +3576,7 @@ impl HuggingFaceRowSource {
             self.config.source_id, label, cached_shards,
         );
         let local_path = Self::download_and_materialize_shard_with_runtime(
+            &self.http_client,
             &self.config,
             &remote_path,
             expected_bytes,
@@ -4949,11 +5007,22 @@ mod tests {
         config
     }
 
+    fn test_http_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(15))
+            .build()
+            .expect("test reqwest client should build")
+    }
+
     fn test_source(config: HuggingFaceRowsConfig) -> HuggingFaceRowSource {
         let http_runtime = Arc::new(HuggingFaceRowSource::build_http_runtime(&config).unwrap());
+        let http_client = HuggingFaceRowSource::build_http_client(&config)
+            .expect("test http_client should build");
         let source = HuggingFaceRowSource {
             config,
             http_runtime,
+            http_client,
             sampler_config: Arc::new(Mutex::new(None)),
             state: Arc::new(Mutex::new(SourceState {
                 materialized_rows: 0,
@@ -5263,7 +5332,8 @@ mod tests {
         config.dataset_name = "invalid///dataset".to_string();
         config.parquet_endpoint = format!("{TEST_UNREACHABLE_URL}/parquet");
 
-        let result = HuggingFaceRowSource::list_remote_candidates(&config);
+        let client = test_http_client();
+        let result = HuggingFaceRowSource::list_remote_candidates(&client, &config);
         assert!(result.is_err());
     }
 
@@ -5274,10 +5344,10 @@ mod tests {
         let temp = tempdir().unwrap();
         let mut config = test_config(temp.path().to_path_buf());
         config.hf_token = Some("test-bearer-token".to_string());
-        let result = HuggingFaceRowSource::http_client(&config);
+        let result = HuggingFaceRowSource::build_http_client(&config);
         assert!(
             result.is_ok(),
-            "http_client should succeed with a well-formed token string"
+            "build_http_client should succeed with a well-formed token string"
         );
     }
 
@@ -5290,8 +5360,10 @@ mod tests {
         let server = spawn_one_shot_http(b"{\"name\":\"testuser\"}".to_vec());
         let base_url = server.url().to_string();
         with_env_var(ENV_TRIPLETS_HF_WHOAMI_ENDPOINT, &base_url, || {
+            let client = test_http_client();
             let runtime = HuggingFaceRowSource::build_http_runtime(&config).unwrap();
-            let result = HuggingFaceRowSource::validate_token_with_runtime(&config, &runtime);
+            let result =
+                HuggingFaceRowSource::validate_token_with_runtime(&client, &config, &runtime);
             assert!(result.is_ok(), "200 response should pass token validation");
         });
     }
@@ -5305,8 +5377,10 @@ mod tests {
         let server = TestHttpServer::new(401, b"Unauthorized".to_vec());
         let base_url = server.url().to_string();
         with_env_var(ENV_TRIPLETS_HF_WHOAMI_ENDPOINT, &base_url, || {
+            let client = test_http_client();
             let runtime = HuggingFaceRowSource::build_http_runtime(&config).unwrap();
-            let result = HuggingFaceRowSource::validate_token_with_runtime(&config, &runtime);
+            let result =
+                HuggingFaceRowSource::validate_token_with_runtime(&client, &config, &runtime);
             assert!(result.is_err(), "401 response should fail token validation");
             match result {
                 Err(SamplerError::SourceUnavailable { reason, .. }) => {
@@ -6468,9 +6542,12 @@ mod tests {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
         let http_runtime = Arc::new(HuggingFaceRowSource::build_http_runtime(&config).unwrap());
+        let http_client = HuggingFaceRowSource::build_http_client(&config)
+            .expect("test http_client should build");
         let source = HuggingFaceRowSource {
             config,
             http_runtime,
+            http_client,
             sampler_config: Arc::new(Mutex::new(None)),
             state: Arc::new(Mutex::new(SourceState {
                 materialized_rows: 0,
@@ -6637,7 +6714,9 @@ mod tests {
         let mut config = test_config(dir.path().to_path_buf());
         config.dataset_name = "invalid///dataset".to_string();
 
+        let client = test_http_client();
         let err = HuggingFaceRowSource::download_and_materialize_shard(
+            &client,
             &config,
             "train/part-000.parquet",
             None,
@@ -6844,7 +6923,9 @@ mod tests {
         fs::create_dir_all(target.parent().unwrap()).unwrap();
         fs::write(&target, b"ok").unwrap();
 
+        let client = test_http_client();
         let resolved = HuggingFaceRowSource::download_and_materialize_shard(
+            &client,
             &config,
             candidate,
             Some(2),
@@ -6867,7 +6948,9 @@ mod tests {
         fs::create_dir_all(temp_target.parent().unwrap()).unwrap();
         fs::write(&temp_target, b"stale").unwrap();
 
+        let client = test_http_client();
         let out = HuggingFaceRowSource::download_and_materialize_shard(
+            &client,
             &config,
             &candidate,
             None,
@@ -7423,8 +7506,10 @@ mod tests {
         let base_url = server.url().to_string();
 
         config.parquet_endpoint = base_url;
+        let client = test_http_client();
         let (candidates, sizes, matched) =
-            HuggingFaceRowSource::list_remote_candidates_from_parquet_manifest(&config).unwrap();
+            HuggingFaceRowSource::list_remote_candidates_from_parquet_manifest(&client, &config)
+                .unwrap();
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(sizes.len(), 1);
@@ -7448,7 +7533,8 @@ mod tests {
         let base_url = server.url().to_string();
 
         config.size_endpoint = base_url.clone();
-        let rows = HuggingFaceRowSource::fetch_global_row_count(&config).unwrap();
+        let client = test_http_client();
+        let rows = HuggingFaceRowSource::fetch_global_row_count(&client, &config).unwrap();
         assert_eq!(rows, Some(12));
     }
 
@@ -7470,9 +7556,13 @@ mod tests {
         let base_url = server.url().to_string();
 
         config.size_endpoint = base_url;
-        let rows =
-            HuggingFaceRowSource::fetch_global_row_count_with_runtime(&config, Some(&runtime))
-                .unwrap();
+        let client = test_http_client();
+        let rows = HuggingFaceRowSource::fetch_global_row_count_with_runtime(
+            &client,
+            &config,
+            Some(&runtime),
+        )
+        .unwrap();
         assert_eq!(rows, Some(34));
     }
 
@@ -7523,7 +7613,8 @@ mod tests {
         let base_url = server.url().to_string();
 
         config.size_endpoint = base_url;
-        let rows = HuggingFaceRowSource::fetch_global_row_count(&config).unwrap();
+        let client = test_http_client();
+        let rows = HuggingFaceRowSource::fetch_global_row_count(&client, &config).unwrap();
         assert_eq!(rows, None);
     }
 
@@ -7542,7 +7633,9 @@ mod tests {
         let base_url = server.url().to_string();
 
         config.parquet_endpoint = base_url;
-        let (candidates, sizes) = HuggingFaceRowSource::list_remote_candidates(&config).unwrap();
+        let client = test_http_client();
+        let (candidates, sizes) =
+            HuggingFaceRowSource::list_remote_candidates(&client, &config).unwrap();
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(sizes.len(), 1);
@@ -7565,9 +7658,13 @@ mod tests {
         let base_url = server.url().to_string();
 
         config.parquet_endpoint = base_url;
-        let (candidates, sizes) =
-            HuggingFaceRowSource::list_remote_candidates_with_runtime(&config, Some(&runtime))
-                .unwrap();
+        let client = test_http_client();
+        let (candidates, sizes) = HuggingFaceRowSource::list_remote_candidates_with_runtime(
+            &client,
+            &config,
+            Some(&runtime),
+        )
+        .unwrap();
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(sizes.len(), 1);
@@ -7607,7 +7704,9 @@ mod tests {
 
         // Must return the full manifest candidate list without falling through to hf-hub.
         config.parquet_endpoint = base_url;
-        let (candidates, sizes) = HuggingFaceRowSource::list_remote_candidates(&config).unwrap();
+        let client = test_http_client();
+        let (candidates, sizes) =
+            HuggingFaceRowSource::list_remote_candidates(&client, &config).unwrap();
 
         assert_eq!(
             candidates.len(),
@@ -7625,7 +7724,9 @@ mod tests {
         let mut config = test_config(dir.path().to_path_buf());
         config.parquet_endpoint = TEST_UNREACHABLE_URL.to_string();
 
-        let result = HuggingFaceRowSource::list_remote_candidates_from_parquet_manifest(&config);
+        let client = test_http_client();
+        let result =
+            HuggingFaceRowSource::list_remote_candidates_from_parquet_manifest(&client, &config);
         assert!(result.is_err());
     }
 
@@ -7636,7 +7737,8 @@ mod tests {
         let mut config = test_config(dir.path().to_path_buf());
         config.size_endpoint = TEST_UNREACHABLE_URL.to_string();
 
-        let result = HuggingFaceRowSource::fetch_global_row_count(&config);
+        let client = test_http_client();
+        let result = HuggingFaceRowSource::fetch_global_row_count(&client, &config);
         assert!(result.is_err());
     }
 
@@ -7661,8 +7763,12 @@ mod tests {
         let base_url = server.url().to_string();
 
         config.info_endpoint = base_url;
-        let maps =
-            HuggingFaceRowSource::fetch_classlabel_maps_with_runtime(&config, Some(&runtime));
+        let client = test_http_client();
+        let maps = HuggingFaceRowSource::fetch_classlabel_maps_with_runtime(
+            &client,
+            &config,
+            Some(&runtime),
+        );
 
         assert_eq!(maps.len(), 1);
         assert_eq!(maps["sentiment"], vec!["neutral", "bullish", "bearish"]);
@@ -7678,7 +7784,9 @@ mod tests {
         let candidate =
             format!("url::{base_url}/datasets/org/ds/resolve/main/train/part-000.ndjson");
 
+        let client = test_http_client();
         let target = HuggingFaceRowSource::download_and_materialize_shard(
+            &client,
             &config,
             &candidate,
             None,
@@ -7712,7 +7820,9 @@ mod tests {
         fs::create_dir_all(target.parent().unwrap()).unwrap();
         fs::write(&target, b"bad").unwrap();
 
+        let client = test_http_client();
         let refreshed = HuggingFaceRowSource::download_and_materialize_shard(
+            &client,
             &config,
             &candidate,
             Some(payload.len() as u64),
@@ -8095,10 +8205,12 @@ mod tests {
         let mut config = test_config(dir.path().to_path_buf());
         config.hf_token = None;
 
+        let client = test_http_client();
         let runtime = HuggingFaceRowSource::build_http_runtime(&config).unwrap();
-        let size =
-            HuggingFaceRowSource::fetch_remote_size_with_runtime(&config, &base_url, &runtime)
-                .unwrap();
+        let size = HuggingFaceRowSource::fetch_remote_size_with_runtime(
+            &client, &config, &base_url, &runtime,
+        )
+        .unwrap();
         // Content-Length should match the payload size.
         assert_eq!(size, Some(payload.len() as u64));
     }
@@ -8114,10 +8226,12 @@ mod tests {
         let mut config = test_config(dir.path().to_path_buf());
         config.hf_token = None;
 
+        let client = test_http_client();
         let runtime = HuggingFaceRowSource::build_http_runtime(&config).unwrap();
-        let size =
-            HuggingFaceRowSource::fetch_remote_size_with_runtime(&config, &base_url, &runtime)
-                .unwrap();
+        let size = HuggingFaceRowSource::fetch_remote_size_with_runtime(
+            &client, &config, &base_url, &runtime,
+        )
+        .unwrap();
         assert_eq!(size, None, "non-2xx response should yield None");
     }
 
@@ -9776,7 +9890,8 @@ mod tests {
         let mut config = test_config(dir.path().to_path_buf());
         config.info_endpoint = TEST_UNREACHABLE_URL.to_string();
         // Port 1 is always unreachable; ureq returns an Err which must be handled.
-        let maps = HuggingFaceRowSource::fetch_classlabel_maps(&config);
+        let client = test_http_client();
+        let maps = HuggingFaceRowSource::fetch_classlabel_maps(&client, &config);
         assert!(
             maps.is_empty(),
             "unreachable endpoint must yield empty map, got: {maps:?}"
@@ -9792,7 +9907,8 @@ mod tests {
         let base_url = server.url().to_string();
 
         config.info_endpoint = base_url;
-        let maps = HuggingFaceRowSource::fetch_classlabel_maps(&config);
+        let client = test_http_client();
+        let maps = HuggingFaceRowSource::fetch_classlabel_maps(&client, &config);
         assert!(
             maps.is_empty(),
             "HTTP 404 response must yield empty map, got: {maps:?}"
@@ -9808,7 +9924,8 @@ mod tests {
         let base_url = server.url().to_string();
 
         config.info_endpoint = base_url;
-        let maps = HuggingFaceRowSource::fetch_classlabel_maps(&config);
+        let client = test_http_client();
+        let maps = HuggingFaceRowSource::fetch_classlabel_maps(&client, &config);
         assert!(
             maps.is_empty(),
             "malformed JSON must yield empty map, got: {maps:?}"
@@ -9836,7 +9953,8 @@ mod tests {
         let base_url = server.url().to_string();
 
         config.info_endpoint = base_url;
-        let maps = HuggingFaceRowSource::fetch_classlabel_maps(&config);
+        let client = test_http_client();
+        let maps = HuggingFaceRowSource::fetch_classlabel_maps(&client, &config);
         assert_eq!(maps.len(), 1);
         assert_eq!(maps["sentiment"], vec!["neutral", "bullish", "bearish"]);
     }
@@ -10054,7 +10172,8 @@ mod tests {
         let base_url = server.url().to_string();
 
         config.size_endpoint = base_url;
-        let result = HuggingFaceRowSource::fetch_global_row_count(&config);
+        let client = test_http_client();
+        let result = HuggingFaceRowSource::fetch_global_row_count(&client, &config);
 
         // The 501 surfaces as an Err so the caller (new()) can emit a warning;
         // it must not be silently swallowed as Ok(Some(0)) or similar.
@@ -10161,7 +10280,8 @@ mod tests {
         let base_url = server.url().to_string();
 
         config.info_endpoint = base_url;
-        let maps = HuggingFaceRowSource::fetch_classlabel_maps(&config);
+        let client = test_http_client();
+        let maps = HuggingFaceRowSource::fetch_classlabel_maps(&client, &config);
 
         assert!(
             maps.is_empty(),
@@ -10185,7 +10305,9 @@ mod tests {
         let base_url = server.url().to_string();
 
         config.parquet_endpoint = base_url;
-        let result = HuggingFaceRowSource::list_remote_candidates_from_parquet_manifest(&config);
+        let client = test_http_client();
+        let result =
+            HuggingFaceRowSource::list_remote_candidates_from_parquet_manifest(&client, &config);
 
         assert!(
             result.is_err(),

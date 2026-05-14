@@ -1499,10 +1499,15 @@ fn huggingface_live_e2e_candidate_and_shard_download() {
     // This is the same method called internally by `ensure_row_available()`.
     // We cache the result here so the HEAD assertion below has an expected
     // size to compare against.
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .expect("test reqwest client should build");
     let runtime =
         HuggingFaceRowSource::build_http_runtime(&config).expect("failed building tokio runtime");
     let (candidates, candidate_sizes) =
-        HuggingFaceRowSource::list_remote_candidates_with_runtime(&config, Some(&runtime))
+        HuggingFaceRowSource::list_remote_candidates_with_runtime(&client, &config, Some(&runtime))
             .expect("remote candidate discovery failed");
     assert!(
         !candidates.is_empty(),
@@ -1557,10 +1562,14 @@ fn huggingface_live_e2e_candidate_and_shard_download() {
         "remote_url_for_candidate should round-trip url:: candidate"
     );
 
-    let head_size =
-        HuggingFaceRowSource::fetch_remote_size_with_runtime(&config, &remote_url, &runtime)
-            .expect("HEAD request should succeed")
-            .expect("HEAD response should include Content-Length");
+    let head_size = HuggingFaceRowSource::fetch_remote_size_with_runtime(
+        &client,
+        &config,
+        &remote_url,
+        &runtime,
+    )
+    .expect("HEAD request should succeed")
+    .expect("HEAD response should include Content-Length");
 
     assert_eq!(
         head_size, manifest_size,
