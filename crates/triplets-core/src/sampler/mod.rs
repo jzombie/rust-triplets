@@ -941,11 +941,23 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     }
 
     fn advance_source_epoch(&mut self) {
+        // The epoch advanced, changing the sampling permutation.  Clear so
+        // that texts from the same cache snapshot can be re-sampled under
+        // the new ordering.  Without this, texts sampled in epoch N would
+        // be permanently blocked in epoch N+1 even if the record pool is
+        // identical.
         self.emitted_text_hashes.clear();
+        // Advance the epoch counter so source refreshes receive a different
+        // permutation seed (seed ^ epoch), producing a fresh traversal order.
         self.source_epoch = self.source_epoch.saturating_add(1);
         self.ingestion.set_source_epoch(self.source_epoch);
+        // Reset per-source record cursors so the new epoch starts from the
+        // beginning of each source's permuted index space (not from where the
+        // previous epoch left off).
         self.source_record_cursors.clear();
         self.source_cycle_idx = 0;
+        // Reset the wrapped-tracking so all sources are eligible for sampling
+        // in the new epoch.
         for source in &self.source_order {
             self.source_wrapped.insert(source.clone(), false);
         }
@@ -1820,10 +1832,25 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     fn sync_records_from_cache(&mut self) -> Result<(), SamplerError> {
         let mut snapshot = self.ingestion.all_records_snapshot();
         snapshot.sort_by(|a, b| a.id.cmp(&b.id));
+        // Replace the record pool with the current cache snapshot so that
+        // records evicted from the bounded in-memory cache no longer consume
+        // memory here.  Without this clear, stale records accumulate across
+        // cache refreshes, causing unbounded memory growth.
         self.records.clear();
+        // Rebuild the long-section set from the new record pool.  Without
+        // clearing first, sources whose records were evicted would leave
+        // stale entries, though this is bounded by num_sources in practice.
         self.sources_with_long_sections.clear();
+        // The cache snapshot has changed — records evicted, new records
+        // arrived.  Clear so that texts from the new window are eligible
+        // even if the same (record_id, text) was emitted before eviction.
+        // Without this, emitted_text_hashes accumulates across cache
+        // refreshes: unbounded growth proportional to source size.
         self.emitted_text_hashes.clear();
-        // Cursor state must never outlive a record snapshot boundary.
+        // Cursor state (BM25 hard-negative caches, chunk/role cursors) must
+        // never outlive a record snapshot boundary.  BM25 backend clears its
+        // negative cursors here; chunk/role cursors are pruned below in
+        // prune_cursor_state() against the new record pool.
         self.negative_backend.on_sync_start();
         for record in snapshot {
             if self.split_store.label_for(&record.id).is_none() {
