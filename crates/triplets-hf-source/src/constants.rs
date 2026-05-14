@@ -100,19 +100,23 @@ pub const HF_HTTP_REQUEST_TIMEOUT_SECS: u64 = 300;
 // ── Throttle / backoff policy ───────────────────────────────────────────────
 
 /// Base delay (milliseconds) before retrying a rate-limited or failed request.
+#[allow(dead_code)]
 pub const HF_THROTTLE_BASE_DELAY_MS: u64 = 200;
 
 /// Maximum random jitter (milliseconds) added to the base delay to spread
 /// retries across clients and avoid thundering-herd synchronization.
+#[allow(dead_code)]
 pub const HF_THROTTLE_ADAPTIVE_JITTER_MS: u64 = 100;
 
 /// Maximum number of concurrent in-flight requests per source. Shard
 /// downloads are serialised per source so this primarily limits overlapping
 /// API calls (parquet manifest, size, info) during startup.
+#[allow(dead_code)]
 pub const HF_THROTTLE_MAX_CONCURRENT: usize = 4;
 
 /// Maximum number of retry attempts for a single request before surfacing
 /// the error to the caller.
+#[allow(dead_code)]
 pub const HF_THROTTLE_MAX_RETRIES: usize = 3;
 
 /// Default base URL for the datasets-server parquet-manifest endpoint.

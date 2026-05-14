@@ -43,9 +43,12 @@ use crate::constants::{
     HF_REMOTE_EXPANSION_HEADROOM_MULTIPLIER, HF_REMOTE_URL_PREFIX,
     HF_RESOLVE_UNKNOWN_FALLBACK_PATH, HF_RESOLVE_URL_SEPARATOR, HF_SHARD_CANDIDATE_SEED_TAG,
     HF_SHARD_STORE_EXTENSION, HF_SHARD_STORE_META_ROWS_KEY, HF_SHARD_STORE_ROW_PREFIX,
-    HF_SHARD_STORE_SOURCE_SIZE_KEY, HF_SIZE_DEFAULT_ENDPOINT, HF_THROTTLE_ADAPTIVE_JITTER_MS,
-    HF_THROTTLE_BASE_DELAY_MS, HF_THROTTLE_MAX_CONCURRENT, HF_THROTTLE_MAX_RETRIES,
-    HF_WHOAMI_DEFAULT_ENDPOINT,
+    HF_SHARD_STORE_SOURCE_SIZE_KEY, HF_SIZE_DEFAULT_ENDPOINT, HF_WHOAMI_DEFAULT_ENDPOINT,
+};
+#[cfg(not(debug_assertions))]
+use crate::constants::{
+    HF_THROTTLE_ADAPTIVE_JITTER_MS, HF_THROTTLE_BASE_DELAY_MS, HF_THROTTLE_MAX_CONCURRENT,
+    HF_THROTTLE_MAX_RETRIES,
 };
 use chrono::{DateTime, Utc};
 use triplets_core::SamplerError;
@@ -2181,7 +2184,7 @@ impl HuggingFaceRowSource {
     pub(crate) fn build_http_client(
         config: &HuggingFaceRowsConfig,
     ) -> Result<ClientWithMiddleware, SamplerError> {
-        use reqwest_drive::{ClientBuilder, ThrottlePolicy, init_throttle};
+        use reqwest_drive::ClientBuilder;
 
         let mut builder = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(HF_HTTP_CONNECT_TIMEOUT_SECS))
@@ -2203,14 +2206,23 @@ impl HuggingFaceRowSource {
                 reason: format!("failed building reqwest client: {err}"),
             })?;
 
-        let throttle = init_throttle(ThrottlePolicy {
-            base_delay_ms: HF_THROTTLE_BASE_DELAY_MS,
-            adaptive_jitter_ms: HF_THROTTLE_ADAPTIVE_JITTER_MS,
-            max_concurrent: HF_THROTTLE_MAX_CONCURRENT,
-            max_retries: HF_THROTTLE_MAX_RETRIES,
-        });
+        #[cfg(not(debug_assertions))]
+        let throttle = {
+            use reqwest_drive::{ThrottlePolicy, init_throttle};
+            init_throttle(ThrottlePolicy {
+                base_delay_ms: HF_THROTTLE_BASE_DELAY_MS,
+                adaptive_jitter_ms: HF_THROTTLE_ADAPTIVE_JITTER_MS,
+                max_concurrent: HF_THROTTLE_MAX_CONCURRENT,
+                max_retries: HF_THROTTLE_MAX_RETRIES,
+            })
+        };
 
-        Ok(ClientBuilder::new(inner).with_arc(throttle).build())
+        let client = ClientBuilder::new(inner);
+        // Only attach throttle/backoff middleware in production — test
+        // environments use mock servers that fail fast and shouldn't retry.
+        #[cfg(not(debug_assertions))]
+        let client = client.with_arc(throttle);
+        Ok(client.build())
     }
 
     async fn fetch_http_body_text(
@@ -5049,8 +5061,9 @@ mod tests {
 
     fn test_source(config: HuggingFaceRowsConfig) -> HuggingFaceRowSource {
         let http_runtime = Arc::new(HuggingFaceRowSource::build_http_runtime(&config).unwrap());
-        let http_client = HuggingFaceRowSource::build_http_client(&config)
-            .expect("test http_client should build");
+        // Use a non-throttled client in tests — mock servers serve a single
+        // request then shut down, so retry backoff would add unnecessary delay.
+        let http_client = test_http_client();
         let source = HuggingFaceRowSource {
             config,
             http_runtime,
@@ -6574,8 +6587,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
         let http_runtime = Arc::new(HuggingFaceRowSource::build_http_runtime(&config).unwrap());
-        let http_client = HuggingFaceRowSource::build_http_client(&config)
-            .expect("test http_client should build");
+        let http_client = test_http_client();
         let source = HuggingFaceRowSource {
             config,
             http_runtime,
