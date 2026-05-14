@@ -2288,13 +2288,19 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         Err(SamplerError::Exhausted(RECIPE_LABEL_TRIPLETS.into()))
     }
 
-    /// Check whether `sample` passes the per-window text dedup.
-    /// Returns `true` and records a hash of the sample's text in
-    /// `emitted_text_hashes` when the text has not been emitted before
-    /// in the current record pool.
-    fn try_emit_text_sample(&mut self, sample: &TextSample) -> bool {
-        self.emitted_text_hashes
-            .insert(stable_hash_str(0, &sample.chunk.text))
+    /// Check whether `sample` passes both per-batch and per-window text dedup.
+    /// The per-batch set is never cleared mid-batch (survives epoch advances),
+    /// while `emitted_text_hashes` is cleared on epoch advance to allow fresh
+    /// permutations.  Both must pass for the sample to be emitted.
+    fn try_emit_text_sample(
+        &mut self,
+        sample: &TextSample,
+        batch_texts: &mut HashSet<String>,
+    ) -> bool {
+        batch_texts.insert(sample.chunk.text.clone())
+            && self
+                .emitted_text_hashes
+                .insert(stable_hash_str(0, &sample.chunk.text))
     }
 
     fn next_text_batch_inner_with_weights(
@@ -2319,6 +2325,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 &mut rng,
             );
             let mut samples = Vec::new();
+            let mut batch_texts = HashSet::new();
             let mut last_recipe_name = None;
             let mut recipe_pos = 0usize;
             let mut recipe_steps = 0usize;
@@ -2334,9 +2341,10 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 last_recipe_name = Some(recipe.name.clone());
                 if let Some(sample) =
                     self.make_text_sample_for_split(&recipe, None, target_split, &mut rng)
-                    && self.try_emit_text_sample(&sample)
                 {
-                    samples.push(sample);
+                    if self.try_emit_text_sample(&sample, &mut batch_texts) {
+                        samples.push(sample);
+                    }
                 }
             }
             if recipe_steps > 0 {
@@ -2355,6 +2363,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         }
 
         let mut samples = Vec::new();
+        let mut batch_texts = HashSet::new();
         let mut source_steps = 0usize;
         let mut cycle = (self.source_cycle_idx / sources.len()) as u64;
         let mut idx = self.source_cycle_idx % sources.len();
@@ -2406,18 +2415,18 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 if let Some(item) =
                     self.make_text_sample_for_split(&recipe, Some(source), target_split, &mut rng)
                 {
-                    recipe_steps = recipe_steps.saturating_add(offset + 1);
-                    *pos = (*pos + offset + 1) % order.len();
-                    sample = Some((recipe, item));
-                    break;
+                    if self.try_emit_text_sample(&item, &mut batch_texts) {
+                        recipe_steps = recipe_steps.saturating_add(offset + 1);
+                        *pos = (*pos + offset + 1) % order.len();
+                        sample = Some((recipe, item));
+                        break;
+                    }
                 }
             }
             if sample.is_none() {
                 recipe_steps = recipe_steps.saturating_add(order.len());
             }
-            if let Some((_recipe, sample)) = sample
-                && self.try_emit_text_sample(&sample)
-            {
+            if let Some((_recipe, sample)) = sample {
                 samples.push(sample);
             }
             idx += 1;
