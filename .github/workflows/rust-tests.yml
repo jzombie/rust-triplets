@@ -60,11 +60,12 @@ jobs:
           echo "hash=$HASH" >> "$GITHUB_OUTPUT"
 
       # Added caching step to speed up dependency builds.
+      # NOTE: ~/.cargo/bin/ excluded from cache to avoid flaky macOS
+      # issue where cached binaries overwrite freshly-installed toolchain.
       - name: Cache Cargo dependencies
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo/bin/
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/

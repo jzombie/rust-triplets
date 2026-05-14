@@ -1,4 +1,4 @@
-//! Shared mock HTTP servers and test utilities for HuggingFace source tests.
+//! Shared mock HTTP servers and test utilities for Hugging Face source tests.
 //!
 //! Used by both unit tests inside the `triplets-hf` crate and integration
 //! tests in `tests/huggingface_integration.rs` so that mock-server logic is

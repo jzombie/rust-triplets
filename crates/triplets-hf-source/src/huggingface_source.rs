@@ -1050,7 +1050,7 @@ impl HuggingFaceRowSource {
                         .enable_all()
                         .build()
                         .expect(
-                            "failed building shared tokio runtime for HuggingFace HTTP requests",
+                            "failed building shared tokio runtime for Hugging Face HTTP requests",
                         ),
                 )
             })
@@ -4792,7 +4792,7 @@ impl HuggingFaceRowSource {
         let source = self.clone();
         let handle = thread::spawn(move || {
             // Acquire the global expansion gate so only one source downloads
-            // a shard at a time across all HuggingFace sources.  The gate is
+            // a shard at a time across all Hugging Face sources.  The gate is
             // released when the thread exits (guard dropped).
             let _gate = EXPANSION_GATE
                 .get_or_init(|| std::sync::Mutex::new(()))

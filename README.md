@@ -118,6 +118,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Hugging Face Source
 
+> **Disclaimer:** This integration is not affiliated with, endorsed by, or associated with Hugging Face. "Hugging Face" is a trademark of Hugging Face, Inc.
+
 Streams rows directly from the Hugging Face Hub without requiring a full dataset download. Map dataset columns to anchor, positive, or plain-text roles the same way as the CSV source.
 
 ```rust,no_run
