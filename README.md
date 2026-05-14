@@ -334,7 +334,9 @@ own client with its own throttle.  Ten sources would allow up to 40 concurrent r
 potentially defeating rate-limit protection.  To share a client manually, pre-build it and
 set it on each config:
 
-```rust
+```rust,ignore
+// Example: sharing a client across multiple sources manually.
+// In practice, `build_hf_sources()` handles this automatically.
 let client = HuggingFaceRowSource::build_http_client(&config)?;
 
 for dataset in datasets {

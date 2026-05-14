@@ -7709,11 +7709,14 @@ mod tests {
     }
 
     #[test]
-    #[serial(global_state)]
     fn config_endpoint_fallback_for_empty_env_values() {
+        // `test_config` overrides endpoints to `TEST_UNREACHABLE_URL` for
+        // network isolation.  This test verifies the DEFAULT values from
+        // `HuggingFaceRowsConfig::new()`, so we call it directly.
         let dir = tempdir().unwrap();
 
-        let c = test_config(dir.path().to_path_buf());
+        let c =
+            HuggingFaceRowsConfig::new("ep_test", "org/dataset", "default", "train", dir.path());
         assert_eq!(c.parquet_endpoint, HF_PARQUET_DEFAULT_ENDPOINT);
         assert_eq!(c.size_endpoint, HF_SIZE_DEFAULT_ENDPOINT);
         assert_eq!(c.info_endpoint, HF_INFO_DEFAULT_ENDPOINT);
