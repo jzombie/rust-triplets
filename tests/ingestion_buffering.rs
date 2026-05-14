@@ -180,8 +180,8 @@ fn test_ingestion_interleaving_no_data_loss() {
 
     // Batch size of 4.
     let mut manager = IngestionManager::new(4, SamplerConfig::default());
-    manager.register_source(Box::new(source_a));
-    manager.register_source(Box::new(source_b));
+    manager.register_source(Box::new(source_a)).unwrap();
+    manager.register_source(Box::new(source_b)).unwrap();
 
     // --- Round 1 ---
     // Should fetch 4 from A (0-3) and 4 from B (0-3).
@@ -242,8 +242,12 @@ fn test_uneven_sources() {
         .collect();
 
     let mut manager = IngestionManager::new(2, SamplerConfig::default());
-    manager.register_source(Box::new(InMemorySource::from_records("A", records_a)));
-    manager.register_source(Box::new(InMemorySource::from_records("B", records_b)));
+    manager
+        .register_source(Box::new(InMemorySource::from_records("A", records_a)))
+        .unwrap();
+    manager
+        .register_source(Box::new(InMemorySource::from_records("B", records_b)))
+        .unwrap();
 
     // Round 1: Fetch A(0,1), B(0,1). Batch: A0, B0. Buffer: A1, B1.
     manager.refresh_all();
@@ -303,8 +307,8 @@ fn test_refresh_all_skips_non_empty_buffers() {
         ..SamplerConfig::default()
     };
     let mut manager = IngestionManager::new(6, config);
-    manager.register_source(Box::new(source_a));
-    manager.register_source(Box::new(source_b));
+    manager.register_source(Box::new(source_a)).unwrap();
+    manager.register_source(Box::new(source_b)).unwrap();
 
     manager.refresh_all();
     assert_eq!(calls_a.load(Ordering::Relaxed), 1);
@@ -334,8 +338,8 @@ fn test_force_refresh_all_always_calls_sources() {
     let source_b = PagedSource::new("B", vec![page_b], Arc::clone(&calls_b));
 
     let mut manager = IngestionManager::new(2, SamplerConfig::default());
-    manager.register_source(Box::new(source_a));
-    manager.register_source(Box::new(source_b));
+    manager.register_source(Box::new(source_a)).unwrap();
+    manager.register_source(Box::new(source_b)).unwrap();
 
     manager.refresh_all();
     assert_eq!(calls_a.load(Ordering::Relaxed), 1);
@@ -356,8 +360,12 @@ fn test_weighted_refresh_all_prefers_weighted_sources() {
         .collect();
 
     let mut manager = IngestionManager::new(4, SamplerConfig::default());
-    manager.register_source(Box::new(InMemorySource::from_records("A", records_a)));
-    manager.register_source(Box::new(InMemorySource::from_records("B", records_b)));
+    manager
+        .register_source(Box::new(InMemorySource::from_records("A", records_a)))
+        .unwrap();
+    manager
+        .register_source(Box::new(InMemorySource::from_records("B", records_b)))
+        .unwrap();
 
     let mut weights = HashMap::new();
     weights.insert("A".to_string(), 2.0);
@@ -382,8 +390,12 @@ fn test_weighted_refresh_all_skips_zero_weight_sources() {
         .collect();
 
     let mut manager = IngestionManager::new(6, SamplerConfig::default());
-    manager.register_source(Box::new(InMemorySource::from_records("A", records_a)));
-    manager.register_source(Box::new(InMemorySource::from_records("B", records_b)));
+    manager
+        .register_source(Box::new(InMemorySource::from_records("A", records_a)))
+        .unwrap();
+    manager
+        .register_source(Box::new(InMemorySource::from_records("B", records_b)))
+        .unwrap();
 
     let mut weights = HashMap::new();
     weights.insert("A".to_string(), 1.0);
@@ -413,9 +425,15 @@ fn test_weighted_refresh_all_zero_weight_does_not_reduce_batch() {
         .collect();
 
     let mut manager = IngestionManager::new(9, SamplerConfig::default());
-    manager.register_source(Box::new(InMemorySource::from_records("A", records_a)));
-    manager.register_source(Box::new(InMemorySource::from_records("B", records_b)));
-    manager.register_source(Box::new(InMemorySource::from_records("C", records_c)));
+    manager
+        .register_source(Box::new(InMemorySource::from_records("A", records_a)))
+        .unwrap();
+    manager
+        .register_source(Box::new(InMemorySource::from_records("B", records_b)))
+        .unwrap();
+    manager
+        .register_source(Box::new(InMemorySource::from_records("C", records_c)))
+        .unwrap();
 
     let mut weights = HashMap::new();
     weights.insert("A".to_string(), 1.0);
@@ -434,9 +452,15 @@ fn test_weighted_refresh_all_zero_weight_does_not_reduce_batch() {
 fn test_refresh_all_runs_sources_in_parallel() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let mut manager = IngestionManager::new(1, SamplerConfig::default());
-    manager.register_source(Box::new(ThreadIdSource::new("A", Arc::clone(&seen))));
-    manager.register_source(Box::new(ThreadIdSource::new("B", Arc::clone(&seen))));
-    manager.register_source(Box::new(ThreadIdSource::new("C", Arc::clone(&seen))));
+    manager
+        .register_source(Box::new(ThreadIdSource::new("A", Arc::clone(&seen))))
+        .unwrap();
+    manager
+        .register_source(Box::new(ThreadIdSource::new("B", Arc::clone(&seen))))
+        .unwrap();
+    manager
+        .register_source(Box::new(ThreadIdSource::new("C", Arc::clone(&seen))))
+        .unwrap();
 
     manager.refresh_all();
 
@@ -451,7 +475,9 @@ fn test_refresh_all_runs_sources_in_parallel() {
 #[test]
 fn test_refresh_stats_track_errors() {
     let mut manager = IngestionManager::new(1, SamplerConfig::default());
-    manager.register_source(Box::new(FailingSource::new("fail_a")));
+    manager
+        .register_source(Box::new(FailingSource::new("fail_a")))
+        .unwrap();
     manager.refresh_all();
 
     let stats = manager.source_refresh_stats();
@@ -470,7 +496,9 @@ fn test_refresh_stats_track_success_metrics() {
         .map(|i| create_dummy_record(&format!("A-{}", i)))
         .collect::<Vec<_>>();
     let mut manager = IngestionManager::new(3, SamplerConfig::default());
-    manager.register_source(Box::new(InMemorySource::from_records("ok_a", records)));
+    manager
+        .register_source(Box::new(InMemorySource::from_records("ok_a", records)))
+        .unwrap();
 
     manager.refresh_all();
 
@@ -528,10 +556,12 @@ fn advance_on_empty_buffer_fills_to_max_records_not_step() {
     }
 
     let mut manager = IngestionManager::new(max_records, SamplerConfig::default());
-    manager.register_source(Box::new(CountingSource {
-        inner: triplets::source::InMemorySource::from_records("counted", records),
-        calls: calls.clone(),
-    }));
+    manager
+        .register_source(Box::new(CountingSource {
+            inner: triplets::source::InMemorySource::from_records("counted", records),
+            calls: calls.clone(),
+        }))
+        .unwrap();
 
     // First advance: buffer is empty, must call source.refresh() once.
     manager.advance(step);
@@ -591,15 +621,19 @@ fn refreshed_sources_are_reported_per_cycle() {
     ]];
 
     let mut manager = IngestionManager::new(2, SamplerConfig::default());
-    manager.register_source(Box::new(PagedSource::new("A", a_pages, calls_a)));
-    manager.register_source(Box::new(PagedSource::new("B", b_pages, calls_b)));
+    manager
+        .register_source(Box::new(PagedSource::new("A", a_pages, calls_a)))
+        .unwrap();
+    manager
+        .register_source(Box::new(PagedSource::new("B", b_pages, calls_b)))
+        .unwrap();
 
     manager.refresh_all();
     let refreshed_first: HashSet<String> =
         manager.last_refreshed_sources().iter().cloned().collect();
     assert_eq!(
         refreshed_first,
-        HashSet::from(["A".to_string(), "B".to_string()])
+        HashSet::from(["A".to_string(), "B".to_string()]),
     );
 
     manager.refresh_all();
@@ -624,8 +658,12 @@ fn refreshed_sources_is_empty_when_no_source_refresh_occurs() {
     ]];
 
     let mut manager = IngestionManager::new(2, SamplerConfig::default());
-    manager.register_source(Box::new(PagedSource::new("left", pages_a, calls_a)));
-    manager.register_source(Box::new(PagedSource::new("right", pages_b, calls_b)));
+    manager
+        .register_source(Box::new(PagedSource::new("left", pages_a, calls_a)))
+        .unwrap();
+    manager
+        .register_source(Box::new(PagedSource::new("right", pages_b, calls_b)))
+        .unwrap();
 
     manager.refresh_all();
     let refreshed_first: HashSet<String> =

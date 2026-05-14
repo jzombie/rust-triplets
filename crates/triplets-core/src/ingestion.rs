@@ -1,5 +1,5 @@
 use crate::config::SamplerConfig;
-use crate::constants::splits::STEP_CURSOR_KEY;
+use crate::constants::splits::{STEP_CURSOR_KEY, is_reserved_source_id};
 use crate::data::DataRecord;
 use crate::errors::SamplerError;
 use crate::hash::derive_epoch_seed;
@@ -293,7 +293,17 @@ impl IngestionManager {
     }
 
     /// Register a source for on-demand ingestion.
-    pub fn register_source(&mut self, source: Box<dyn DataSource + 'static>) {
+    ///
+    /// Returns an error if the source's `id()` matches the reserved `__*__`
+    /// pattern used for internal synthetic/metadata source identifiers.
+    pub fn register_source(
+        &mut self,
+        source: Box<dyn DataSource + 'static>,
+    ) -> Result<(), SamplerError> {
+        let source_id = source.id().to_string();
+        if is_reserved_source_id(&source_id) {
+            return Err(SamplerError::ReservedSourceId(source_id));
+        }
         let cache = RecordCache::new(self.max_records);
         self.sources.push(SourceState {
             source,
@@ -302,6 +312,7 @@ impl IngestionManager {
             cache,
             stats: SourceRefreshStats::default(),
         });
+        Ok(())
     }
 
     /// Load persisted per-source stream cursors.
@@ -915,17 +926,19 @@ mod tests {
         manager.load_cursors(&[]);
 
         let refreshes = Arc::new(AtomicUsize::new(0));
-        manager.register_source(Box::new(ScriptedSource::new(
-            "cursor_source",
-            refreshes,
-            vec![Ok(SourceSnapshot {
-                records: vec![make_record("id_1", "original_source")],
-                cursor: SourceCursor {
-                    last_seen: Utc::now(),
-                    revision: 33,
-                },
-            })],
-        )));
+        manager
+            .register_source(Box::new(ScriptedSource::new(
+                "cursor_source",
+                refreshes,
+                vec![Ok(SourceSnapshot {
+                    records: vec![make_record("id_1", "original_source")],
+                    cursor: SourceCursor {
+                        last_seen: Utc::now(),
+                        revision: 33,
+                    },
+                })],
+            )))
+            .unwrap();
         assert!(manager.has_sources());
 
         manager.load_cursors(&[("cursor_source".to_string(), 7)]);
@@ -949,21 +962,23 @@ mod tests {
     fn advance_uses_buffer_before_refreshing_again() {
         let refreshes = Arc::new(AtomicUsize::new(0));
         let mut manager = IngestionManager::new(5, SamplerConfig::default());
-        manager.register_source(Box::new(ScriptedSource::new(
-            "buffered",
-            refreshes.clone(),
-            vec![Ok(SourceSnapshot {
-                records: vec![
-                    make_record("a", "x"),
-                    make_record("b", "x"),
-                    make_record("c", "x"),
-                ],
-                cursor: SourceCursor {
-                    last_seen: Utc::now(),
-                    revision: 1,
-                },
-            })],
-        )));
+        manager
+            .register_source(Box::new(ScriptedSource::new(
+                "buffered",
+                refreshes.clone(),
+                vec![Ok(SourceSnapshot {
+                    records: vec![
+                        make_record("a", "x"),
+                        make_record("b", "x"),
+                        make_record("c", "x"),
+                    ],
+                    cursor: SourceCursor {
+                        last_seen: Utc::now(),
+                        revision: 1,
+                    },
+                })],
+            )))
+            .unwrap();
 
         manager.advance(1);
         assert_eq!(refreshes.load(Ordering::SeqCst), 1);
@@ -978,30 +993,32 @@ mod tests {
     fn force_refresh_clears_buffer_and_fetches_again() {
         let refreshes = Arc::new(AtomicUsize::new(0));
         let mut manager = IngestionManager::new(4, SamplerConfig::default());
-        manager.register_source(Box::new(ScriptedSource::new(
-            "force",
-            refreshes.clone(),
-            vec![
-                Ok(SourceSnapshot {
-                    records: vec![
-                        make_record("r1", "x"),
-                        make_record("r2", "x"),
-                        make_record("r3", "x"),
-                    ],
-                    cursor: SourceCursor {
-                        last_seen: Utc::now(),
-                        revision: 10,
-                    },
-                }),
-                Ok(SourceSnapshot {
-                    records: vec![make_record("r4", "x")],
-                    cursor: SourceCursor {
-                        last_seen: Utc::now(),
-                        revision: 11,
-                    },
-                }),
-            ],
-        )));
+        manager
+            .register_source(Box::new(ScriptedSource::new(
+                "force",
+                refreshes.clone(),
+                vec![
+                    Ok(SourceSnapshot {
+                        records: vec![
+                            make_record("r1", "x"),
+                            make_record("r2", "x"),
+                            make_record("r3", "x"),
+                        ],
+                        cursor: SourceCursor {
+                            last_seen: Utc::now(),
+                            revision: 10,
+                        },
+                    }),
+                    Ok(SourceSnapshot {
+                        records: vec![make_record("r4", "x")],
+                        cursor: SourceCursor {
+                            last_seen: Utc::now(),
+                            revision: 11,
+                        },
+                    }),
+                ],
+            )))
+            .unwrap();
 
         manager.advance(1);
         assert_eq!(manager.all_records_len(), 1);
@@ -1017,28 +1034,32 @@ mod tests {
     #[test]
     fn weighted_drain_respects_zero_and_fallback_weights() {
         let mut manager = IngestionManager::new(6, SamplerConfig::default());
-        manager.register_source(Box::new(ScriptedSource::new(
-            "a",
-            Arc::new(AtomicUsize::new(0)),
-            vec![Ok(SourceSnapshot {
-                records: vec![make_record("a1", "a"), make_record("a2", "a")],
-                cursor: SourceCursor {
-                    last_seen: Utc::now(),
-                    revision: 1,
-                },
-            })],
-        )));
-        manager.register_source(Box::new(ScriptedSource::new(
-            "b",
-            Arc::new(AtomicUsize::new(0)),
-            vec![Ok(SourceSnapshot {
-                records: vec![make_record("b1", "b"), make_record("b2", "b")],
-                cursor: SourceCursor {
-                    last_seen: Utc::now(),
-                    revision: 1,
-                },
-            })],
-        )));
+        manager
+            .register_source(Box::new(ScriptedSource::new(
+                "a",
+                Arc::new(AtomicUsize::new(0)),
+                vec![Ok(SourceSnapshot {
+                    records: vec![make_record("a1", "a"), make_record("a2", "a")],
+                    cursor: SourceCursor {
+                        last_seen: Utc::now(),
+                        revision: 1,
+                    },
+                })],
+            )))
+            .unwrap();
+        manager
+            .register_source(Box::new(ScriptedSource::new(
+                "b",
+                Arc::new(AtomicUsize::new(0)),
+                vec![Ok(SourceSnapshot {
+                    records: vec![make_record("b1", "b"), make_record("b2", "b")],
+                    cursor: SourceCursor {
+                        last_seen: Utc::now(),
+                        revision: 1,
+                    },
+                })],
+            )))
+            .unwrap();
 
         let mut only_b = HashMap::new();
         only_b.insert("a".to_string(), 0.0);
@@ -1052,28 +1073,32 @@ mod tests {
         assert!(ids.iter().all(|id| id.starts_with('b')));
 
         let mut manager_fallback = IngestionManager::new(6, SamplerConfig::default());
-        manager_fallback.register_source(Box::new(ScriptedSource::new(
-            "a",
-            Arc::new(AtomicUsize::new(0)),
-            vec![Ok(SourceSnapshot {
-                records: vec![make_record("a1", "a")],
-                cursor: SourceCursor {
-                    last_seen: Utc::now(),
-                    revision: 2,
-                },
-            })],
-        )));
-        manager_fallback.register_source(Box::new(ScriptedSource::new(
-            "b",
-            Arc::new(AtomicUsize::new(0)),
-            vec![Ok(SourceSnapshot {
-                records: vec![make_record("b1", "b")],
-                cursor: SourceCursor {
-                    last_seen: Utc::now(),
-                    revision: 2,
-                },
-            })],
-        )));
+        manager_fallback
+            .register_source(Box::new(ScriptedSource::new(
+                "a",
+                Arc::new(AtomicUsize::new(0)),
+                vec![Ok(SourceSnapshot {
+                    records: vec![make_record("a1", "a")],
+                    cursor: SourceCursor {
+                        last_seen: Utc::now(),
+                        revision: 2,
+                    },
+                })],
+            )))
+            .unwrap();
+        manager_fallback
+            .register_source(Box::new(ScriptedSource::new(
+                "b",
+                Arc::new(AtomicUsize::new(0)),
+                vec![Ok(SourceSnapshot {
+                    records: vec![make_record("b1", "b")],
+                    cursor: SourceCursor {
+                        last_seen: Utc::now(),
+                        revision: 2,
+                    },
+                })],
+            )))
+            .unwrap();
 
         let mut all_zero = HashMap::new();
         all_zero.insert("a".to_string(), 0.0);
@@ -1093,17 +1118,21 @@ mod tests {
     #[test]
     fn refresh_errors_and_panics_update_source_stats() {
         let mut manager = IngestionManager::new(4, SamplerConfig::default());
-        manager.register_source(Box::new(ScriptedSource::new(
-            "err_source",
-            Arc::new(AtomicUsize::new(0)),
-            vec![Err(SamplerError::SourceUnavailable {
-                source_id: "err_source".to_string(),
-                reason: "boom".to_string(),
-            })],
-        )));
-        manager.register_source(Box::new(PanicSource {
-            id: "panic_source".to_string(),
-        }));
+        manager
+            .register_source(Box::new(ScriptedSource::new(
+                "err_source",
+                Arc::new(AtomicUsize::new(0)),
+                vec![Err(SamplerError::SourceUnavailable {
+                    source_id: "err_source".to_string(),
+                    reason: "boom".to_string(),
+                })],
+            )))
+            .unwrap();
+        manager
+            .register_source(Box::new(PanicSource {
+                id: "panic_source".to_string(),
+            }))
+            .unwrap();
 
         manager.refresh_all();
         let stats = manager.source_refresh_stats();
@@ -1137,17 +1166,19 @@ mod tests {
     #[test]
     fn force_refresh_with_weights_path_is_exercised() {
         let mut manager = IngestionManager::new(3, SamplerConfig::default());
-        manager.register_source(Box::new(ScriptedSource::new(
-            "w",
-            Arc::new(AtomicUsize::new(0)),
-            vec![Ok(SourceSnapshot {
-                records: vec![make_record("w1", "w")],
-                cursor: SourceCursor {
-                    last_seen: Utc::now(),
-                    revision: 3,
-                },
-            })],
-        )));
+        manager
+            .register_source(Box::new(ScriptedSource::new(
+                "w",
+                Arc::new(AtomicUsize::new(0)),
+                vec![Ok(SourceSnapshot {
+                    records: vec![make_record("w1", "w")],
+                    cursor: SourceCursor {
+                        last_seen: Utc::now(),
+                        revision: 3,
+                    },
+                })],
+            )))
+            .unwrap();
 
         let mut weights = HashMap::new();
         weights.insert("w".to_string(), 1.0);
@@ -1158,11 +1189,13 @@ mod tests {
     #[test]
     fn advance_with_weights_rejects_unknown_source() {
         let mut manager = IngestionManager::new(4, SamplerConfig::default());
-        manager.register_source(Box::new(ScriptedSource::new(
-            "known",
-            Arc::new(AtomicUsize::new(0)),
-            vec![],
-        )));
+        manager
+            .register_source(Box::new(ScriptedSource::new(
+                "known",
+                Arc::new(AtomicUsize::new(0)),
+                vec![],
+            )))
+            .unwrap();
 
         let mut weights = HashMap::new();
         weights.insert("known".to_string(), 1.0);
@@ -1178,11 +1211,13 @@ mod tests {
     #[test]
     fn refresh_all_with_weights_rejects_negative_weight() {
         let mut manager = IngestionManager::new(4, SamplerConfig::default());
-        manager.register_source(Box::new(ScriptedSource::new(
-            "src",
-            Arc::new(AtomicUsize::new(0)),
-            vec![],
-        )));
+        manager
+            .register_source(Box::new(ScriptedSource::new(
+                "src",
+                Arc::new(AtomicUsize::new(0)),
+                vec![],
+            )))
+            .unwrap();
 
         let mut weights = HashMap::new();
         weights.insert("src".to_string(), -1.0);
@@ -1197,11 +1232,13 @@ mod tests {
     #[test]
     fn force_refresh_all_with_weights_rejects_unknown_source() {
         let mut manager = IngestionManager::new(4, SamplerConfig::default());
-        manager.register_source(Box::new(ScriptedSource::new(
-            "real",
-            Arc::new(AtomicUsize::new(0)),
-            vec![],
-        )));
+        manager
+            .register_source(Box::new(ScriptedSource::new(
+                "real",
+                Arc::new(AtomicUsize::new(0)),
+                vec![],
+            )))
+            .unwrap();
 
         let mut weights = HashMap::new();
         weights.insert("ghost".to_string(), 1.0);
@@ -1278,19 +1315,23 @@ mod tests {
 
         // --- epoch 0 ---
         let mut manager = IngestionManager::new(4, config.clone());
-        manager.register_source(Box::new(SeedCapturingSource::new(
-            "src",
-            Arc::clone(&seeds_epoch0),
-        )));
+        manager
+            .register_source(Box::new(SeedCapturingSource::new(
+                "src",
+                Arc::clone(&seeds_epoch0),
+            )))
+            .unwrap();
         // source_epoch defaults to 0; refresh_all passes derive_epoch_seed(base, 0)
         manager.refresh_all();
 
         // --- epoch 1 ---
         let mut manager2 = IngestionManager::new(4, config.clone());
-        manager2.register_source(Box::new(SeedCapturingSource::new(
-            "src",
-            Arc::clone(&seeds_epoch1),
-        )));
+        manager2
+            .register_source(Box::new(SeedCapturingSource::new(
+                "src",
+                Arc::clone(&seeds_epoch1),
+            )))
+            .unwrap();
         manager2.set_source_epoch(1);
         manager2.refresh_all();
 
@@ -1333,10 +1374,12 @@ mod tests {
         let seeds = Arc::new(Mutex::new(Vec::new()));
 
         let mut manager = IngestionManager::new(4, config.clone());
-        manager.register_source(Box::new(SeedCapturingSource::new(
-            "src",
-            Arc::clone(&seeds),
-        )));
+        manager
+            .register_source(Box::new(SeedCapturingSource::new(
+                "src",
+                Arc::clone(&seeds),
+            )))
+            .unwrap();
 
         // Epoch 0, first refresh: step_counter goes 0→1, seed = derive(A, 0) ^ 1
         manager.refresh_all();
@@ -1381,17 +1424,19 @@ mod tests {
             Arc::clone(&store),
         );
         let refreshes = Arc::new(AtomicUsize::new(0));
-        sampler.register_source(Box::new(ScriptedSource::new(
-            "src",
-            refreshes,
-            vec![Ok(SourceSnapshot {
-                records: vec![make_record("r1", "src")],
-                cursor: SourceCursor {
-                    last_seen: Utc::now(),
-                    revision: 1,
-                },
-            })],
-        )));
+        sampler
+            .register_source(Box::new(ScriptedSource::new(
+                "src",
+                refreshes,
+                vec![Ok(SourceSnapshot {
+                    records: vec![make_record("r1", "src")],
+                    cursor: SourceCursor {
+                        last_seen: Utc::now(),
+                        revision: 1,
+                    },
+                })],
+            )))
+            .unwrap();
 
         // Call a batch method to trigger ensure_source_state() so
         // save_sampler_state actually writes.  The batch itself may
@@ -1416,17 +1461,19 @@ mod tests {
 
         // Feed the REAL loaded cursors to a new manager
         let mut manager2 = IngestionManager::new(4, SamplerConfig::default());
-        manager2.register_source(Box::new(ScriptedSource::new(
-            "src",
-            Arc::new(AtomicUsize::new(0)),
-            vec![Ok(SourceSnapshot {
-                records: vec![make_record("r2", "src")],
-                cursor: SourceCursor {
-                    last_seen: Utc::now(),
-                    revision: 2,
-                },
-            })],
-        )));
+        manager2
+            .register_source(Box::new(ScriptedSource::new(
+                "src",
+                Arc::new(AtomicUsize::new(0)),
+                vec![Ok(SourceSnapshot {
+                    records: vec![make_record("r2", "src")],
+                    cursor: SourceCursor {
+                        last_seen: Utc::now(),
+                        revision: 2,
+                    },
+                })],
+            )))
+            .unwrap();
         manager2.load_cursors(&loaded.source_stream_cursors);
 
         // step_counter restored to saved value, refresh increments
@@ -1501,17 +1548,19 @@ mod tests {
     #[test]
     fn refresh_paths_handle_zero_capacity_and_no_sources() {
         let mut manager = IngestionManager::new(0, SamplerConfig::default());
-        manager.register_source(Box::new(ScriptedSource::new(
-            "zero_capacity",
-            Arc::new(AtomicUsize::new(0)),
-            vec![Ok(SourceSnapshot {
-                records: vec![make_record("r1", "zero_capacity")],
-                cursor: SourceCursor {
-                    last_seen: Utc::now(),
-                    revision: 1,
-                },
-            })],
-        )));
+        manager
+            .register_source(Box::new(ScriptedSource::new(
+                "zero_capacity",
+                Arc::new(AtomicUsize::new(0)),
+                vec![Ok(SourceSnapshot {
+                    records: vec![make_record("r1", "zero_capacity")],
+                    cursor: SourceCursor {
+                        last_seen: Utc::now(),
+                        revision: 1,
+                    },
+                })],
+            )))
+            .unwrap();
         manager.refresh_all();
         assert!(manager.all_caches_empty());
 
@@ -1567,18 +1616,24 @@ mod tests {
         );
 
         let mut manager = IngestionManager::new(30, SamplerConfig::default());
-        manager.register_source(Box::new(FairSource {
-            id: "src_0".to_string(),
-            refresh_count: Arc::clone(&counts.0),
-        }));
-        manager.register_source(Box::new(FairSource {
-            id: "src_1".to_string(),
-            refresh_count: Arc::clone(&counts.1),
-        }));
-        manager.register_source(Box::new(FairSource {
-            id: "src_2".to_string(),
-            refresh_count: Arc::clone(&counts.2),
-        }));
+        manager
+            .register_source(Box::new(FairSource {
+                id: "src_0".to_string(),
+                refresh_count: Arc::clone(&counts.0),
+            }))
+            .unwrap();
+        manager
+            .register_source(Box::new(FairSource {
+                id: "src_1".to_string(),
+                refresh_count: Arc::clone(&counts.1),
+            }))
+            .unwrap();
+        manager
+            .register_source(Box::new(FairSource {
+                id: "src_2".to_string(),
+                refresh_count: Arc::clone(&counts.2),
+            }))
+            .unwrap();
 
         // First refresh_all fills all buffers.
         manager.refresh_all();
@@ -1663,10 +1718,12 @@ mod tests {
         let counts: Vec<Arc<AtomicUsize>> = (0..5).map(|_| Arc::new(AtomicUsize::new(0))).collect();
         let mut manager = IngestionManager::new(40, SamplerConfig::default());
         for (i, count) in counts.iter().enumerate() {
-            manager.register_source(Box::new(SimpleSource {
-                id: format!("src_{i}"),
-                refresh_count: Arc::clone(count),
-            }));
+            manager
+                .register_source(Box::new(SimpleSource {
+                    id: format!("src_{i}"),
+                    refresh_count: Arc::clone(count),
+                }))
+                .unwrap();
         }
 
         manager.refresh_all();
@@ -1766,10 +1823,12 @@ mod tests {
         let sampler = TripletSampler::new(config, store);
 
         for (i, count) in counts.iter().enumerate() {
-            sampler.register_source(Box::new(Tracked {
-                id: format!("src_{i}"),
-                refresh_count: Arc::clone(count),
-            }));
+            sampler
+                .register_source(Box::new(Tracked {
+                    id: format!("src_{i}"),
+                    refresh_count: Arc::clone(count),
+                }))
+                .unwrap();
         }
         sampler
     }
@@ -1903,5 +1962,54 @@ mod tests {
             vec![6, 6, 6, 26, 11],
             "unequal-weights: unexpected refresh distribution"
         );
+    }
+
+    #[test]
+    fn register_source_rejects_reserved_id_pattern() {
+        use crate::constants::splits::is_reserved_source_id;
+
+        let mut manager = IngestionManager::new(4, SamplerConfig::default());
+
+        // Verify the utility function catches common patterns
+        assert!(is_reserved_source_id("__step__"));
+        assert!(is_reserved_source_id("__meta__"));
+        assert!(is_reserved_source_id("__anything__"));
+        assert!(is_reserved_source_id("__x__"));
+        assert!(!is_reserved_source_id(""));
+        assert!(!is_reserved_source_id("__"));
+        assert!(!is_reserved_source_id("___"));
+        assert!(!is_reserved_source_id("normal_source"));
+        assert!(!is_reserved_source_id("_prefix_suffix_"));
+        assert!(!is_reserved_source_id("__unclosed"));
+        assert!(!is_reserved_source_id("unopened__"));
+
+        // Registering with a `__*__` id should fail
+        let result = manager.register_source(Box::new(ScriptedSource::new(
+            "__reserved__",
+            Arc::new(AtomicUsize::new(0)),
+            vec![],
+        )));
+        assert!(
+            result.is_err(),
+            "register_source should reject reserved source id"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, SamplerError::ReservedSourceId(id) if id == "__reserved__"),
+            "expected ReservedSourceId error, got: {err}"
+        );
+
+        // Verify source was NOT registered (still zero sources)
+        assert!(!manager.has_sources());
+
+        // Normal source IDs still work
+        manager
+            .register_source(Box::new(ScriptedSource::new(
+                "valid_source",
+                Arc::new(AtomicUsize::new(0)),
+                vec![],
+            )))
+            .unwrap();
+        assert!(manager.has_sources());
     }
 }

@@ -110,7 +110,9 @@ fn assert_diversity_for_seed_and_split(seed: u64, allowed_split: SplitLabel) {
     let records: Vec<DataRecord> = (0..300).map(|idx| build_record("unit", idx)).collect();
     let store = Arc::new(DeterministicSplitStore::new(split, 77).unwrap());
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(InMemorySource::from_records("unit", records)));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("unit", records)))
+        .unwrap();
 
     let mut anchor_counts: HashMap<RecordId, usize> = HashMap::new();
     let mut negative_counts: HashMap<RecordId, usize> = HashMap::new();

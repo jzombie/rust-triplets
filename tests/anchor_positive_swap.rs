@@ -99,7 +99,9 @@ fn make_sampler(
         ..SamplerConfig::default()
     };
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(InMemorySource::from_records(source_name, records)));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(source_name, records)))
+        .unwrap();
     sampler
 }
 
@@ -278,10 +280,12 @@ fn negative_is_unaffected_by_swap() {
         ..SamplerConfig::default()
     };
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "neg_src",
-        make_records("neg_src", 6),
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "neg_src",
+            make_records("neg_src", 6),
+        )))
+        .unwrap();
 
     for _ in 0..20 {
         let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();

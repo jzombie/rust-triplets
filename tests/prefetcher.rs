@@ -76,12 +76,16 @@ fn prefetcher_yields_triplet_batches() {
     ];
 
     let sampler = Arc::new(TripletSampler::new(config, store));
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "source_a", records_a,
-    )));
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "source_b", records_b,
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "source_a", records_a,
+        )))
+        .unwrap();
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "source_b", records_b,
+        )))
+        .unwrap();
 
     let prefetcher = Arc::clone(&sampler).prefetch_triplet_batches(SplitLabel::Train, 2);
     let start = Instant::now();

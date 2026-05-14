@@ -218,7 +218,9 @@ fn single_source_shuffled_cycles_records_before_repeat() {
         build_record("only", "b", 2),
         build_record("only", "c", 3),
     ];
-    sampler.register_source(Box::new(InMemorySource::from_records("only", records)));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("only", records)))
+        .unwrap();
 
     let mut seen = Vec::new();
     for _ in 0..4 {
@@ -242,8 +244,12 @@ fn multi_source_shuffled_visits_all_sources() {
 
     let source_a = vec![build_record("a", "a1", 1), build_record("a", "a2", 2)];
     let source_b = vec![build_record("b", "b1", 1), build_record("b", "b2", 2)];
-    sampler.register_source(Box::new(InMemorySource::from_records("a", source_a)));
-    sampler.register_source(Box::new(InMemorySource::from_records("b", source_b)));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("a", source_a)))
+        .unwrap();
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("b", source_b)))
+        .unwrap();
 
     let mut sources: Vec<SourceId> = Vec::new();
     for _ in 0..2 {
@@ -270,36 +276,48 @@ fn restart_with_persisted_state_continues_sequence() {
 
     let source_a = vec![build_record("a", "a1", 1), build_record("a", "a2", 2)];
     let source_b = vec![build_record("b", "b1", 1), build_record("b", "b2", 2)];
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "a",
-        source_a.clone(),
-    )));
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "b",
-        source_b.clone(),
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "a",
+            source_a.clone(),
+        )))
+        .unwrap();
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "b",
+            source_b.clone(),
+        )))
+        .unwrap();
 
     let first_batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
     let first = first_batch.triplets[0].anchor.record_id.clone();
     sampler.save_sampler_state(None).unwrap();
     // Restart from persisted state: should continue from the stored sequence.
     let resumed = TripletSampler::new(build_config(11, 4, split), Arc::clone(&store));
-    resumed.register_source(Box::new(InMemorySource::from_records(
-        "a",
-        source_a.clone(),
-    )));
-    resumed.register_source(Box::new(InMemorySource::from_records(
-        "b",
-        source_b.clone(),
-    )));
+    resumed
+        .register_source(Box::new(InMemorySource::from_records(
+            "a",
+            source_a.clone(),
+        )))
+        .unwrap();
+    resumed
+        .register_source(Box::new(InMemorySource::from_records(
+            "b",
+            source_b.clone(),
+        )))
+        .unwrap();
 
     let next_batch = resumed.next_triplet_batch(SplitLabel::Train).unwrap();
     let next = next_batch.triplets[0].anchor.record_id.clone();
 
     // Second restart to assert determinism from storage alone.
     let resumed_again = TripletSampler::new(build_config(11, 4, split), store);
-    resumed_again.register_source(Box::new(InMemorySource::from_records("a", source_a)));
-    resumed_again.register_source(Box::new(InMemorySource::from_records("b", source_b)));
+    resumed_again
+        .register_source(Box::new(InMemorySource::from_records("a", source_a)))
+        .unwrap();
+    resumed_again
+        .register_source(Box::new(InMemorySource::from_records("b", source_b)))
+        .unwrap();
 
     let repeated_batch = resumed_again.next_triplet_batch(SplitLabel::Train).unwrap();
     let repeated = repeated_batch.triplets[0].anchor.record_id.clone();
@@ -327,14 +345,18 @@ fn negatives_change_after_restart_when_state_is_persisted() {
         build_record("b", "b2", 2),
         build_record("b", "b3", 3),
     ];
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "a",
-        source_a.clone(),
-    )));
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "b",
-        source_b.clone(),
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "a",
+            source_a.clone(),
+        )))
+        .unwrap();
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "b",
+            source_b.clone(),
+        )))
+        .unwrap();
 
     let first_batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
     let first_negatives: Vec<RecordId> = first_batch
@@ -345,8 +367,12 @@ fn negatives_change_after_restart_when_state_is_persisted() {
     sampler.save_sampler_state(None).unwrap();
 
     let resumed = TripletSampler::new(build_config(13, 4, split), store);
-    resumed.register_source(Box::new(InMemorySource::from_records("a", source_a)));
-    resumed.register_source(Box::new(InMemorySource::from_records("b", source_b)));
+    resumed
+        .register_source(Box::new(InMemorySource::from_records("a", source_a)))
+        .unwrap();
+    resumed
+        .register_source(Box::new(InMemorySource::from_records("b", source_b)))
+        .unwrap();
 
     let second_batch = resumed.next_triplet_batch(SplitLabel::Train).unwrap();
     let second_negatives: Vec<RecordId> = second_batch
@@ -381,14 +407,18 @@ fn batch_size_invariance_matches_sequence() {
         let mut config = build_config(17, batch_size, split);
         config.ingestion_max_records = 6;
         let sampler = TripletSampler::new(config, store);
-        sampler.register_source(Box::new(InMemorySource::from_records(
-            "a",
-            source_a.clone(),
-        )));
-        sampler.register_source(Box::new(InMemorySource::from_records(
-            "b",
-            source_b.clone(),
-        )));
+        sampler
+            .register_source(Box::new(InMemorySource::from_records(
+                "a",
+                source_a.clone(),
+            )))
+            .unwrap();
+        sampler
+            .register_source(Box::new(InMemorySource::from_records(
+                "b",
+                source_b.clone(),
+            )))
+            .unwrap();
         let mut ids = Vec::new();
         while ids.len() < 6 {
             let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
@@ -416,7 +446,9 @@ fn negatives_are_not_positive_record() {
     let sampler = TripletSampler::new(build_config(19, 2, split), store);
 
     let source_a = vec![build_record("a", "a1", 1), build_record("a", "a2", 2)];
-    sampler.register_source(Box::new(InMemorySource::from_records("a", source_a)));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("a", source_a)))
+        .unwrap();
 
     let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
     for triplet in batch.triplets {
@@ -436,10 +468,12 @@ fn refresh_only_writes_new_split_assignments() {
     let sampler = TripletSampler::new(build_config(23, 1, split), Arc::clone(&store));
 
     let source_a = vec![build_record("a", "a1", 1), build_record("a", "a2", 2)];
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "a",
-        source_a.clone(),
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "a",
+            source_a.clone(),
+        )))
+        .unwrap();
     let first_upserts = store.upsert_count();
 
     let second_upserts = store.upsert_count();
@@ -470,14 +504,18 @@ fn deterministic_order_with_fixed_seed_and_unchanged_dataset() {
         let mut config = build_config(31, 4, split);
         config.ingestion_max_records = 6;
         let sampler = TripletSampler::new(config, store);
-        sampler.register_source(Box::new(InMemorySource::from_records(
-            "a",
-            source_a.clone(),
-        )));
-        sampler.register_source(Box::new(InMemorySource::from_records(
-            "b",
-            source_b.clone(),
-        )));
+        sampler
+            .register_source(Box::new(InMemorySource::from_records(
+                "a",
+                source_a.clone(),
+            )))
+            .unwrap();
+        sampler
+            .register_source(Box::new(InMemorySource::from_records(
+                "b",
+                source_b.clone(),
+            )))
+            .unwrap();
         let mut ids = Vec::new();
         for _ in 0..3 {
             let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
@@ -528,7 +566,9 @@ fn zero_test_split_still_cycles_all_records_when_train_and_validation_allowed() 
         records.push(build_record("unit", suffix, day as u32 + 1));
     }
 
-    sampler.register_source(Box::new(InMemorySource::from_records("unit", records)));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("unit", records)))
+        .unwrap();
 
     let mut seen_train = std::collections::HashSet::new();
     let mut seen_validation = std::collections::HashSet::new();
@@ -647,10 +687,12 @@ fn allowed_split_records_eventually_sampled_across_ratio_matrix() {
             );
         }
 
-        sampler.register_source(Box::new(InMemorySource::from_records(
-            format!("matrix_case_{case_idx}"),
-            records,
-        )));
+        sampler
+            .register_source(Box::new(InMemorySource::from_records(
+                format!("matrix_case_{case_idx}"),
+                records,
+            )))
+            .unwrap();
 
         let mut seen: HashMap<SplitLabel, std::collections::HashSet<RecordId>> = HashMap::new();
         for split_label in &allowed_splits {
@@ -758,10 +800,12 @@ fn allowed_split_records_eventually_sampled_across_ratio_matrix_via_generic_trip
             );
         }
 
-        sampler.register_source(Box::new(InMemorySource::from_records(
-            format!("generic_matrix_case_{case_idx}"),
-            records,
-        )));
+        sampler
+            .register_source(Box::new(InMemorySource::from_records(
+                format!("generic_matrix_case_{case_idx}"),
+                records,
+            )))
+            .unwrap();
 
         let mut seen: HashMap<SplitLabel, std::collections::HashSet<RecordId>> = HashMap::new();
         for split_label in &allowed_splits {
@@ -825,7 +869,9 @@ fn per_epoch_shuffle_changes_source_order() {
         build_record("only", "e", 5),
         build_record("only", "f", 6),
     ];
-    sampler.register_source(Box::new(InMemorySource::from_records("only", records)));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("only", records)))
+        .unwrap();
 
     let mut first_epoch = Vec::new();
     for _ in 0..2 {
@@ -898,10 +944,12 @@ fn many_sources_small_batch_distribution_is_uniform() {
         let records: Vec<_> = (0..RECORDS_PER_SOURCE)
             .map(|j| build_record(&source_name, &format!("r{j}"), j as u32))
             .collect();
-        sampler.register_source(Box::new(InMemorySource::from_records(
-            &source_name,
-            records,
-        )));
+        sampler
+            .register_source(Box::new(InMemorySource::from_records(
+                &source_name,
+                records,
+            )))
+            .unwrap();
     }
 
     // ── Sampling phase ───────────────────────────────────────────────────────

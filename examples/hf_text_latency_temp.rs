@@ -188,7 +188,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     )?);
     let sampler = Arc::new(TripletSampler::new(config, split_store.clone()));
     for source in sources {
-        sampler.register_source(source);
+        sampler
+            .register_source(source)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
     }
 
     println!(

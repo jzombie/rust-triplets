@@ -413,7 +413,10 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         derive_epoch_seed(self.config.seed, self.source_epoch)
     }
 
-    fn register_source(&mut self, source: Box<dyn DataSource + 'static>) {
+    fn register_source(
+        &mut self,
+        source: Box<dyn DataSource + 'static>,
+    ) -> Result<(), SamplerError> {
         let source_id = source.id().to_string();
         if !self.using_config_triplet_recipes {
             let triplets = source.default_triplet_recipes();
@@ -428,7 +431,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 }
             }
         }
-        self.ingestion.register_source(source);
+        self.ingestion.register_source(source)?;
+        Ok(())
     }
 
     fn set_epoch(&mut self, epoch: u64) -> Result<(), SamplerError> {
@@ -3051,9 +3055,15 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     }
 
     /// Register a data source for ingestion and sampling.
-    pub fn register_source(&self, source: Box<dyn DataSource + 'static>) {
+    ///
+    /// Returns an error if the source's `id()` matches the reserved `__*__`
+    /// pattern used for internal synthetic/metadata source identifiers.
+    pub fn register_source(
+        &self,
+        source: Box<dyn DataSource + 'static>,
+    ) -> Result<(), SamplerError> {
         let mut inner = self.inner.lock().unwrap();
-        inner.register_source(source);
+        inner.register_source(source)
     }
 
     /// Force sampler epoch to `epoch` (advanced deterministic replay control).

@@ -9330,7 +9330,7 @@ mod tests {
             },
             split_store,
         );
-        sampler.register_source(Box::new(source.clone()));
+        sampler.register_source(Box::new(source.clone())).unwrap();
 
         // Collect cursor_revision values over several next_text_batch calls.
         // Multiple next_text_batch calls should succeed (each triggers a
@@ -9388,7 +9388,7 @@ mod tests {
                 seed: 42, ingestion_max_records: 10, batch_size: 1,
                 ..SamplerConfig::default()
             }, split);
-            sampler.register_source(Box::new(source.clone()));
+            sampler.register_source(Box::new(source.clone())).unwrap();
             (source, sampler, tmp)
         };
 

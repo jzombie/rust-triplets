@@ -133,6 +133,15 @@ pub mod splits {
     pub const EPOCH_HASHES_PREFIX: &[u8] = b"epoch_hashes:";
     /// Tombstone marker byte for clearing persisted epoch hashes.
     pub const EPOCH_RECORD_TOMBSTONE: u8 = b'-';
+
+    /// Check whether a source id matches the `__*__` reserved pattern.
+    ///
+    /// Source identifiers starting and ending with double underscores are
+    /// reserved for internal synthetic/metadata use (e.g. `__step__`).
+    /// Users may not register sources whose `id()` returns such a value.
+    pub fn is_reserved_source_id(id: &str) -> bool {
+        id.len() >= 4 && id.starts_with("__") && id.ends_with("__")
+    }
     /// Version tag for persisted epoch-meta records.
     pub const EPOCH_META_RECORD_VERSION: u8 = 1;
     /// Version tag for persisted epoch-hash records.

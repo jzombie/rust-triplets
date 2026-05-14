@@ -43,4 +43,9 @@ pub enum SamplerError {
         /// Human-readable explanation.
         reason: String,
     },
+    /// Source ID matches the reserved `__*__` pattern and cannot be used by user sources.
+    #[error(
+        "source id '{0}' matches the reserved `__*__` pattern and cannot be used by user-registered sources"
+    )]
+    ReservedSourceId(SourceId),
 }

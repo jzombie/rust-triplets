@@ -251,7 +251,7 @@ fn huggingface_text_mode_triplets_can_use_different_anchor_positive_windows() {
 
     let store = Arc::new(DeterministicSplitStore::new(split, 777).expect("split store"));
     let sampler = TripletSampler::new(sampler_config, store);
-    sampler.register_source(Box::new(source));
+    sampler.register_source(Box::new(source)).unwrap();
 
     let mut observed_hf_simcse_triplet = false;
     let mut observed_different_window_pair = false;
@@ -2062,7 +2062,7 @@ fn sampler_next_text_batch_re_expands_after_cache_eviction() {
         ..SamplerConfig::default()
     };
     let sampler = TripletSampler::new(sampler_config, split_store);
-    sampler.register_source(Box::new(source));
+    sampler.register_source(Box::new(source)).unwrap();
 
     // ── Drain shards through next_text_batch ────────────────────────────
     //
@@ -2290,7 +2290,7 @@ fn full_pipeline_samples_across_downloaded_shards() {
         ..SamplerConfig::default()
     };
     let sampler = TripletSampler::new(sampler_config, split_store);
-    sampler.register_source(Box::new(source));
+    sampler.register_source(Box::new(source)).unwrap();
 
     // Sample several batches.  The first batch triggers bootstrap (downloads
     // shard 0), subsequent batches trigger background expansion (shards 1, 2).
