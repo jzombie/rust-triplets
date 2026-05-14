@@ -87,6 +87,13 @@ pub const HF_BASE_URL: &str = "https://huggingface.co";
 pub const HF_DATASETS_BASE_URL: &str = "https://huggingface.co/datasets";
 
 // ---------------------------------------------------------------------------
+// ── Shared tokio runtime ────────────────────────────────────────────────────
+
+/// Number of worker threads for the process-wide shared tokio multi-threaded
+/// runtime used by Hugging Face HTTP operations.
+pub const HF_SHARED_RUNTIME_WORKER_THREADS: usize = 2;
+
+// ---------------------------------------------------------------------------
 // ── HTTP client timeouts ────────────────────────────────────────────────────
 
 /// TCP/TLS connect timeout for the shared `reqwest::Client` (seconds).

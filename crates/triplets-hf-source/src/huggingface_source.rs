@@ -43,7 +43,8 @@ use crate::constants::{
     HF_REMOTE_EXPANSION_HEADROOM_MULTIPLIER, HF_REMOTE_URL_PREFIX,
     HF_RESOLVE_UNKNOWN_FALLBACK_PATH, HF_RESOLVE_URL_SEPARATOR, HF_SHARD_CANDIDATE_SEED_TAG,
     HF_SHARD_STORE_EXTENSION, HF_SHARD_STORE_META_ROWS_KEY, HF_SHARD_STORE_ROW_PREFIX,
-    HF_SHARD_STORE_SOURCE_SIZE_KEY, HF_SIZE_DEFAULT_ENDPOINT, HF_WHOAMI_DEFAULT_ENDPOINT,
+    HF_SHARD_STORE_SOURCE_SIZE_KEY, HF_SHARED_RUNTIME_WORKER_THREADS, HF_SIZE_DEFAULT_ENDPOINT,
+    HF_WHOAMI_DEFAULT_ENDPOINT,
 };
 #[cfg(not(debug_assertions))]
 use crate::constants::{
@@ -1045,7 +1046,7 @@ impl HuggingFaceRowSource {
             .get_or_init(|| {
                 Arc::new(
                     tokio::runtime::Builder::new_multi_thread()
-                        .worker_threads(2)
+                        .worker_threads(HF_SHARED_RUNTIME_WORKER_THREADS)
                         .enable_all()
                         .build()
                         .expect(
