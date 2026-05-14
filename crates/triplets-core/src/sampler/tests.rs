@@ -22,7 +22,7 @@ pub const FNV1A64_PRIME: u64 = 0x100000001b3;
 /// Number of batches sampled for deterministic sequence hash assertions.
 pub const FULL_SEQUENCE_LEN: usize = 45;
 /// Expected hash for deterministic text batch sequence.
-pub const TEXT_BATCH_SEQUENCE_HASH: u64 = 18406693596435159841;
+pub const TEXT_BATCH_SEQUENCE_HASH: u64 = 7962444922980597149;
 /// Expected hash for deterministic triplet batch sequence.
 #[cfg(not(feature = "bm25-mining"))]
 pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 7521776225374240393;
@@ -36,7 +36,7 @@ pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 17832018185824582948;
 #[cfg(feature = "bm25-mining")]
 pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 3528525448544850669;
 /// Expected hash for deterministic prefetch text batch sequence.
-pub const PREFETCH_TEXT_BATCH_SEQUENCE_HASH: u64 = 5552668211597897837;
+pub const PREFETCH_TEXT_BATCH_SEQUENCE_HASH: u64 = 15593577537707362833;
 /// Expected hash for deterministic prefetch triplet batch sequence.
 #[cfg(not(feature = "bm25-mining"))]
 pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 11869075277114531356;
@@ -2562,11 +2562,11 @@ fn split_order_is_train_val_test_for_text_batches() {
             "source_c::record_02".to_string(),
             "source_c::record_03".to_string(),
             "source_b::record_03".to_string(),
+            "source_b::record_03".to_string(),
             "source_c::record_02".to_string(),
             "source_c::record_06".to_string(),
             "source_b::record_07".to_string(),
-            "source_b::record_03".to_string(),
-            "source_c::record_06".to_string()
+            "source_c::record_03".to_string()
         ]
     );
 }
@@ -2640,9 +2640,9 @@ fn prefetch_text_batches_preserve_split_order() {
             "source_a::record_05".to_string(),
             "source_c::record_02".to_string(),
             "source_c::record_04".to_string(),
+            "source_a::record_05".to_string(),
             "source_c::record_05".to_string(),
             "source_b::record_07".to_string(),
-            "source_c::record_04".to_string(),
             "source_a::record_05".to_string()
         ]
     );
@@ -7378,7 +7378,6 @@ fn text_batch_prevents_duplicate_text_per_record_from_text_columns() {
     }
 }
 
-
 #[test]
 /// Verify that `consumed_text` prevents the same (record_id, text) pair
 /// from being sampled again across batches, regardless of source wrapping.
@@ -7431,7 +7430,61 @@ fn text_batch_prevents_repeat_across_batches() {
     }
 }
 
-fn text_sampling_cycles_recipes_over_time() {
+#[test]
+/// Verify that `emitted_text_hashes` is cleared on `sync_records_from_cache()`,
+/// allowing texts from previous ingestion windows to be re-sampled after a
+/// cache refresh.  Without this, the set would grow unboundedly and permanently
+/// block texts once emitted.
+fn emitted_text_hashes_allows_resample_after_cache_refresh() {
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+    let mut config = base_config();
+    config.batch_size = 1;
+    // Cache holds 2 records at a time so the window slides across refreshes.
+    config.ingestion_max_records = 2;
+    config.allowed_splits = vec![SplitLabel::Train];
+    config.split = split;
+    config.recipes = Vec::new();
+    config.text_recipes = vec![TextRecipe {
+        name: "anchor_text".into(),
+        selector: Selector::Role(SectionRole::Anchor),
+        weight: 1.0,
+        instruction: None,
+    }];
+
+    let store = Arc::new(DeterministicSplitStore::new(split, 42).unwrap());
+    let sampler = TripletSampler::new(config, store);
+
+    // Three records: "a" and "c" share the same text content.
+    let records: Vec<DataRecord> = vec![
+        ("rec_a", "hello"),
+        ("rec_b", "world"),
+        ("rec_c", "hello"),
+    ]
+    .into_iter()
+    .map(|(id, text)| {
+        let mut r = sample_record();
+        r.id = id.to_string();
+        r.sections[0].text = text.to_string();
+        r.sections[0].sentences = vec![text.to_string()];
+        r
+    })
+    .collect();
+    sampler.register_source(Box::new(InMemorySource::from_records("src", records)));
+
+    // Batch 1 — draws from window containing "rec_a", "rec_b".
+    let batch1 = sampler.next_text_batch(SplitLabel::Train).unwrap();
+    assert_eq!(batch1.samples.len(), 1);
+    let id1 = batch1.samples[0].chunk.record_id.clone();
+
+    // Batch 2 — draws the other record from the same window.
+    let batch2 = sampler.next_text_batch(SplitLabel::Train).unwrap();
+    assert_eq!(batch2.samples.len(), 1);
+    let id2 = batch2.samples[0].chunk.record_id.clone();
+    assert_ne{
     let split = SplitRatios::default();
     let mut config = base_config();
     config.batch_size = 1;

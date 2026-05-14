@@ -309,10 +309,10 @@ struct TripletSamplerInner<S: SplitStore + EpochStateStore + SamplerStateStore +
     source_record_cursors: HashMap<SourceId, usize>,
     /// Round-robin index for triplet recipe cycling.
     triplet_recipe_rr_idx: usize,
-        /// Tracks (record_id, text) pairs already emitted by the text batch path
+    /// Hash set of (record_id, text) pairs already emitted by the text batch path
     /// within the current cache epoch.  Cleared on every sync_records_from_cache.
     /// Prevents the same text from being sampled again regardless of source wrapping.
-    consumed_text: HashSet<u64>,
+    emitted_text_hashes: HashSet<u64>,
     /// Round-robin index for text recipe cycling.
     text_recipe_rr_idx: usize,
     /// Epoch counter for per-source deterministic shuffling (seed ^ epoch).
@@ -389,7 +389,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             source_state_dirty: false,
             source_record_indices: HashMap::new(),
             source_record_cursors: HashMap::new(),
-            consumed_text: HashSet::new(),
+            emitted_text_hashes: HashSet::new(),
             triplet_recipe_rr_idx: 0,
             text_recipe_rr_idx: 0,
             source_epoch: 0,
@@ -941,7 +941,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     }
 
     fn advance_source_epoch(&mut self) {
-        self.consumed_text.clear();
+        self.emitted_text_hashes.clear();
         self.source_epoch = self.source_epoch.saturating_add(1);
         self.ingestion.set_source_epoch(self.source_epoch);
         self.source_record_cursors.clear();
@@ -1822,6 +1822,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         snapshot.sort_by(|a, b| a.id.cmp(&b.id));
         self.records.clear();
         self.sources_with_long_sections.clear();
+        self.emitted_text_hashes.clear();
         // Cursor state must never outlive a record snapshot boundary.
         self.negative_backend.on_sync_start();
         for record in snapshot {
@@ -2287,10 +2288,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                     // (Anchor and Context sections with identical text) cannot produce
                     // duplicate text content in the same batch.
                     let key = text_dedup_key(&sample.chunk);
-                    if seen.insert(key) && self.consumed_text.insert({
-                    let h = stable_hash_str(0, &sample.chunk.record_id);
-                    stable_hash_str(h, &sample.chunk.text)
-                }) {
+                    if seen.insert(key)
+                        && self.emitted_text_hashes.insert({
+                            let h = stable_hash_str(0, &sample.chunk.record_id);
+                            stable_hash_str(h, &sample.chunk.text)
+                        })
+                    {
                         samples.push(sample);
                     }
                 }
@@ -2377,10 +2380,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 // (Anchor and Context sections with identical text) cannot produce
                 // duplicate text content in the same batch.
                 let key = text_dedup_key(&sample.chunk);
-                if seen.insert(key) && self.consumed_text.insert({
-                    let h = stable_hash_str(0, &sample.chunk.record_id);
-                    stable_hash_str(h, &sample.chunk.text)
-                }) {
+                if seen.insert(key)
+                    && self.emitted_text_hashes.insert({
+                        let h = stable_hash_str(0, &sample.chunk.record_id);
+                        stable_hash_str(h, &sample.chunk.text)
+                    })
+                {
                     samples.push(sample);
                 }
             }
