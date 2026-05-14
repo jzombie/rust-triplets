@@ -325,14 +325,17 @@ rate-limited (429) and transient failures up to 3 times with jittered delays. De
 (including `cargo test`) skip the middleware so tests against mock servers aren't slowed by
 retry delays. Compile with `--release` to enable automatic retry in production.
 
-**Client sharing.**  When using a [source-list file](#source-list-file-format) via
-`build_hf_sources`, a single throttled client is built automatically and shared across all
-sources in the list — one connection pool, one throttle state governing all outbound traffic.
+**Runtime & client sharing.**  All `HuggingFaceRowSource` instances share a single
+multi-threaded tokio runtime, so TCP connections established by one source can be reused
+by another.  When using a [source-list file](#source-list-file-format) via
+`build_hf_sources`, a single throttled client is also built automatically and shared across
+all sources in the list — one connection pool, one throttle state governing all outbound
+traffic.
 
-If you construct sources manually with `HuggingFaceRowSource::new()`, each source gets its
-own client with its own throttle.  Ten sources would allow up to 40 concurrent requests,
-potentially defeating rate-limit protection.  To share a client manually, pre-build it and
-set it on each config:
+If you construct sources manually with `HuggingFaceRowSource::new()`, each source still
+shares the same runtime, but gets its own client with its own throttle.  Ten sources would
+allow up to 40 concurrent requests, potentially defeating rate-limit protection.  To share
+a client manually, pre-build it and set it on each config:
 
 ```rust,ignore
 // Example: sharing a client across multiple sources manually.
