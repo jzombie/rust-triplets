@@ -309,11 +309,11 @@ struct TripletSamplerInner<S: SplitStore + EpochStateStore + SamplerStateStore +
     source_record_cursors: HashMap<SourceId, usize>,
     /// Round-robin index for triplet recipe cycling.
     triplet_recipe_rr_idx: usize,
-    /// Text content already emitted by the text batch path while the record
+    /// Hashes of text already emitted by the text batch path while the record
     /// pool is stable.  Pruned on sync_records_from_cache only when records
     /// are evicted.  Prevents the same text from being sampled again within
     /// the same ingestion window, regardless of source wrapping or epoch.
-    emitted_texts: HashSet<String>,
+    emitted_text_hashes: HashSet<u64>,
     /// Round-robin index for text recipe cycling.
     text_recipe_rr_idx: usize,
     /// Epoch counter for per-source deterministic shuffling (seed ^ epoch).
@@ -391,7 +391,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             source_state_dirty: false,
             source_record_indices: HashMap::new(),
             source_record_cursors: HashMap::new(),
-            emitted_texts: HashSet::new(),
+            emitted_text_hashes: HashSet::new(),
             triplet_recipe_rr_idx: 0,
             text_recipe_rr_idx: 0,
             source_epoch: 0,
@@ -944,7 +944,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
 
     fn advance_source_epoch(&mut self) {
         // The epoch advanced, changing the sampling permutation.
-        // emitted_texts is NOT cleared: the record pool is unchanged,
+        // emitted_text_hashes is NOT cleared: the record pool is unchanged,
         // so texts already emitted are still off-limits.  The epoch
         // changes the shuffling permutation, not the dedup window.
         // Advance the epoch counter so source refreshes receive a different
@@ -1847,12 +1847,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         // clearing first, sources whose records were evicted would leave
         // stale entries, though this is bounded by num_sources in practice.
         self.sources_with_long_sections.clear();
-        // Prune emitted texts only when records were actually evicted or
-        // added, not on every ingestion advance.  This preserves cross-batch
+        // Prune emitted text hashes only when records were actually evicted
+        // or added, not on every ingestion advance.  This preserves cross-batch
         // dedup within a stable pool.  The set is naturally bounded by the
         // pool size (max_records unique texts).
         if pool_changed {
-            self.emitted_texts.clear();
+            self.emitted_text_hashes.clear();
         }
         // Cursor state (BM25 hard-negative caches, chunk/role cursors) must
         // never outlive a record snapshot boundary.  BM25 backend clears its
@@ -2280,10 +2280,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     }
 
     /// Check whether `sample` passes the per-window text dedup.
-    /// Returns `true` and records the sample's text in `emitted_texts` when
-    /// the text has not been emitted before in the current record pool.
+    /// Returns `true` and records a hash of the sample's text in
+    /// `emitted_text_hashes` when the text has not been emitted before
+    /// in the current record pool.
     fn try_emit_text_sample(&mut self, sample: &TextSample) -> bool {
-        self.emitted_texts.insert(sample.chunk.text.clone())
+        self.emitted_text_hashes
+            .insert(stable_hash_str(0, &sample.chunk.text))
     }
 
     fn next_text_batch_inner_with_weights(
