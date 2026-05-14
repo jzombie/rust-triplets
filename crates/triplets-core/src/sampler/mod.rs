@@ -2245,6 +2245,23 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         Err(SamplerError::Exhausted(RECIPE_LABEL_TRIPLETS.into()))
     }
 
+    /// Check whether `sample` passes both per-batch and per-window dedup
+    /// for text batch sampling.  Returns `true` and records the sample's
+    /// (record_id, text) identity in `seen` and `emitted_text_hashes` when
+    /// the sample is eligible.
+    fn try_emit_text_sample(
+        &mut self,
+        sample: &TextSample,
+        seen: &mut HashSet<(String, String)>,
+    ) -> bool {
+        let key = text_dedup_key(&sample.chunk);
+        seen.insert(key)
+            && self.emitted_text_hashes.insert({
+                let h = stable_hash_str(0, &sample.chunk.record_id);
+                stable_hash_str(h, &sample.chunk.text)
+            })
+    }
+
     fn next_text_batch_inner_with_weights(
         &mut self,
         target_split: SplitLabel,
@@ -2283,19 +2300,9 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 last_recipe_name = Some(recipe.name.clone());
                 if let Some(sample) =
                     self.make_text_sample_for_split(&recipe, None, target_split, &mut rng)
+                    && self.try_emit_text_sample(&sample, &mut seen)
                 {
-                    // Use (record_id, text) as dedup key so that text-columns mode sources
-                    // (Anchor and Context sections with identical text) cannot produce
-                    // duplicate text content in the same batch.
-                    let key = text_dedup_key(&sample.chunk);
-                    if seen.insert(key)
-                        && self.emitted_text_hashes.insert({
-                            let h = stable_hash_str(0, &sample.chunk.record_id);
-                            stable_hash_str(h, &sample.chunk.text)
-                        })
-                    {
-                        samples.push(sample);
-                    }
+                    samples.push(sample);
                 }
             }
             if recipe_steps > 0 {
@@ -2375,19 +2382,10 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             if sample.is_none() {
                 recipe_steps = recipe_steps.saturating_add(order.len());
             }
-            if let Some((_recipe, sample)) = sample {
-                // Use (record_id, text) as dedup key so that text-columns mode sources
-                // (Anchor and Context sections with identical text) cannot produce
-                // duplicate text content in the same batch.
-                let key = text_dedup_key(&sample.chunk);
-                if seen.insert(key)
-                    && self.emitted_text_hashes.insert({
-                        let h = stable_hash_str(0, &sample.chunk.record_id);
-                        stable_hash_str(h, &sample.chunk.text)
-                    })
-                {
-                    samples.push(sample);
-                }
+            if let Some((_recipe, sample)) = sample
+                && self.try_emit_text_sample(&sample, &mut seen)
+            {
+                samples.push(sample);
             }
             idx += 1;
             source_steps += 1;
