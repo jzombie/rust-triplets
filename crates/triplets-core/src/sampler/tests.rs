@@ -22,7 +22,7 @@ pub const FNV1A64_PRIME: u64 = 0x100000001b3;
 /// Number of batches sampled for deterministic sequence hash assertions.
 pub const FULL_SEQUENCE_LEN: usize = 45;
 /// Expected hash for deterministic text batch sequence.
-pub const TEXT_BATCH_SEQUENCE_HASH: u64 = 7962444922980597149;
+pub const TEXT_BATCH_SEQUENCE_HASH: u64 = 677953162338177825;
 /// Expected hash for deterministic triplet batch sequence.
 #[cfg(not(feature = "bm25-mining"))]
 pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 7521776225374240393;
@@ -36,7 +36,7 @@ pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 17832018185824582948;
 #[cfg(feature = "bm25-mining")]
 pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 3528525448544850669;
 /// Expected hash for deterministic prefetch text batch sequence.
-pub const PREFETCH_TEXT_BATCH_SEQUENCE_HASH: u64 = 15593577537707362833;
+pub const PREFETCH_TEXT_BATCH_SEQUENCE_HASH: u64 = 992254287403543173;
 /// Expected hash for deterministic prefetch triplet batch sequence.
 #[cfg(not(feature = "bm25-mining"))]
 pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 11869075277114531356;
@@ -75,6 +75,7 @@ pub const READABLE_BM25_TITLES: [&str; 8] = [
     "Carbon policy update",
 ];
 
+use crate::constants::splits::STEP_CURSOR_KEY;
 use crate::data::{ChunkView, QualityScore, RecordChunk, RecordSection};
 use crate::kvp::{KvpField, KvpPrefixSampler};
 use crate::metadata::META_FIELD_DATE;
@@ -756,14 +757,18 @@ fn kvp_prefix_is_applied_to_non_initial_windows_from_long_sections() {
     record.meta_prefix = Some(prefix);
 
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "kvp_source",
-        vec![record],
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "kvp_source",
+            vec![record],
+        )))
+        .unwrap();
 
+    // Cross-batch text dedup prevents repeating window texts.  With
+    // max_window_tokens=4 (overlap=0) and 12 tokens there are exactly 3 unique
+    // windows before exhaustion.
     let mut saw_non_initial_window = false;
-    for _ in 0..12 {
-        let batch = sampler.next_text_batch(SplitLabel::Train).unwrap();
+    while let Ok(batch) = sampler.next_text_batch(SplitLabel::Train) {
         let sample = &batch.samples[0];
 
         assert!(
@@ -829,7 +834,7 @@ fn exhaustion_retry_limit_returns_exhausted() {
     let refresh_calls = Arc::new(AtomicUsize::new(0));
     let source = CountingSource::new("unit", records, Arc::clone(&refresh_calls));
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(source));
+    sampler.register_source(Box::new(source)).unwrap();
 
     let result = sampler.next_triplet_batch(SplitLabel::Train);
     assert!(matches!(result, Err(SamplerError::Exhausted(_))));
@@ -884,11 +889,15 @@ fn single_source_failure_does_not_fail_batch_when_other_source_has_data() {
     ];
 
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(FailingSource::new("failing_source")));
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "healthy_source",
-        healthy_records,
-    )));
+    sampler
+        .register_source(Box::new(FailingSource::new("failing_source")))
+        .unwrap();
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "healthy_source",
+            healthy_records,
+        )))
+        .unwrap();
 
     let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
     assert_eq!(batch.triplets.len(), 1);
@@ -939,10 +948,12 @@ fn triplet_batch_is_padded_to_batch_size_when_unique_pool_is_small() {
     ];
 
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "pad_source",
-        records,
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "pad_source",
+            records,
+        )))
+        .unwrap();
 
     let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
     assert_eq!(batch.triplets.len(), 8);
@@ -990,10 +1001,12 @@ fn pair_batch_is_padded_to_batch_size_when_unique_pool_is_small() {
     ];
 
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "pair_source",
-        records,
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "pair_source",
+            records,
+        )))
+        .unwrap();
 
     let batch = sampler.next_pair_batch(SplitLabel::Train).unwrap();
     assert_eq!(batch.pairs.len(), 9);
@@ -1030,10 +1043,12 @@ fn text_batch_is_padded_to_batch_size_when_unique_pool_is_small() {
     let records = vec![trader_record(&text_a, "2025-03-01", "A", "Body A")];
 
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "text_source",
-        records,
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "text_source",
+            records,
+        )))
+        .unwrap();
 
     let batch = sampler.next_text_batch(SplitLabel::Train).unwrap();
     assert_eq!(batch.samples.len(), 7);
@@ -1091,15 +1106,19 @@ fn failed_source_is_retried_on_next_batch_call() {
     ];
 
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(FlakySource::new(
-        "flaky_source",
-        flaky_records,
-        Arc::clone(&flaky_calls),
-    )));
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "steady_source",
-        healthy_records,
-    )));
+    sampler
+        .register_source(Box::new(FlakySource::new(
+            "flaky_source",
+            flaky_records,
+            Arc::clone(&flaky_calls),
+        )))
+        .unwrap();
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "steady_source",
+            healthy_records,
+        )))
+        .unwrap();
 
     sampler.next_triplet_batch(SplitLabel::Train).unwrap();
     assert_eq!(flaky_calls.load(Ordering::Relaxed), 1);
@@ -1506,10 +1525,12 @@ fn runtime_batches_do_not_bypass_custom_chunker() {
         meta_prefix: None,
     };
 
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "unit",
-        vec![mk("c1"), mk("c2"), mk("c3")],
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "unit",
+            vec![mk("c1"), mk("c2"), mk("c3")],
+        )))
+        .unwrap();
 
     let text_batch = sampler.next_text_batch(SplitLabel::Train).unwrap();
     assert!(!text_batch.samples.is_empty());
@@ -2189,11 +2210,14 @@ fn text_pair_and_triplet_chunks_all_come_from_materialize_pool() {
 
     let store = Arc::new(DeterministicSplitStore::new(split, 77).unwrap());
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(InMemorySource::from_records("unit", records)));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("unit", records)))
+        .unwrap();
 
     // Text batches ─ every sampled chunk must come from the pool.
-    for _ in 0..5 {
-        let batch = sampler.next_text_batch(SplitLabel::Train).unwrap();
+    // Cross-batch text dedup prevents repeats of chunk texts, so collect
+    // until Exhausted (3 unique chunks with batch_size=2 → 2 batches).
+    while let Ok(batch) = sampler.next_text_batch(SplitLabel::Train) {
         for sample in &batch.samples {
             assert!(
                 expected_pool.contains(sample.chunk.text.as_str()),
@@ -2205,6 +2229,10 @@ fn text_pair_and_triplet_chunks_all_come_from_materialize_pool() {
     }
 
     // Triplet batches ─ anchor, positive, and negative must all be in the pool.
+    // Triplet batches use anchors/windows/negatives from the records, and the
+    // dedup is on the *text content* not the record.  Triplets select distinct
+    // anchor/positive/negative roles so they can still form new combinations.
+    // We keep 5 iterations since those mostly exhaust on anchor combinations.
     for _ in 0..5 {
         let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
         for triplet in &batch.triplets {
@@ -2293,7 +2321,9 @@ fn end_to_end_text_weighting_uses_chunk_offsets() {
         }],
         meta_prefix: None,
     };
-    sampler.register_source(Box::new(InMemorySource::from_records("unit", vec![record])));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("unit", vec![record])))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -2362,10 +2392,12 @@ fn end_to_end_text_weighting_respects_splits() {
     val_record.source = "split_weighted".into();
     test_record.source = "split_weighted".into();
 
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "split_weighted",
-        vec![train_record, val_record, test_record],
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "split_weighted",
+            vec![train_record, val_record, test_record],
+        )))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -2446,18 +2478,24 @@ fn build_split_order_sampler(seed: u64, batch_size: usize) -> SplitOrderFixture 
         records
     };
 
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "source_a",
-        make_records("source_a"),
-    )));
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "source_b",
-        make_records("source_b"),
-    )));
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "source_c",
-        make_records("source_c"),
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "source_a",
+            make_records("source_a"),
+        )))
+        .unwrap();
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "source_b",
+            make_records("source_b"),
+        )))
+        .unwrap();
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "source_c",
+            make_records("source_c"),
+        )))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -2929,10 +2967,12 @@ fn readable_triplet_examples_by_mode() {
     let sampler = TripletSampler::new(config, Arc::clone(&store));
     let mut all_records = vec![anchor.clone()];
     all_records.extend(candidates);
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "readable_source",
-        all_records,
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "readable_source",
+            all_records,
+        )))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -3083,10 +3123,12 @@ fn bm25_not_rng_only_when_only_anchor_text_changes() {
 
         let mut all_records = vec![anchor];
         all_records.extend(candidates);
-        sampler.register_source(Box::new(InMemorySource::from_records(
-            "readable_source",
-            all_records,
-        )));
+        sampler
+            .register_source(Box::new(InMemorySource::from_records(
+                "readable_source",
+                all_records,
+            )))
+            .unwrap();
         sampler
             .inner
             .lock()
@@ -3209,7 +3251,9 @@ fn generates_pairs_from_single_source() {
         ),
     ];
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(InMemorySource::from_records("unit", records)));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("unit", records)))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -3240,10 +3284,12 @@ fn produces_text_samples() {
     };
     let store = Arc::new(DeterministicSplitStore::new(split, 11).unwrap());
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "unit",
-        vec![sample_record()],
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "unit",
+            vec![sample_record()],
+        )))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -3292,7 +3338,9 @@ fn cycles_through_section_windows_before_repeating() {
         meta_prefix: None,
     };
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(InMemorySource::from_records("unit", vec![record])));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("unit", vec![record])))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -3301,14 +3349,15 @@ fn cycles_through_section_windows_before_repeating() {
         .unwrap();
 
     let mut outputs = Vec::new();
-    for _ in 0..3 {
-        let batch = sampler.next_text_batch(SplitLabel::Train).unwrap();
+    // Cross-batch text dedup prevents repeating the same text, so we can only
+    // emit each unique window once per stable pool.  Two windows → two batches.
+    while let Ok(batch) = sampler.next_text_batch(SplitLabel::Train) {
         outputs.push(batch.samples[0].chunk.text.clone());
     }
 
-    assert_eq!(outputs[0], "one two");
-    assert_eq!(outputs[1], "three four");
-    assert_eq!(outputs[2], "one two");
+    assert!(outputs.contains(&"one two".to_string()));
+    assert!(outputs.contains(&"three four".to_string()));
+    assert_eq!(outputs.len(), 2, "expected exactly 2 unique windows");
 }
 
 #[test]
@@ -3361,7 +3410,9 @@ fn first_chunk_offset_is_deterministic_and_nonzero_when_hash_demands_it() {
         };
 
         let sampler = TripletSampler::new(config, store);
-        sampler.register_source(Box::new(InMemorySource::from_records("unit", vec![record])));
+        sampler
+            .register_source(Box::new(InMemorySource::from_records("unit", vec![record])))
+            .unwrap();
         sampler
             .inner
             .lock()
@@ -3461,7 +3512,9 @@ fn first_role_section_offset_is_deterministic_and_nonzero_when_hash_demands_it()
         };
 
         let sampler = TripletSampler::new(config, store);
-        sampler.register_source(Box::new(InMemorySource::from_records("unit", vec![record])));
+        sampler
+            .register_source(Box::new(InMemorySource::from_records("unit", vec![record])))
+            .unwrap();
         sampler
             .inner
             .lock()
@@ -3649,7 +3702,9 @@ fn kvp_date_formats_can_differ_within_same_triplet_across_all_splits() {
         })
         .collect();
 
-    sampler.register_source(Box::new(InMemorySource::from_records("tt", records)));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("tt", records)))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -3757,7 +3812,9 @@ fn kvp_date_formats_can_differ_between_anchor_and_positive_across_all_splits() {
         })
         .collect();
 
-    sampler.register_source(Box::new(InMemorySource::from_records("tt", records)));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("tt", records)))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -3865,7 +3922,9 @@ fn kvp_prefix_signatures_are_not_constant_across_triplets_with_all_splits() {
         })
         .collect();
 
-    sampler.register_source(Box::new(InMemorySource::from_records("tt", records)));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("tt", records)))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -3976,7 +4035,9 @@ fn triplets_cover_kvp_behaviors_across_all_splits() {
         })
         .collect();
 
-    sampler.register_source(Box::new(InMemorySource::from_records("tt", records)));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("tt", records)))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -4236,10 +4297,12 @@ fn derives_text_recipes_from_triplets() {
     };
     let store = Arc::new(DeterministicSplitStore::new(split, 17).unwrap());
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "unit",
-        vec![sample_record()],
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "unit",
+            vec![sample_record()],
+        )))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -4288,7 +4351,7 @@ fn source_triplets_drive_text_sampling() {
     }];
     let decorated = RecipeDecoratedSource::new(records, recipes);
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(decorated));
+    sampler.register_source(Box::new(decorated)).unwrap();
     sampler
         .inner
         .lock()
@@ -4342,7 +4405,9 @@ fn source_defined_recipes_fill_config_gap() {
         store.upsert(record.id.clone(), SplitLabel::Train).unwrap();
     }
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(RecipeSource::new(records, recipes.clone())));
+    sampler
+        .register_source(Box::new(RecipeSource::new(records, recipes.clone())))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -4392,7 +4457,9 @@ fn source_recipes_drive_text_sampling() {
         ),
     ];
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(RecipeSource::new(records, recipes)));
+    sampler
+        .register_source(Box::new(RecipeSource::new(records, recipes)))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -4443,7 +4510,9 @@ fn role_mode_text_batches_cover_all_three_selector_slots() {
         })
         .collect();
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(RecipeSource::new(records, recipes)));
+    sampler
+        .register_source(Box::new(RecipeSource::new(records, recipes)))
+        .unwrap();
 
     let mut seen_anchor = false;
     let mut seen_positive = false;
@@ -4514,7 +4583,9 @@ fn source_a_negative_pairs_follow_strategy() {
         ),
     ];
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(InMemorySource::from_records("tt", records)));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("tt", records)))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -4567,7 +4638,9 @@ fn qa_negative_pairs_mismatch() {
         ),
     ];
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(InMemorySource::from_records("qa", records)));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("qa", records)))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -4790,10 +4863,12 @@ fn weighted_recipe_selection_zero_weight_recipe_never_appears_in_batch() {
         trader_record(&id_c, "2025-01-03", "C", "Body C long enough to chunk"),
     ];
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        PRIMARY_SOURCE_ID,
-        records,
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            PRIMARY_SOURCE_ID,
+            records,
+        )))
+        .unwrap();
 
     for _ in 0..20 {
         if let Ok(batch) = sampler.next_triplet_batch(SplitLabel::Train) {
@@ -4873,10 +4948,12 @@ fn weighted_recipe_selection_frequency_matches_weight_ratio() {
         trader_record(&id_d, "2025-01-04", "D", "Body D long enough to chunk"),
     ];
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        PRIMARY_SOURCE_ID,
-        records,
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            PRIMARY_SOURCE_ID,
+            records,
+        )))
+        .unwrap();
 
     let mut heavy_count = 0usize;
     let mut light_count = 0usize;
@@ -5588,11 +5665,15 @@ fn wrong_article_falls_back_within_same_split() {
         .collect();
 
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(InMemorySource::from_records("tt", anchor_records)));
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "other",
-        other_records,
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("tt", anchor_records)))
+        .unwrap();
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "other",
+            other_records,
+        )))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -5666,10 +5747,12 @@ fn bm25_hard_negative_respects_same_source_split_pool() {
     );
 
     let sampler = TripletSampler::new(config, Arc::clone(&store));
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "tt",
-        vec![anchor.clone(), similar.clone(), distant],
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "tt",
+            vec![anchor.clone(), similar.clone(), distant],
+        )))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -5738,10 +5821,12 @@ fn bm25_negative_is_lexically_closer_than_uniform_pool_baseline() {
     );
 
     let sampler = TripletSampler::new(config, Arc::clone(&store));
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "tt",
-        vec![anchor.clone(), similar, distant],
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "tt",
+            vec![anchor.clone(), similar, distant],
+        )))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -5894,7 +5979,9 @@ fn custom_recipe_still_respects_strategy_pool_with_bm25() {
         .collect();
 
     let sampler = TripletSampler::new(config, Arc::clone(&store));
-    sampler.register_source(Box::new(InMemorySource::from_records("tt", records)));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("tt", records)))
+        .unwrap();
 
     let batch = sampler
         .next_triplet_batch(SplitLabel::Train)
@@ -5974,7 +6061,9 @@ fn bm25_ranked_candidates_never_cross_split_boundaries() {
     }
 
     let sampler = TripletSampler::new(config, Arc::clone(&store));
-    sampler.register_source(Box::new(InMemorySource::from_records("tt", records)));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("tt", records)))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -6083,10 +6172,12 @@ fn bm25_ranked_candidates_match_raw_bm25_engine() {
     ];
 
     let sampler = TripletSampler::new(config, Arc::clone(&store));
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "readable_source",
-        records,
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "readable_source",
+            records,
+        )))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -6224,10 +6315,12 @@ fn bm25_ranking_ignores_kvp_meta_prefix_tags() {
     );
 
     let sampler = TripletSampler::new(config, Arc::clone(&store));
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "kvp_source",
-        vec![anchor, kvp_bait, plain_text_best],
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "kvp_source",
+            vec![anchor, kvp_bait, plain_text_best],
+        )))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -6315,7 +6408,9 @@ fn bm25_triplets_never_reuse_text_across_slots() {
     ];
 
     let sampler = TripletSampler::new(config, Arc::clone(&store));
-    sampler.register_source(Box::new(InMemorySource::from_records("tt", records)));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("tt", records)))
+        .unwrap();
     let batch = sampler
         .next_triplet_batch(SplitLabel::Train)
         .expect("expected bm25 triplet batch");
@@ -6369,10 +6464,12 @@ fn bm25_cursor_state_is_cleared_on_each_record_snapshot_sync() {
         })
         .unwrap();
     let sampler = TripletSampler::new(base_config(), Arc::clone(&store));
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "strict_sync_source",
-        vec![trader_record(&sync_id, "2025-01-01", "Anchor", "body")],
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "strict_sync_source",
+            vec![trader_record(&sync_id, "2025-01-01", "Anchor", "body")],
+        )))
+        .unwrap();
 
     let mut inner = sampler.inner.lock().unwrap();
     inner.ingest_internal(SplitLabel::Train).unwrap();
@@ -6490,10 +6587,12 @@ fn chunk_and_role_cursors_are_pruned_across_cache_sync() {
         })
         .unwrap();
     let sampler = TripletSampler::new(base_config(), Arc::clone(&store));
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "strict_sync_source",
-        vec![trader_record(&sync_id, "2025-01-01", "Anchor", "body")],
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "strict_sync_source",
+            vec![trader_record(&sync_id, "2025-01-01", "Anchor", "body")],
+        )))
+        .unwrap();
 
     let mut inner = sampler.inner.lock().unwrap();
     inner.ingest_internal(SplitLabel::Train).unwrap();
@@ -6604,11 +6703,15 @@ fn wrong_publication_date_falls_back_within_same_split() {
         .collect();
 
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(InMemorySource::from_records("tt", anchor_records)));
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "other",
-        other_records,
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("tt", anchor_records)))
+        .unwrap();
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "other",
+            other_records,
+        )))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -6689,11 +6792,15 @@ fn qa_mismatch_falls_back_within_same_split() {
         .collect();
 
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(InMemorySource::from_records("qa", qa_records)));
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "other",
-        other_records,
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("qa", qa_records)))
+        .unwrap();
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "other",
+            other_records,
+        )))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -6754,14 +6861,18 @@ fn negative_selection_never_falls_back_across_splits() {
     let other_val = trader_record(&val_id, "2025-01-02", "Other Val", "Body B");
     let other_test = trader_record(&test_id, "2025-01-03", "Other Test", "Body C");
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "a",
-        vec![anchor.clone()],
-    )));
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "b",
-        vec![other_val, other_test],
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "a",
+            vec![anchor.clone()],
+        )))
+        .unwrap();
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "b",
+            vec![other_val, other_test],
+        )))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -6857,7 +6968,9 @@ fn fallback_triplet_negative_never_matches_anchor() {
     config.allowed_splits = vec![SplitLabel::Train];
 
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(InMemorySource::from_records("tt", records)));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("tt", records)))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -6975,7 +7088,9 @@ fn triplets_never_cross_split_boundaries() {
     config.text_recipes = Vec::new();
 
     let sampler = TripletSampler::new(config, Arc::clone(&store));
-    sampler.register_source(Box::new(InMemorySource::from_records("split_iso", records)));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("split_iso", records)))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -7049,7 +7164,9 @@ fn split_specific_batch_apis_return_exact_size_and_requested_split_only() {
     }];
 
     let sampler = TripletSampler::new(config, Arc::clone(&store));
-    sampler.register_source(Box::new(InMemorySource::from_records("split_api", records)));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("split_api", records)))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -7153,10 +7270,12 @@ fn split_specific_triplet_api_keeps_anchor_positive_negative_in_same_split() {
     config.text_recipes = Vec::new();
 
     let sampler = TripletSampler::new(config, Arc::clone(&store));
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "split_triplet_iso",
-        records,
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "split_triplet_iso",
+            records,
+        )))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -7256,7 +7375,9 @@ fn triplet_sampling_produces_anchor_positive_and_negative() {
         trader_record(&article_b, "2025-01-02", "Beta", "Body beta"),
     ];
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(InMemorySource::from_records("tt", records)));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("tt", records)))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -7298,7 +7419,9 @@ fn refresh_limit_caps_records_per_source() {
         .map(|(idx, id)| record_with_offset(id, base, idx as i64))
         .collect();
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(InMemorySource::from_records("unit", records)));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("unit", records)))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -7345,7 +7468,9 @@ fn triplet_sampling_cycles_recipes_over_time() {
         trader_record("src::cycle_b", "2025-01-02", "Cycle B", "Body cycle b"),
         trader_record("src::cycle_c", "2025-01-03", "Cycle C", "Body cycle c"),
     ];
-    sampler.register_source(Box::new(InMemorySource::from_records("unit", records)));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("unit", records)))
+        .unwrap();
 
     let mut seen = std::collections::HashSet::new();
     for _ in 0..10 {
@@ -7398,7 +7523,9 @@ fn triplet_batch_dedupes_identical_triplets() {
         trader_record(&dedupe_a, "2025-01-01", "Dedupe A", "Body A"),
         trader_record(&dedupe_b, "2025-01-02", "Dedupe B", "Body B"),
     ];
-    sampler.register_source(Box::new(InMemorySource::from_records("tt", records)));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("tt", records)))
+        .unwrap();
 
     let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
     let mut seen = std::collections::HashSet::new();
@@ -7447,7 +7574,9 @@ fn text_batch_dedupes_identical_chunks() {
         trader_record(&dedupe_a, "2025-01-01", "Dedupe A", "Body A"),
         trader_record(&dedupe_b, "2025-01-02", "Dedupe B", "Body B"),
     ];
-    sampler.register_source(Box::new(InMemorySource::from_records("tt", records)));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("tt", records)))
+        .unwrap();
 
     let batch = sampler.next_text_batch(SplitLabel::Train).unwrap();
     let mut seen = std::collections::HashSet::new();
@@ -7521,7 +7650,9 @@ fn text_batch_prevents_duplicate_text_per_record_from_text_columns() {
         text_columns_record(&r3, "Content C identical in both sections."),
         text_columns_record(&r4, "Content D identical in both sections."),
     ];
-    sampler.register_source(Box::new(InMemorySource::from_records("tt", records)));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("tt", records)))
+        .unwrap();
 
     let batch = sampler.next_text_batch(SplitLabel::Train).unwrap();
     assert_eq!(
@@ -7576,7 +7707,9 @@ fn text_batch_prevents_repeat_across_batches() {
             r
         })
         .collect();
-    sampler.register_source(Box::new(InMemorySource::from_records("src", records)));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("src", records)))
+        .unwrap();
 
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for i in 0..10 {
@@ -7631,7 +7764,9 @@ fn emitted_text_hashes_allows_resample_after_cache_refresh() {
             r
         })
         .collect();
-    sampler.register_source(Box::new(InMemorySource::from_records("src", records)));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("src", records)))
+        .unwrap();
 
     // Batch 1 — draws from window containing "rec_a", "rec_b".
     let batch1 = sampler.next_text_batch(SplitLabel::Train).unwrap();
@@ -7672,6 +7807,176 @@ fn emitted_text_hashes_allows_resample_after_cache_refresh() {
 }
 
 #[test]
+/// Verify cross-batch dedup blocks repeats within a stable record pool.
+/// Two records, batch_size=1, three batch calls.  The third call returns
+/// Exhausted because both texts were already emitted and the pool hasn't
+/// changed (no eviction).
+fn emitted_text_hashes_blocks_repeats_across_batches_with_same_pool() {
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+    let mut config = base_config();
+    config.batch_size = 1;
+    // Large enough to hold all records — no cache eviction happens.
+    config.ingestion_max_records = 10;
+    config.allowed_splits = vec![SplitLabel::Train];
+    config.split = split;
+    config.recipes = Vec::new();
+    config.text_recipes = vec![TextRecipe {
+        name: "anchor_text".into(),
+        selector: Selector::Role(SectionRole::Anchor),
+        weight: 1.0,
+        instruction: None,
+    }];
+
+    let store = Arc::new(DeterministicSplitStore::new(split, 42).unwrap());
+    let sampler = TripletSampler::new(config, store);
+
+    // Two records with distinct text. Pool fits entirely in cache (max_records=10).
+    // The source will wrap when the cursor exhausts both, but the record pool
+    // NEVER EVICTS — same two records stay in cache the whole time.
+    let records: Vec<DataRecord> = vec![("dup_rec_0", "Content A"), ("dup_rec_1", "Content B")]
+        .into_iter()
+        .map(|(id, text)| {
+            let mut r = sample_record();
+            r.id = id.to_string();
+            r.sections[0].text = text.to_string();
+            r.sections[0].sentences = vec![text.to_string()];
+            r
+        })
+        .collect();
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("src", records)))
+        .unwrap();
+
+    let batch1 = sampler.next_text_batch(SplitLabel::Train).unwrap();
+    assert_eq!(batch1.samples.len(), 1);
+    let id1 = batch1.samples[0].chunk.record_id.clone();
+
+    let batch2 = sampler.next_text_batch(SplitLabel::Train).unwrap();
+    assert_eq!(batch2.samples.len(), 1);
+    let id2 = batch2.samples[0].chunk.record_id.clone();
+    assert_ne!(id1, id2, "batch 1 and 2 should be different records");
+
+    // Batch 3: the source has wrapped, cursor reset, epoch advanced,
+    // but emitted_texts still blocks repeats.  Both texts were already
+    // emitted, so the sampler correctly returns Exhausted.
+    let err = sampler.next_text_batch(SplitLabel::Train).expect_err(
+        "batch 3 should be Exhausted — only 2 unique texts in pool, both already emitted",
+    );
+    assert!(
+        matches!(err, SamplerError::Exhausted(_)),
+        "expected Exhausted, got: {err:?}"
+    );
+}
+
+#[test]
+/// Verify that text batch dedup (`emitted_text_hashes`) is completely isolated
+/// from triplet and pair batch handling.  Exhaust text batches first, then
+/// confirm triplet/pair batches still work independently.
+fn text_dedup_isolation_does_not_affect_triplet_or_pair_batches() {
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+    let mut config = base_config();
+    config.batch_size = 2;
+    config.ingestion_max_records = 10;
+    config.allowed_splits = vec![SplitLabel::Train];
+    config.split = split;
+    config.recipes = vec![TripletRecipe {
+        name: "iso_triplet".into(),
+        anchor: Selector::Role(SectionRole::Anchor),
+        positive_selector: Selector::Role(SectionRole::Context),
+        negative_selector: Selector::Role(SectionRole::Context),
+        negative_strategy: NegativeStrategy::WrongArticle,
+        weight: 1.0,
+        instruction: None,
+        allow_same_anchor_positive: false,
+    }];
+    config.text_recipes = vec![TextRecipe {
+        name: "iso_text".into(),
+        selector: Selector::Role(SectionRole::Context),
+        weight: 1.0,
+        instruction: None,
+    }];
+
+    let store = Arc::new(DeterministicSplitStore::new(split, 42).unwrap());
+    let sampler = TripletSampler::new(config, store);
+
+    // Three records with distinct text in Anchor section (title) and
+    // Context section (body).  Text dedup will see 3 unique texts.
+    let records: Vec<DataRecord> = vec![
+        trader_record("iso_rec_a", "2025-06-01", "Title A", "Body A content here."),
+        trader_record("iso_rec_b", "2025-06-01", "Title B", "Body B content here."),
+        trader_record("iso_rec_c", "2025-06-01", "Title C", "Body C content here."),
+    ];
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("iso", records)))
+        .unwrap();
+
+    // ── Phase 1: exhaust text batches ──────────────────────────────────
+    // 3 unique texts with batch_size=2 → 2 batches (2 texts + 1 text + padding).
+    let text_batch1 = sampler
+        .next_text_batch(SplitLabel::Train)
+        .expect("first text batch should succeed");
+    assert_eq!(text_batch1.samples.len(), 2);
+
+    let text_batch2 = sampler
+        .next_text_batch(SplitLabel::Train)
+        .expect("second text batch should succeed");
+    assert_eq!(text_batch2.samples.len(), 2);
+
+    // Third call: all 3 texts already emitted, pool unchanged → Exhausted.
+    let text_err = sampler
+        .next_text_batch(SplitLabel::Train)
+        .expect_err("third text batch should be Exhausted");
+    assert!(
+        matches!(text_err, SamplerError::Exhausted(_)),
+        "expected text Exhausted, got: {text_err:?}"
+    );
+
+    // ── Phase 2: triplet batch still works ─────────────────────────────
+    // Triplet dedup uses its own per-batch (RecordId, RecordId, RecordId)
+    // set, completely separate from emitted_text_hashes.
+    let triplet_batch = sampler
+        .next_triplet_batch(SplitLabel::Train)
+        .expect("triplet batch must still succeed after text exhaustion");
+    assert_eq!(
+        triplet_batch.triplets.len(),
+        2,
+        "triplet batch should return full batch_size"
+    );
+    // Verify triplets have distinct structural keys (not text deduped).
+    let mut triplet_seen: std::collections::HashSet<(String, String, String)> =
+        std::collections::HashSet::new();
+    for t in &triplet_batch.triplets {
+        let key = (
+            t.anchor.record_id.clone(),
+            t.positive.record_id.clone(),
+            t.negative.record_id.clone(),
+        );
+        assert!(
+            triplet_seen.insert(key),
+            "triplet batch should not contain duplicate triplets"
+        );
+    }
+
+    // ── Phase 3: pair batch still works ────────────────────────────────
+    let pair_batch = sampler
+        .next_pair_batch(SplitLabel::Train)
+        .expect("pair batch must still succeed after text exhaustion");
+    assert_eq!(
+        pair_batch.pairs.len(),
+        2,
+        "pair batch should return full batch_size"
+    );
+}
+
+#[test]
 fn text_sampling_cycles_recipes_over_time() {
     let split = SplitRatios::default();
     let mut config = base_config();
@@ -7699,10 +8004,12 @@ fn text_sampling_cycles_recipes_over_time() {
     rec_a.id = "record_a".into();
     let mut rec_b = sample_record();
     rec_b.id = "record_b".into();
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "unit",
-        vec![rec_a, rec_b],
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "unit",
+            vec![rec_a, rec_b],
+        )))
+        .unwrap();
 
     let mut seen = std::collections::HashSet::new();
     for _ in 0..10 {
@@ -7760,7 +8067,9 @@ fn epoch_sampling_visits_each_record_before_repeat() {
         trader_record(&epoch_c, "2025-01-03", "Epoch Gamma", "Body gamma"),
     ];
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(InMemorySource::from_records("tt", records)));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("tt", records)))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -7830,10 +8139,12 @@ fn epoch_sampling_persists_between_runs() {
     let first_anchor = {
         let store = Arc::new(FileSplitStore::open(&store_path, split, 73).unwrap());
         let sampler = TripletSampler::new(build_config(), store);
-        sampler.register_source(Box::new(InMemorySource::from_records(
-            "tt",
-            dataset.clone(),
-        )));
+        sampler
+            .register_source(Box::new(InMemorySource::from_records(
+                "tt",
+                dataset.clone(),
+            )))
+            .unwrap();
         sampler
             .inner
             .lock()
@@ -7853,10 +8164,12 @@ fn epoch_sampling_persists_between_runs() {
 
     let store = Arc::new(FileSplitStore::open(&store_path, split, 73).unwrap());
     let sampler = TripletSampler::new(build_config(), store);
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "tt",
-        dataset.clone(),
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "tt",
+            dataset.clone(),
+        )))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -7926,10 +8239,12 @@ fn epoch_sampling_handles_new_records_after_restart() {
     let _first_anchor = {
         let store = Arc::new(FileSplitStore::open(&store_path, split, 111).unwrap());
         let sampler = TripletSampler::new(base_config.clone(), store);
-        sampler.register_source(Box::new(InMemorySource::from_records(
-            "tt",
-            initial_records.clone(),
-        )));
+        sampler
+            .register_source(Box::new(InMemorySource::from_records(
+                "tt",
+                initial_records.clone(),
+            )))
+            .unwrap();
         sampler
             .inner
             .lock()
@@ -7953,10 +8268,12 @@ fn epoch_sampling_handles_new_records_after_restart() {
 
     let store = Arc::new(FileSplitStore::open(&store_path, split, 111).unwrap());
     let sampler = TripletSampler::new(base_config, store);
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "tt",
-        expanded_records.clone(),
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "tt",
+            expanded_records.clone(),
+        )))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -8027,10 +8344,12 @@ fn source_epoch_is_propagated_to_ingestion_on_resume() {
     let persisted_epoch = {
         let store = Arc::new(FileSplitStore::open(&store_path, split, 11).unwrap());
         let sampler = TripletSampler::new(build_config(), Arc::clone(&store));
-        sampler.register_source(Box::new(InMemorySource::from_records(
-            "src",
-            records.clone(),
-        )));
+        sampler
+            .register_source(Box::new(InMemorySource::from_records(
+                "src",
+                records.clone(),
+            )))
+            .unwrap();
         // Drive enough batches to cycle through all records and advance epoch.
         for _ in 0..8 {
             let _ = sampler.next_triplet_batch(SplitLabel::Train);
@@ -8052,10 +8371,12 @@ fn source_epoch_is_propagated_to_ingestion_on_resume() {
     // must equal the persisted value before any refresh fires.
     let store = Arc::new(FileSplitStore::open(&store_path, split, 11).unwrap());
     let sampler = TripletSampler::new(build_config(), Arc::clone(&store));
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "src",
-        records.clone(),
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "src",
+            records.clone(),
+        )))
+        .unwrap();
     {
         let mut inner = sampler.inner.lock().unwrap();
         // Trigger cursor loading (the step that must set source_epoch early).
@@ -8068,6 +8389,188 @@ fn source_epoch_is_propagated_to_ingestion_on_resume() {
         assert_eq!(
             inner.source_epoch, persisted_epoch,
             "sampler source_epoch must match persisted epoch after resume"
+        );
+    }
+}
+
+#[test]
+fn resume_restores_epoch_and_step_counter_together() {
+    // Combined regression test covering both epoch and step counter
+    // restoration on resume.  Individual tests cover each dimension
+    // separately, but this is the explicit combined assertion:
+    //
+    //   After save → resume, BOTH source_epoch AND step_counter must
+    //   equal their saved values.  A mismatch in either breaks the
+    //   deterministic seed chain that sources receive on refresh.
+    //
+    // Structure:
+    //   1. Create sampler on a FileSplitStore, register a source.
+    //   2. Drive the ingestion at epoch 0 to advance step_counter.
+    //   3. set_epoch(1) — resets step_counter to 0.
+    //   4. Drive ingestion at epoch 1 to advance step_counter again.
+    //   5. Save state; capture saved_epoch and saved_step.
+    //   6. Create fresh sampler on the same store.
+    //   7. Load state; verify BOTH source_epoch and step_counter restored.
+    let split = SplitRatios {
+        train: 0.7,
+        validation: 0.2,
+        test: 0.1,
+    };
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("epoch_step_resume_store");
+
+    let config = SamplerConfig {
+        seed: 42,
+        split,
+        allowed_splits: vec![SplitLabel::Train],
+        // Use a minimal non-empty config so ingest_internal_for_split
+        // initialises the ingestion layer correctly.
+        recipes: vec![TripletRecipe {
+            name: "ep_step".into(),
+            anchor: Selector::Role(SectionRole::Anchor),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 1.0,
+            instruction: None,
+            allow_same_anchor_positive: false,
+        }],
+        text_recipes: Vec::new(),
+        ..SamplerConfig::default()
+    };
+
+    let records: Vec<DataRecord> = (0..6)
+        .map(|i| {
+            trader_record(
+                &format!("ep_step::rec_{i:02}"),
+                "2025-01-01",
+                &format!("Title {i}"),
+                &format!("Body {i} with enough context for sampling"),
+            )
+        })
+        .collect();
+
+    // Phase 1 — drive ingestion at epoch 0, then epoch 1, save.
+    let (saved_epoch, saved_step) = {
+        let store = Arc::new(FileSplitStore::open(&store_path, split, 42).unwrap());
+        let sampler = TripletSampler::new(config.clone(), Arc::clone(&store));
+        sampler
+            .register_source(Box::new(InMemorySource::from_records(
+                "src",
+                records.clone(),
+            )))
+            .unwrap();
+
+        {
+            let mut inner = sampler.inner.lock().unwrap();
+            // Call ingest_internal_for_split to load cursors and trigger
+            // the first refresh, which increments step from 0 to 1.
+            inner.ingest_internal(SplitLabel::Train).unwrap();
+            // A second call: caches still have data, so advance() is used.
+            // Advance with a rolling refresh increments step from 1 to 2.
+            inner.ingest_internal(SplitLabel::Train).unwrap();
+            // A third call: same pattern, step 2 to 3.
+            inner.ingest_internal(SplitLabel::Train).unwrap();
+        }
+
+        // Advance to epoch 1 — resets step_counter to 0.
+        sampler.set_epoch(1).unwrap();
+
+        {
+            let mut inner = sampler.inner.lock().unwrap();
+            // Each call triggers a refresh (step 0→1, 1→2, 2→3).
+            inner.ingest_internal(SplitLabel::Train).unwrap();
+            inner.ingest_internal(SplitLabel::Train).unwrap();
+            inner.ingest_internal(SplitLabel::Train).unwrap();
+        }
+
+        // Capture step and epoch BEFORE saving.
+        let (pre_save_step, pre_save_epoch) = {
+            let inner = sampler.inner.lock().unwrap();
+            (inner.ingestion.step_counter(), inner.source_epoch)
+        };
+
+        sampler.save_sampler_state(None).unwrap();
+
+        // Read back what was persisted.
+        let persisted = store.load_sampler_state().unwrap().unwrap();
+        let persisted_step = persisted
+            .source_stream_cursors
+            .iter()
+            .find(|(k, _)| k == STEP_CURSOR_KEY)
+            .map(|(_, v)| *v)
+            .expect("step must be persisted via STEP_CURSOR_KEY in source_stream_cursors");
+
+        assert_eq!(
+            persisted.source_epoch, pre_save_epoch,
+            "persisted source_epoch must match in-memory value"
+        );
+        assert_eq!(
+            persisted_step, pre_save_step,
+            "persisted step must match in-memory step_counter"
+        );
+        assert!(
+            persisted.source_epoch > 0,
+            "source_epoch must have advanced past 0"
+        );
+        assert!(persisted_step > 0, "step_counter must have advanced past 0");
+
+        (persisted.source_epoch, persisted_step)
+    };
+
+    // Phase 2 — fresh sampler; verify BOTH are restored from the store.
+    {
+        let store = Arc::new(FileSplitStore::open(&store_path, split, 42).unwrap());
+        // 2a. The persisted payload itself must contain the saved values.
+        let persisted = store.load_sampler_state().unwrap().unwrap();
+        assert_eq!(
+            persisted.source_epoch, saved_epoch,
+            "persisted source_epoch must match saved value"
+        );
+        let persisted_step = persisted
+            .source_stream_cursors
+            .iter()
+            .find(|(k, _)| k == STEP_CURSOR_KEY)
+            .map(|(_, v)| *v)
+            .expect("step must be in source_stream_cursors after save");
+        assert_eq!(
+            persisted_step, saved_step,
+            "persisted step must match saved value"
+        );
+
+        // 2b. After loading state into a new sampler, the first ingest call
+        //     triggers a refresh that increments step from saved → saved+1.
+        //     Verifying saved+1 proves the step counter was correctly
+        //     restored before the refresh (it continued, not restarted at 1).
+        let sampler = TripletSampler::new(config, Arc::clone(&store));
+        sampler
+            .register_source(Box::new(InMemorySource::from_records("src", records)))
+            .unwrap();
+
+        let mut inner = sampler.inner.lock().unwrap();
+        // ingest_internal triggers ensure_source_state (loads persisted
+        // epoch+step) before its first refresh.
+        inner.ingest_internal(SplitLabel::Train).unwrap();
+
+        assert_eq!(
+            inner.source_epoch, saved_epoch,
+            "sampler source_epoch must match saved value after resume"
+        );
+        assert_eq!(
+            inner.ingestion.source_epoch(),
+            saved_epoch,
+            "ingestion source_epoch must match saved value after resume"
+        );
+
+        let post_ingest_step = inner.ingestion.step_counter();
+        // After restore step ← saved_step, the mandatory first refresh
+        // after cache-wipe increments it: post_ingest = saved + 1.
+        assert_eq!(
+            post_ingest_step,
+            saved_step + 1,
+            "first post-resume refresh must advance step_counter from \
+             {saved_step} to {saved_step}+1, indicating it was restored \
+             rather than reset to 0"
         );
     }
 }
@@ -8139,14 +8642,18 @@ fn oversampling_advances_cursors_on_large_records() {
         });
     }
 
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "small",
-        vec![multi_chunk_record],
-    )));
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "large",
-        large_source_records,
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "small",
+            vec![multi_chunk_record],
+        )))
+        .unwrap();
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "large",
+            large_source_records,
+        )))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -8156,11 +8663,12 @@ fn oversampling_advances_cursors_on_large_records() {
 
     // We expect 6 samples total (3 from Small, 3 from Large)
     // The "Small" samples should progress through the content.
+    // Cross-batch text dedup prevents repeating text content, so we collect
+    // all batches until Exhausted (6 unique texts / batch_size=3 = 2 batches).
     let mut small_samples = Vec::new();
     let mut large_samples = Vec::new();
 
-    for _ in 0..12 {
-        let batch = sampler.next_text_batch(SplitLabel::Train).unwrap();
+    while let Ok(batch) = sampler.next_text_batch(SplitLabel::Train) {
         for sample in batch.samples {
             let text = sample.chunk.text;
             if sample.chunk.record_id == "long_record" {
@@ -8229,18 +8737,26 @@ fn text_sampling_balances_sources_without_epoch_tracker() {
     factual.id = factual_id.clone();
     factual.source = "qa_factual".into();
 
+    // The opinion record MUST have a distinct anchor text so the cross-batch
+    // text dedup doesn't reject it (both records originally shared "Sample title").
     let mut opinion = sample_record();
     opinion.id = opinion_id.clone();
     opinion.source = "qa_opinionated".into();
+    opinion.sections[0].text = "Opinion title".into();
+    opinion.sections[0].sentences = vec!["Opinion title".into()];
 
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "qa_factual_source",
-        vec![factual.clone()],
-    )));
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "qa_opinion_source",
-        vec![opinion.clone()],
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "qa_factual_source",
+            vec![factual.clone()],
+        )))
+        .unwrap();
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "qa_opinion_source",
+            vec![opinion.clone()],
+        )))
+        .unwrap();
 
     sampler
         .inner
@@ -8308,10 +8824,12 @@ fn chunk_sampling_respects_split_boundaries() {
     train_record.source = "split_test".into();
     val_record.source = "split_test".into();
 
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "split_test",
-        vec![train_record, val_record],
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "split_test",
+            vec![train_record, val_record],
+        )))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -8319,8 +8837,10 @@ fn chunk_sampling_respects_split_boundaries() {
         .ingest_internal(SplitLabel::Train)
         .unwrap();
 
-    for _ in 0..4 {
-        let batch = sampler.next_text_batch(SplitLabel::Train).unwrap();
+    // Cross-batch text dedup prevents repeating chunk texts.  The train record
+    // has text "One Two" chunked into 2 unique windows.  We verify all
+    // emitted samples stay within the Train split before exhausting.
+    while let Ok(batch) = sampler.next_text_batch(SplitLabel::Train) {
         let sample = &batch.samples[0];
         let label = sampler
             .inner
@@ -8420,7 +8940,9 @@ fn adds_dynamic_chunk_pair_recipe_for_long_section_sources() {
     let sampler = TripletSampler::new(config, store);
     // Source provides only a base recipe; dynamic augmentation should happen
     // automatically during ingest based on observed section lengths.
-    sampler.register_source(Box::new(RecipeSource::new(records, recipes)));
+    sampler
+        .register_source(Box::new(RecipeSource::new(records, recipes)))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -8534,7 +9056,9 @@ fn does_not_add_dynamic_chunk_pair_recipe_when_all_sections_fit_window() {
         },
     ];
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(RecipeSource::new(records, recipes)));
+    sampler
+        .register_source(Box::new(RecipeSource::new(records, recipes)))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -8633,7 +9157,9 @@ fn adds_dynamic_chunk_pair_recipe_even_with_global_config_recipes() {
 
     let store = Arc::new(DeterministicSplitStore::new(split, 121).unwrap());
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(RecipeSource::new(records, Vec::new())));
+    sampler
+        .register_source(Box::new(RecipeSource::new(records, Vec::new())))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -8728,7 +9254,9 @@ fn auto_injected_recipe_uses_distinct_context_chunks_for_anchor_and_positive() {
     let sampler = TripletSampler::new(config, store);
     // Empty default recipes means the auto-injected recipe is the only
     // recipe available for this source when long sections are detected.
-    sampler.register_source(Box::new(RecipeSource::new(records, Vec::new())));
+    sampler
+        .register_source(Box::new(RecipeSource::new(records, Vec::new())))
+        .unwrap();
 
     let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
     assert_eq!(batch.triplets.len(), 1);
@@ -8837,7 +9365,9 @@ fn auto_injected_recipe_never_uses_identical_anchor_and_positive_chunks() {
     let store = Arc::new(DeterministicSplitStore::new(split, 120).unwrap());
     let sampler = TripletSampler::new(config, store);
     // No default source recipes: only the auto-injected recipe can run.
-    sampler.register_source(Box::new(RecipeSource::new(records, Vec::new())));
+    sampler
+        .register_source(Box::new(RecipeSource::new(records, Vec::new())))
+        .unwrap();
 
     for _ in 0..32 {
         let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
@@ -8916,7 +9446,9 @@ fn auto_injected_recipe_uses_window_chunks_for_anchor_and_positive() {
 
     let store = Arc::new(DeterministicSplitStore::new(split, 123).unwrap());
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(RecipeSource::new(records, Vec::new())));
+    sampler
+        .register_source(Box::new(RecipeSource::new(records, Vec::new())))
+        .unwrap();
 
     for _ in 0..16 {
         let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
@@ -8999,7 +9531,9 @@ fn auto_injected_recipe_keeps_all_components_in_requested_split() {
     }
 
     let sampler = TripletSampler::new(config, Arc::clone(&store));
-    sampler.register_source(Box::new(RecipeSource::new(records, Vec::new())));
+    sampler
+        .register_source(Box::new(RecipeSource::new(records, Vec::new())))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -9133,19 +9667,36 @@ fn sampler_allows_concurrent_batch_requests() {
         instruction: None,
     }];
 
+    // Each record MUST have a unique context section text so that the
+    // cross-batch text dedup doesn't exhaust after the first concurrent
+    // request.  All 4 threads race; with 4 unique texts each thread gets one.
+    let bodies = [
+        "concurrent_body_0",
+        "concurrent_body_1",
+        "concurrent_body_2",
+        "concurrent_body_3",
+    ];
+    let mut body_idx = 0usize;
     let records: Vec<DataRecord> = (0u32..)
         .filter_map(|i| {
             let id = format!("concurrent_{i}");
             (store.label_for(&id) == Some(SplitLabel::Train)).then(|| {
                 let mut r = sample_record();
                 r.id = id;
+                // Override the context section text so each record is unique.
+                let text = bodies[body_idx];
+                body_idx += 1;
+                r.sections[1].text = text.into();
+                r.sections[1].sentences = vec![text.into()];
                 r
             })
         })
         .take(4)
         .collect();
     let sampler = Arc::new(TripletSampler::new(config, store));
-    sampler.register_source(Box::new(InMemorySource::from_records("unit", records)));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("unit", records)))
+        .unwrap();
 
     let handles: Vec<_> = (0..4)
         .map(|_| {
@@ -9288,10 +9839,12 @@ fn sampler_for_prefetch_tests() -> Arc<TripletSampler<DeterministicSplitStore>> 
         })
         .take(4)
         .collect();
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "prefetch_source",
-        records,
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "prefetch_source",
+            records,
+        )))
+        .unwrap();
     sampler
 }
 
@@ -9409,10 +9962,12 @@ fn different_epochs_produce_different_record_orderings() {
     };
 
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "epoch_order",
-        records,
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "epoch_order",
+            records,
+        )))
+        .unwrap();
 
     // Epoch 0: collect one anchor per batch across all Train records.
     let epoch0: Vec<String> = (0..n_train)
@@ -9543,10 +10098,12 @@ fn resumed_sampler_uses_persisted_epoch_seed() {
     let epoch0_sequence: Vec<String> = {
         let store = Arc::new(DeterministicSplitStore::new(split, base_seed).unwrap());
         let sampler = TripletSampler::new(make_config(), store);
-        sampler.register_source(Box::new(InMemorySource::from_records(
-            "ep_resume",
-            records.clone(),
-        )));
+        sampler
+            .register_source(Box::new(InMemorySource::from_records(
+                "ep_resume",
+                records.clone(),
+            )))
+            .unwrap();
         draw_n(&sampler, n_draws)
     };
 
@@ -9556,10 +10113,12 @@ fn resumed_sampler_uses_persisted_epoch_seed() {
     {
         let store = Arc::new(FileSplitStore::open(&store_path, split, base_seed).unwrap());
         let sampler = TripletSampler::new(make_config(), Arc::clone(&store));
-        sampler.register_source(Box::new(InMemorySource::from_records(
-            "ep_resume",
-            records.clone(),
-        )));
+        sampler
+            .register_source(Box::new(InMemorySource::from_records(
+                "ep_resume",
+                records.clone(),
+            )))
+            .unwrap();
         sampler
             .next_triplet_batch(SplitLabel::Train)
             .expect("priming batch must succeed");
@@ -9571,10 +10130,12 @@ fn resumed_sampler_uses_persisted_epoch_seed() {
     let epoch1_sequence: Vec<String> = {
         let store = Arc::new(FileSplitStore::open(&store_path, split, base_seed).unwrap());
         let sampler = TripletSampler::new(make_config(), store);
-        sampler.register_source(Box::new(InMemorySource::from_records(
-            "ep_resume",
-            records.clone(),
-        )));
+        sampler
+            .register_source(Box::new(InMemorySource::from_records(
+                "ep_resume",
+                records.clone(),
+            )))
+            .unwrap();
         draw_n(&sampler, n_draws)
     };
 
@@ -9657,7 +10218,9 @@ fn triplet_rejects_negative_with_duplicate_text_content() {
             "Completely different body",
         ),
     ];
-    sampler.register_source(Box::new(InMemorySource::from_records("tt", records)));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("tt", records)))
+        .unwrap();
 
     // Draw many batches; every triplet must have all-distinct slot texts.
     for _ in 0..32 {
@@ -9725,10 +10288,12 @@ fn wrong_publication_date_covers_some_none_branch_with_undated_candidates() {
     let cand_same = trader_record(&same_date_id, "2025-01-01", "Same date cand", "Body C");
 
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        PRIMARY_SOURCE_ID,
-        vec![anchor_dated, cand_no_date, cand_same],
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            PRIMARY_SOURCE_ID,
+            vec![anchor_dated, cand_no_date, cand_same],
+        )))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -9794,10 +10359,12 @@ fn wrong_publication_date_covers_none_some_and_none_none_branches() {
         .retain(|t| META_FIELD_DATE.strip(t).is_none());
 
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        PRIMARY_SOURCE_ID,
-        vec![anchor_no_date, cand_dated, cand_no_date],
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            PRIMARY_SOURCE_ID,
+            vec![anchor_no_date, cand_dated, cand_no_date],
+        )))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -9857,10 +10424,12 @@ fn temporal_offset_selector_finds_nearest_chronological_neighbor() {
     let r30d = record_with_offset(&id_30d, base, 30 * 86400);
 
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        PRIMARY_SOURCE_ID,
-        vec![r0, r7d, r30d],
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            PRIMARY_SOURCE_ID,
+            vec![r0, r7d, r30d],
+        )))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -9925,10 +10494,12 @@ fn temporal_offset_selector_never_crosses_split_boundaries() {
         ..SamplerConfig::default()
     };
     let sampler = TripletSampler::new(config, store);
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        PRIMARY_SOURCE_ID,
-        vec![anchor_rec, val_rec, train_rec],
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            PRIMARY_SOURCE_ID,
+            vec![anchor_rec, val_rec, train_rec],
+        )))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -10014,7 +10585,9 @@ fn instruction_propagates_from_recipe_to_sample_triplet() {
     ];
 
     let sampler = TripletSampler::new(config, Arc::clone(&store));
-    sampler.register_source(Box::new(InMemorySource::from_records("unit", records)));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("unit", records)))
+        .unwrap();
 
     let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
     assert_eq!(batch.triplets.len(), 1);
@@ -10090,10 +10663,12 @@ fn allow_same_anchor_positive_permits_identical_text_triplet() {
     config_blocked.recipes = vec![simcse_recipe_blocked];
 
     let sampler_blocked = TripletSampler::new(config_blocked, Arc::clone(&store));
-    sampler_blocked.register_source(Box::new(InMemorySource::from_records(
-        "unit",
-        records.clone(),
-    )));
+    sampler_blocked
+        .register_source(Box::new(InMemorySource::from_records(
+            "unit",
+            records.clone(),
+        )))
+        .unwrap();
     // With flag=false the sampler cannot build any valid triplet from these records
     // (every anchor/positive pair is identical text), so the batch should error.
     assert!(
@@ -10120,7 +10695,9 @@ fn allow_same_anchor_positive_permits_identical_text_triplet() {
     config_allowed.recipes = vec![simcse_recipe_allowed];
 
     let sampler_allowed = TripletSampler::new(config_allowed, Arc::clone(&store));
-    sampler_allowed.register_source(Box::new(InMemorySource::from_records("unit", records)));
+    sampler_allowed
+        .register_source(Box::new(InMemorySource::from_records("unit", records)))
+        .unwrap();
     let batch = sampler_allowed
         .next_triplet_batch(SplitLabel::Train)
         .expect("triplet must be produced when allow_same_anchor_positive=true");
@@ -10215,14 +10792,18 @@ fn bm25_ranked_candidates_are_scoped_to_anchor_source() {
     };
 
     let sampler = TripletSampler::new(config, Arc::clone(&store));
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "source_alpha",
-        vec![anchor.clone(), same_source],
-    )));
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "source_beta",
-        vec![other_source.clone()],
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "source_alpha",
+            vec![anchor.clone(), same_source],
+        )))
+        .unwrap();
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "source_beta",
+            vec![other_source.clone()],
+        )))
+        .unwrap();
 
     sampler
         .inner
@@ -10303,10 +10884,12 @@ fn bm25_fallback_counter_increments_when_no_bm25_candidates_match() {
     ];
 
     let sampler = TripletSampler::new(config, Arc::clone(&store));
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        PRIMARY_SOURCE_ID,
-        records,
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            PRIMARY_SOURCE_ID,
+            records,
+        )))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -10413,10 +10996,12 @@ fn bm25_query_uses_raw_chunk_text_not_decorated_text() {
     );
 
     let sampler = TripletSampler::new(config, Arc::clone(&store));
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        PRIMARY_SOURCE_ID,
-        vec![anchor.clone(), content_peer.clone(), prefix_peer.clone()],
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            PRIMARY_SOURCE_ID,
+            vec![anchor.clone(), content_peer.clone(), prefix_peer.clone()],
+        )))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -10608,10 +11193,12 @@ fn select_chunk_parallel_temporal_offset_returns_chunk_from_neighbor() {
         r
     };
 
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        PRIMARY_SOURCE_ID,
-        vec![anchor_rec.clone(), neighbor_rec],
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            PRIMARY_SOURCE_ID,
+            vec![anchor_rec.clone(), neighbor_rec],
+        )))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -11009,10 +11596,12 @@ fn for_split_weight_apis_succeed_with_registered_source() {
             )
         })
         .collect();
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        PRIMARY_SOURCE_ID,
-        records,
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            PRIMARY_SOURCE_ID,
+            records,
+        )))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -11070,10 +11659,12 @@ fn bm25_query_text_over_token_limit_is_truncated_before_search() {
             )
         })
         .collect();
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        PRIMARY_SOURCE_ID,
-        records.clone(),
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            PRIMARY_SOURCE_ID,
+            records.clone(),
+        )))
+        .unwrap();
     sampler
         .inner
         .lock()
@@ -11321,10 +11912,12 @@ fn batch_size_guard_prevents_oversampling_from_large_pool() {
         .collect();
 
     let sampler = TripletSampler::new(config, Arc::clone(&store));
-    sampler.register_source(Box::new(InMemorySource::from_records(
-        "osg_source",
-        records,
-    )));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "osg_source",
+            records,
+        )))
+        .unwrap();
 
     // Pair batch: assert exactly BATCH items (not Exhausted, not more).
     let pair_batch = sampler
@@ -11359,4 +11952,32 @@ fn batch_size_guard_prevents_oversampling_from_large_pool() {
         "triplet batch length must equal batch_size; got {}",
         triplet_batch.triplets.len()
     );
+}
+
+#[test]
+fn sampler_register_source_rejects_reserved_id_pattern() {
+    // Verify that TripletSampler::register_source also rejects `__*__` ids
+    let ratios = SplitRatios {
+        train: 0.8,
+        validation: 0.1,
+        test: 0.1,
+    };
+    let store = Arc::new(DeterministicSplitStore::new(ratios, 42).unwrap());
+    let sampler = TripletSampler::new(SamplerConfig::default(), store);
+
+    let result = sampler.register_source(Box::new(InMemorySource::new("__reserved__")));
+    assert!(
+        result.is_err(),
+        "TripletSampler::register_source should reject reserved source id"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, SamplerError::ReservedSourceId(ref id) if id == "__reserved__"),
+        "expected ReservedSourceId error, got: {err}"
+    );
+
+    // Normal source IDs still work
+    sampler
+        .register_source(Box::new(InMemorySource::new("valid_id")))
+        .unwrap();
 }

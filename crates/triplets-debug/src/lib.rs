@@ -618,7 +618,9 @@ where
     let split_store = Arc::new(FileSplitStore::open(&split_store_path, config.split, 99)?);
     let sampler = TripletSampler::new(config, split_store.clone());
     for source in sources {
-        sampler.register_source(source);
+        sampler
+            .register_source(source)
+            .map_err(|e| Box::new(e) as Box<dyn Error>)?;
     }
 
     if cli.show_pair_samples {

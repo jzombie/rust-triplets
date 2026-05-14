@@ -110,6 +110,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Configuring Sources
 
+> **Reserved source IDs.** Source identifiers matching the `__*__` pattern
+> (starting and ending with double underscores) are reserved for internal
+> synthetic/metadata use — for example, `__step__` is used to persist the
+> ingestion step counter across restarts. If a source's `id()` returns such
+> a value, `register_source` returns `SamplerError::ReservedSourceId`.
+> This ensures the `__*__` namespace can be used by the framework for
+> metadata entries without colliding with user-defined sources.
+
 - [Hugging Face Source](#hugging-face-source)
 - [CSV Source](#csv-source)
 - [Text File Source](#text-file-source)
@@ -146,7 +154,7 @@ Streams rows directly from the Hugging Face Hub without requiring a full dataset
         );
 
         let source = HuggingFaceRowSource::new(config)?;
-        sampler.register_source(Box::new(source));
+        sampler.register_source(Box::new(source))?;
         Ok(())
     }
 }
@@ -348,7 +356,7 @@ for dataset in datasets {
     let mut cfg = HuggingFaceRowsConfig::new(...);
     cfg.http_client = Some(client.clone());  // clone is cheap (Arc'd)
     let source = HuggingFaceRowSource::new(cfg)?;
-    sampler.register_source(Box::new(source));
+    sampler.register_source(Box::new(source))?;
 }
 ```
 
@@ -374,13 +382,13 @@ let config = CsvSourceConfig::new("qna", "data/qna.csv")
     .with_positive_column("answer")
     .with_trust(0.9);
 let source = CsvSource::new(config).unwrap();
-sampler.register_source(Box::new(source));
+sampler.register_source(Box::new(source)).unwrap();
 
 // Text mode (SimCSE): single column used for both anchor and context.
 let config2 = CsvSourceConfig::new("corpus", "data/corpus.csv")
     .with_text_column("text");
 let source2 = CsvSource::new(config2).unwrap();
-sampler.register_source(Box::new(source2));
+sampler.register_source(Box::new(source2)).unwrap();
 ```
 
 Rows with empty required fields are skipped. Column name matching is case-insensitive.
@@ -404,7 +412,7 @@ let config = FileSourceConfig::new("docs", "./data/corpus")
     .with_trust(0.9); // Assign a quality score to this source
 
 let source = FileSource::new(config);
-sampler.register_source(Box::new(source));
+sampler.register_source(Box::new(source)).unwrap();
 ```
 
 ### InMemory Source
@@ -448,7 +456,7 @@ let sampler = TripletSampler::new(
     },
     store,
 );
-sampler.register_source(Box::new(source));
+sampler.register_source(Box::new(source)).unwrap();
 ```
 
 `from_records` is a convenience constructor when you already have a collected `Vec`. Pair it with `DataRecord::from_text` to keep bulk construction concise:
@@ -533,7 +541,7 @@ let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
 let store = Arc::new(DeterministicSplitStore::new(ratios, 42).unwrap());
 let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
 let adapter = IndexableAdapter::new(MyApiSource);
-sampler.register_source(Box::new(adapter));
+sampler.register_source(Box::new(adapter)).unwrap();
 ```
 
 ## Sampling and Mixing
@@ -559,14 +567,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_anchor_column("question")
         .with_positive_column("answer")
         .with_trust(0.9);
-    sampler.register_source(Box::new(CsvSource::new(csv_config)?));
+    sampler.register_source(Box::new(CsvSource::new(csv_config)?))?;
 
     // Source 2: local plain-text corpus of internal documentation.
     // Files are indexed recursively; filename stem → anchor, body → context.
     let file_config = FileSourceConfig::new("docs", "./data/internal_docs")
         .with_text_files_only(true)
         .with_trust(0.7); // lower trust — unreviewed internal docs
-    sampler.register_source(Box::new(FileSource::new(file_config)));
+    sampler.register_source(Box::new(FileSource::new(file_config)))?;
 
     // Override the mixing ratio for this batch: pull from the high-quality
     // CSV source 70% of the time and the local docs 30% of the time.
@@ -906,7 +914,7 @@ let store = Arc::new(DeterministicSplitStore::new(ratios, 42).unwrap());
 let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
 
 // One registration — the source provides both recipes.
-sampler.register_source(Box::new(FinancialReportsSource { /* … */ }));
+sampler.register_source(Box::new(FinancialReportsSource { /* … */ })).unwrap();
 
 let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
 // batch.triplets is a mix of "metrics_cross_view" and "metrics_to_transcript"
@@ -1165,7 +1173,7 @@ let sampler = TripletSampler::new(
     .with_denoiser(DenoiserConfig { enabled: true, strip_markdown: true, ..DenoiserConfig::default() }),
     store,
 );
-sampler.register_source(Box::new(source));
+sampler.register_source(Box::new(source)).unwrap();
 
 // The sampler supports triplet, pair, and text batches — use whichever
 // output format your training loop requires:

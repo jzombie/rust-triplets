@@ -40,7 +40,7 @@ use crate::types::SourceId;
 /// let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
 /// let store = Arc::new(DeterministicSplitStore::new(ratios, 42).unwrap());
 /// let sampler = TripletSampler::new(SamplerConfig::default(), store);
-/// sampler.register_source(Box::new(source));
+/// sampler.register_source(Box::new(source)).unwrap();
 /// ```
 pub struct InMemorySource {
     id: SourceId,
