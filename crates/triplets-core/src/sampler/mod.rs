@@ -2277,7 +2277,10 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 if let Some(sample) =
                     self.make_text_sample_for_split(&recipe, None, target_split, &mut rng)
                 {
-                    let key = chunk_key(&sample.chunk);
+                    // Use (record_id, text) as dedup key so that text-columns mode sources
+                    // (Anchor and Context sections with identical text) cannot produce
+                    // duplicate text content in the same batch.
+                    let key = (sample.chunk.record_id.clone(), sample.chunk.text.clone());
                     if seen.insert(key) {
                         samples.push(sample);
                     }
@@ -2361,7 +2364,10 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 recipe_steps = recipe_steps.saturating_add(order.len());
             }
             if let Some((_recipe, sample)) = sample {
-                let key = chunk_key(&sample.chunk);
+                // Use (record_id, text) as dedup key so that text-columns mode sources
+                // (Anchor and Context sections with identical text) cannot produce
+                // duplicate text content in the same batch.
+                let key = (sample.chunk.record_id.clone(), sample.chunk.text.clone());
                 if seen.insert(key) {
                     samples.push(sample);
                 }

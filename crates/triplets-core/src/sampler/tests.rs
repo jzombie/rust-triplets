@@ -537,6 +537,35 @@ fn trader_record(id: &str, date: &str, title: &str, body: &str) -> DataRecord {
     }
 }
 
+/// Create a record where Anchor and Context sections have identical text,
+/// simulating the text-columns mode that Hugging Face sources use.
+fn text_columns_record(id: &str, common_text: &str) -> DataRecord {
+    let now = Utc::now();
+    DataRecord {
+        id: id.into(),
+        source: "unit".into(),
+        created_at: now,
+        updated_at: now,
+        quality: QualityScore { trust: 0.9 },
+        taxonomy: vec!["SampleCorp".into()],
+        sections: vec![
+            RecordSection {
+                role: SectionRole::Anchor,
+                heading: Some("Text".into()),
+                text: common_text.into(),
+                sentences: vec![common_text.into()],
+            },
+            RecordSection {
+                role: SectionRole::Context,
+                heading: Some("Text".into()),
+                text: common_text.into(),
+                sentences: vec![common_text.into()],
+            },
+        ],
+        meta_prefix: None,
+    }
+}
+
 fn extract_date_prefix(chunk_text: &str) -> Option<String> {
     let first_line = chunk_text.lines().next()?;
     let prefix = first_line.strip_prefix("meta: ")?;
@@ -7265,6 +7294,68 @@ fn text_batch_dedupes_identical_chunks() {
         assert!(
             seen.insert(key),
             "text sample should be unique within batch"
+        );
+    }
+}
+
+#[test]
+fn text_batch_prevents_duplicate_text_per_record_from_text_columns() {
+    let split = SplitRatios {
+        train: 0.7,
+        validation: 0.2,
+        test: 0.1,
+    };
+    let mut config = base_config();
+    config.batch_size = 4;
+    config.allowed_splits = vec![SplitLabel::Train];
+    config.split = split;
+    config.recipes = vec![TripletRecipe {
+        name: "simcse".into(),
+        anchor: Selector::Role(SectionRole::Anchor),
+        positive_selector: Selector::Role(SectionRole::Context),
+        negative_selector: Selector::Role(SectionRole::Context),
+        negative_strategy: NegativeStrategy::WrongArticle,
+        weight: 1.0,
+        instruction: None,
+        allow_same_anchor_positive: true,
+    }];
+
+    let store = Arc::new(DeterministicSplitStore::new(split, 91).unwrap());
+    let find_train_id = |prefix: &str| -> String {
+        (0u32..)
+            .find_map(|i| {
+                let id = format!("{prefix}_{i}");
+                (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+            })
+            .unwrap()
+    };
+    let r1 = find_train_id("tc_rec");
+    let r2 = find_train_id("tc_other_a");
+    let r3 = find_train_id("tc_other_b");
+    let r4 = find_train_id("tc_other_c");
+    let sampler = TripletSampler::new(config, store);
+
+    let records = vec![
+        text_columns_record(&r1, "Content A identical in both sections."),
+        text_columns_record(&r2, "Content B identical in both sections."),
+        text_columns_record(&r3, "Content C identical in both sections."),
+        text_columns_record(&r4, "Content D identical in both sections."),
+    ];
+    sampler.register_source(Box::new(InMemorySource::from_records("tt", records)));
+
+    let batch = sampler.next_text_batch(SplitLabel::Train).unwrap();
+    assert_eq!(
+        batch.samples.len(),
+        4,
+        "batch should be full with 4 records"
+    );
+
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    for sample in &batch.samples {
+        let dedup_key = (sample.chunk.record_id.clone(), sample.chunk.text.clone());
+        assert!(
+            seen.insert(dedup_key),
+            "Anchor and Context sections of the same record must not produce duplicate text content in batch",
         );
     }
 }
