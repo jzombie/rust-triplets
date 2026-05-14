@@ -6392,6 +6392,168 @@ fn bm25_cursor_state_is_cleared_on_each_record_snapshot_sync() {
 }
 
 #[test]
+/// Verify that `prune_cursor_state()` removes stale chunk and role cursor
+/// entries for records that are no longer in the record pool.  Without this,
+/// chunk_cursors and role_cursors would accumulate entries across cache syncs,
+/// leading to unbounded memory growth.
+fn chunk_and_role_cursors_are_pruned_when_records_are_removed() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 42).unwrap());
+    let mut inner = TripletSamplerInner::new(base_config(), store);
+
+    // No records loaded yet — every cursor entry is stale.
+    assert!(inner.records.is_empty());
+
+    inner
+        .chunk_cursors
+        .insert(("stale_record".to_string(), 0_usize), 3_usize);
+    inner
+        .role_cursors
+        .insert(("stale_record".to_string(), "Anchor".to_string()), 5_usize);
+    assert_eq!(inner.chunk_cursors.len(), 1);
+    assert_eq!(inner.role_cursors.len(), 1);
+
+    // prune_cursor_state() must remove entries whose record IDs are absent.
+    inner.prune_cursor_state();
+    assert!(
+        inner.chunk_cursors.is_empty(),
+        "chunk_cursors should be pruned when their record is gone"
+    );
+    assert!(
+        inner.role_cursors.is_empty(),
+        "role_cursors should be pruned when their record is gone"
+    );
+
+    // Now add a valid record and entries for it, plus another stale entry.
+    let mut record = sample_record();
+    record.id = "valid_record".to_string();
+    inner
+        .records
+        .insert("valid_record".to_string(), Arc::new(record));
+
+    inner
+        .chunk_cursors
+        .insert(("valid_record".to_string(), 0_usize), 3_usize);
+    inner
+        .chunk_cursors
+        .insert(("another_stale".to_string(), 0_usize), 7_usize);
+    inner
+        .role_cursors
+        .insert(("valid_record".to_string(), "Anchor".to_string()), 5_usize);
+    inner
+        .role_cursors
+        .insert(("another_stale".to_string(), "Anchor".to_string()), 9_usize);
+    assert_eq!(inner.chunk_cursors.len(), 2);
+    assert_eq!(inner.role_cursors.len(), 2);
+
+    inner.prune_cursor_state();
+
+    // Stale entries removed, valid entries kept.
+    assert_eq!(
+        inner.chunk_cursors.len(),
+        1,
+        "chunk_cursors should keep valid entries and drop stale ones"
+    );
+    assert_eq!(
+        inner.role_cursors.len(),
+        1,
+        "role_cursors should keep valid entries and drop stale ones"
+    );
+    assert!(
+        inner
+            .chunk_cursors
+            .contains_key(&("valid_record".to_string(), 0_usize))
+    );
+    assert!(
+        inner
+            .role_cursors
+            .contains_key(&("valid_record".to_string(), "Anchor".to_string()))
+    );
+}
+
+#[test]
+/// Verify that `sync_records_from_cache()` prunes chunk and role cursor
+/// entries for records that are no longer in the record pool, while retaining
+/// entries for records that survive the sync.  Follows the same pattern as
+/// `bm25_cursor_state_is_cleared_on_each_record_snapshot_sync`.
+fn chunk_and_role_cursors_are_pruned_across_cache_sync() {
+    let split = SplitRatios {
+        train: 0.7,
+        validation: 0.2,
+        test: 0.1,
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 2024).unwrap());
+    let sync_id = (0u32..)
+        .find_map(|i| {
+            let id = format!("strict_sync_anchor_{i}");
+            (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+        })
+        .unwrap();
+    let sampler = TripletSampler::new(base_config(), Arc::clone(&store));
+    sampler.register_source(Box::new(InMemorySource::from_records(
+        "strict_sync_source",
+        vec![trader_record(&sync_id, "2025-01-01", "Anchor", "body")],
+    )));
+
+    let mut inner = sampler.inner.lock().unwrap();
+    inner.ingest_internal(SplitLabel::Train).unwrap();
+
+    // Verify sync_id is present in the record pool.
+    assert!(inner.records.contains_key(&sync_id));
+
+    // Insert cursor entries for both a valid record and a stale record.
+    inner
+        .chunk_cursors
+        .insert((sync_id.clone(), 0_usize), 3_usize);
+    inner
+        .chunk_cursors
+        .insert(("stale_record".to_string(), 0_usize), 7_usize);
+    inner
+        .role_cursors
+        .insert((sync_id.clone(), "Anchor".to_string()), 5_usize);
+    inner
+        .role_cursors
+        .insert(("stale_record".to_string(), "Anchor".to_string()), 9_usize);
+    assert_eq!(inner.chunk_cursors.len(), 2);
+    assert_eq!(inner.role_cursors.len(), 2);
+
+    // sync_records_from_cache must prune stale cursor entries.
+    inner.sync_records_from_cache().unwrap();
+
+    // Cursor for sync_id survives; cursor for stale_record is gone.
+    assert_eq!(
+        inner.chunk_cursors.len(),
+        1,
+        "chunk_cursors should keep valid entry and drop stale one"
+    );
+    assert_eq!(
+        inner.role_cursors.len(),
+        1,
+        "role_cursors should keep valid entry and drop stale one"
+    );
+    assert!(
+        inner
+            .chunk_cursors
+            .contains_key(&(sync_id.clone(), 0_usize))
+    );
+    assert!(
+        inner
+            .role_cursors
+            .contains_key(&(sync_id.clone(), "Anchor".to_string()))
+    );
+    assert!(
+        !inner
+            .chunk_cursors
+            .contains_key(&("stale_record".to_string(), 0_usize))
+    );
+    assert!(
+        !inner
+            .role_cursors
+            .contains_key(&("stale_record".to_string(), "Anchor".to_string()))
+    );
+}
+
+#[test]
 fn wrong_publication_date_falls_back_within_same_split() {
     let split = SplitRatios {
         train: 0.34,
@@ -7374,6 +7536,137 @@ fn text_batch_prevents_duplicate_text_per_record_from_text_columns() {
         assert!(
             seen.insert(dedup_key),
             "Anchor and Context sections of the same record must not produce duplicate text content in batch",
+        );
+    }
+}
+
+#[test]
+/// Verify that `consumed_text` prevents the same (record_id, text) pair
+/// from being sampled again across batches, regardless of source wrapping.
+/// Uses InMemorySource (which wraps) to confirm the filter is source-agnostic.
+fn text_batch_prevents_repeat_across_batches() {
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+    let mut config = base_config();
+    config.batch_size = 1;
+    config.ingestion_max_records = 10;
+    config.allowed_splits = vec![SplitLabel::Train];
+    config.split = split;
+    config.recipes = Vec::new();
+    config.text_recipes = vec![TextRecipe {
+        name: "anchor_text".into(),
+        selector: Selector::Role(SectionRole::Anchor),
+        weight: 1.0,
+        instruction: None,
+    }];
+
+    let store = Arc::new(DeterministicSplitStore::new(split, 42).unwrap());
+    let sampler = TripletSampler::new(config, store);
+
+    // InMemorySource wraps when exhausted — consumed_text must still block repeats.
+    let records: Vec<DataRecord> = (0..10)
+        .map(|i| {
+            let mut r = sample_record();
+            r.id = format!("consume_rec_{}", i);
+            r.sections[0].text = format!("Content {}", i);
+            r.sections[0].sentences = vec![format!("Content {}", i)];
+            r
+        })
+        .collect();
+    sampler.register_source(Box::new(InMemorySource::from_records("src", records)));
+
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for i in 0..10 {
+        let batch = sampler.next_text_batch(SplitLabel::Train).unwrap();
+        assert_eq!(batch.samples.len(), 1, "batch {} should have 1 sample", i);
+        let rid = batch.samples[0].chunk.record_id.clone();
+        assert!(
+            seen.insert(rid.clone()),
+            "record {} was sampled again on batch {} — consumed_text should have blocked it",
+            rid,
+            i,
+        );
+    }
+}
+
+#[test]
+/// Verify that `emitted_text_hashes` is cleared on `sync_records_from_cache()`,
+/// allowing texts from previous ingestion windows to be re-sampled after a
+/// cache refresh.  Without this, the set would grow unboundedly and permanently
+/// block texts once emitted.
+fn emitted_text_hashes_allows_resample_after_cache_refresh() {
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+    let mut config = base_config();
+    config.batch_size = 1;
+    // Cache holds 2 records at a time so the window slides across refreshes.
+    config.ingestion_max_records = 2;
+    config.allowed_splits = vec![SplitLabel::Train];
+    config.split = split;
+    config.recipes = Vec::new();
+    config.text_recipes = vec![TextRecipe {
+        name: "anchor_text".into(),
+        selector: Selector::Role(SectionRole::Anchor),
+        weight: 1.0,
+        instruction: None,
+    }];
+
+    let store = Arc::new(DeterministicSplitStore::new(split, 42).unwrap());
+    let sampler = TripletSampler::new(config, store);
+
+    // Three records: "a" and "c" share the same text content.
+    let records: Vec<DataRecord> = vec![("rec_a", "hello"), ("rec_b", "world"), ("rec_c", "hello")]
+        .into_iter()
+        .map(|(id, text)| {
+            let mut r = sample_record();
+            r.id = id.to_string();
+            r.sections[0].text = text.to_string();
+            r.sections[0].sentences = vec![text.to_string()];
+            r
+        })
+        .collect();
+    sampler.register_source(Box::new(InMemorySource::from_records("src", records)));
+
+    // Batch 1 — draws from window containing "rec_a", "rec_b".
+    let batch1 = sampler.next_text_batch(SplitLabel::Train).unwrap();
+    assert_eq!(batch1.samples.len(), 1);
+    let id1 = batch1.samples[0].chunk.record_id.clone();
+
+    // Batch 2 — draws the other record from the same window.
+    let batch2 = sampler.next_text_batch(SplitLabel::Train).unwrap();
+    assert_eq!(batch2.samples.len(), 1);
+    let id2 = batch2.samples[0].chunk.record_id.clone();
+    assert_ne!(
+        id1, id2,
+        "batch 2 should be a different record from batch 1"
+    );
+
+    // Both records from the first window are now exhausted.
+    // Batch 3 triggers a source refresh (buffer empty), which slides the
+    // cache window: "rec_a" is evicted, "rec_c" enters.  sync_records_from_cache
+    // clears emitted_text_hashes, so the text "hello" from "rec_c" is eligible.
+    let batch3 = sampler.next_text_batch(SplitLabel::Train).unwrap();
+    assert_eq!(batch3.samples.len(), 1);
+    let id3 = batch3.samples[0].chunk.record_id.clone();
+    assert_eq!(
+        id3, "rec_c",
+        "batch 3 should sample the newly arrived record even though its text 'hello' was already emitted in batch 1"
+    );
+
+    // Verify boundedness: records should not accumulate stale entries across syncs.
+    // Cache holds 2 records, so records should have at most 2 entries.
+    {
+        let guard = sampler.inner.lock().unwrap();
+        assert!(
+            guard.records.len() <= 2,
+            "records contains {} entries; should be at most 2 after cache slide",
+            guard.records.len()
         );
     }
 }

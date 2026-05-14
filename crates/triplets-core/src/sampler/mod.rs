@@ -309,6 +309,10 @@ struct TripletSamplerInner<S: SplitStore + EpochStateStore + SamplerStateStore +
     source_record_cursors: HashMap<SourceId, usize>,
     /// Round-robin index for triplet recipe cycling.
     triplet_recipe_rr_idx: usize,
+    /// Hash set of (record_id, text) pairs already emitted by the text batch path
+    /// between cache-sync boundaries.  Cleared on every sync_records_from_cache.
+    /// Prevents the same text from being sampled again regardless of source wrapping.
+    emitted_text_hashes: HashSet<u64>,
     /// Round-robin index for text recipe cycling.
     text_recipe_rr_idx: usize,
     /// Epoch counter for per-source deterministic shuffling (seed ^ epoch).
@@ -385,6 +389,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             source_state_dirty: false,
             source_record_indices: HashMap::new(),
             source_record_cursors: HashMap::new(),
+            emitted_text_hashes: HashSet::new(),
             triplet_recipe_rr_idx: 0,
             text_recipe_rr_idx: 0,
             source_epoch: 0,
@@ -936,10 +941,23 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     }
 
     fn advance_source_epoch(&mut self) {
+        // The epoch advanced, changing the sampling permutation.  Clear so
+        // that texts from the same cache snapshot can be re-sampled under
+        // the new ordering.  Without this, texts sampled in epoch N would
+        // be permanently blocked in epoch N+1 even if the record pool is
+        // identical.
+        self.emitted_text_hashes.clear();
+        // Advance the epoch counter so source refreshes receive a different
+        // permutation seed (seed ^ epoch), producing a fresh traversal order.
         self.source_epoch = self.source_epoch.saturating_add(1);
         self.ingestion.set_source_epoch(self.source_epoch);
+        // Reset per-source record cursors so the new epoch starts from the
+        // beginning of each source's permuted index space (not from where the
+        // previous epoch left off).
         self.source_record_cursors.clear();
         self.source_cycle_idx = 0;
+        // Reset the wrapped-tracking so all sources are eligible for sampling
+        // in the new epoch.
         for source in &self.source_order {
             self.source_wrapped.insert(source.clone(), false);
         }
@@ -1814,9 +1832,25 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     fn sync_records_from_cache(&mut self) -> Result<(), SamplerError> {
         let mut snapshot = self.ingestion.all_records_snapshot();
         snapshot.sort_by(|a, b| a.id.cmp(&b.id));
+        // Replace the record pool with the current cache snapshot so that
+        // records evicted from the bounded in-memory cache no longer consume
+        // memory here.  Without this clear, stale records accumulate across
+        // cache refreshes, causing unbounded memory growth.
         self.records.clear();
+        // Rebuild the long-section set from the new record pool.  Without
+        // clearing first, sources whose records were evicted would leave
+        // stale entries, though this is bounded by num_sources in practice.
         self.sources_with_long_sections.clear();
-        // Cursor state must never outlive a record snapshot boundary.
+        // The cache snapshot has changed — records evicted, new records
+        // arrived.  Clear so that texts from the new window are eligible
+        // even if the same (record_id, text) was emitted before eviction.
+        // Without this, emitted_text_hashes accumulates across cache
+        // refreshes: unbounded growth proportional to source size.
+        self.emitted_text_hashes.clear();
+        // Cursor state (BM25 hard-negative caches, chunk/role cursors) must
+        // never outlive a record snapshot boundary.  BM25 backend clears its
+        // negative cursors here; chunk/role cursors are pruned below in
+        // prune_cursor_state() against the new record pool.
         self.negative_backend.on_sync_start();
         for record in snapshot {
             if self.split_store.label_for(&record.id).is_none() {
@@ -2238,6 +2272,23 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         Err(SamplerError::Exhausted(RECIPE_LABEL_TRIPLETS.into()))
     }
 
+    /// Check whether `sample` passes both per-batch and per-window dedup
+    /// for text batch sampling.  Returns `true` and records the sample's
+    /// (record_id, text) identity in `seen` and `emitted_text_hashes` when
+    /// the sample is eligible.
+    fn try_emit_text_sample(
+        &mut self,
+        sample: &TextSample,
+        seen: &mut HashSet<(String, String)>,
+    ) -> bool {
+        let key = text_dedup_key(&sample.chunk);
+        seen.insert(key)
+            && self.emitted_text_hashes.insert({
+                let h = stable_hash_str(0, &sample.chunk.record_id);
+                stable_hash_str(h, &sample.chunk.text)
+            })
+    }
+
     fn next_text_batch_inner_with_weights(
         &mut self,
         target_split: SplitLabel,
@@ -2276,14 +2327,9 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 last_recipe_name = Some(recipe.name.clone());
                 if let Some(sample) =
                     self.make_text_sample_for_split(&recipe, None, target_split, &mut rng)
+                    && self.try_emit_text_sample(&sample, &mut seen)
                 {
-                    // Use (record_id, text) as dedup key so that text-columns mode sources
-                    // (Anchor and Context sections with identical text) cannot produce
-                    // duplicate text content in the same batch.
-                    let key = text_dedup_key(&sample.chunk);
-                    if seen.insert(key) {
-                        samples.push(sample);
-                    }
+                    samples.push(sample);
                 }
             }
             if recipe_steps > 0 {
@@ -2363,14 +2409,10 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             if sample.is_none() {
                 recipe_steps = recipe_steps.saturating_add(order.len());
             }
-            if let Some((_recipe, sample)) = sample {
-                // Use (record_id, text) as dedup key so that text-columns mode sources
-                // (Anchor and Context sections with identical text) cannot produce
-                // duplicate text content in the same batch.
-                let key = text_dedup_key(&sample.chunk);
-                if seen.insert(key) {
-                    samples.push(sample);
-                }
+            if let Some((_recipe, sample)) = sample
+                && self.try_emit_text_sample(&sample, &mut seen)
+            {
+                samples.push(sample);
             }
             idx += 1;
             source_steps += 1;
