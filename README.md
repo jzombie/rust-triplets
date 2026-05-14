@@ -317,6 +317,39 @@ enforces a **32 GiB hard cap** on this cache. The cap can be tuned or disabled t
 When the cap is reached, the least recently accessed shards are evicted first. Evicted shards
 are re-downloaded automatically from Hugging Face on the next access.
 
+#### Throttling & Retry
+
+Release builds include an exponential-backoff throttle middleware
+([`reqwest-drive`](https://crates.io/crates/reqwest-drive)) that retries
+rate-limited (429) and transient failures up to 3 times with jittered delays. Debug builds
+(including `cargo test`) skip the middleware so tests against mock servers aren't slowed by
+retry delays. Compile with `--release` to enable automatic retry in production.
+
+**Runtime & client sharing.**  All `HuggingFaceRowSource` instances share a single
+multi-threaded tokio runtime, so TCP connections established by one source can be reused
+by another.  When using a [source-list file](#source-list-file-format) via
+`build_hf_sources`, a single throttled client is also built automatically and shared across
+all sources in the list — one connection pool, one throttle state governing all outbound
+traffic.
+
+If you construct sources manually with `HuggingFaceRowSource::new()`, each source still
+shares the same runtime, but gets its own client with its own throttle.  Ten sources would
+allow up to 40 concurrent requests, potentially defeating rate-limit protection.  To share
+a client manually, pre-build it and set it on each config:
+
+```rust,ignore
+// Example: sharing a client across multiple sources manually.
+// In practice, `build_hf_sources()` handles this automatically.
+let client = HuggingFaceRowSource::build_http_client(&config)?;
+
+for dataset in datasets {
+    let mut cfg = HuggingFaceRowsConfig::new(...);
+    cfg.http_client = Some(client.clone());  // clone is cheap (Arc'd)
+    let source = HuggingFaceRowSource::new(cfg)?;
+    sampler.register_source(Box::new(source));
+}
+```
+
 ### CSV Source
 
 Load rows from a CSV file with explicit column mappings. The file **must have a named header row** — columns are always selected by name. Supports two modes:

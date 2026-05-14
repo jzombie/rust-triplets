@@ -22,6 +22,7 @@ hf-hub = { workspace = true }
 parquet = { workspace = true }
 rayon = { workspace = true }
 reqwest = { workspace = true }
+reqwest-drive = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 simd-r-drive = { workspace = true }
