@@ -2341,10 +2341,9 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 last_recipe_name = Some(recipe.name.clone());
                 if let Some(sample) =
                     self.make_text_sample_for_split(&recipe, None, target_split, &mut rng)
+                    && self.try_emit_text_sample(&sample, &mut batch_texts)
                 {
-                    if self.try_emit_text_sample(&sample, &mut batch_texts) {
-                        samples.push(sample);
-                    }
+                    samples.push(sample);
                 }
             }
             if recipe_steps > 0 {
@@ -2414,13 +2413,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 let recipe = recipes[recipe_idx].clone();
                 if let Some(item) =
                     self.make_text_sample_for_split(&recipe, Some(source), target_split, &mut rng)
+                    && self.try_emit_text_sample(&item, &mut batch_texts)
                 {
-                    if self.try_emit_text_sample(&item, &mut batch_texts) {
-                        recipe_steps = recipe_steps.saturating_add(offset + 1);
-                        *pos = (*pos + offset + 1) % order.len();
-                        sample = Some((recipe, item));
-                        break;
-                    }
+                    recipe_steps = recipe_steps.saturating_add(offset + 1);
+                    *pos = (*pos + offset + 1) % order.len();
+                    sample = Some((recipe, item));
+                    break;
                 }
             }
             if sample.is_none() {
