@@ -4,7 +4,7 @@
 mod constants;
 mod huggingface_source;
 
-/// Test utilities for HuggingFace source tests.
+/// Test utilities for Hugging Face source tests.
 ///
 /// Used by unit tests inside the `triplets-hf` crate and integration tests
 /// in `crates/triplets-hf/tests/huggingface_integration.rs`.
