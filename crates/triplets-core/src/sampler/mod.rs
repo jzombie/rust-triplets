@@ -309,6 +309,10 @@ struct TripletSamplerInner<S: SplitStore + EpochStateStore + SamplerStateStore +
     source_record_cursors: HashMap<SourceId, usize>,
     /// Round-robin index for triplet recipe cycling.
     triplet_recipe_rr_idx: usize,
+        /// Tracks (record_id, text) pairs already emitted by the text batch path
+    /// within the current cache epoch.  Cleared on every sync_records_from_cache.
+    /// Prevents the same text from being sampled again regardless of source wrapping.
+    consumed_text: HashSet<(String, String)>,
     /// Round-robin index for text recipe cycling.
     text_recipe_rr_idx: usize,
     /// Epoch counter for per-source deterministic shuffling (seed ^ epoch).
@@ -385,6 +389,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             source_state_dirty: false,
             source_record_indices: HashMap::new(),
             source_record_cursors: HashMap::new(),
+            consumed_text: HashSet::new(),
             triplet_recipe_rr_idx: 0,
             text_recipe_rr_idx: 0,
             source_epoch: 0,
@@ -936,6 +941,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     }
 
     fn advance_source_epoch(&mut self) {
+        self.consumed_text.clear();
         self.source_epoch = self.source_epoch.saturating_add(1);
         self.ingestion.set_source_epoch(self.source_epoch);
         self.source_record_cursors.clear();
@@ -2281,7 +2287,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                     // (Anchor and Context sections with identical text) cannot produce
                     // duplicate text content in the same batch.
                     let key = text_dedup_key(&sample.chunk);
-                    if seen.insert(key) {
+                    if seen.insert(key.clone()) && self.consumed_text.insert(key) {
                         samples.push(sample);
                     }
                 }
@@ -2368,7 +2374,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 // (Anchor and Context sections with identical text) cannot produce
                 // duplicate text content in the same batch.
                 let key = text_dedup_key(&sample.chunk);
-                if seen.insert(key) {
+                if seen.insert(key.clone()) && self.consumed_text.insert(key) {
                     samples.push(sample);
                 }
             }
