@@ -1957,9 +1957,14 @@ mod tests {
             "src_3 (w=2.0) must outpace all w=1.0 sources (totals: {totals:?})"
         );
         // Lock in the exact deterministic distribution.
+        // (Distribution changed after the cross-batch dedup fix: with proper
+        // per-record hash tracking, the sampler exhausts and force-refreshes
+        // more often, which increases the total number of refresh cycles but
+        // preserves the weighted distribution pattern. The key invariant
+        // (src_3 with w=2.0 outpaces all w=1.0 sources) is unchanged.)
         assert_eq!(
             totals,
-            vec![6, 6, 6, 26, 11],
+            vec![14, 14, 14, 37, 19],
             "unequal-weights: unexpected refresh distribution"
         );
     }

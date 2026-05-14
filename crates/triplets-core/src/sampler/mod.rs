@@ -313,7 +313,11 @@ struct TripletSamplerInner<S: SplitStore + EpochStateStore + SamplerStateStore +
     /// pool is stable.  Pruned on sync_records_from_cache only when records
     /// are evicted.  Prevents the same text from being sampled again within
     /// the same ingestion window, regardless of source wrapping or epoch.
-    emitted_text_hashes: HashSet<u64>,
+    ///
+    /// Per-record tracking lets us surgically remove hashes only for evicted
+    /// records, preserving cross-batch dedup across small window advances
+    /// (e.g. window=512, batch_size=4 where only 4/512 records are swapped).
+    emitted_text_hashes: HashMap<RecordId, HashSet<u64>>,
     /// Round-robin index for text recipe cycling.
     text_recipe_rr_idx: usize,
     /// Epoch counter for per-source deterministic shuffling (seed ^ epoch).
@@ -391,7 +395,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             source_state_dirty: false,
             source_record_indices: HashMap::new(),
             source_record_cursors: HashMap::new(),
-            emitted_text_hashes: HashSet::new(),
+            emitted_text_hashes: HashMap::new(),
             triplet_recipe_rr_idx: 0,
             text_recipe_rr_idx: 0,
             source_epoch: 0,
@@ -1841,11 +1845,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     fn sync_records_from_cache(&mut self) -> Result<(), SamplerError> {
         let mut snapshot = self.ingestion.all_records_snapshot();
         snapshot.sort_by(|a, b| a.id.cmp(&b.id));
-        // Check whether the pool actually changed before clearing anything.
-        // This avoids tearing down cross-batch dedup state on every advance.
-        let old_ids: HashSet<&str> = self.records.keys().map(|s| s.as_str()).collect();
-        let incoming_ids: HashSet<&str> = snapshot.iter().map(|r| r.id.as_str()).collect();
-        let pool_changed = old_ids != incoming_ids;
+
+        // Determine which records are being evicted BEFORE clearing self.records.
+        // Use owned strings to avoid borrowing self.records across the clear().
+        let old_ids: HashSet<String> = self.records.keys().cloned().collect();
+        let incoming_ids: HashSet<String> = snapshot.iter().map(|r| r.id.clone()).collect();
+        let evicted: HashSet<&String> = old_ids.difference(&incoming_ids).collect();
 
         // Replace the record pool with the current cache snapshot so that
         // records evicted from the bounded in-memory cache no longer consume
@@ -1856,12 +1861,16 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         // clearing first, sources whose records were evicted would leave
         // stale entries, though this is bounded by num_sources in practice.
         self.sources_with_long_sections.clear();
-        // Prune emitted text hashes only when records were actually evicted
-        // or added, not on every ingestion advance.  This preserves cross-batch
-        // dedup within a stable pool.  The set is naturally bounded by the
-        // pool size (max_records unique texts).
-        if pool_changed {
-            self.emitted_text_hashes.clear();
+        // Prune emitted text hashes only for records that were actually
+        // evicted from the pool, not on every ingestion advance.  This
+        // preserves cross-batch dedup within a stable pool: with a window
+        // of 512 and batch_size of 4, only 4 records are swapped per
+        // advance, and the other 508 records' emitted hashes must survive.
+        //
+        // Old code cleared the entire set on ANY pool change, which broke
+        // cross-batch dedup on every single advance call.
+        for evicted_id in &evicted {
+            self.emitted_text_hashes.remove(*evicted_id);
         }
         // Cursor state (BM25 hard-negative caches, chunk/role cursors) must
         // never outlive a record snapshot boundary.  BM25 backend clears its
@@ -2300,6 +2309,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         batch_texts.insert(sample.chunk.text.clone())
             && self
                 .emitted_text_hashes
+                .entry(sample.chunk.record_id.clone())
+                .or_default()
                 .insert(stable_hash_str(0, &sample.chunk.text))
     }
 

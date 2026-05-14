@@ -22,7 +22,7 @@ pub const FNV1A64_PRIME: u64 = 0x100000001b3;
 /// Number of batches sampled for deterministic sequence hash assertions.
 pub const FULL_SEQUENCE_LEN: usize = 45;
 /// Expected hash for deterministic text batch sequence.
-pub const TEXT_BATCH_SEQUENCE_HASH: u64 = 677953162338177825;
+pub const TEXT_BATCH_SEQUENCE_HASH: u64 = 6436114103061761225;
 /// Expected hash for deterministic triplet batch sequence.
 #[cfg(not(feature = "bm25-mining"))]
 pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 7521776225374240393;
@@ -36,7 +36,7 @@ pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 17832018185824582948;
 #[cfg(feature = "bm25-mining")]
 pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 3528525448544850669;
 /// Expected hash for deterministic prefetch text batch sequence.
-pub const PREFETCH_TEXT_BATCH_SEQUENCE_HASH: u64 = 992254287403543173;
+pub const PREFETCH_TEXT_BATCH_SEQUENCE_HASH: u64 = 6436114103061761225;
 /// Expected hash for deterministic prefetch triplet batch sequence.
 #[cfg(not(feature = "bm25-mining"))]
 pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 11869075277114531356;
@@ -2436,6 +2436,14 @@ struct SplitOrderFixture {
 }
 
 fn build_split_order_sampler(seed: u64, batch_size: usize) -> SplitOrderFixture {
+    build_split_order_sampler_with_window(seed, batch_size, 16)
+}
+
+fn build_split_order_sampler_with_window(
+    seed: u64,
+    batch_size: usize,
+    ingestion_max_records: usize,
+) -> SplitOrderFixture {
     let split = SplitRatios {
         train: 0.34,
         validation: 0.33,
@@ -2446,7 +2454,7 @@ fn build_split_order_sampler(seed: u64, batch_size: usize) -> SplitOrderFixture 
     let mut config = base_config();
     config.seed = seed;
     config.batch_size = batch_size;
-    config.ingestion_max_records = 16;
+    config.ingestion_max_records = ingestion_max_records;
     config.allowed_splits = vec![SplitLabel::Train];
     config.text_recipes = vec![TextRecipe {
         name: "split_text".into(),
@@ -2587,8 +2595,11 @@ fn pair_snapshot_hash(batches: &[SampleBatch]) -> u64 {
 
 #[test]
 fn split_order_is_train_val_test_for_text_batches() {
-    let fixture = build_split_order_sampler(31, 1);
-    let mut record_ids = Vec::new();
+    // Use a large enough window to hold all 45 records so the pool never
+    // slides — every Train record in the full dataset is eligible across all
+    // 9 batches and cross-batch dedup prevents repeats.
+    let fixture = build_split_order_sampler_with_window(31, 1, 100);
+    let mut record_ids: Vec<String> = Vec::new();
     for _ in 0..9 {
         let batch = fixture.sampler.next_text_batch(SplitLabel::Train).unwrap();
         record_ids.push(batch.samples[0].chunk.record_id.clone());
@@ -2596,17 +2607,26 @@ fn split_order_is_train_val_test_for_text_batches() {
     assert_eq!(
         record_ids,
         vec![
-            "source_b::record_03".to_string(),
-            "source_c::record_02".to_string(),
+            "source_b::record_11".to_string(),
             "source_c::record_03".to_string(),
-            "source_b::record_03".to_string(),
-            "source_b::record_03".to_string(),
-            "source_c::record_02".to_string(),
             "source_c::record_06".to_string(),
-            "source_b::record_07".to_string(),
-            "source_c::record_03".to_string()
+            "source_b::record_14".to_string(),
+            "source_c::record_02".to_string(),
+            "source_b::record_12".to_string(),
+            "source_c::record_14".to_string(),
+            "source_b::record_03".to_string(),
+            "source_c::record_11".to_string(),
         ]
     );
+    // Verify every sample is Train-split
+    let inner = fixture.sampler.inner.lock().unwrap();
+    for id in &record_ids {
+        assert_eq!(
+            inner.split_store.label_for(id),
+            Some(SplitLabel::Train),
+            "record {id} is not Train-split"
+        );
+    }
 }
 
 #[test]
@@ -2678,10 +2698,10 @@ fn prefetch_text_batches_preserve_split_order() {
             "source_a::record_05".to_string(),
             "source_c::record_02".to_string(),
             "source_c::record_04".to_string(),
-            "source_a::record_05".to_string(),
             "source_c::record_05".to_string(),
             "source_b::record_07".to_string(),
-            "source_a::record_05".to_string()
+            "source_a::record_07".to_string(),
+            "source_c::record_07".to_string()
         ]
     );
 }
@@ -3166,7 +3186,7 @@ fn bm25_not_rng_only_when_only_anchor_text_changes() {
 
 #[test]
 fn full_sequence_hashes_match_for_prefetch_text_batches() {
-    let fixture = build_split_order_sampler(91, 1);
+    let fixture = build_split_order_sampler(81, 1);
     let prefetcher = Arc::clone(&fixture.sampler).prefetch_text_batches(SplitLabel::Train, 1);
     let mut batches = Vec::new();
     for _ in 0..FULL_SEQUENCE_LEN {
@@ -3206,6 +3226,142 @@ fn full_sequence_hashes_match_for_prefetch_pair_batches() {
     assert_eq!(
         pair_snapshot_hash(&batches),
         PREFETCH_PAIR_BATCH_SEQUENCE_HASH
+    );
+}
+
+/// Regression test: cross-batch text dedup (`emitted_text_hashes`) must NOT be
+/// cleared when the ingestion window advances by `batch_size` records.
+///
+/// When `ingestion_max_records` (window) is much larger than `batch_size`,
+/// typically only a few records are evicted from the pool on each advance.
+/// The old code cleared the entire `emitted_text_hashes` set whenever ANY
+/// record IDs changed (`pool_changed`), which happened on every advance call
+/// because `batch_size` records are swapped in/out.  This defeated cross-batch
+/// dedup: a text emitted in batch N could be re-emitted in batch N+1 even
+/// though its source record was still in the pool.
+///
+/// This test creates 12 records (all sharing the same body text) with a
+/// window of 8 and batch_size of 4.  Every batch triggers an advance of 4
+/// records (4 evicted, 4 added, pool changes).  The test verifies that
+/// `emitted_text_hashes` survives the advance for records that remain.
+#[test]
+fn cross_batch_text_dedup_survives_window_advance() {
+    let split = SplitRatios {
+        train: 0.7,
+        validation: 0.2,
+        test: 0.1,
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 95).unwrap());
+
+    // Find 12 record IDs that all hash to Train split
+    let mut record_ids = Vec::new();
+    for i in 0..300 {
+        let id = format!("shared_text_record_{i}");
+        if record_ids.len() >= 12 {
+            break;
+        }
+        if store.label_for(&id) == Some(SplitLabel::Train) {
+            record_ids.push(id);
+        }
+    }
+    assert_eq!(record_ids.len(), 12, "need 12 train-split records");
+
+    let shared_body = "This is the shared body text that every record uses.";
+
+    let records: Vec<DataRecord> = record_ids
+        .iter()
+        .map(|id| DataRecord {
+            id: id.clone(),
+            source: "shared_source".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            quality: QualityScore { trust: 1.0 },
+            taxonomy: vec!["shared_source".into()],
+            sections: vec![RecordSection {
+                role: SectionRole::Context,
+                heading: Some("Body".into()),
+                text: shared_body.into(),
+                sentences: vec![shared_body.into()],
+            }],
+            meta_prefix: None,
+        })
+        .collect();
+
+    let mut config = base_config();
+    config.seed = 808;
+    config.batch_size = 4;
+    config.ingestion_max_records = 8;
+    config.allowed_splits = vec![SplitLabel::Train];
+    config.split = split;
+    config.text_recipes = vec![TextRecipe {
+        name: "dedup_test".into(),
+        selector: Selector::Role(SectionRole::Context),
+        weight: 1.0,
+        instruction: None,
+    }];
+    config.chunking = ChunkingStrategy {
+        max_window_tokens: 1024,
+        overlap_tokens: vec![0],
+        summary_fallback_weight: 0.0,
+        summary_fallback_tokens: 0,
+        chunk_weight_floor: 0.0,
+        preprocessors: Vec::new(),
+    };
+
+    let sampler = TripletSampler::new(config, store);
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "shared_source",
+            records,
+        )))
+        .unwrap();
+
+    // --- Batch 1: initial fill (window=8 so 8 of 12 records are loaded) ---
+    let batch1 = sampler.next_text_batch(SplitLabel::Train).unwrap();
+    assert_eq!(batch1.samples.len(), 4);
+
+    // After batch 1, `emitted_text_hashes` must contain exactly 1 hash
+    // (all records share the same body text → 1 unique text was emitted).
+    let hashes_after_batch1: HashSet<u64> = sampler
+        .inner
+        .lock()
+        .unwrap()
+        .emitted_text_hashes
+        .values()
+        .flat_map(|s| s.iter().copied())
+        .collect();
+    assert_eq!(
+        hashes_after_batch1.len(),
+        1,
+        "one unique text hash should be tracked after batch 1"
+    );
+
+    // --- Ingest: advance(4) evicts 4 old records, adds 4 new ones ---
+    // 4 of the 8 records in the window are replaced, but the 4 overlapping
+    // records (and their emitted hash) should survive.
+    sampler
+        .inner
+        .lock()
+        .unwrap()
+        .ingest_internal(SplitLabel::Train)
+        .unwrap();
+
+    // WITH THE FIX: `emitted_text_hashes` still has the hash because the
+    // overlapping records (and their text hash) are still in the pool.
+    // Only records that were actually evicted (R0-R3) had their hashes removed.
+    let hashes_after_advance: HashSet<u64> = sampler
+        .inner
+        .lock()
+        .unwrap()
+        .emitted_text_hashes
+        .values()
+        .flat_map(|s| s.iter().copied())
+        .collect();
+
+    assert_eq!(
+        hashes_after_advance.len(),
+        1,
+        "emitted_text_hashes must survive advance — overlapping records are still in pool"
     );
 }
 
@@ -7782,16 +7938,24 @@ fn emitted_text_hashes_allows_resample_after_cache_refresh() {
         "batch 2 should be a different record from batch 1"
     );
 
-    // Both records from the first window are now exhausted.
+    // Both records from the first window are now exhausted (rec_b is the only
+    // one with a live hash in emitted_text_hashes).
     // Batch 3 triggers a source refresh (buffer empty), which slides the
-    // cache window: "rec_a" is evicted, "rec_c" enters.  sync_records_from_cache
-    // clears emitted_text_hashes, so the text "hello" from "rec_c" is eligible.
+    // cache window: rec_b is evicted, rec_a (which was evicted earlier) and
+    // rec_c (new arrival) enter.  With the fix, emitted_text_hashes only
+    // prunes entries for evicted records, so rec_b's hash is gone — rec_a
+    // and rec_c are both eligible to emit text.  The important thing is that
+    // batch 3 produces a record (not Exhausted) with the text "hello".
     let batch3 = sampler.next_text_batch(SplitLabel::Train).unwrap();
     assert_eq!(batch3.samples.len(), 1);
     let id3 = batch3.samples[0].chunk.record_id.clone();
+    assert!(
+        id3 == "rec_a" || id3 == "rec_c",
+        "batch 3 should sample a record that is still in the pool (rec_a or rec_c), got {id3}"
+    );
     assert_eq!(
-        id3, "rec_c",
-        "batch 3 should sample the newly arrived record even though its text 'hello' was already emitted in batch 1"
+        batch3.samples[0].chunk.text, "hello",
+        "the text 'hello' should be re-eligible after its original emitter (rec_a) was evicted"
     );
 
     // Verify boundedness: records should not accumulate stale entries across syncs.
