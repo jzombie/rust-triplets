@@ -305,15 +305,16 @@ impl IngestionManager {
     }
 
     /// Load persisted per-source stream cursors.
-    ///
-    /// The synthetic `{STEP_CURSOR_KEY:?}` entry is extracted and restored as
-    /// the step counter (backward-compatible persistence detail).
     pub fn load_cursors(&mut self, cursors: &[(SourceId, u64)]) {
         if cursors.is_empty() {
             return;
         }
         let mut map = std::collections::HashMap::with_capacity(cursors.len());
         for (id, revision) in cursors {
+            // The step counter is stored as a (STEP_CURSOR_KEY, revision)
+            // tuple inside the same source_stream_cursors Vec.  Bitcode
+            // serialises it identically to any ("source_a", 14) cursor;
+            // the special meaning is applied here at read time.
             if id == STEP_CURSOR_KEY {
                 self.step_counter = *revision;
             } else {
@@ -331,9 +332,6 @@ impl IngestionManager {
     }
 
     /// Snapshot current per-source stream cursors.
-    ///
-    /// Includes a synthetic `{STEP_CURSOR_KEY:?}` entry so the step counter
-    /// survives restarts via the existing `source_stream_cursors` path.
     pub fn snapshot_cursors(&self) -> Vec<(SourceId, u64)> {
         let mut out = Vec::new();
         for state in &self.sources {
@@ -341,6 +339,10 @@ impl IngestionManager {
                 out.push((state.source.id().to_string(), cursor.revision));
             }
         }
+        // Append the step counter as a (STEP_CURSOR_KEY, step) tuple so it
+        // survives restarts inside the same Vec that bitcode already encodes.
+        // Bitcode sees only Vec<(String, u64)> — this tuple is no different
+        // from any source cursor.  load_cursors reverses the interpretation.
         out.push((STEP_CURSOR_KEY.to_string(), self.step_counter));
         out
     }
