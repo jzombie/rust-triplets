@@ -257,11 +257,13 @@ impl IngestionManager {
     /// I/O offset into the source's stream and must continue advancing so
     /// every record is eventually fetched (resetting it would repeat the
     /// leading slice of the source on every epoch boundary).
+    /// Reset step counter to 0 (called at epoch boundaries).
+    pub(crate) fn reset_step_counter(&mut self) {
+        self.step_counter = 0;
+    }
+
     pub(crate) fn set_source_epoch(&mut self, epoch: u64) {
         self.source_epoch = epoch;
-        // Reset the step counter so each epoch starts from step 0,
-        // giving deterministic per-epoch step sequences.
-        self.step_counter = 0;
     }
 
     /// Return the current source epoch.
@@ -296,13 +298,18 @@ impl IngestionManager {
     }
 
     /// Load persisted per-source stream cursors.
+    /// If a `"__step__"` entry is present, restores `step_counter` from it.
     pub fn load_cursors(&mut self, cursors: &[(SourceId, u64)]) {
         if cursors.is_empty() {
             return;
         }
         let mut map = std::collections::HashMap::with_capacity(cursors.len());
         for (id, revision) in cursors {
-            map.insert(id.as_str(), *revision);
+            if id == "__step__" {
+                self.step_counter = *revision;
+            } else {
+                map.insert(id.as_str(), *revision);
+            }
         }
         for state in &mut self.sources {
             if let Some(revision) = map.get(state.source.id()) {
@@ -314,7 +321,8 @@ impl IngestionManager {
         }
     }
 
-    /// Snapshot current per-source stream cursors.
+    /// Snapshot current per-source stream cursors, including the step
+    /// counter as a synthetic `"__step__"` entry so it survives restarts.
     pub fn snapshot_cursors(&self) -> Vec<(SourceId, u64)> {
         let mut out = Vec::new();
         for state in &self.sources {
@@ -322,6 +330,7 @@ impl IngestionManager {
                 out.push((state.source.id().to_string(), cursor.revision));
             }
         }
+        out.push(("__step__".to_string(), self.step_counter));
         out
     }
 
@@ -745,7 +754,9 @@ mod tests {
     use crate::config::{Selector, TextRecipe, TripletRecipe};
     use crate::data::{QualityScore, RecordSection, SectionRole};
     use crate::sampler::Sampler;
-    use crate::splits::{DeterministicSplitStore, SplitLabel, SplitRatios};
+    use crate::splits::{
+        DeterministicSplitStore, PersistedSamplerState, SamplerStateStore, SplitLabel, SplitRatios,
+    };
     use chrono::Utc;
     use std::collections::HashMap;
     use std::collections::VecDeque;
@@ -908,11 +919,16 @@ mod tests {
 
         manager.load_cursors(&[("cursor_source".to_string(), 7)]);
         let cursors = manager.snapshot_cursors();
-        assert_eq!(cursors, vec![("cursor_source".to_string(), 7)]);
+        // snapshot_cursors now includes a __step__ entry.
+        assert_eq!(cursors.len(), 2);
+        assert_eq!(cursors[0], ("cursor_source".to_string(), 7));
+        assert_eq!(cursors[1].0, "__step__");
 
         manager.refresh_all();
         let updated = manager.snapshot_cursors();
-        assert_eq!(updated, vec![("cursor_source".to_string(), 33)]);
+        assert_eq!(updated.len(), 2);
+        assert_eq!(updated[0], ("cursor_source".to_string(), 33));
+        assert_eq!(updated[1].0, "__step__");
         let records = manager.all_records_snapshot();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].source, "cursor_source");
@@ -1322,6 +1338,7 @@ mod tests {
 
         // Advance epoch — step_counter must reset to 0.
         manager.set_source_epoch(1);
+        manager.reset_step_counter();
         seeds.lock().unwrap().clear();
 
         // Epoch 1, first refresh: step_counter goes 0→1 again.
@@ -1332,6 +1349,98 @@ mod tests {
             step1_epoch1,
             derive_epoch_seed(config.seed, 1) ^ 1,
             "epoch 1 step 1 seed (must be ^1, not ^2)"
+        );
+    }
+
+    #[test]
+    fn step_counter_survives_sampler_save_and_load_state() {
+        // Proves __step__ survives through the REAL API path:
+        //   TripletSampler::save_sampler_state → persist_source_state
+        //   → self.ingestion.snapshot_cursors() internally
+        //   → DeterministicSplitStore.save_sampler_state
+        //   → load_sampler_state → load_cursors
+        let store = Arc::new(DeterministicSplitStore::new(SplitRatios::default(), 1).unwrap());
+
+        // Sampler with ScriptedSource (provides empty recipes but that's fine)
+        let sampler = TripletSampler::new(
+            SamplerConfig {
+                seed: 42,
+                ..SamplerConfig::default()
+            },
+            Arc::clone(&store),
+        );
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        sampler.register_source(Box::new(ScriptedSource::new(
+            "src",
+            refreshes,
+            vec![Ok(SourceSnapshot {
+                records: vec![make_record("r1", "src")],
+                cursor: SourceCursor {
+                    last_seen: Utc::now(),
+                    revision: 1,
+                },
+            })],
+        )));
+
+        // Call a batch method to trigger ensure_source_state() so
+        // save_sampler_state actually writes.  The batch itself may
+        // exhaust (no recipes) but the state is loaded regardless.
+        let _ = sampler.next_text_batch(SplitLabel::Train);
+
+        // Save through the REAL sampler API
+        sampler.save_sampler_state(None).unwrap();
+
+        // Load back what the sampler saved
+        let loaded = store.load_sampler_state().unwrap().unwrap();
+        let step_saved = loaded
+            .source_stream_cursors
+            .iter()
+            .find(|(k, _)| k == "__step__")
+            .map(|(_, v)| *v)
+            .expect("__step__ must be in persisted source_stream_cursors");
+        assert!(
+            step_saved > 0,
+            "step_counter must be >0 after batch call through TripletSampler"
+        );
+
+        // Feed the REAL loaded cursors to a new manager
+        let mut manager2 = IngestionManager::new(4, SamplerConfig::default());
+        manager2.register_source(Box::new(ScriptedSource::new(
+            "src",
+            Arc::new(AtomicUsize::new(0)),
+            vec![Ok(SourceSnapshot {
+                records: vec![make_record("r2", "src")],
+                cursor: SourceCursor {
+                    last_seen: Utc::now(),
+                    revision: 2,
+                },
+            })],
+        )));
+        manager2.load_cursors(&loaded.source_stream_cursors);
+
+        // step_counter restored to saved value, refresh increments
+        let step_before = manager2
+            .snapshot_cursors()
+            .iter()
+            .find(|(k, _)| k == "__step__")
+            .map(|(_, v)| *v)
+            .unwrap();
+        assert_eq!(
+            step_before, step_saved,
+            "load_cursors must restore __step__ to saved value"
+        );
+
+        manager2.refresh_all();
+        let step_after = manager2
+            .snapshot_cursors()
+            .iter()
+            .find(|(k, _)| k == "__step__")
+            .map(|(_, v)| *v)
+            .unwrap();
+        assert_eq!(
+            step_after,
+            step_saved + 1,
+            "step must continue: loaded {step_saved}, refresh incremented to {step_saved}+1"
         );
     }
 

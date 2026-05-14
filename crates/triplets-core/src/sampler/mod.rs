@@ -437,6 +437,9 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         self.source_epoch = epoch;
         self.ingestion.set_source_epoch(epoch);
         self.ingestion.reset_stream_cursors();
+        // Reset step counter at epoch boundary so each epoch
+        // starts with step=0, giving deterministic step sequences.
+        self.ingestion.reset_step_counter();
         self.source_record_cursors.clear();
         self.source_cycle_idx = 0;
         for source in &self.source_order {
@@ -951,6 +954,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         // permutation seed (seed ^ epoch), producing a fresh traversal order.
         self.source_epoch = self.source_epoch.saturating_add(1);
         self.ingestion.set_source_epoch(self.source_epoch);
+        // Reset step counter at epoch boundary.
+        self.ingestion.reset_step_counter();
         // Reset per-source record cursors so the new epoch starts from the
         // beginning of each source's permuted index space (not from where the
         // previous epoch left off).
