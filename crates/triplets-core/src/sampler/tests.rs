@@ -7459,20 +7459,16 @@ fn emitted_text_hashes_allows_resample_after_cache_refresh() {
     let sampler = TripletSampler::new(config, store);
 
     // Three records: "a" and "c" share the same text content.
-    let records: Vec<DataRecord> = vec![
-        ("rec_a", "hello"),
-        ("rec_b", "world"),
-        ("rec_c", "hello"),
-    ]
-    .into_iter()
-    .map(|(id, text)| {
-        let mut r = sample_record();
-        r.id = id.to_string();
-        r.sections[0].text = text.to_string();
-        r.sections[0].sentences = vec![text.to_string()];
-        r
-    })
-    .collect();
+    let records: Vec<DataRecord> = vec![("rec_a", "hello"), ("rec_b", "world"), ("rec_c", "hello")]
+        .into_iter()
+        .map(|(id, text)| {
+            let mut r = sample_record();
+            r.id = id.to_string();
+            r.sections[0].text = text.to_string();
+            r.sections[0].sentences = vec![text.to_string()];
+            r
+        })
+        .collect();
     sampler.register_source(Box::new(InMemorySource::from_records("src", records)));
 
     // Batch 1 — draws from window containing "rec_a", "rec_b".
@@ -7484,7 +7480,26 @@ fn emitted_text_hashes_allows_resample_after_cache_refresh() {
     let batch2 = sampler.next_text_batch(SplitLabel::Train).unwrap();
     assert_eq!(batch2.samples.len(), 1);
     let id2 = batch2.samples[0].chunk.record_id.clone();
-    assert_ne{
+    assert_ne!(
+        id1, id2,
+        "batch 2 should be a different record from batch 1"
+    );
+
+    // Both records from the first window are now exhausted.
+    // Batch 3 triggers a source refresh (buffer empty), which slides the
+    // cache window: "rec_a" is evicted, "rec_c" enters.  sync_records_from_cache
+    // clears emitted_text_hashes, so the text "hello" from "rec_c" is eligible.
+    let batch3 = sampler.next_text_batch(SplitLabel::Train).unwrap();
+    assert_eq!(batch3.samples.len(), 1);
+    let id3 = batch3.samples[0].chunk.record_id.clone();
+    assert_eq!(
+        id3, "rec_c",
+        "batch 3 should sample the newly arrived record even though its text 'hello' was already emitted in batch 1"
+    );
+}
+
+#[test]
+fn text_sampling_cycles_recipes_over_time() {
     let split = SplitRatios::default();
     let mut config = base_config();
     config.batch_size = 1;
