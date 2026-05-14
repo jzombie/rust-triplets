@@ -472,12 +472,7 @@ pub fn build_hf_sources(roots: &HfListRoots) -> Vec<Box<dyn DataSource + 'static
         })
         .collect();
 
-    // Build a single throttled HTTP client shared by all sources in this
-    // list so they use a single connection pool and throttle state.
-    let shared_client = HuggingFaceRowSource::build_http_client(&HuggingFaceRowsConfig::new(
-        "", "org/ds", "default", "", "",
-    ))
-    .ok();
+    let mut shared_client: Option<ClientWithMiddleware> = None;
 
     roots
         .sources
@@ -493,8 +488,7 @@ pub fn build_hf_sources(roots: &HfListRoots) -> Vec<Box<dyn DataSource + 'static
             };
 
             let source_id = source_ids[idx].clone();
-            let snapshot_dir = match managed_hf_list_snapshot_dir(&dataset, &config, &split, idx)
-            {
+            let snapshot_dir = match managed_hf_list_snapshot_dir(&dataset, &config, &split, idx) {
                 Ok(path) => path,
                 Err(err) => {
                     eprintln!(
@@ -505,21 +499,16 @@ pub fn build_hf_sources(roots: &HfListRoots) -> Vec<Box<dyn DataSource + 'static
                 }
             };
 
-            let mut hf = HuggingFaceRowsConfig::new(
-                source_id,
-                dataset,
-                config,
-                split,
-                snapshot_dir,
-            );
+            let mut hf =
+                HuggingFaceRowsConfig::new(source_id, dataset, config, split, snapshot_dir);
             hf.anchor_columns = source.anchor_columns.clone();
             hf.positive_columns = source.positive_columns.clone();
             hf.context_columns = source.context_columns.clone();
             hf.text_columns = source.text_columns.clone();
             hf.trust_override = source.trust;
-            // Share a single http_client across all sources from this list.
-            // build_shared_http_client is called once outside the loop and
-            // cloned onto each config (reqwest::Client clone is Arc internally).
+            if shared_client.is_none() {
+                shared_client = HuggingFaceRowSource::build_http_client(&hf).ok();
+            }
             hf.http_client = shared_client.clone();
             println!(
                 "source {idx}: hf://{}/{}/{} -> anchor={:?}, positive={:?}, context={:?}, text_columns={:?}",
@@ -1043,14 +1032,34 @@ type ParquetManifestCandidates = (Vec<String>, HashMap<String, u64>, usize);
 type ShardIndexResult = (Vec<ShardIndex>, usize);
 
 impl HuggingFaceRowSource {
+    /// Return a reference to the process-wide shared multi-threaded tokio
+    /// runtime, lazily initialized on first access.
+    ///
+    /// All `HuggingFaceRowSource` instances use this single runtime so that
+    /// HTTP connections established by one source can be safely reused by
+    /// another source via the shared `reqwest::Client` connection pool.
+    fn shared_runtime() -> Arc<tokio::runtime::Runtime> {
+        use std::sync::OnceLock;
+        static RUNTIME: OnceLock<Arc<tokio::runtime::Runtime>> = OnceLock::new();
+        RUNTIME
+            .get_or_init(|| {
+                Arc::new(
+                    tokio::runtime::Builder::new_multi_thread()
+                        .worker_threads(2)
+                        .enable_all()
+                        .build()
+                        .expect(
+                            "failed building shared tokio runtime for HuggingFace HTTP requests",
+                        ),
+                )
+            })
+            .clone()
+    }
+
     /// Build a new source by indexing local shard files.
     pub fn new(mut config: HuggingFaceRowsConfig) -> Result<Self, SamplerError> {
         let start_new = Instant::now();
-        let http_runtime = Arc::new(Self::build_http_runtime(&config)?);
-        // Use a shared client if one was pre-built on the config, otherwise
-        // build a new one.  build_hf_sources() sets http_client on each config
-        // so all sources from a list share a single connection pool and
-        // throttle state.
+        let http_runtime = Self::shared_runtime();
         let http_client = config
             .http_client
             .take()
@@ -2208,11 +2217,6 @@ impl HuggingFaceRowSource {
     /// Build a throttled `ClientWithMiddleware` from the config's connection
     /// and auth settings, including exponential-backoff retry for rate limits
     /// and transient failures.
-    ///
-    /// The client is internally reference-counted — cloning it shares the
-    /// same connection pool and throttle state.  [`build_hf_sources`] builds
-    /// a single client and shares it across all sources from a list so that
-    /// outbound traffic is governed by a single throttle state.
     pub(crate) fn build_http_client(
         config: &HuggingFaceRowsConfig,
     ) -> Result<ClientWithMiddleware, SamplerError> {
@@ -2238,6 +2242,8 @@ impl HuggingFaceRowSource {
                 reason: format!("failed building reqwest client: {err}"),
             })?;
 
+        // Throttle/backoff middleware is skipped in debug builds
+        // (cargo test, cargo build without --release).
         #[cfg(not(debug_assertions))]
         let throttle = {
             use reqwest_drive::{ThrottlePolicy, init_throttle};
@@ -2250,8 +2256,6 @@ impl HuggingFaceRowSource {
         };
 
         let client = ClientBuilder::new(inner);
-        // Only attach throttle/backoff middleware in production — test
-        // environments use mock servers that fail fast and shouldn't retry.
         #[cfg(not(debug_assertions))]
         let client = client.with_arc(throttle);
         Ok(client.build())
@@ -2264,18 +2268,18 @@ impl HuggingFaceRowSource {
         query: &[(&str, &str)],
         endpoint_label: &str,
     ) -> Result<String, SamplerError> {
-        // Build the request with a plain reqwest client for .query() support,
-        // then execute it through the middleware client for throttling/retry.
-        let request = reqwest::Client::new()
-            .get(endpoint)
-            .query(query)
-            .build()
+        // Build the URL with query parameters, then build a fresh request
+        // and execute it through the middleware client for throttling/retry.
+        // We use url::Url::parse_with_params so the request is built without
+        // creating a throwaway reqwest::Client (Client::new() has no timeouts).
+        let url = reqwest::Url::parse_with_params(endpoint, query.iter().map(|&(k, v)| (k, v)))
             .map_err(|err| SamplerError::SourceUnavailable {
                 source_id: source_id.to_string(),
-                reason: format!("failed building request to {endpoint_label}: {err}"),
+                reason: format!("failed building URL for {endpoint_label}: {err}"),
             })?;
         let response = http_client
-            .execute(request)
+            .get(url)
+            .send()
             .await
             .map_err(|err| SamplerError::SourceUnavailable {
                 source_id: source_id.to_string(),
@@ -5069,6 +5073,10 @@ mod tests {
     use tempfile::tempdir;
     use triplets_core::utils::platform_newline;
 
+    use crate::test_utils::{
+        TEST_UNREACHABLE_URL, TestHttpServer, spawn_manifest_and_shard_http, spawn_one_shot_http,
+    };
+
     fn test_config(snapshot_dir: PathBuf) -> HuggingFaceRowsConfig {
         let mut config =
             HuggingFaceRowsConfig::new("hf_test", "org/dataset", "default", "train", snapshot_dir);
@@ -5077,6 +5085,12 @@ mod tests {
         config.hf_token = None;
         config.cache_capacity = 10;
         config.remote_expansion_headroom_multiplier = 3;
+        // Point endpoints to connection-refused so tests never wait on
+        // real HF servers.  Tests that exercise HTTP against mock servers
+        // override these in their own body.
+        config.info_endpoint = TEST_UNREACHABLE_URL.to_string();
+        config.size_endpoint = TEST_UNREACHABLE_URL.to_string();
+        config.parquet_endpoint = TEST_UNREACHABLE_URL.to_string();
         config
     }
 
@@ -5127,10 +5141,6 @@ mod tests {
         });
         source
     }
-
-    use crate::test_utils::{
-        TEST_UNREACHABLE_URL, TestHttpServer, spawn_manifest_and_shard_http, spawn_one_shot_http,
-    };
 
     fn with_env_var<R>(key: &str, value: &str, run: impl FnOnce() -> R) -> R {
         let previous = env::var(key).ok();
