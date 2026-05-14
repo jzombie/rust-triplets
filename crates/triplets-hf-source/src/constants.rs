@@ -86,6 +86,16 @@ pub const HF_BASE_URL: &str = "https://huggingface.co";
 /// `{base}/{dataset}/resolve/main/{relative_path}`.
 pub const HF_DATASETS_BASE_URL: &str = "https://huggingface.co/datasets";
 
+// ---------------------------------------------------------------------------
+// ── HTTP client timeouts ────────────────────────────────────────────────────
+
+/// TCP/TLS connect timeout for the shared `reqwest::Client` (seconds).
+pub const HF_HTTP_CONNECT_TIMEOUT_SECS: u64 = 15;
+
+/// Total request timeout for the shared `reqwest::Client` (seconds).
+/// Covers the entire download of a single shard.
+pub const HF_HTTP_REQUEST_TIMEOUT_SECS: u64 = 300;
+
 /// Default base URL for the datasets-server parquet-manifest endpoint.
 pub const HF_PARQUET_DEFAULT_ENDPOINT: &str = "https://datasets-server.huggingface.co/parquet";
 
