@@ -320,7 +320,7 @@ are re-downloaded automatically from Hugging Face on the next access.
 #### Throttling & Retry
 
 Release builds include an exponential-backoff throttle middleware
-([`reqwest-drive`](https://docs.rs/reqwest-drive/latest/reqwest_drive/)) that retries
+([`reqwest-drive`](https://crates.io/crates/reqwest-drive)) that retries
 rate-limited (429) and transient failures up to 3 times with jittered delays. Debug builds
 (including `cargo test`) skip the middleware so tests against mock servers aren't slowed by
 retry delays. Compile with `--release` to enable automatic retry in production.
