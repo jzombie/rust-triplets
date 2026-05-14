@@ -137,7 +137,7 @@ fn strategy_reason_and_chunk_key_cover_all_variants() {
         quality: QualityScore { trust: 1.0 },
         kvp_meta: Default::default(),
     };
-    let key_window = chunk_key(&base);
+    let key_window = triplet_chunk_key(&base);
     assert!(key_window.contains("|w|2"));
 
     let summary = RecordChunk {
@@ -147,7 +147,7 @@ fn strategy_reason_and_chunk_key_cover_all_variants() {
         },
         ..base
     };
-    let key_summary = chunk_key(&summary);
+    let key_summary = triplet_chunk_key(&summary);
     assert!(key_summary.contains("|s|summary"));
 }
 
@@ -531,6 +531,35 @@ fn trader_record(id: &str, date: &str, title: &str, body: &str) -> DataRecord {
                 heading: Some("Summary".into()),
                 text: body.into(),
                 sentences: vec![body.into()],
+            },
+        ],
+        meta_prefix: None,
+    }
+}
+
+/// Create a record where Anchor and Context sections have identical text,
+/// simulating the text-columns mode that Hugging Face sources use.
+fn text_columns_record(id: &str, common_text: &str) -> DataRecord {
+    let now = Utc::now();
+    DataRecord {
+        id: id.into(),
+        source: "unit".into(),
+        created_at: now,
+        updated_at: now,
+        quality: QualityScore { trust: 0.9 },
+        taxonomy: vec!["SampleCorp".into()],
+        sections: vec![
+            RecordSection {
+                role: SectionRole::Anchor,
+                heading: Some("Text".into()),
+                text: common_text.into(),
+                sentences: vec![common_text.into()],
+            },
+            RecordSection {
+                role: SectionRole::Context,
+                heading: Some("Text".into()),
+                text: common_text.into(),
+                sentences: vec![common_text.into()],
             },
         ],
         meta_prefix: None,
@@ -2461,7 +2490,7 @@ fn text_snapshot_hash(batches: &[TextBatch]) -> u64 {
                 "text|{}|{}|{}|{}",
                 sample.recipe,
                 sample.chunk.record_id,
-                chunk_key(&sample.chunk),
+                triplet_chunk_key(&sample.chunk),
                 fmt_weight(sample.weight)
             )
         })
@@ -2478,11 +2507,11 @@ fn triplet_snapshot_hash(batches: &[TripletBatch]) -> u64 {
                 "triplet|{}|{}|{}|{}|{}|{}|{}|{}",
                 triplet.recipe,
                 triplet.anchor.record_id,
-                chunk_key(&triplet.anchor),
+                triplet_chunk_key(&triplet.anchor),
                 triplet.positive.record_id,
-                chunk_key(&triplet.positive),
+                triplet_chunk_key(&triplet.positive),
                 triplet.negative.record_id,
-                chunk_key(&triplet.negative),
+                triplet_chunk_key(&triplet.negative),
                 fmt_weight(triplet.weight)
             )
         })
@@ -2507,9 +2536,9 @@ fn pair_snapshot_hash(batches: &[SampleBatch]) -> u64 {
                 pair.recipe,
                 label_str(&pair.label),
                 pair.anchor.record_id,
-                chunk_key(&pair.anchor),
+                triplet_chunk_key(&pair.anchor),
                 pair.positive.record_id,
-                chunk_key(&pair.positive),
+                triplet_chunk_key(&pair.positive),
                 fmt_weight(pair.weight),
                 reason
             ));
@@ -7261,10 +7290,90 @@ fn text_batch_dedupes_identical_chunks() {
     let batch = sampler.next_text_batch(SplitLabel::Train).unwrap();
     let mut seen = std::collections::HashSet::new();
     for sample in &batch.samples {
-        let key = chunk_key(&sample.chunk);
+        let key = triplet_chunk_key(&sample.chunk);
         assert!(
             seen.insert(key),
             "text sample should be unique within batch"
+        );
+    }
+}
+
+#[test]
+/// Regression test for duplicate text content when text-columns mode sources
+/// (Anchor and Context sections share identical text) are sampled with derived
+/// text recipes (_anchor selects Anchor, _positive selects Context).
+///
+/// Before the fix the dedup key was triplet_chunk_key = (record_id, section_idx, window_index).
+/// Since Anchor (idx=0) and Context (idx=1) are different sections, they produced
+/// different keys even though the text content was identical, allowing the same
+/// text from the same record to enter the batch twice.
+///
+/// The fix uses (record_id, text) as the dedup key, which correctly collapses
+/// duplicate text content regardless of which section it came from.
+fn text_batch_prevents_duplicate_text_per_record_from_text_columns() {
+    let split = SplitRatios {
+        train: 0.7,
+        validation: 0.2,
+        test: 0.1,
+    };
+    let mut config = base_config();
+    config.batch_size = 4;
+    config.allowed_splits = vec![SplitLabel::Train];
+    config.split = split;
+    config.recipes = vec![TripletRecipe {
+        name: "simcse".into(),
+        anchor: Selector::Role(SectionRole::Anchor),
+        positive_selector: Selector::Role(SectionRole::Context),
+        negative_selector: Selector::Role(SectionRole::Context),
+        negative_strategy: NegativeStrategy::WrongArticle,
+        weight: 1.0,
+        instruction: None,
+        allow_same_anchor_positive: true,
+    }];
+
+    let store = Arc::new(DeterministicSplitStore::new(split, 91).unwrap());
+    let find_train_id = |prefix: &str| -> String {
+        (0u32..)
+            .find_map(|i| {
+                let id = format!("{prefix}_{i}");
+                (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+            })
+            .unwrap()
+    };
+    // Find 4 records whose split label is Train so they are eligible for sampling.
+    let r1 = find_train_id("tc_rec");
+    let r2 = find_train_id("tc_other_a");
+    let r3 = find_train_id("tc_other_b");
+    let r4 = find_train_id("tc_other_c");
+    let sampler = TripletSampler::new(config, store);
+
+    // Create 4 records where each has the SAME text in BOTH its Anchor and Context
+    // sections — mimicking HF text-columns mode (e.g. C4, SlimPajama with text=text).
+    // The derived text recipes (simcse_anchor → Anchor, simcse_positive → Context)
+    // will select different section indices but produce identical text from the same record.
+    // The fix deduplicates by (record_id, text) so this should yield exactly 4 unique samples
+    // (one per record), not 8 (one per section).
+    let records = vec![
+        text_columns_record(&r1, "Content A identical in both sections."),
+        text_columns_record(&r2, "Content B identical in both sections."),
+        text_columns_record(&r3, "Content C identical in both sections."),
+        text_columns_record(&r4, "Content D identical in both sections."),
+    ];
+    sampler.register_source(Box::new(InMemorySource::from_records("tt", records)));
+
+    let batch = sampler.next_text_batch(SplitLabel::Train).unwrap();
+    assert_eq!(
+        batch.samples.len(),
+        4,
+        "batch should be full with 4 records"
+    );
+
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    for sample in &batch.samples {
+        let dedup_key = text_dedup_key(&sample.chunk);
+        assert!(
+            seen.insert(dedup_key),
+            "Anchor and Context sections of the same record must not produce duplicate text content in batch",
         );
     }
 }
@@ -8340,7 +8449,10 @@ fn auto_injected_recipe_uses_distinct_context_chunks_for_anchor_and_positive() {
     // Anchor/positive should be different windows from the same record.
     assert_eq!(triplet.anchor.record_id, long_anchor_id);
     assert_eq!(triplet.anchor.record_id, triplet.positive.record_id);
-    assert_ne!(chunk_key(&triplet.anchor), chunk_key(&triplet.positive));
+    assert_ne!(
+        triplet_chunk_key(&triplet.anchor),
+        triplet_chunk_key(&triplet.positive)
+    );
 
     // Hardcoded expected windows for long_anchor (4 tokens, window size 2).
     let expected_a = "one two";
@@ -8444,8 +8556,8 @@ fn auto_injected_recipe_never_uses_identical_anchor_and_positive_chunks() {
         );
         assert_eq!(triplet.anchor.record_id, triplet.positive.record_id);
         assert_ne!(
-            chunk_key(&triplet.anchor),
-            chunk_key(&triplet.positive),
+            triplet_chunk_key(&triplet.anchor),
+            triplet_chunk_key(&triplet.positive),
             "anchor and positive chunk keys must differ; anchor='{}' positive='{}'",
             triplet.anchor.text,
             triplet.positive.text
@@ -8522,7 +8634,10 @@ fn auto_injected_recipe_uses_window_chunks_for_anchor_and_positive() {
         );
         assert!(matches!(triplet.anchor.view, ChunkView::Window { .. }));
         assert!(matches!(triplet.positive.view, ChunkView::Window { .. }));
-        assert_ne!(chunk_key(&triplet.anchor), chunk_key(&triplet.positive));
+        assert_ne!(
+            triplet_chunk_key(&triplet.anchor),
+            triplet_chunk_key(&triplet.positive)
+        );
     }
 }
 
@@ -8621,7 +8736,10 @@ fn auto_injected_recipe_keeps_all_components_in_requested_split() {
 
             assert_eq!(triplet.anchor.record_id, triplet.positive.record_id);
             assert_ne!(triplet.anchor.record_id, triplet.negative.record_id);
-            assert_ne!(chunk_key(&triplet.anchor), chunk_key(&triplet.positive));
+            assert_ne!(
+                triplet_chunk_key(&triplet.anchor),
+                triplet_chunk_key(&triplet.positive)
+            );
         }
     }
 }
