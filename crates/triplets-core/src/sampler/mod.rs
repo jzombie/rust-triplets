@@ -310,7 +310,7 @@ struct TripletSamplerInner<S: SplitStore + EpochStateStore + SamplerStateStore +
     /// Round-robin index for triplet recipe cycling.
     triplet_recipe_rr_idx: usize,
     /// Hash set of (record_id, text) pairs already emitted by the text batch path
-    /// within the current cache epoch.  Cleared on every sync_records_from_cache.
+    /// between cache-sync boundaries.  Cleared on every sync_records_from_cache.
     /// Prevents the same text from being sampled again regardless of source wrapping.
     emitted_text_hashes: HashSet<u64>,
     /// Round-robin index for text recipe cycling.
