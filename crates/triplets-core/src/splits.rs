@@ -113,6 +113,8 @@ pub struct PersistedSamplerState {
     /// Round-robin index for text recipes.
     pub text_recipe_rr_idx: u64,
     /// Persisted source stream refresh cursors.
+    /// Stores per-source I/O cursors and, for backward compatibility, the
+    /// step counter as a synthetic `(STEP_CURSOR_KEY, revision)` entry.
     pub source_stream_cursors: Vec<(SourceId, u64)>,
 }
 

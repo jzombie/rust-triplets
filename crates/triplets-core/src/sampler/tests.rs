@@ -75,6 +75,7 @@ pub const READABLE_BM25_TITLES: [&str; 8] = [
     "Carbon policy update",
 ];
 
+use crate::constants::splits::STEP_CURSOR_KEY;
 use crate::data::{ChunkView, QualityScore, RecordChunk, RecordSection};
 use crate::kvp::{KvpField, KvpPrefixSampler};
 use crate::metadata::META_FIELD_DATE;
@@ -8338,14 +8339,7 @@ fn resume_restores_epoch_and_step_counter_together() {
         // Capture step and epoch BEFORE saving.
         let (pre_save_step, pre_save_epoch) = {
             let inner = sampler.inner.lock().unwrap();
-            let step = inner
-                .ingestion
-                .snapshot_cursors()
-                .iter()
-                .find(|(k, _)| k == "__step__")
-                .map(|(_, v)| *v)
-                .unwrap();
-            (step, inner.source_epoch)
+            (inner.ingestion.step_counter(), inner.source_epoch)
         };
 
         sampler.save_sampler_state(None).unwrap();
@@ -8355,9 +8349,9 @@ fn resume_restores_epoch_and_step_counter_together() {
         let persisted_step = persisted
             .source_stream_cursors
             .iter()
-            .find(|(k, _)| k == "__step__")
+            .find(|(k, _)| k == STEP_CURSOR_KEY)
             .map(|(_, v)| *v)
-            .unwrap();
+            .expect("step must be persisted via STEP_CURSOR_KEY in source_stream_cursors");
 
         assert_eq!(
             persisted.source_epoch, pre_save_epoch,
@@ -8365,17 +8359,13 @@ fn resume_restores_epoch_and_step_counter_together() {
         );
         assert_eq!(
             persisted_step, pre_save_step,
-            "persisted __step__ must match in-memory step_counter"
+            "persisted step must match in-memory step_counter"
         );
         assert!(
             persisted.source_epoch > 0,
             "source_epoch must have advanced past 0"
         );
-        assert!(
-            persisted_step > 0,
-            "step_counter must have advanced past 0 after {} ingest calls",
-            pre_save_step
-        );
+        assert!(persisted_step > 0, "step_counter must have advanced past 0");
 
         (persisted.source_epoch, persisted_step)
     };
@@ -8392,12 +8382,12 @@ fn resume_restores_epoch_and_step_counter_together() {
         let persisted_step = persisted
             .source_stream_cursors
             .iter()
-            .find(|(k, _)| k == "__step__")
+            .find(|(k, _)| k == STEP_CURSOR_KEY)
             .map(|(_, v)| *v)
-            .unwrap();
+            .expect("step must be in source_stream_cursors after save");
         assert_eq!(
             persisted_step, saved_step,
-            "persisted __step__ must match saved value"
+            "persisted step must match saved value"
         );
 
         // 2b. After loading state into a new sampler, the first ingest call
@@ -8422,13 +8412,7 @@ fn resume_restores_epoch_and_step_counter_together() {
             "ingestion source_epoch must match saved value after resume"
         );
 
-        let post_ingest_step = inner
-            .ingestion
-            .snapshot_cursors()
-            .iter()
-            .find(|(k, _)| k == "__step__")
-            .map(|(_, v)| *v)
-            .unwrap();
+        let post_ingest_step = inner.ingestion.step_counter();
         // After restore step ← saved_step, the mandatory first refresh
         // after cache-wipe increments it: post_ingest = saved + 1.
         assert_eq!(

@@ -119,6 +119,9 @@ pub mod splits {
     pub const SAMPLER_STATE_RECORD_VERSION: u8 = 1;
     /// Key used for storing sampler-state payloads.
     pub const SAMPLER_STATE_KEY: &[u8] = b"sampler_state";
+    /// Synthetic source-id used inside `source_stream_cursors` to persist the
+    /// ingestion step counter for backward-compatible restart-resume support.
+    pub const STEP_CURSOR_KEY: &str = "__step__";
 
     /// Key used for split-store global metadata.
     pub const META_KEY: &[u8] = b"__meta__";

@@ -1,4 +1,5 @@
 use crate::config::SamplerConfig;
+use crate::constants::splits::STEP_CURSOR_KEY;
 use crate::data::DataRecord;
 use crate::errors::SamplerError;
 use crate::hash::derive_epoch_seed;
@@ -262,6 +263,12 @@ impl IngestionManager {
         self.step_counter = 0;
     }
 
+    /// Return the current step counter.
+    #[cfg(test)]
+    pub fn step_counter(&self) -> u64 {
+        self.step_counter
+    }
+
     pub(crate) fn set_source_epoch(&mut self, epoch: u64) {
         self.source_epoch = epoch;
     }
@@ -298,14 +305,16 @@ impl IngestionManager {
     }
 
     /// Load persisted per-source stream cursors.
-    /// If a `"__step__"` entry is present, restores `step_counter` from it.
+    ///
+    /// The synthetic `{STEP_CURSOR_KEY:?}` entry is extracted and restored as
+    /// the step counter (backward-compatible persistence detail).
     pub fn load_cursors(&mut self, cursors: &[(SourceId, u64)]) {
         if cursors.is_empty() {
             return;
         }
         let mut map = std::collections::HashMap::with_capacity(cursors.len());
         for (id, revision) in cursors {
-            if id == "__step__" {
+            if id == STEP_CURSOR_KEY {
                 self.step_counter = *revision;
             } else {
                 map.insert(id.as_str(), *revision);
@@ -321,8 +330,10 @@ impl IngestionManager {
         }
     }
 
-    /// Snapshot current per-source stream cursors, including the step
-    /// counter as a synthetic `"__step__"` entry so it survives restarts.
+    /// Snapshot current per-source stream cursors.
+    ///
+    /// Includes a synthetic `{STEP_CURSOR_KEY:?}` entry so the step counter
+    /// survives restarts via the existing `source_stream_cursors` path.
     pub fn snapshot_cursors(&self) -> Vec<(SourceId, u64)> {
         let mut out = Vec::new();
         for state in &self.sources {
@@ -330,7 +341,7 @@ impl IngestionManager {
                 out.push((state.source.id().to_string(), cursor.revision));
             }
         }
-        out.push(("__step__".to_string(), self.step_counter));
+        out.push((STEP_CURSOR_KEY.to_string(), self.step_counter));
         out
     }
 
@@ -754,9 +765,7 @@ mod tests {
     use crate::config::{Selector, TextRecipe, TripletRecipe};
     use crate::data::{QualityScore, RecordSection, SectionRole};
     use crate::sampler::Sampler;
-    use crate::splits::{
-        DeterministicSplitStore, PersistedSamplerState, SamplerStateStore, SplitLabel, SplitRatios,
-    };
+    use crate::splits::{DeterministicSplitStore, SamplerStateStore, SplitLabel, SplitRatios};
     use chrono::Utc;
     use std::collections::HashMap;
     use std::collections::VecDeque;
@@ -922,13 +931,13 @@ mod tests {
         // snapshot_cursors now includes a __step__ entry.
         assert_eq!(cursors.len(), 2);
         assert_eq!(cursors[0], ("cursor_source".to_string(), 7));
-        assert_eq!(cursors[1].0, "__step__");
+        assert_eq!(cursors[1].0, STEP_CURSOR_KEY);
 
         manager.refresh_all();
         let updated = manager.snapshot_cursors();
         assert_eq!(updated.len(), 2);
         assert_eq!(updated[0], ("cursor_source".to_string(), 33));
-        assert_eq!(updated[1].0, "__step__");
+        assert_eq!(updated[1].0, STEP_CURSOR_KEY);
         let records = manager.all_records_snapshot();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].source, "cursor_source");
@@ -1354,7 +1363,7 @@ mod tests {
 
     #[test]
     fn step_counter_survives_sampler_save_and_load_state() {
-        // Proves __step__ survives through the REAL API path:
+        // Proves the step counter survives through the REAL API path:
         //   TripletSampler::save_sampler_state → persist_source_state
         //   → self.ingestion.snapshot_cursors() internally
         //   → DeterministicSplitStore.save_sampler_state
@@ -1395,9 +1404,9 @@ mod tests {
         let step_saved = loaded
             .source_stream_cursors
             .iter()
-            .find(|(k, _)| k == "__step__")
+            .find(|(k, _)| k == STEP_CURSOR_KEY)
             .map(|(_, v)| *v)
-            .expect("__step__ must be in persisted source_stream_cursors");
+            .expect("STEP_CURSOR_KEY must be in persisted source_stream_cursors");
         assert!(
             step_saved > 0,
             "step_counter must be >0 after batch call through TripletSampler"
@@ -1422,7 +1431,7 @@ mod tests {
         let step_before = manager2
             .snapshot_cursors()
             .iter()
-            .find(|(k, _)| k == "__step__")
+            .find(|(k, _)| k == STEP_CURSOR_KEY)
             .map(|(_, v)| *v)
             .unwrap();
         assert_eq!(
@@ -1434,7 +1443,7 @@ mod tests {
         let step_after = manager2
             .snapshot_cursors()
             .iter()
-            .find(|(k, _)| k == "__step__")
+            .find(|(k, _)| k == STEP_CURSOR_KEY)
             .map(|(_, v)| *v)
             .unwrap();
         assert_eq!(
