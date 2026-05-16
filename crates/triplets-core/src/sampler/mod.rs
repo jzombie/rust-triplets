@@ -2941,12 +2941,19 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         self.next_triplet_batch_with_weights_for_split(split, &HashMap::new())
     }
 
-    /// Return a weighted pair batch for `split` using per-source weights.
-    pub fn next_pair_batch_with_weights_for_split(
+    /// Shared retry loop for all three batch types: load state, bump step,
+    /// retry on exhaustion up to EXHAUSTION_RETRY_LIMIT times, and return
+    /// the batch or propagate the final error.
+    fn next_batch_with_retry<B>(
         &self,
         split: SplitLabel,
         weights: &HashMap<SourceId, f32>,
-    ) -> Result<SampleBatch, SamplerError> {
+        inner_fn: impl Fn(
+            &mut TripletSamplerInner<S>,
+            SplitLabel,
+            Option<&HashMap<SourceId, f32>>,
+        ) -> Result<B, SamplerError>,
+    ) -> Result<B, SamplerError> {
         let mut inner = self.inner.lock().unwrap();
         inner.ensure_split_allowed(split)?;
         // Load persisted state BEFORE bumping step so the restored step
@@ -2955,7 +2962,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         // Bump __step__ once per public call, regardless of success/exhaustion.
         inner.ingestion.increment_step();
         for attempt in 0..=EXHAUSTION_RETRY_LIMIT {
-            match inner.next_pair_batch_inner_with_weights(split, Some(weights)) {
+            match inner_fn(&mut inner, split, Some(weights)) {
                 Ok(batch) => return Ok(batch),
                 Err(SamplerError::Exhausted(_)) if attempt < EXHAUSTION_RETRY_LIMIT => {
                     inner.force_ingest_refresh_with_weights_for_split(split, weights)?;
@@ -2963,7 +2970,19 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 Err(err) => return Err(err),
             }
         }
+        // The for-loop always returns via the match arms above.
         unreachable!()
+    }
+
+    /// Return a weighted pair batch for `split` using per-source weights.
+    pub fn next_pair_batch_with_weights_for_split(
+        &self,
+        split: SplitLabel,
+        weights: &HashMap<SourceId, f32>,
+    ) -> Result<SampleBatch, SamplerError> {
+        self.next_batch_with_retry(split, weights, |inner, split, weights| {
+            inner.next_pair_batch_inner_with_weights(split, weights)
+        })
     }
 
     /// Return a weighted text batch for `split` using per-source weights.
@@ -2972,20 +2991,9 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         split: SplitLabel,
         weights: &HashMap<SourceId, f32>,
     ) -> Result<TextBatch, SamplerError> {
-        let mut inner = self.inner.lock().unwrap();
-        inner.ensure_split_allowed(split)?;
-        inner.ensure_state_loaded()?;
-        inner.ingestion.increment_step();
-        for attempt in 0..=EXHAUSTION_RETRY_LIMIT {
-            match inner.next_text_batch_inner_with_weights(split, Some(weights)) {
-                Ok(batch) => return Ok(batch),
-                Err(SamplerError::Exhausted(_)) if attempt < EXHAUSTION_RETRY_LIMIT => {
-                    inner.force_ingest_refresh_with_weights_for_split(split, weights)?;
-                }
-                Err(err) => return Err(err),
-            }
-        }
-        Err(SamplerError::Exhausted(RECIPE_LABEL_TEXT.into()))
+        self.next_batch_with_retry(split, weights, |inner, split, weights| {
+            inner.next_text_batch_inner_with_weights(split, weights)
+        })
     }
 
     /// Return a weighted triplet batch for `split` using per-source weights.
@@ -2994,20 +3002,9 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         split: SplitLabel,
         weights: &HashMap<SourceId, f32>,
     ) -> Result<TripletBatch, SamplerError> {
-        let mut inner = self.inner.lock().unwrap();
-        inner.ensure_split_allowed(split)?;
-        inner.ensure_state_loaded()?;
-        inner.ingestion.increment_step();
-        for attempt in 0..=EXHAUSTION_RETRY_LIMIT {
-            match inner.next_triplet_batch_inner_with_weights(split, Some(weights)) {
-                Ok(batch) => return Ok(batch),
-                Err(SamplerError::Exhausted(_)) if attempt < EXHAUSTION_RETRY_LIMIT => {
-                    inner.force_ingest_refresh_with_weights_for_split(split, weights)?;
-                }
-                Err(err) => return Err(err),
-            }
-        }
-        Err(SamplerError::Exhausted(RECIPE_LABEL_TRIPLETS.into()))
+        self.next_batch_with_retry(split, weights, |inner, split, weights| {
+            inner.next_triplet_batch_inner_with_weights(split, weights)
+        })
     }
 
     /// Spawn a background prefetcher for triplet batches.
