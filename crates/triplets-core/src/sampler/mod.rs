@@ -1937,6 +1937,13 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     /// Load persisted sampler state (ingestion cursors + sampling state) if not
     /// already loaded, WITHOUT triggering a refresh.  This lets the wrapper
     /// methods restore the saved step counter before bumping it for the call.
+    ///
+    /// NOTE: only ingestion cursors are loaded here.  The sampling state
+    /// (RNG, source_record_cursors, etc.) is restored later by
+    /// `ingest_internal_for_split` → `ensure_source_state` AFTER records
+    /// have been synced from cache, which populates `source_record_indices`.
+    /// Loading it earlier would silently drop cursor restorations because
+    /// the index is empty at that point.
     fn ensure_state_loaded(&mut self) -> Result<(), SamplerError> {
         if !self.ingestion_cursors_loaded {
             if let Some(state) = self.split_store.load_sampler_state()? {
@@ -1945,7 +1952,6 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             }
             self.ingestion_cursors_loaded = true;
         }
-        self.ensure_source_state()?;
         Ok(())
     }
 
