@@ -321,7 +321,7 @@ struct TripletSamplerInner<S: SplitStore + EpochStateStore + SamplerStateStore +
     /// Round-robin index for text recipe cycling.
     text_recipe_rr_idx: usize,
     /// Epoch counter for per-source deterministic shuffling (seed ^ epoch).
-    source_epoch: u64,
+    epoch: u64,
 
     /// Tracks whether each source has wrapped its cursor in the current epoch.
     source_wrapped: HashMap<SourceId, bool>,
@@ -398,7 +398,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             emitted_text_hashes: HashMap::new(),
             triplet_recipe_rr_idx: 0,
             text_recipe_rr_idx: 0,
-            source_epoch: 0,
+            epoch: 0,
             source_wrapped: HashMap::new(),
         };
         if !sampler.using_config_text_recipes {
@@ -411,10 +411,10 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         &self.text_recipes
     }
 
-    /// Current epoch-adjusted seed: mixes `source_epoch` into `config.seed` so every epoch
+    /// Current epoch-adjusted seed: mixes `epoch` into `config.seed` so every epoch
     /// produces a distinct permutation across all seed-dependent operations.
     fn epoch_seed(&self) -> u64 {
-        derive_epoch_seed(self.config.seed, self.source_epoch)
+        derive_epoch_seed(self.config.seed, self.epoch)
     }
 
     fn register_source(
@@ -442,12 +442,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     fn set_epoch(&mut self, epoch: u64) -> Result<(), SamplerError> {
         self.epoch_tracker.ensure_loaded()?;
         self.epoch_tracker.force_epoch(epoch);
-        self.source_epoch = epoch;
-        self.ingestion.set_source_epoch(epoch);
+        self.epoch = epoch;
+        self.ingestion.set_epoch(epoch);
         self.ingestion.reset_stream_cursors();
-        // Reset step counter at epoch boundary so each epoch
+        // Reset epoch step at epoch boundary so each epoch
         // starts with step=0, giving deterministic step sequences.
-        self.ingestion.reset_step_counter();
+        self.ingestion.reset_epoch_step();
         self.source_record_cursors.clear();
         self.source_cycle_idx = 0;
         for source in &self.source_order {
@@ -600,8 +600,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                     self.source_record_cursors.insert(source, cursor as usize);
                 }
             }
-            self.source_epoch = state.source_epoch;
-            self.ingestion.set_source_epoch(state.source_epoch);
+            self.epoch = state.epoch;
+            self.ingestion.set_epoch(state.epoch);
             self.rng = DeterministicRng::from_state(state.rng_state);
             self.triplet_recipe_rr_idx = state.triplet_recipe_rr_idx as usize;
             self.text_recipe_rr_idx = state.text_recipe_rr_idx as usize;
@@ -623,7 +623,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 .iter()
                 .map(|(source, cursor)| (source.clone(), *cursor as u64))
                 .collect(),
-            source_epoch: self.source_epoch,
+            epoch: self.epoch,
             rng_state: self.rng.state(),
             triplet_recipe_rr_idx: self.triplet_recipe_rr_idx as u64,
             text_recipe_rr_idx: self.text_recipe_rr_idx as u64,
@@ -949,20 +949,20 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             .iter()
             .all(|name| self.source_wrapped.get(name).copied().unwrap_or(false));
         if all_wrapped {
-            self.advance_source_epoch();
+            self.advance_epoch();
         }
     }
 
-    fn advance_source_epoch(&mut self) {
+    fn advance_epoch(&mut self) {
         // The epoch advanced, changing the sampling permutation.
         // emitted_text_hashes is NOT cleared: the record pool is unchanged,
         // so texts already emitted are still off-limits.  The epoch
         // changes the shuffling permutation, not the dedup window.
         // Advance the epoch counter so source refreshes receive a different
         // permutation seed (seed ^ epoch), producing a fresh traversal order.
-        self.source_epoch = self.source_epoch.saturating_add(1);
-        self.ingestion.set_source_epoch(self.source_epoch);
-        // Do NOT reset the step counter here: __step__ tracks the number of
+        self.epoch = self.epoch.saturating_add(1);
+        self.ingestion.set_epoch(self.epoch);
+        // Do NOT reset the epoch step here: __step__ tracks the number of
         // refresh batches, which is orthogonal to the sampling epoch.
         // Resetting it would corrupt the persisted cursor value on resume.
         // Reset per-source record cursors so the new epoch starts from the
@@ -1902,7 +1902,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         if !self.ingestion_cursors_loaded {
             if let Some(state) = self.split_store.load_sampler_state()? {
                 self.ingestion.load_cursors(&state.source_stream_cursors);
-                self.ingestion.set_source_epoch(state.source_epoch);
+                self.ingestion.set_epoch(state.epoch);
             }
             self.ingestion_cursors_loaded = true;
         }
@@ -1946,7 +1946,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         if !self.ingestion_cursors_loaded {
             if let Some(state) = self.split_store.load_sampler_state()? {
                 self.ingestion.load_cursors(&state.source_stream_cursors);
-                self.ingestion.set_source_epoch(state.source_epoch);
+                self.ingestion.set_epoch(state.epoch);
             }
             self.ingestion_cursors_loaded = true;
         }
@@ -1969,7 +1969,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         if !self.ingestion_cursors_loaded {
             if let Some(state) = self.split_store.load_sampler_state()? {
                 self.ingestion.load_cursors(&state.source_stream_cursors);
-                self.ingestion.set_source_epoch(state.source_epoch);
+                self.ingestion.set_epoch(state.epoch);
             }
             self.ingestion_cursors_loaded = true;
         }
@@ -2034,7 +2034,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         if !self.ingestion_cursors_loaded {
             if let Some(state) = self.split_store.load_sampler_state()? {
                 self.ingestion.load_cursors(&state.source_stream_cursors);
-                self.ingestion.set_source_epoch(state.source_epoch);
+                self.ingestion.set_epoch(state.epoch);
             }
             self.ingestion_cursors_loaded = true;
         }
@@ -2964,7 +2964,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         // counter is reflected before we increment it for this call.
         inner.ensure_ingestion_cursors_loaded()?;
         // Bump __step__ once per public call, regardless of success/exhaustion.
-        inner.ingestion.increment_step();
+        inner.ingestion.increment_epoch_step();
         for attempt in 0..=EXHAUSTION_RETRY_LIMIT {
             match inner_fn(&mut inner, split, Some(weights)) {
                 Ok(batch) => return Ok(batch),

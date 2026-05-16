@@ -8686,7 +8686,7 @@ mod tests {
     #[test]
     fn shard_candidate_seed_changes_with_sampler_seed() {
         // Verifies that different sampler_seed values (which in production
-        // include the step_counter XOR from IngestionManager) produce
+        // include the epoch_step XOR from IngestionManager) produce
         // different shard permutations, while the same seed is deterministic.
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
@@ -9311,7 +9311,7 @@ mod tests {
         let split_state = PersistedSamplerState {
             source_cycle_idx: 0,
             source_record_cursors: vec![("cursor_test".to_string(), 0)],
-            source_epoch: 0,
+            epoch: 0,
             rng_state: 0,
             triplet_recipe_rr_idx: 0,
             text_recipe_rr_idx: 0,
@@ -9349,7 +9349,7 @@ mod tests {
     #[test]
     fn next_batch_methods_rebuild_shard_order_with_step() {
         // Each batch method gets its own source+sampler with a unique
-        // snapshot directory.  The first refresh increments step_counter
+        // snapshot directory.  The first refresh increments epoch_step
         // 0→1, XORs into the seed (42^0^1=43), set_active_sampler_config
         // rebuilds the order differently from the initial seed=0.
         let shard_body: String = (0..10)
@@ -10041,7 +10041,7 @@ mod tests {
     fn set_active_sampler_config_rebuilds_order_every_call() {
         // Proves that set_active_sampler_config rebuilds the shard
         // permutation every time it's called with a different seed
-        // (the seed changes every call due to step_counter XOR in
+        // (the seed changes every call due to epoch_step XOR in
         // IngestionManager).
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());

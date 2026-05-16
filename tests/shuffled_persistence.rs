@@ -214,7 +214,7 @@ fn save_none_writes_to_save_path_only() {
     let sentinel = PersistedSamplerState {
         source_cycle_idx: 0xDEAD,
         source_record_cursors: vec![],
-        source_epoch: 0xBEEF,
+        epoch: 0xBEEF,
         rng_state: 0,
         triplet_recipe_rr_idx: 0,
         text_recipe_rr_idx: 0,
@@ -274,7 +274,7 @@ fn save_none_writes_to_save_path_only() {
         "save(None) must not modify other store paths"
     );
     assert_eq!(
-        other_state.source_epoch, 0xBEEF,
+        other_state.epoch, 0xBEEF,
         "save(None) must not modify other store paths"
     );
 }
@@ -335,7 +335,7 @@ fn save_sampler_state_some_mirrors_to_new_store_path() {
         mirror_state.source_record_cursors,
         source_state.source_record_cursors
     );
-    assert_eq!(mirror_state.source_epoch, source_state.source_epoch);
+    assert_eq!(mirror_state.epoch, source_state.epoch);
     assert_eq!(mirror_state.rng_state, source_state.rng_state);
     assert_eq!(
         mirror_state.triplet_recipe_rr_idx,
@@ -399,7 +399,7 @@ fn save_sampler_state_some_preserves_split_assignments_in_mirror_store() {
     let state = PersistedSamplerState {
         source_cycle_idx: 1,
         source_record_cursors: vec![("source_a".to_string(), 2)],
-        source_epoch: 3,
+        epoch: 3,
         rng_state: 4,
         triplet_recipe_rr_idx: 5,
         text_recipe_rr_idx: 6,
@@ -434,7 +434,7 @@ fn save_sampler_state_some_errors_if_destination_store_exists() {
     let dummy_state = PersistedSamplerState {
         source_cycle_idx: 0,
         source_record_cursors: vec![],
-        source_epoch: 0,
+        epoch: 0,
         rng_state: 0,
         triplet_recipe_rr_idx: 0,
         text_recipe_rr_idx: 0,
@@ -448,7 +448,7 @@ fn save_sampler_state_some_errors_if_destination_store_exists() {
     let state = PersistedSamplerState {
         source_cycle_idx: 1,
         source_record_cursors: vec![("source_a".to_string(), 2)],
-        source_epoch: 3,
+        epoch: 3,
         rng_state: 4,
         triplet_recipe_rr_idx: 5,
         text_recipe_rr_idx: 6,

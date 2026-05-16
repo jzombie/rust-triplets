@@ -111,8 +111,8 @@ pub struct PersistedSamplerState {
     pub source_cycle_idx: u64,
     /// Per-source record cursors.
     pub source_record_cursors: Vec<(SourceId, u64)>,
-    /// Current source epoch used for deterministic reshuffle.
-    pub source_epoch: u64,
+    /// Current epoch used for deterministic reshuffle.
+    pub epoch: u64,
     /// Deterministic RNG internal state.
     pub rng_state: u64,
     /// Round-robin index for triplet recipes.
@@ -881,7 +881,7 @@ mod tests {
             let state = PersistedSamplerState {
                 source_cycle_idx: 11,
                 source_record_cursors: vec![("s".to_string(), 1)],
-                source_epoch: 5,
+                epoch: 5,
                 rng_state: 99,
                 triplet_recipe_rr_idx: 2,
                 text_recipe_rr_idx: 3,
@@ -899,7 +899,7 @@ mod tests {
         let reopened = FileSplitStore::open(&path, ratios, 123).unwrap();
         let loaded_state = reopened.load_sampler_state().unwrap().unwrap();
         assert_eq!(loaded_state.source_cycle_idx, 11);
-        assert_eq!(loaded_state.source_epoch, 5);
+        assert_eq!(loaded_state.epoch, 5);
         assert_eq!(loaded_state.rng_state, 99);
         let loaded_meta = reopened.load_epoch_meta().unwrap();
         assert_eq!(loaded_meta.get(&SplitLabel::Train).unwrap().epoch, 3);
@@ -918,7 +918,7 @@ mod tests {
                 &PersistedSamplerState {
                     source_cycle_idx: 0,
                     source_record_cursors: vec![],
-                    source_epoch: 0,
+                    epoch: 0,
                     rng_state: 0,
                     triplet_recipe_rr_idx: 0,
                     text_recipe_rr_idx: 0,
@@ -994,7 +994,7 @@ mod tests {
         let state = PersistedSamplerState {
             source_cycle_idx: 11,
             source_record_cursors: vec![("source_a".to_string(), 1)],
-            source_epoch: 8,
+            epoch: 8,
             rng_state: 1234,
             triplet_recipe_rr_idx: 2,
             text_recipe_rr_idx: 5,
@@ -1003,7 +1003,7 @@ mod tests {
         store.save_sampler_state(&state, None).unwrap();
         let loaded_state = store.load_sampler_state().unwrap().unwrap();
         assert_eq!(loaded_state.source_cycle_idx, 11);
-        assert_eq!(loaded_state.source_epoch, 8);
+        assert_eq!(loaded_state.epoch, 8);
         assert_eq!(loaded_state.rng_state, 1234);
         assert_eq!(loaded_state.triplet_recipe_rr_idx, 2);
         assert_eq!(loaded_state.text_recipe_rr_idx, 5);
@@ -1021,7 +1021,7 @@ mod tests {
         let reopened = FileSplitStore::open(&path, SplitRatios::default(), 222).unwrap();
         let disk_state = reopened.load_sampler_state().unwrap().unwrap();
         assert_eq!(disk_state.source_cycle_idx, 11);
-        assert_eq!(disk_state.source_epoch, 8);
+        assert_eq!(disk_state.epoch, 8);
         assert_eq!(disk_state.rng_state, 1234);
         let disk_meta = reopened.load_epoch_meta().unwrap();
         assert_eq!(disk_meta.get(&SplitLabel::Train).unwrap().epoch, 3);
@@ -1153,7 +1153,7 @@ mod tests {
         let state = PersistedSamplerState {
             source_cycle_idx: 1,
             source_record_cursors: vec![("s".to_string(), 2)],
-            source_epoch: 3,
+            epoch: 3,
             rng_state: 4,
             triplet_recipe_rr_idx: 5,
             text_recipe_rr_idx: 6,
@@ -1162,7 +1162,7 @@ mod tests {
         let encoded_state = encode_sampler_state(&state);
         let decoded_state = decode_sampler_state(&encoded_state).unwrap().unwrap();
         assert_eq!(decoded_state.source_cycle_idx, 1);
-        assert_eq!(decoded_state.source_epoch, 3);
+        assert_eq!(decoded_state.epoch, 3);
         assert_eq!(decoded_state.rng_state, 4);
     }
 
@@ -1223,7 +1223,7 @@ mod tests {
         let sampler_state = PersistedSamplerState {
             source_cycle_idx: 1,
             source_record_cursors: vec![("s1".to_string(), 2)],
-            source_epoch: 3,
+            epoch: 3,
             rng_state: 4,
             triplet_recipe_rr_idx: 5,
             text_recipe_rr_idx: 6,
@@ -1231,8 +1231,8 @@ mod tests {
         };
         store.save_sampler_state(&sampler_state, None).unwrap();
         assert_eq!(
-            store.load_sampler_state().unwrap().unwrap().source_epoch,
-            sampler_state.source_epoch
+            store.load_sampler_state().unwrap().unwrap().epoch,
+            sampler_state.epoch
         );
     }
 
@@ -1259,7 +1259,7 @@ mod tests {
         let sampler_state = PersistedSamplerState {
             source_cycle_idx: 1,
             source_record_cursors: vec![("s1".to_string(), 2)],
-            source_epoch: 7,
+            epoch: 7,
             rng_state: 123,
             triplet_recipe_rr_idx: 4,
             text_recipe_rr_idx: 6,
@@ -1280,7 +1280,7 @@ mod tests {
             5
         );
         assert_eq!(
-            store_b.load_sampler_state().unwrap().unwrap().source_epoch,
+            store_b.load_sampler_state().unwrap().unwrap().epoch,
             7
         );
 
@@ -1299,7 +1299,7 @@ mod tests {
                 .load_sampler_state()
                 .unwrap()
                 .unwrap()
-                .source_epoch,
+                .epoch,
             7
         );
     }
@@ -1320,7 +1320,7 @@ mod tests {
         let sampler_state = PersistedSamplerState {
             source_cycle_idx: 1,
             source_record_cursors: vec![("s1".to_string(), 2)],
-            source_epoch: 9,
+            epoch: 9,
             rng_state: 123,
             triplet_recipe_rr_idx: 4,
             text_recipe_rr_idx: 6,
@@ -1338,7 +1338,7 @@ mod tests {
             Some(SplitLabel::Validation)
         );
         assert_eq!(
-            store_b.load_sampler_state().unwrap().unwrap().source_epoch,
+            store_b.load_sampler_state().unwrap().unwrap().epoch,
             9
         );
 
@@ -1364,7 +1364,7 @@ mod tests {
         let initial_state = PersistedSamplerState {
             source_cycle_idx: 1,
             source_record_cursors: vec![],
-            source_epoch: 1,
+            epoch: 1,
             rng_state: 0,
             triplet_recipe_rr_idx: 0,
             text_recipe_rr_idx: 0,
@@ -1376,7 +1376,7 @@ mod tests {
         let checkpoint_state = PersistedSamplerState {
             source_cycle_idx: 99,
             source_record_cursors: vec![],
-            source_epoch: 99,
+            epoch: 99,
             rng_state: 42,
             triplet_recipe_rr_idx: 0,
             text_recipe_rr_idx: 0,
@@ -1395,7 +1395,7 @@ mod tests {
                 .load_sampler_state()
                 .unwrap()
                 .unwrap()
-                .source_epoch,
+                .epoch,
             1,
             "save_to=Some(...) must not overwrite the on-disk save_path"
         );
@@ -1404,7 +1404,7 @@ mod tests {
         let store_b = FileSplitStore::open(&path_b, ratios, 42).unwrap();
         let state_from_b = store_b.load_sampler_state().unwrap().unwrap();
         assert_eq!(
-            state_from_b.source_epoch, 99,
+            state_from_b.epoch, 99,
             "checkpoint store must hold the snapshotted state"
         );
     }
@@ -1432,7 +1432,7 @@ mod tests {
                 &PersistedSamplerState {
                     source_cycle_idx: 0,
                     source_record_cursors: vec![],
-                    source_epoch: 0,
+                    epoch: 0,
                     rng_state: 0,
                     triplet_recipe_rr_idx: 0,
                     text_recipe_rr_idx: 0,
@@ -1454,7 +1454,7 @@ mod tests {
                 &PersistedSamplerState {
                     source_cycle_idx: 0,
                     source_record_cursors: vec![],
-                    source_epoch: 0,
+                    epoch: 0,
                     rng_state: 0,
                     triplet_recipe_rr_idx: 0,
                     text_recipe_rr_idx: 0,
@@ -1552,7 +1552,7 @@ mod tests {
         let state = PersistedSamplerState {
             source_cycle_idx: 5,
             source_record_cursors: vec![("s".to_string(), 3)],
-            source_epoch: 9,
+            epoch: 9,
             rng_state: 42,
             triplet_recipe_rr_idx: 1,
             text_recipe_rr_idx: 2,
@@ -1569,7 +1569,7 @@ mod tests {
         let new_state = PersistedSamplerState {
             source_cycle_idx: 99,
             source_record_cursors: vec![("s".to_string(), 77)],
-            source_epoch: 100,
+            epoch: 100,
             rng_state: 0,
             triplet_recipe_rr_idx: 0,
             text_recipe_rr_idx: 0,
@@ -1589,7 +1589,7 @@ mod tests {
         let verify_source = FileSplitStore::open(&source, ratios, 77).unwrap();
         let loaded = verify_source.load_sampler_state().unwrap().unwrap();
         assert_eq!(loaded.source_cycle_idx, 5);
-        assert_eq!(loaded.source_epoch, 9);
+        assert_eq!(loaded.epoch, 9);
     }
 
     /// `save_sampler_state(None)` on a bootstrapped store must publish to the
@@ -1609,7 +1609,7 @@ mod tests {
         let state = PersistedSamplerState {
             source_cycle_idx: 7,
             source_record_cursors: vec![],
-            source_epoch: 2,
+            epoch: 2,
             rng_state: 1,
             triplet_recipe_rr_idx: 0,
             text_recipe_rr_idx: 0,
@@ -1647,7 +1647,7 @@ mod tests {
         let state = PersistedSamplerState {
             source_cycle_idx: 3,
             source_record_cursors: vec![],
-            source_epoch: 1,
+            epoch: 1,
             rng_state: 0,
             triplet_recipe_rr_idx: 0,
             text_recipe_rr_idx: 0,
@@ -1692,7 +1692,7 @@ mod tests {
             let state = PersistedSamplerState {
                 source_cycle_idx: cycle_idx,
                 source_record_cursors: vec![],
-                source_epoch: 0,
+                epoch: 0,
                 rng_state: 0,
                 triplet_recipe_rr_idx: 0,
                 text_recipe_rr_idx: 0,

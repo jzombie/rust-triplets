@@ -3522,7 +3522,7 @@ fn first_chunk_offset_is_deterministic_and_nonzero_when_hash_demands_it() {
     let key = "window_record::0";
     let pool_len = 3usize;
     // In single-source mode, the first anchor selection wraps immediately and
-    // advances source_epoch to 1 before chunk selection runs.
+    // advances epoch to 1 before chunk selection runs.
     let epoch_seed_mask = 1u64;
     let mut seed = 1u64;
     while (stable_hash_str(seed ^ epoch_seed_mask, key) as usize).is_multiple_of(pool_len) {
@@ -3610,7 +3610,7 @@ fn first_role_section_offset_is_deterministic_and_nonzero_when_hash_demands_it()
     let key = "role_offset_record::context";
     let section_count = 3usize;
     // In single-source mode, the first anchor selection wraps immediately and
-    // advances source_epoch to 1 before role section selection runs.
+    // advances epoch to 1 before role section selection runs.
     let epoch_seed_mask = 1u64;
     let mut seed = 1u64;
     while (stable_hash_str(seed ^ epoch_seed_mask, key) as usize).is_multiple_of(section_count) {
@@ -3785,7 +3785,7 @@ fn reentry_after_epoch_change_can_restart_from_different_chunk_offset() {
     inner
         .chunk_cursors
         .remove(&("reentry_record".to_string(), 0));
-    inner.source_epoch = inner.source_epoch.saturating_add(1);
+    inner.epoch = inner.epoch.saturating_add(1);
 
     let first_epoch1 = inner
         .next_chunk_from_pool("reentry_record", 0, pool)
@@ -4421,7 +4421,7 @@ fn role_reentry_after_epoch_change_can_restart_from_different_section_offset() {
     inner
         .chunk_cursors
         .retain(|(record_id, _), _| record_id != &record.id);
-    inner.source_epoch = inner.source_epoch.saturating_add(1);
+    inner.epoch = inner.epoch.saturating_add(1);
 
     let first_epoch1 = inner
         .select_by_role(&record, &SectionRole::Context)
@@ -5532,7 +5532,7 @@ fn source_state_and_recipe_helpers_cover_remaining_branches() {
     inner.source_state_loaded = true;
     inner.source_cycle_idx = 3;
     inner.source_record_cursors.insert("source_a".into(), 4);
-    inner.source_epoch = 5;
+    inner.epoch = 5;
     inner.triplet_recipe_rr_idx = 6;
     inner.text_recipe_rr_idx = 7;
     inner.persist_source_state(None).unwrap();
@@ -5542,7 +5542,7 @@ fn source_state_and_recipe_helpers_cover_remaining_branches() {
         persisted.source_record_cursors,
         vec![("source_a".into(), 4)]
     );
-    assert_eq!(persisted.source_epoch, 5);
+    assert_eq!(persisted.epoch, 5);
     assert_eq!(persisted.triplet_recipe_rr_idx, 6);
     assert_eq!(persisted.text_recipe_rr_idx, 7);
     assert!(!inner.source_state_dirty);
@@ -5670,7 +5670,7 @@ fn records_by_split_and_anchor_selection_cover_edge_cases() {
             .choose_anchor_record(Some("source_b"), SplitLabel::Train)
             .is_none()
     );
-    assert_eq!(inner.source_epoch, 1);
+    assert_eq!(inner.epoch, 1);
     assert_eq!(inner.source_cycle_idx, 0);
 
     // With no reconciled epoch entries for this split, source-less anchor selection
@@ -8458,11 +8458,11 @@ fn epoch_sampling_handles_new_records_after_restart() {
 }
 
 #[test]
-fn source_epoch_is_propagated_to_ingestion_on_resume() {
+fn epoch_is_propagated_to_ingestion_on_resume() {
     // Verify that when a sampler resumes from persisted state after a
     // cache wipe (e.g. only simd-r-drive state is kept), the ingestion
-    // manager already has the correct source_epoch before the very first
-    // refresh call fires.  If source_epoch were loaded too late (only in
+    // manager already has the correct epoch before the very first
+    // refresh call fires.  If epoch were loaded too late (only in
     // ensure_source_state, which runs *after* the first refresh), sources
     // that derive their permutation seed from config.seed inside refresh()
     // would silently use epoch 0 instead of the persisted epoch.
@@ -8503,7 +8503,7 @@ fn source_epoch_is_propagated_to_ingestion_on_resume() {
         })
         .collect();
 
-    // First run: advance enough batches to trigger at least one source_epoch
+    // First run: advance enough batches to trigger at least one epoch
     // increment so the persisted epoch is non-zero.
     let persisted_epoch = {
         let store = Arc::new(FileSplitStore::open(&store_path, split, 11).unwrap());
@@ -8520,18 +8520,18 @@ fn source_epoch_is_propagated_to_ingestion_on_resume() {
         }
         sampler.save_sampler_state(None).unwrap();
         let state = store.load_sampler_state().unwrap().unwrap();
-        state.source_epoch
+        state.epoch
     };
 
     // Epoch must have advanced — the test is meaningless if it stayed at 0.
     assert!(
         persisted_epoch > 0,
-        "source_epoch should have advanced; got {persisted_epoch}"
+        "epoch should have advanced; got {persisted_epoch}"
     );
 
     // Second run: simulate a cache wipe by NOT reloading the ingestion
     // stream cursors, i.e. start the sampler fresh but with the same store.
-    // After the very first ingest call the ingestion manager's source_epoch
+    // After the very first ingest call the ingestion manager's epoch
     // must equal the persisted value before any refresh fires.
     let store = Arc::new(FileSplitStore::open(&store_path, split, 11).unwrap());
     let sampler = TripletSampler::new(build_config(), Arc::clone(&store));
@@ -8543,38 +8543,38 @@ fn source_epoch_is_propagated_to_ingestion_on_resume() {
         .unwrap();
     {
         let mut inner = sampler.inner.lock().unwrap();
-        // Trigger cursor loading (the step that must set source_epoch early).
+        // Trigger cursor loading (the step that must set epoch early).
         inner.ingest_internal(SplitLabel::Train).unwrap();
         assert_eq!(
-            inner.ingestion.source_epoch(),
+            inner.ingestion.epoch(),
             persisted_epoch,
-            "ingestion source_epoch must match persisted epoch after resume"
+            "ingestion epoch must match persisted epoch after resume"
         );
         assert_eq!(
-            inner.source_epoch, persisted_epoch,
-            "sampler source_epoch must match persisted epoch after resume"
+            inner.epoch, persisted_epoch,
+            "sampler epoch must match persisted epoch after resume"
         );
     }
 }
 
 #[test]
-fn resume_restores_epoch_and_step_counter_together() {
+fn resume_restores_epoch_and_epoch_step_together() {
     // Combined regression test covering both epoch and step counter
     // restoration on resume.  Individual tests cover each dimension
     // separately, but this is the explicit combined assertion:
     //
-    //   After save → resume, BOTH source_epoch AND step_counter must
+    //   After save → resume, BOTH epoch AND epoch_step must
     //   equal their saved values.  A mismatch in either breaks the
     //   deterministic seed chain that sources receive on refresh.
     //
     // Structure:
     //   1. Create sampler on a FileSplitStore, register a source.
-    //   2. Drive the ingestion at epoch 0 to advance step_counter.
-    //   3. set_epoch(1) — resets step_counter to 0.
-    //   4. Drive ingestion at epoch 1 to advance step_counter again.
+    //   2. Drive the ingestion at epoch 0 to advance epoch_step.
+    //   3. set_epoch(1) — resets epoch_step to 0.
+    //   4. Drive ingestion at epoch 1 to advance epoch_step again.
     //   5. Save state; capture saved_epoch and saved_step.
     //   6. Create fresh sampler on the same store.
-    //   7. Load state; verify BOTH source_epoch and step_counter restored.
+    //   7. Load state; verify BOTH epoch and epoch_step restored.
     let split = SplitRatios {
         train: 0.7,
         validation: 0.2,
@@ -8635,7 +8635,7 @@ fn resume_restores_epoch_and_step_counter_together() {
         sampler.next_pair_batch(SplitLabel::Train).unwrap();
         sampler.next_pair_batch(SplitLabel::Train).unwrap();
 
-        // Advance to epoch 1 — resets step_counter to 0 (explicit set_epoch).
+        // Advance to epoch 1 — resets epoch_step to 0 (explicit set_epoch).
         sampler.set_epoch(1).unwrap();
 
         // Each next_pair_batch call at epoch 1 increments step 0→1→2→3.
@@ -8646,7 +8646,7 @@ fn resume_restores_epoch_and_step_counter_together() {
         // Capture step and epoch BEFORE saving.
         let (pre_save_step, pre_save_epoch) = {
             let inner = sampler.inner.lock().unwrap();
-            (inner.ingestion.step_counter(), inner.source_epoch)
+            (inner.ingestion.epoch_step(), inner.epoch)
         };
 
         sampler.save_sampler_state(None).unwrap();
@@ -8661,20 +8661,20 @@ fn resume_restores_epoch_and_step_counter_together() {
             .expect("step must be persisted via STEP_CURSOR_KEY in source_stream_cursors");
 
         assert_eq!(
-            persisted.source_epoch, pre_save_epoch,
-            "persisted source_epoch must match in-memory value"
+            persisted.epoch, pre_save_epoch,
+            "persisted epoch must match in-memory value"
         );
         assert_eq!(
             persisted_step, pre_save_step,
-            "persisted step must match in-memory step_counter"
+            "persisted step must match in-memory epoch_step"
         );
         assert!(
-            persisted.source_epoch > 0,
-            "source_epoch must have advanced past 0"
+            persisted.epoch > 0,
+            "epoch must have advanced past 0"
         );
-        assert!(persisted_step > 0, "step_counter must have advanced past 0");
+        assert!(persisted_step > 0, "epoch_step must have advanced past 0");
 
-        (persisted.source_epoch, persisted_step)
+        (persisted.epoch, persisted_step)
     };
 
     // Phase 2 — fresh sampler; verify BOTH are restored from the store.
@@ -8683,8 +8683,8 @@ fn resume_restores_epoch_and_step_counter_together() {
         // 2a. The persisted payload itself must contain the saved values.
         let persisted = store.load_sampler_state().unwrap().unwrap();
         assert_eq!(
-            persisted.source_epoch, saved_epoch,
-            "persisted source_epoch must match saved value"
+            persisted.epoch, saved_epoch,
+            "persisted epoch must match saved value"
         );
         let persisted_step = persisted
             .source_stream_cursors
@@ -8712,24 +8712,24 @@ fn resume_restores_epoch_and_step_counter_together() {
             inner.ingest_internal(SplitLabel::Train).unwrap();
             // After ingest_internal the persisted state has been loaded.
             assert_eq!(
-                inner.source_epoch, saved_epoch,
-                "sampler source_epoch must match saved value after resume"
+                inner.epoch, saved_epoch,
+                "sampler epoch must match saved value after resume"
             );
             assert_eq!(
-                inner.ingestion.source_epoch(),
+                inner.ingestion.epoch(),
                 saved_epoch,
-                "ingestion source_epoch must match saved value after resume"
+                "ingestion epoch must match saved value after resume"
             );
         }
 
         // The first next_pair_batch call bumps step from saved → saved+1.
         let _ = sampler.next_pair_batch(SplitLabel::Train);
-        let post_ingest_step = sampler.inner.lock().unwrap().ingestion.step_counter();
+        let post_ingest_step = sampler.inner.lock().unwrap().ingestion.epoch_step();
         // next_pair_batch bumps step: saved → saved + 1.
         assert_eq!(
             post_ingest_step,
             saved_step + 1,
-            "first post-resume batch call must advance step_counter from
+            "first post-resume batch call must advance epoch_step from
              {saved_step} to {saved_step}+1, indicating it was restored
              rather than reset to 0"
         );
@@ -10178,7 +10178,7 @@ fn resumed_sampler_uses_persisted_epoch_seed() {
     //   Setup     — separate sampler on a file store: draw one batch to
     //               prime source-state loading (so the save is not a no-op),
     //               call set_epoch(1), then save.  The persisted state now
-    //               has cursor=1 and source_epoch=1.
+    //               has cursor=1 and epoch=1.
     //   Resume    — brand-new sampler on the same file store; no set_epoch
     //               call; draw n_draws records.  Epoch 1 must be loaded
     //               automatically from the store.
@@ -10270,7 +10270,7 @@ fn resumed_sampler_uses_persisted_epoch_seed() {
 
     // Setup — draw one batch to mark source state as loaded (persist_source_state
     // is a no-op when source_state_loaded=false), advance to epoch 1, then save.
-    // Saved state: cursor=1, source_epoch=1.
+    // Saved state: cursor=1, epoch=1.
     {
         let store = Arc::new(FileSplitStore::open(&store_path, split, base_seed).unwrap());
         let sampler = TripletSampler::new(make_config(), Arc::clone(&store));
@@ -12328,7 +12328,7 @@ fn text_batch_duplicate_text_different_records() {
 }
 
 #[test]
-fn step_counter_increments_through_public_batch_apis() {
+fn epoch_step_increments_through_public_batch_apis() {
     // Prove __step__ increments per call through the PUBLIC next_*_batch methods.
     // Uses pair and triplet paths (no cross-batch dedup) so we can
     // call them multiple times without exhausting on text dedup.
@@ -12369,13 +12369,13 @@ fn step_counter_increments_through_public_batch_apis() {
         .register_source(Box::new(InMemorySource::from_records("src", records)))
         .unwrap();
 
-    let step = sampler.inner.lock().unwrap().ingestion.step_counter();
+    let step = sampler.inner.lock().unwrap().ingestion.epoch_step();
     assert_eq!(step, 0, "step starts at 0");
 
     // next_pair_batch — no cross-batch dedup, can call multiple times
     for expected in 1u64..=3 {
         let _ = sampler.next_pair_batch(SplitLabel::Train);
-        let step = sampler.inner.lock().unwrap().ingestion.step_counter();
+        let step = sampler.inner.lock().unwrap().ingestion.epoch_step();
         assert_eq!(
             step, expected,
             "step must be {expected} after {expected} next_pair_batch calls (got {step})"
@@ -12385,7 +12385,7 @@ fn step_counter_increments_through_public_batch_apis() {
     // next_triplet_batch — also no cross-batch dedup
     for expected in 4u64..=6 {
         let _ = sampler.next_triplet_batch(SplitLabel::Train);
-        let step = sampler.inner.lock().unwrap().ingestion.step_counter();
+        let step = sampler.inner.lock().unwrap().ingestion.epoch_step();
         assert_eq!(
             step, expected,
             "step must be {expected} after next_triplet_batch (got {step})"
@@ -12396,9 +12396,9 @@ fn step_counter_increments_through_public_batch_apis() {
     // but the step counter is bumped BEFORE batch building, so we can
     // assert step incremented even if the batch returns an error.
     {
-        let before = sampler.inner.lock().unwrap().ingestion.step_counter();
+        let before = sampler.inner.lock().unwrap().ingestion.epoch_step();
         let _ = sampler.next_text_batch(SplitLabel::Train);
-        let after = sampler.inner.lock().unwrap().ingestion.step_counter();
+        let after = sampler.inner.lock().unwrap().ingestion.epoch_step();
         assert!(
             after > before,
             "step must increase after next_text_batch call (was {before}, now {after})"
@@ -12407,7 +12407,7 @@ fn step_counter_increments_through_public_batch_apis() {
 }
 
 #[test]
-fn explicit_set_epoch_resets_step_then_increments_per_batch() {
+fn explicit_set_epoch_resets_epoch_step_then_increments_per_batch() {
     // Explicit set_epoch MUST reset __step__ to 0 so each epoch produces
     // the same step sequence (1, 2, 3, …).  This is the user-visible
     // contract for curriculum / multi-stage training.
@@ -12447,7 +12447,7 @@ fn explicit_set_epoch_resets_step_then_increments_per_batch() {
     sampler.next_pair_batch(SplitLabel::Train).unwrap();
     sampler.next_pair_batch(SplitLabel::Train).unwrap();
     assert_eq!(
-        sampler.inner.lock().unwrap().ingestion.step_counter(),
+        sampler.inner.lock().unwrap().ingestion.epoch_step(),
         3,
         "epoch 0 step should be 3 after 3 batches"
     );
@@ -12455,7 +12455,7 @@ fn explicit_set_epoch_resets_step_then_increments_per_batch() {
     // Explicit set_epoch(1) — step MUST reset to 0.
     sampler.set_epoch(1).unwrap();
     assert_eq!(
-        sampler.inner.lock().unwrap().ingestion.step_counter(),
+        sampler.inner.lock().unwrap().ingestion.epoch_step(),
         0,
         "step must reset to 0 after explicit set_epoch"
     );
@@ -12463,21 +12463,21 @@ fn explicit_set_epoch_resets_step_then_increments_per_batch() {
     // Epoch 1: step goes 0 → 1 → 2 → 3 again (same sequence as epoch 0).
     sampler.next_pair_batch(SplitLabel::Train).unwrap();
     assert_eq!(
-        sampler.inner.lock().unwrap().ingestion.step_counter(),
+        sampler.inner.lock().unwrap().ingestion.epoch_step(),
         1,
         "epoch 1 first batch → step 1"
     );
     sampler.next_pair_batch(SplitLabel::Train).unwrap();
     sampler.next_pair_batch(SplitLabel::Train).unwrap();
     assert_eq!(
-        sampler.inner.lock().unwrap().ingestion.step_counter(),
+        sampler.inner.lock().unwrap().ingestion.epoch_step(),
         3,
         "epoch 1 step should be 3 after 3 batches"
     );
 }
 
 #[test]
-fn step_resume_preserves_epoch_and_continues_from_saved_value() {
+fn epoch_step_resume_preserves_epoch_and_continues_from_saved_value() {
     // Resume contract: save state after N batches, create a new sampler on
     // the same store, call next_*_batch — the FIRST resumed batch produces
     // step = saved_step + 1, proving the counter was correctly restored.
@@ -12534,7 +12534,7 @@ fn step_resume_preserves_epoch_and_continues_from_saved_value() {
         sampler.next_pair_batch(SplitLabel::Train).unwrap(); // step 1→2
         sampler.next_pair_batch(SplitLabel::Train).unwrap(); // step 2→3
 
-        let step = sampler.inner.lock().unwrap().ingestion.step_counter();
+        let step = sampler.inner.lock().unwrap().ingestion.epoch_step();
         sampler.save_sampler_state(None).unwrap();
         step
     };
@@ -12555,7 +12555,7 @@ fn step_resume_preserves_epoch_and_continues_from_saved_value() {
         // First batch call after resume: state loaded, step increments
         // from saved_step to saved_step + 1.
         sampler.next_pair_batch(SplitLabel::Train).unwrap();
-        let step = sampler.inner.lock().unwrap().ingestion.step_counter();
+        let step = sampler.inner.lock().unwrap().ingestion.epoch_step();
         assert_eq!(
             step,
             saved_step + 1,
@@ -12564,7 +12564,7 @@ fn step_resume_preserves_epoch_and_continues_from_saved_value() {
 
         // Second batch: step continues to saved_step + 2.
         sampler.next_pair_batch(SplitLabel::Train).unwrap();
-        let step = sampler.inner.lock().unwrap().ingestion.step_counter();
+        let step = sampler.inner.lock().unwrap().ingestion.epoch_step();
         assert_eq!(
             step,
             saved_step + 2,
@@ -12574,7 +12574,7 @@ fn step_resume_preserves_epoch_and_continues_from_saved_value() {
 }
 
 #[test]
-fn resume_continues_step_counter_from_saved_value() {
+fn resume_continues_epoch_step_from_saved_value() {
     // After save → load, the first next_*_batch call must restore the
     // persisted step counter, then increment it by 1.  This proves the
     // step counter survives save/resume correctly.
@@ -12646,7 +12646,7 @@ fn resume_continues_step_counter_from_saved_value() {
             for _ in 0..3 {
                 sampler.next_pair_batch(SplitLabel::Train).unwrap();
             }
-            let step_at_save = sampler.inner.lock().unwrap().ingestion.step_counter();
+            let step_at_save = sampler.inner.lock().unwrap().ingestion.epoch_step();
             sampler.save_sampler_state(None).unwrap();
             let batch4 = sampler.next_pair_batch(SplitLabel::Train).unwrap();
             (step_at_save, pair_snapshot_hash(&[batch4]))
@@ -12676,7 +12676,7 @@ fn resume_continues_step_counter_from_saved_value() {
             "pair batch content must be bit-identical after resume"
         );
         assert_eq!(
-            sampler.inner.lock().unwrap().ingestion.step_counter(),
+            sampler.inner.lock().unwrap().ingestion.epoch_step(),
             step_at_save + 1,
             "pair step must continue after resume"
         );
@@ -12716,7 +12716,7 @@ fn resume_continues_step_counter_from_saved_value() {
         for _ in 0..2 {
             sampler.next_text_batch(SplitLabel::Train).unwrap();
         }
-        let step_at_save = sampler.inner.lock().unwrap().ingestion.step_counter();
+        let step_at_save = sampler.inner.lock().unwrap().ingestion.epoch_step();
         sampler.save_sampler_state(None).unwrap();
         assert_eq!(step_at_save, 2, "text: 2 batches before save");
 
@@ -12736,7 +12736,7 @@ fn resume_continues_step_counter_from_saved_value() {
             .unwrap();
         let _ = sampler.next_text_batch(SplitLabel::Train).unwrap();
         assert_eq!(
-            sampler.inner.lock().unwrap().ingestion.step_counter(),
+            sampler.inner.lock().unwrap().ingestion.epoch_step(),
             step_at_save + 1,
             "text step must continue after resume"
         );
@@ -12771,7 +12771,7 @@ fn resume_continues_step_counter_from_saved_value() {
         for _ in 0..3 {
             sampler.next_triplet_batch(SplitLabel::Train).unwrap();
         }
-        let step_at_save = sampler.inner.lock().unwrap().ingestion.step_counter();
+        let step_at_save = sampler.inner.lock().unwrap().ingestion.epoch_step();
         sampler.save_sampler_state(None).unwrap();
         assert_eq!(step_at_save, 3, "triplet: 3 batches before save");
 
@@ -12794,7 +12794,7 @@ fn resume_continues_step_counter_from_saved_value() {
         // identity has a pre-existing gap.  Here we only check step counter.
         let _ = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
         assert_eq!(
-            sampler.inner.lock().unwrap().ingestion.step_counter(),
+            sampler.inner.lock().unwrap().ingestion.epoch_step(),
             step_at_save + 1,
             "triplet step must continue after resume"
         );
