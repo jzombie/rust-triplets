@@ -1058,10 +1058,10 @@ To resume training, initialize a `FileSplitStore` at the same path. The sampler 
 - Source epoch — the shuffling permutation counter.
 - Recipe round-robin indices for triplet and text recipes.
 
-**What does NOT resume deterministically:**
+**Resume limitations (step counter is unaffected):**
 
-- **Text batches:** `emitted_text_hashes` (cross-batch text dedup) is not persisted. After resume, the dedup starts fresh — the same text may appear on both sides of a save/load boundary. Pair and triplet batches don't use this dedup.
-- **Triplet batches:** Resume is deterministic (same save → same resumed output every time, verified by integration test), but the resumed content does NOT bit-exactly match what the original session would have produced at that step — the saved state is missing some internal state. The step counter itself is not the cause.
+* **Text batches (Deduplication resets):** The system does not save the memory of previously processed text (`emitted_text_hashes`). When you resume, this memory starts from scratch, meaning the same text might appear on both sides of a save/load boundary. *(Note: Pair and Triplet batches do not use this deduplication).*
+* **Triplet batches (State mismatch):** If you pause and resume, the output will **not** perfectly match what the session would have produced if it had never been paused. The saved state is missing some internal data (root cause unknown). However, resuming is still deterministic: loading a specific save file will always yield the exact same resumed output, and the anchor sequence continues correctly.
 
 ```rust,no_run
 use std::sync::Arc;
