@@ -1076,13 +1076,17 @@ use triplets::{SamplerConfig, TripletSampler, FileSplitStore, SplitRatios, Sampl
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
-    let seed = 42;
+    let store_seed = 42;    // controls split assignment (Train/Val/Test)
+    let sampler_seed = 42;  // controls sampling RNG and epoch ordering
 
     // Opening an existing FileSplitStore automatically loads its persisted state.
-    let store = Arc::new(FileSplitStore::open("checkpoints/splits.bin", ratios, seed)?);
+    let store = Arc::new(FileSplitStore::open("checkpoints/splits.bin", ratios, store_seed)?);
 
     // The step counter, RNG, and record cursors are restored.
-    let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
+    let mut sampler = TripletSampler::new(
+        SamplerConfig { seed: sampler_seed, ..Default::default() },
+        store,
+    );
     Ok(())
 }
 ```
