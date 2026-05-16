@@ -1934,17 +1934,15 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         Ok(())
     }
 
-    /// Load persisted sampler state (ingestion cursors + sampling state) if not
-    /// already loaded, WITHOUT triggering a refresh.  This lets the wrapper
-    /// methods restore the saved step counter before bumping it for the call.
+    /// Ensure ingestion cursors (including `__step__`) are loaded from the
+    /// persisted state so the step counter reflects the saved value before
+    /// the wrapper increments it for the current call.
     ///
-    /// NOTE: only ingestion cursors are loaded here.  The sampling state
-    /// (RNG, source_record_cursors, etc.) is restored later by
-    /// `ingest_internal_for_split` → `ensure_source_state` AFTER records
-    /// have been synced from cache, which populates `source_record_indices`.
-    /// Loading it earlier would silently drop cursor restorations because
-    /// the index is empty at that point.
-    fn ensure_state_loaded(&mut self) -> Result<(), SamplerError> {
+    /// Only loads ingestion cursors and source epoch.  The sampling state
+    /// (RNG, source_record_cursors, …) is restored later by
+    /// `ingest_internal_for_split` → `ensure_source_state`, after
+    /// `sync_records_from_cache` has populated `source_record_indices`.
+    fn ensure_ingestion_cursors_loaded(&mut self) -> Result<(), SamplerError> {
         if !self.ingestion_cursors_loaded {
             if let Some(state) = self.split_store.load_sampler_state()? {
                 self.ingestion.load_cursors(&state.source_stream_cursors);
@@ -2964,7 +2962,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         inner.ensure_split_allowed(split)?;
         // Load persisted state BEFORE bumping step so the restored step
         // counter is reflected before we increment it for this call.
-        inner.ensure_state_loaded()?;
+        inner.ensure_ingestion_cursors_loaded()?;
         // Bump __step__ once per public call, regardless of success/exhaustion.
         inner.ingestion.increment_step();
         for attempt in 0..=EXHAUSTION_RETRY_LIMIT {
