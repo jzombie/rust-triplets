@@ -12579,9 +12579,9 @@ fn resume_continues_step_counter_from_saved_value() {
     // persisted step counter, then increment it by 1.  This proves the
     // step counter survives save/resume correctly.
     //
-    // Content identity is NOT verified here — `source_wrapped` is not
-    // persisted, so the first anchor selection after resume may trigger
-    // an epoch advance that differs from the original session.
+    // Content identity is NOT checked here (see each section's note below).
+    // All three sections verify only that __step__ continues correctly after
+    // save → resume: the first resumed batch produces step = saved + 1.
     let split = SplitRatios::default();
 
     let make_records = |source: &str| -> Vec<DataRecord> {
@@ -12666,9 +12666,6 @@ fn resume_continues_step_counter_from_saved_value() {
             .unwrap();
 
         let _ = sampler.next_pair_batch(SplitLabel::Train).unwrap();
-        // Do NOT check batch content identity: `source_wrapped` is not
-        // persisted, so the first anchor selection after resume may differ.
-        // Only verify the step counter continues correctly.
         assert_eq!(
             sampler.inner.lock().unwrap().ingestion.step_counter(),
             step_at_save + 1,
@@ -12676,10 +12673,10 @@ fn resume_continues_step_counter_from_saved_value() {
         );
     }
 
-    // === TEXT batch resume (step counter only) ===
+    // === TEXT batch resume ===
     {
-        // Text batches lose `emitted_text_hashes` on resume, so content may
-        // differ.  Only verify the step counter continues correctly.
+        // `emitted_text_hashes` is NOT persisted — text dedup restarts fresh
+        // on resume.  Content may differ; only checking step counter.
         let mut text_config = config.clone();
         text_config.text_recipes = vec![TextRecipe {
             name: "resume_text".into(),
@@ -12736,8 +12733,12 @@ fn resume_continues_step_counter_from_saved_value() {
         );
     }
 
-    // === TRIPLET batch resume (step counter only) ===
+    // === TRIPLET batch resume ===
     {
+        // Full triplet content identity on resume has a pre-existing gap
+        // (separate from step counter changes).  Anchor sequence is verified
+        // by `restart_with_persisted_state_continues_sequence`; here we only
+        // check the step counter.
         let temp = tempdir().unwrap();
         let store_path = temp.path().join("resume_step_triplet");
         let store = Arc::new(FileSplitStore::open(&store_path, split, config.seed).unwrap());
@@ -12779,6 +12780,9 @@ fn resume_continues_step_counter_from_saved_value() {
                 make_records("step_tri"),
             )))
             .unwrap();
+        // Triplet anchor sequence on resume is verified by
+        // `restart_with_persisted_state_continues_sequence`; full content
+        // identity has a pre-existing gap.  Here we only check step counter.
         let _ = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
         assert_eq!(
             sampler.inner.lock().unwrap().ingestion.step_counter(),
