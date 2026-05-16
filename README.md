@@ -1065,6 +1065,11 @@ To resume training, initialize a `FileSplitStore` at the same path. The sampler 
 
 **Source-level determinism caveat:** The sampler's determinism assumes each source returns records in a consistent order for a given cursor position. Sources that fetch from multiple shards in parallel (e.g., Hugging Face datasets with many shard files) may interleave records differently across runs depending on network timing and shard availability. Two hyperparameter tuning jobs starting from the same checkpoint could see shards in different orders and diverge from there. This is a source-level concern — the sampler itself is deterministic given consistent input.
 
+**Multi-platform caveat:** The core sampler logic (RNG, cursors) is platform-independent, but two things vary across environments:
+
+- **Newlines:** On Unix the chunk text uses `\n`; on Windows it uses `\r\n` (via `platform_newline()`). The same records are selected but the text differs.
+- **Hashing instability:** `std::hash::DefaultHasher` (SipHash-2-4) is used for shuffle keys, fingerprints, and epoch ordering — its output is not guaranteed stable across Rust compiler versions. This means epoch ordering and record selection can differ between compiler versions, even on the same OS.
+
 ```rust,no_run
 use std::sync::Arc;
 use triplets::{SamplerConfig, TripletSampler, FileSplitStore, SplitRatios, Sampler};
