@@ -1063,6 +1063,8 @@ To resume training, initialize a `FileSplitStore` at the same path. The sampler 
 * **Text batches (Deduplication resets):** The system does not save the memory of previously processed text (`emitted_text_hashes`). When you resume, this memory starts from scratch, meaning the same text might appear on both sides of a save/load boundary. *(Note: Pair and Triplet batches do not use this deduplication).*
 * **Triplet batches (State mismatch):** If you pause and resume, the output will **not** perfectly match what the session would have produced if it had never been paused. The saved state is missing some internal data (root cause unknown). However, resuming is still deterministic: loading a specific save file will always yield the exact same resumed output, and the anchor sequence continues correctly.
 
+**Source-level determinism caveat:** The sampler's determinism assumes each source returns records in a consistent order for a given cursor position. Sources that fetch from multiple shards in parallel (e.g., Hugging Face datasets with many shard files) may interleave records differently across runs depending on network timing and shard availability. Two hyperparameter tuning jobs starting from the same checkpoint could see shards in different orders and diverge from there. This is a source-level concern — the sampler itself is deterministic given consistent input.
+
 ```rust,no_run
 use std::sync::Arc;
 use triplets::{SamplerConfig, TripletSampler, FileSplitStore, SplitRatios, Sampler};
