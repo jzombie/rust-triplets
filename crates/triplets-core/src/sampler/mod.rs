@@ -2096,19 +2096,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         target_split: SplitLabel,
         weights: Option<&HashMap<SourceId, f32>>,
     ) -> Result<SampleBatch, SamplerError> {
-        if let Some(weights) = weights {
-            if weights.is_empty()
-                || weights
-                    .values()
-                    .all(|&w| w == *weights.values().next().unwrap())
-            {
-                self.ingest_internal_for_split(target_split)?;
-            } else {
-                self.ingest_internal_with_weights_for_split(target_split, weights)?;
-            }
-        } else {
-            self.ingest_internal_for_split(target_split)?;
-        }
+        self.ingest_with_weights_fallback(target_split, weights)?;
         // Bump __step__ AFTER ingest (which may have loaded persisted state).
         self.ingestion.increment_step();
         self.ensure_split_has_records(target_split)?;

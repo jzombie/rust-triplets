@@ -98,6 +98,13 @@ pub struct PersistedSplitHashes {
 }
 
 /// Persisted sampler runtime state (cursors, recipe indices, RNG).
+///
+/// Every field here is restored on resume.  Notable things NOT persisted:
+///
+/// - **`emitted_text_hashes`** — cross-batch text dedup restarts fresh after
+///   a save/load boundary.  The same text may appear on both sides.
+/// - **`source_wrapped`** — reconstructed from the restored cursors.
+/// - **`chunk_index` / role cursors** — rebuilt from the ingested pool.
 #[derive(Clone, Debug, bitcode::Encode, bitcode::Decode)]
 pub struct PersistedSamplerState {
     /// Source-cycle round-robin index.
