@@ -962,8 +962,9 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         // permutation seed (seed ^ epoch), producing a fresh traversal order.
         self.source_epoch = self.source_epoch.saturating_add(1);
         self.ingestion.set_source_epoch(self.source_epoch);
-        // Reset step counter at epoch boundary.
-        self.ingestion.reset_step_counter();
+        // Do NOT reset the step counter here: __step__ tracks the number of
+        // refresh batches, which is orthogonal to the sampling epoch.
+        // Resetting it would corrupt the persisted cursor value on resume.
         // Reset per-source record cursors so the new epoch starts from the
         // beginning of each source's permuted index space (not from where the
         // previous epoch left off).
@@ -2095,6 +2096,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         target_split: SplitLabel,
         weights: Option<&HashMap<SourceId, f32>>,
     ) -> Result<SampleBatch, SamplerError> {
+        // Bump __step__ once per public batch call (tracks model training steps).
+        self.ingestion.increment_step();
         if let Some(weights) = weights {
             if weights.is_empty()
                 || weights
@@ -2319,6 +2322,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         target_split: SplitLabel,
         weights: Option<&HashMap<SourceId, f32>>,
     ) -> Result<TextBatch, SamplerError> {
+        // Bump __step__ once per public batch call (tracks model training steps).
+        self.ingestion.increment_step();
         self.ingest_with_weights_fallback(target_split, weights)?;
         self.ensure_split_has_records(target_split)?;
         let sources = self.source_order.clone();
@@ -2467,6 +2472,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         target_split: SplitLabel,
         weights: Option<&HashMap<SourceId, f32>>,
     ) -> Result<TripletBatch, SamplerError> {
+        // Bump __step__ once per public batch call (tracks model training steps).
+        self.ingestion.increment_step();
         self.ingest_with_weights_fallback(target_split, weights)?;
         self.ensure_split_has_records(target_split)?;
         let sources = self.source_order.clone();

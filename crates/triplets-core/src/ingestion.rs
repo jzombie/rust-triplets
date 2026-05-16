@@ -263,6 +263,12 @@ impl IngestionManager {
         self.step_counter = 0;
     }
 
+    /// Increment step counter by 1. Called once per `next_*_batch` call so that
+    /// `__step__` tracks model training steps, not ingestion refresh events.
+    pub(crate) fn increment_step(&mut self) {
+        self.step_counter = self.step_counter.saturating_add(1);
+    }
+
     /// Return the current step counter.
     #[cfg(test)]
     pub fn step_counter(&self) -> u64 {
@@ -494,7 +500,6 @@ impl IngestionManager {
         }
 
         if !refresh_plan.is_empty() {
-            self.step_counter = self.step_counter.saturating_add(1);
             self.source_refresh_generation = self.source_refresh_generation.saturating_add(1);
             self.last_refreshed_sources = refresh_plan
                 .iter()
@@ -1352,17 +1357,18 @@ mod tests {
         );
 
         // They must match the expected derive_epoch_seed values.
-        // The step_counter starts at 0 and is incremented to 1 before
-        // refresh_all passes the seed.  So each seed is epoch-seed XOR 1.
+        // step_counter starts at 0 and stays 0 for direct refresh_all calls
+        // (step is only bumped by next_*_batch calls).  So each seed is
+        // epoch-seed XOR 0 (= derive_epoch_seed).
         assert_eq!(
             seed_at_epoch0,
-            derive_epoch_seed(base_seed, 0) ^ 1,
-            "epoch-0 seed mismatch (step_counter=1)"
+            derive_epoch_seed(base_seed, 0) ^ 0,
+            "epoch-0 seed mismatch (step_counter=0)"
         );
         assert_eq!(
             seed_at_epoch1,
-            derive_epoch_seed(base_seed, 1) ^ 1,
-            "epoch-1 seed mismatch (step_counter=1)"
+            derive_epoch_seed(base_seed, 1) ^ 0,
+            "epoch-1 seed mismatch (step_counter=0)"
         );
     }
 
@@ -1381,28 +1387,30 @@ mod tests {
             )))
             .unwrap();
 
-        // Epoch 0, first refresh: step_counter goes 0→1, seed = derive(A, 0) ^ 1
+        // Epoch 0, first refresh: step_counter stays at 0 (no longer
+        // incremented by refresh_all — it's bumped per batch call instead).
+        // seed = derive(seed, 0) ^ 0 = derive(seed, 0).
         manager.refresh_all();
         let step1_seed = seeds.lock().unwrap()[0];
         assert_eq!(
             step1_seed,
-            derive_epoch_seed(config.seed, 0) ^ 1,
-            "epoch 0 step 1 seed"
+            derive_epoch_seed(config.seed, 0) ^ 0,
+            "epoch 0 step 0 seed (step=0 now, was ^1 before refactor)"
         );
 
-        // Advance epoch — step_counter must reset to 0.
+        // Advance epoch — step_counter must stay 0 (no batch calls yet).
         manager.set_source_epoch(1);
         manager.reset_step_counter();
         seeds.lock().unwrap().clear();
 
-        // Epoch 1, first refresh: step_counter goes 0→1 again.
-        // WITHOUT reset it would be 2.
+        // Epoch 1, first refresh: step stays at 0 (no batch calls in this test).
+        // WITHOUT reset it would still be 0 (batch calls are the only increment).
         manager.refresh_all();
         let step1_epoch1 = seeds.lock().unwrap()[0];
         assert_eq!(
             step1_epoch1,
-            derive_epoch_seed(config.seed, 1) ^ 1,
-            "epoch 1 step 1 seed (must be ^1, not ^2)"
+            derive_epoch_seed(config.seed, 1) ^ 0,
+            "epoch 1 step 0 seed (must be ^0 since refresh_all no longer bumps step)"
         );
     }
 
@@ -1476,7 +1484,8 @@ mod tests {
             .unwrap();
         manager2.load_cursors(&loaded.source_stream_cursors);
 
-        // step_counter restored to saved value, refresh increments
+        // step_counter restored to saved value; verify it's stable (no batch
+        // call was made, so step does not change).
         let step_before = manager2
             .snapshot_cursors()
             .iter()
@@ -1488,6 +1497,7 @@ mod tests {
             "load_cursors must restore __step__ to saved value"
         );
 
+        // Verify the step is still present after a refresh (no increment).
         manager2.refresh_all();
         let step_after = manager2
             .snapshot_cursors()
@@ -1496,9 +1506,9 @@ mod tests {
             .map(|(_, v)| *v)
             .unwrap();
         assert_eq!(
-            step_after,
-            step_saved + 1,
-            "step must continue: loaded {step_saved}, refresh incremented to {step_saved}+1"
+            step_after, step_saved,
+            "step must survive refresh_all without increment (step is per-batch,
+             not per-refresh): loaded {step_saved}, got {step_after}"
         );
     }
 

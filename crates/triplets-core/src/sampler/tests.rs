@@ -8627,26 +8627,21 @@ fn resume_restores_epoch_and_step_counter_together() {
 
         {
             let mut inner = sampler.inner.lock().unwrap();
-            // Call ingest_internal_for_split to load cursors and trigger
-            // the first refresh, which increments step from 0 to 1.
-            inner.ingest_internal(SplitLabel::Train).unwrap();
-            // A second call: caches still have data, so advance() is used.
-            // Advance with a rolling refresh increments step from 1 to 2.
-            inner.ingest_internal(SplitLabel::Train).unwrap();
-            // A third call: same pattern, step 2 to 3.
-            inner.ingest_internal(SplitLabel::Train).unwrap();
+            // First ingest loads cursors (no step increment).
+            inner.ingest_internal_for_split(SplitLabel::Train).unwrap();
         }
+        // Then next_pair_batch increments step 0→1, 1→2, 2→3.
+        sampler.next_pair_batch(SplitLabel::Train).unwrap();
+        sampler.next_pair_batch(SplitLabel::Train).unwrap();
+        sampler.next_pair_batch(SplitLabel::Train).unwrap();
 
-        // Advance to epoch 1 — resets step_counter to 0.
+        // Advance to epoch 1 — resets step_counter to 0 (explicit set_epoch).
         sampler.set_epoch(1).unwrap();
 
-        {
-            let mut inner = sampler.inner.lock().unwrap();
-            // Each call triggers a refresh (step 0→1, 1→2, 2→3).
-            inner.ingest_internal(SplitLabel::Train).unwrap();
-            inner.ingest_internal(SplitLabel::Train).unwrap();
-            inner.ingest_internal(SplitLabel::Train).unwrap();
-        }
+        // Each next_pair_batch call at epoch 1 increments step 0→1→2→3.
+        sampler.next_pair_batch(SplitLabel::Train).unwrap();
+        sampler.next_pair_batch(SplitLabel::Train).unwrap();
+        sampler.next_pair_batch(SplitLabel::Train).unwrap();
 
         // Capture step and epoch BEFORE saving.
         let (pre_save_step, pre_save_epoch) = {
@@ -8702,38 +8697,40 @@ fn resume_restores_epoch_and_step_counter_together() {
             "persisted step must match saved value"
         );
 
-        // 2b. After loading state into a new sampler, the first ingest call
-        //     triggers a refresh that increments step from saved → saved+1.
+        // 2b. After loading state into a new sampler, the first next_pair_batch
+        //     call increments step from saved → saved+1 via the public API.
         //     Verifying saved+1 proves the step counter was correctly
-        //     restored before the refresh (it continued, not restarted at 1).
+        //     restored before the increment (it continued, not restarted at 1).
         let sampler = TripletSampler::new(config, Arc::clone(&store));
         sampler
             .register_source(Box::new(InMemorySource::from_records("src", records)))
             .unwrap();
 
-        let mut inner = sampler.inner.lock().unwrap();
-        // ingest_internal triggers ensure_source_state (loads persisted
-        // epoch+step) before its first refresh.
-        inner.ingest_internal(SplitLabel::Train).unwrap();
+        // Trigger cursor loading (which restores epoch + step from store).
+        {
+            let mut inner = sampler.inner.lock().unwrap();
+            inner.ingest_internal(SplitLabel::Train).unwrap();
+            // After ingest_internal the persisted state has been loaded.
+            assert_eq!(
+                inner.source_epoch, saved_epoch,
+                "sampler source_epoch must match saved value after resume"
+            );
+            assert_eq!(
+                inner.ingestion.source_epoch(),
+                saved_epoch,
+                "ingestion source_epoch must match saved value after resume"
+            );
+        }
 
-        assert_eq!(
-            inner.source_epoch, saved_epoch,
-            "sampler source_epoch must match saved value after resume"
-        );
-        assert_eq!(
-            inner.ingestion.source_epoch(),
-            saved_epoch,
-            "ingestion source_epoch must match saved value after resume"
-        );
-
-        let post_ingest_step = inner.ingestion.step_counter();
-        // After restore step ← saved_step, the mandatory first refresh
-        // after cache-wipe increments it: post_ingest = saved + 1.
+        // The first next_pair_batch call bumps step from saved → saved+1.
+        let _ = sampler.next_pair_batch(SplitLabel::Train);
+        let post_ingest_step = sampler.inner.lock().unwrap().ingestion.step_counter();
+        // next_pair_batch bumps step: saved → saved + 1.
         assert_eq!(
             post_ingest_step,
             saved_step + 1,
-            "first post-resume refresh must advance step_counter from \
-             {saved_step} to {saved_step}+1, indicating it was restored \
+            "first post-resume batch call must advance step_counter from
+             {saved_step} to {saved_step}+1, indicating it was restored
              rather than reset to 0"
         );
     }
@@ -12328,4 +12325,83 @@ fn text_batch_duplicate_text_different_records() {
         shared_count <= 1,
         "shared_text_alpha should appear at most once (dedup blocked second record), got {shared_count}"
     );
+}
+
+#[test]
+fn step_counter_increments_through_public_batch_apis() {
+    // Prove the same property through the PUBLIC next_*_batch methods.
+    // Uses the pair and triplet paths (no cross-batch dedup) so we can
+    // call them multiple times without exhausting on text dedup.
+    let mut config = base_config();
+    config.batch_size = 20; // == records_per_source → drain empties buffer every call
+    config.recipes = vec![TripletRecipe {
+        name: "step_test".into(),
+        anchor: Selector::Role(SectionRole::Anchor),
+        positive_selector: Selector::Role(SectionRole::Context),
+        negative_selector: Selector::Role(SectionRole::Context),
+        negative_strategy: NegativeStrategy::WrongArticle,
+        weight: 1.0,
+        instruction: None,
+        allow_same_anchor_positive: false,
+    }];
+    config.text_recipes = vec![TextRecipe {
+        name: "context".into(),
+        selector: Selector::Role(SectionRole::Context),
+        weight: 1.0,
+        instruction: None,
+    }];
+
+    let store = Arc::new(DeterministicSplitStore::new(SplitRatios::default(), 42).unwrap());
+    let sampler = TripletSampler::new(config, store);
+
+    let records: Vec<DataRecord> = (0..20)
+        .map(|i| {
+            trader_record(
+                &format!("step_pub::rec_{i:02}"),
+                "2025-01-01",
+                &format!("Title {i}"),
+                &format!("Unique body {i} for public batch step test"),
+            )
+        })
+        .collect();
+
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("src", records)))
+        .unwrap();
+
+    let step = sampler.inner.lock().unwrap().ingestion.step_counter();
+    assert_eq!(step, 0, "step starts at 0");
+
+    // next_pair_batch — no cross-batch dedup, can call multiple times
+    for expected in 1u64..=3 {
+        let _ = sampler.next_pair_batch(SplitLabel::Train);
+        let step = sampler.inner.lock().unwrap().ingestion.step_counter();
+        assert_eq!(
+            step, expected,
+            "step must be {expected} after {expected} next_pair_batch calls (got {step})"
+        );
+    }
+
+    // next_triplet_batch — also no cross-batch dedup
+    for expected in 4u64..=6 {
+        let _ = sampler.next_triplet_batch(SplitLabel::Train);
+        let step = sampler.inner.lock().unwrap().ingestion.step_counter();
+        assert_eq!(
+            step, expected,
+            "step must be {expected} after next_triplet_batch (got {step})"
+        );
+    }
+
+    // next_text_batch — may eventually exhaust on cross-batch dedup,
+    // but the step counter is bumped BEFORE batch building, so we can
+    // assert step incremented even if the batch returns an error.
+    {
+        let before = sampler.inner.lock().unwrap().ingestion.step_counter();
+        let _ = sampler.next_text_batch(SplitLabel::Train);
+        let after = sampler.inner.lock().unwrap().ingestion.step_counter();
+        assert!(
+            after > before,
+            "step must increase after next_text_batch call (was {before}, now {after})"
+        );
+    }
 }
