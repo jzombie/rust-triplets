@@ -1047,7 +1047,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Deterministic Resuming
 
-To resume training, initialize a `FileSplitStore` at the same path. The sampler automatically restores cursors, RNG state, and epoch progress from that store.
+To resume training, initialize a `FileSplitStore` at the same path. The sampler automatically restores the ingestion position, RNG state, source epoch, and per-source record cursors from that store.
+
+**What resumes deterministically:**
+
+- Ingestion stream cursors (which records have been fetched from each source).
+- The step counter (`__step__`) — incremented once per `next_*_batch` call.
+- The deterministic RNG state — batch-to-batch shuffle order.
+- Per-source anchor record cursors — which records have been sampled as anchors.
+- Source epoch — the shuffling permutation counter.
+- Recipe round-robin indices for triplet and text recipes.
+
+**What does NOT resume deterministically:**
+
+- **Text batches:** `emitted_text_hashes` (cross-batch text dedup) is not persisted. After resume, the dedup starts fresh — the same text may appear on both sides of a save/load boundary. Pair and triplet batches don't use this dedup.
+- **Triplet batches:** Resume is deterministic (same save → same resumed output every time, verified by integration test), but the resumed content does NOT bit-exactly match what the original session would have produced at that step — the saved state is missing some internal state. The step counter itself is not the cause.
 
 ```rust,no_run
 use std::sync::Arc;
@@ -1060,7 +1074,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Opening an existing FileSplitStore automatically loads its persisted state.
     let store = Arc::new(FileSplitStore::open("checkpoints/splits.bin", ratios, seed)?);
 
-    // The sampler will resume from the exact record and recipe it was on.
+    // The step counter, RNG, and record cursors are restored.
     let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
     Ok(())
 }
