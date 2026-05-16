@@ -12329,8 +12329,8 @@ fn text_batch_duplicate_text_different_records() {
 
 #[test]
 fn step_counter_increments_through_public_batch_apis() {
-    // Prove the same property through the PUBLIC next_*_batch methods.
-    // Uses the pair and triplet paths (no cross-batch dedup) so we can
+    // Prove __step__ increments per call through the PUBLIC next_*_batch methods.
+    // Uses pair and triplet paths (no cross-batch dedup) so we can
     // call them multiple times without exhausting on text dedup.
     let mut config = base_config();
     config.batch_size = 20; // == records_per_source → drain empties buffer every call
@@ -12402,6 +12402,173 @@ fn step_counter_increments_through_public_batch_apis() {
         assert!(
             after > before,
             "step must increase after next_text_batch call (was {before}, now {after})"
+        );
+    }
+}
+
+#[test]
+fn explicit_set_epoch_resets_step_then_increments_per_batch() {
+    // Explicit set_epoch MUST reset __step__ to 0 so each epoch produces
+    // the same step sequence (1, 2, 3, …).  This is the user-visible
+    // contract for curriculum / multi-stage training.
+    let mut config = base_config();
+    config.batch_size = 20;
+    config.recipes = vec![TripletRecipe {
+        name: "epoch_step".into(),
+        anchor: Selector::Role(SectionRole::Anchor),
+        positive_selector: Selector::Role(SectionRole::Context),
+        negative_selector: Selector::Role(SectionRole::Context),
+        negative_strategy: NegativeStrategy::WrongArticle,
+        weight: 1.0,
+        instruction: None,
+        allow_same_anchor_positive: false,
+    }];
+
+    let store = Arc::new(DeterministicSplitStore::new(SplitRatios::default(), 42).unwrap());
+    let sampler = TripletSampler::new(config, store);
+
+    let records: Vec<DataRecord> = (0..20)
+        .map(|i| {
+            trader_record(
+                &format!("epoch_step::rec_{i:02}"),
+                "2025-01-01",
+                &format!("Title {i}"),
+                &format!("Body {i} for epoch step test"),
+            )
+        })
+        .collect();
+
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("src", records)))
+        .unwrap();
+
+    // Epoch 0: step goes 0 → 1 → 2 → 3.
+    sampler.next_pair_batch(SplitLabel::Train).unwrap();
+    sampler.next_pair_batch(SplitLabel::Train).unwrap();
+    sampler.next_pair_batch(SplitLabel::Train).unwrap();
+    assert_eq!(
+        sampler.inner.lock().unwrap().ingestion.step_counter(),
+        3,
+        "epoch 0 step should be 3 after 3 batches"
+    );
+
+    // Explicit set_epoch(1) — step MUST reset to 0.
+    sampler.set_epoch(1).unwrap();
+    assert_eq!(
+        sampler.inner.lock().unwrap().ingestion.step_counter(),
+        0,
+        "step must reset to 0 after explicit set_epoch"
+    );
+
+    // Epoch 1: step goes 0 → 1 → 2 → 3 again (same sequence as epoch 0).
+    sampler.next_pair_batch(SplitLabel::Train).unwrap();
+    assert_eq!(
+        sampler.inner.lock().unwrap().ingestion.step_counter(),
+        1,
+        "epoch 1 first batch → step 1"
+    );
+    sampler.next_pair_batch(SplitLabel::Train).unwrap();
+    sampler.next_pair_batch(SplitLabel::Train).unwrap();
+    assert_eq!(
+        sampler.inner.lock().unwrap().ingestion.step_counter(),
+        3,
+        "epoch 1 step should be 3 after 3 batches"
+    );
+}
+
+#[test]
+fn step_resume_preserves_epoch_and_continues_from_saved_value() {
+    // Resume contract: save state after N batches, create a new sampler on
+    // the same store, call next_*_batch — the FIRST resumed batch produces
+    // step = saved_step + 1, proving the counter was correctly restored.
+    let split = SplitRatios {
+        train: 0.7,
+        validation: 0.2,
+        test: 0.1,
+    };
+    let temp = tempdir().unwrap();
+    let store_path = temp.path().join("step_resume_test");
+
+    let config = SamplerConfig {
+        seed: 42,
+        split,
+        batch_size: 6,
+        allowed_splits: vec![SplitLabel::Train],
+        recipes: vec![TripletRecipe {
+            name: "resume_step".into(),
+            anchor: Selector::Role(SectionRole::Anchor),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 1.0,
+            instruction: None,
+            allow_same_anchor_positive: false,
+        }],
+        text_recipes: Vec::new(),
+        ..SamplerConfig::default()
+    };
+
+    let records: Vec<DataRecord> = (0..6)
+        .map(|i| {
+            trader_record(
+                &format!("res_step::rec_{i:02}"),
+                "2025-01-01",
+                &format!("Title {i}"),
+                &format!("Body {i} for resume step test"),
+            )
+        })
+        .collect();
+
+    // Phase 1 — run 3 batches, save state.
+    let saved_step = {
+        let store = Arc::new(FileSplitStore::open(&store_path, split, 42).unwrap());
+        let sampler = TripletSampler::new(config.clone(), Arc::clone(&store));
+        sampler
+            .register_source(Box::new(InMemorySource::from_records(
+                "src",
+                records.clone(),
+            )))
+            .unwrap();
+
+        sampler.next_pair_batch(SplitLabel::Train).unwrap(); // step 0→1
+        sampler.next_pair_batch(SplitLabel::Train).unwrap(); // step 1→2
+        sampler.next_pair_batch(SplitLabel::Train).unwrap(); // step 2→3
+
+        let step = sampler.inner.lock().unwrap().ingestion.step_counter();
+        sampler.save_sampler_state(None).unwrap();
+        step
+    };
+
+    assert_eq!(saved_step, 3, "must have run 3 batches before save");
+
+    // Phase 2 — fresh sampler on same store, verify resume.
+    {
+        let store = Arc::new(FileSplitStore::open(&store_path, split, 42).unwrap());
+        let sampler = TripletSampler::new(config, Arc::clone(&store));
+        sampler
+            .register_source(Box::new(InMemorySource::from_records(
+                "src",
+                records.clone(),
+            )))
+            .unwrap();
+
+        // First batch call after resume: state loaded, step increments
+        // from saved_step to saved_step + 1.
+        sampler.next_pair_batch(SplitLabel::Train).unwrap();
+        let step = sampler.inner.lock().unwrap().ingestion.step_counter();
+        assert_eq!(
+            step,
+            saved_step + 1,
+            "first resumed batch must produce step {saved_step}+1, got {step}"
+        );
+
+        // Second batch: step continues to saved_step + 2.
+        sampler.next_pair_batch(SplitLabel::Train).unwrap();
+        let step = sampler.inner.lock().unwrap().ingestion.step_counter();
+        assert_eq!(
+            step,
+            saved_step + 2,
+            "second resumed batch must produce step {saved_step}+2, got {step}"
         );
     }
 }

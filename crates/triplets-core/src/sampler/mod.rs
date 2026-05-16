@@ -2096,8 +2096,6 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         target_split: SplitLabel,
         weights: Option<&HashMap<SourceId, f32>>,
     ) -> Result<SampleBatch, SamplerError> {
-        // Bump __step__ once per public batch call (tracks model training steps).
-        self.ingestion.increment_step();
         if let Some(weights) = weights {
             if weights.is_empty()
                 || weights
@@ -2111,6 +2109,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         } else {
             self.ingest_internal_for_split(target_split)?;
         }
+        // Bump __step__ AFTER ingest (which may have loaded persisted state).
+        self.ingestion.increment_step();
         self.ensure_split_has_records(target_split)?;
         let sources = self.source_order.clone();
         if sources.is_empty() {
@@ -2322,9 +2322,9 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         target_split: SplitLabel,
         weights: Option<&HashMap<SourceId, f32>>,
     ) -> Result<TextBatch, SamplerError> {
-        // Bump __step__ once per public batch call (tracks model training steps).
-        self.ingestion.increment_step();
         self.ingest_with_weights_fallback(target_split, weights)?;
+        // Bump __step__ AFTER ingest (which may have loaded persisted state).
+        self.ingestion.increment_step();
         self.ensure_split_has_records(target_split)?;
         let sources = self.source_order.clone();
         if sources.is_empty() {
@@ -2472,9 +2472,9 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         target_split: SplitLabel,
         weights: Option<&HashMap<SourceId, f32>>,
     ) -> Result<TripletBatch, SamplerError> {
-        // Bump __step__ once per public batch call (tracks model training steps).
-        self.ingestion.increment_step();
         self.ingest_with_weights_fallback(target_split, weights)?;
+        // Bump __step__ AFTER ingest (which may have loaded persisted state).
+        self.ingestion.increment_step();
         self.ensure_split_has_records(target_split)?;
         let sources = self.source_order.clone();
         if sources.is_empty() {
