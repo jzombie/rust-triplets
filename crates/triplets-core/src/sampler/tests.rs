@@ -12582,11 +12582,7 @@ fn resume_continues_step_counter_from_saved_value() {
     // Content identity is NOT verified here — `source_wrapped` is not
     // persisted, so the first anchor selection after resume may trigger
     // an epoch advance that differs from the original session.
-    let split = SplitRatios {
-        train: 0.7,
-        validation: 0.2,
-        test: 0.1,
-    };
+    let split = SplitRatios::default();
 
     let make_records = |source: &str| -> Vec<DataRecord> {
         (0..10)
@@ -12672,12 +12668,122 @@ fn resume_continues_step_counter_from_saved_value() {
         let _ = sampler.next_pair_batch(SplitLabel::Train).unwrap();
         // Do NOT check batch content identity: `source_wrapped` is not
         // persisted, so the first anchor selection after resume may differ.
-        // Instead, verify that the step counter continues correctly.
+        // Only verify the step counter continues correctly.
         assert_eq!(
             sampler.inner.lock().unwrap().ingestion.step_counter(),
             step_at_save + 1,
-            "step must continue: saved {step_at_save}, first resumed batch {}",
-            sampler.inner.lock().unwrap().ingestion.step_counter()
+            "pair step must continue after resume"
+        );
+    }
+
+    // === TEXT batch resume (step counter only) ===
+    {
+        // Text batches lose `emitted_text_hashes` on resume, so content may
+        // differ.  Only verify the step counter continues correctly.
+        let mut text_config = config.clone();
+        text_config.text_recipes = vec![TextRecipe {
+            name: "resume_text".into(),
+            selector: Selector::Role(SectionRole::Context),
+            weight: 1.0,
+            instruction: None,
+        }];
+        let temp = tempdir().unwrap();
+        let store_path = temp.path().join("resume_step_text");
+        let store = Arc::new(FileSplitStore::open(&store_path, split, config.seed).unwrap());
+        let sampler = TripletSampler::new(text_config.clone(), Arc::clone(&store));
+        sampler
+            .register_source(Box::new(InMemorySource::from_records(
+                "src_a",
+                make_records("step_text"),
+            )))
+            .unwrap();
+        sampler
+            .register_source(Box::new(InMemorySource::from_records(
+                "src_b",
+                make_records("step_text"),
+            )))
+            .unwrap();
+        {
+            let mut inner = sampler.inner.lock().unwrap();
+            inner.ingest_internal(SplitLabel::Train).unwrap();
+        }
+        for _ in 0..2 {
+            sampler.next_text_batch(SplitLabel::Train).unwrap();
+        }
+        let step_at_save = sampler.inner.lock().unwrap().ingestion.step_counter();
+        sampler.save_sampler_state(None).unwrap();
+        assert_eq!(step_at_save, 2, "text: 2 batches before save");
+
+        let store = Arc::new(FileSplitStore::open(&store_path, split, config.seed).unwrap());
+        let sampler = TripletSampler::new(text_config, Arc::clone(&store));
+        sampler
+            .register_source(Box::new(InMemorySource::from_records(
+                "src_a",
+                make_records("step_text"),
+            )))
+            .unwrap();
+        sampler
+            .register_source(Box::new(InMemorySource::from_records(
+                "src_b",
+                make_records("step_text"),
+            )))
+            .unwrap();
+        let _ = sampler.next_text_batch(SplitLabel::Train).unwrap();
+        assert_eq!(
+            sampler.inner.lock().unwrap().ingestion.step_counter(),
+            step_at_save + 1,
+            "text step must continue after resume"
+        );
+    }
+
+    // === TRIPLET batch resume (step counter only) ===
+    {
+        let temp = tempdir().unwrap();
+        let store_path = temp.path().join("resume_step_triplet");
+        let store = Arc::new(FileSplitStore::open(&store_path, split, config.seed).unwrap());
+        let sampler = TripletSampler::new(config.clone(), Arc::clone(&store));
+        sampler
+            .register_source(Box::new(InMemorySource::from_records(
+                "src_a",
+                make_records("step_tri"),
+            )))
+            .unwrap();
+        sampler
+            .register_source(Box::new(InMemorySource::from_records(
+                "src_b",
+                make_records("step_tri"),
+            )))
+            .unwrap();
+        {
+            let mut inner = sampler.inner.lock().unwrap();
+            inner.ingest_internal(SplitLabel::Train).unwrap();
+        }
+        for _ in 0..3 {
+            sampler.next_triplet_batch(SplitLabel::Train).unwrap();
+        }
+        let step_at_save = sampler.inner.lock().unwrap().ingestion.step_counter();
+        sampler.save_sampler_state(None).unwrap();
+        assert_eq!(step_at_save, 3, "triplet: 3 batches before save");
+
+        let store = Arc::new(FileSplitStore::open(&store_path, split, config.seed).unwrap());
+        let sampler = TripletSampler::new(config.clone(), Arc::clone(&store));
+        sampler
+            .register_source(Box::new(InMemorySource::from_records(
+                "src_a",
+                make_records("step_tri"),
+            )))
+            .unwrap();
+        sampler
+            .register_source(Box::new(InMemorySource::from_records(
+                "src_b",
+                make_records("step_tri"),
+            )))
+            .unwrap();
+        let _ = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
+        assert_eq!(
+            sampler.inner.lock().unwrap().ingestion.step_counter(),
+            step_at_save + 1,
+            "triplet step must continue after resume"
         );
     }
 }
