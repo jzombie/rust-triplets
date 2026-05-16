@@ -1279,10 +1279,7 @@ mod tests {
                 .epoch,
             5
         );
-        assert_eq!(
-            store_b.load_sampler_state().unwrap().unwrap().epoch,
-            7
-        );
+        assert_eq!(store_b.load_sampler_state().unwrap().unwrap().epoch, 7);
 
         let store_a_again = FileSplitStore::open(&path_a, ratios, 42).unwrap();
         assert_eq!(
@@ -1295,11 +1292,7 @@ mod tests {
             5
         );
         assert_eq!(
-            store_a_again
-                .load_sampler_state()
-                .unwrap()
-                .unwrap()
-                .epoch,
+            store_a_again.load_sampler_state().unwrap().unwrap().epoch,
             7
         );
     }
@@ -1337,10 +1330,7 @@ mod tests {
             store_b.label_for(&assigned_id),
             Some(SplitLabel::Validation)
         );
-        assert_eq!(
-            store_b.load_sampler_state().unwrap().unwrap().epoch,
-            9
-        );
+        assert_eq!(store_b.load_sampler_state().unwrap().unwrap().epoch, 9);
 
         // save_to=Some(path_b) must not publish to path_a (the canonical save_path).
         assert!(
@@ -1391,11 +1381,7 @@ mod tests {
         drop(store_a);
         let store_a_disk = FileSplitStore::open(&path_a, ratios, 42).unwrap();
         assert_eq!(
-            store_a_disk
-                .load_sampler_state()
-                .unwrap()
-                .unwrap()
-                .epoch,
+            store_a_disk.load_sampler_state().unwrap().unwrap().epoch,
             1,
             "save_to=Some(...) must not overwrite the on-disk save_path"
         );

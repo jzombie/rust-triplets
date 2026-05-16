@@ -8668,10 +8668,7 @@ fn resume_restores_epoch_and_epoch_step_together() {
             persisted_step, pre_save_step,
             "persisted step must match in-memory epoch_step"
         );
-        assert!(
-            persisted.epoch > 0,
-            "epoch must have advanced past 0"
-        );
+        assert!(persisted.epoch > 0, "epoch must have advanced past 0");
         assert!(persisted_step > 0, "epoch_step must have advanced past 0");
 
         (persisted.epoch, persisted_step)
