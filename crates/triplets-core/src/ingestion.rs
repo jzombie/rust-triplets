@@ -1357,17 +1357,16 @@ mod tests {
         );
 
         // They must match the expected derive_epoch_seed values.
-        // step_counter starts at 0 and stays 0 for direct refresh_all calls
-        // (step is only bumped by next_*_batch calls).  So each seed is
-        // epoch-seed XOR 0 (= derive_epoch_seed).
+        // step_counter stays at 0 for direct refresh_all calls
+        // (it's only bumped by next_*_batch calls).
         assert_eq!(
             seed_at_epoch0,
-            derive_epoch_seed(base_seed, 0) ^ 0,
+            derive_epoch_seed(base_seed, 0),
             "epoch-0 seed mismatch (step_counter=0)"
         );
         assert_eq!(
             seed_at_epoch1,
-            derive_epoch_seed(base_seed, 1) ^ 0,
+            derive_epoch_seed(base_seed, 1),
             "epoch-1 seed mismatch (step_counter=0)"
         );
     }
@@ -1389,13 +1388,12 @@ mod tests {
 
         // Epoch 0, first refresh: step_counter stays at 0 (no longer
         // incremented by refresh_all — it's bumped per batch call instead).
-        // seed = derive(seed, 0) ^ 0 = derive(seed, 0).
         manager.refresh_all();
         let step1_seed = seeds.lock().unwrap()[0];
         assert_eq!(
             step1_seed,
-            derive_epoch_seed(config.seed, 0) ^ 0,
-            "epoch 0 step 0 seed (step=0 now, was ^1 before refactor)"
+            derive_epoch_seed(config.seed, 0),
+            "epoch 0 step 0 seed"
         );
 
         // Advance epoch — step_counter must stay 0 (no batch calls yet).
@@ -1404,12 +1402,11 @@ mod tests {
         seeds.lock().unwrap().clear();
 
         // Epoch 1, first refresh: step stays at 0 (no batch calls in this test).
-        // WITHOUT reset it would still be 0 (batch calls are the only increment).
         manager.refresh_all();
         let step1_epoch1 = seeds.lock().unwrap()[0];
         assert_eq!(
             step1_epoch1,
-            derive_epoch_seed(config.seed, 1) ^ 0,
+            derive_epoch_seed(config.seed, 1),
             "epoch 1 step 0 seed (must be ^0 since refresh_all no longer bumps step)"
         );
     }
