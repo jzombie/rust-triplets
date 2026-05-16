@@ -12617,39 +12617,43 @@ fn resume_continues_step_counter_from_saved_value() {
         allow_same_anchor_positive: false,
     }];
 
-    let run_phase = |cfg: SamplerConfig, store_path: &std::path::Path, records: Vec<DataRecord>| {
-        let store = Arc::new(FileSplitStore::open(store_path, cfg.split, cfg.seed).unwrap());
-        let sampler = TripletSampler::new(cfg, Arc::clone(&store));
-        sampler
-            .register_source(Box::new(InMemorySource::from_records(
-                "src_a",
-                records.clone(),
-            )))
-            .unwrap();
-        sampler
-            .register_source(Box::new(InMemorySource::from_records("src_b", records)))
-            .unwrap();
-
-        // Ingest once, drain 3 batches, save.
-        {
-            let mut inner = sampler.inner.lock().unwrap();
-            inner.ingest_internal(SplitLabel::Train).unwrap();
-        }
-        for _ in 0..3 {
-            sampler.next_pair_batch(SplitLabel::Train).unwrap();
-        }
-        let step_at_save = sampler.inner.lock().unwrap().ingestion.step_counter();
-        sampler.save_sampler_state(None).unwrap();
-        step_at_save
-    };
-
     // === PAIR batch resume ===
     {
         let temp = tempdir().unwrap();
         let store_path = temp.path().join("resume_pair");
-        let step_at_save = run_phase(config.clone(), &store_path, make_records("pair"));
+
+        // Phase 1: run 3 batches, save, capture 4th batch hash.
+        let (step_at_save, expected_hash) = {
+            let store =
+                Arc::new(FileSplitStore::open(&store_path, config.split, config.seed).unwrap());
+            let sampler = TripletSampler::new(config.clone(), Arc::clone(&store));
+            sampler
+                .register_source(Box::new(InMemorySource::from_records(
+                    "src_a",
+                    make_records("pair"),
+                )))
+                .unwrap();
+            sampler
+                .register_source(Box::new(InMemorySource::from_records(
+                    "src_b",
+                    make_records("pair"),
+                )))
+                .unwrap();
+            {
+                let mut inner = sampler.inner.lock().unwrap();
+                inner.ingest_internal(SplitLabel::Train).unwrap();
+            }
+            for _ in 0..3 {
+                sampler.next_pair_batch(SplitLabel::Train).unwrap();
+            }
+            let step_at_save = sampler.inner.lock().unwrap().ingestion.step_counter();
+            sampler.save_sampler_state(None).unwrap();
+            let batch4 = sampler.next_pair_batch(SplitLabel::Train).unwrap();
+            (step_at_save, pair_snapshot_hash(&[batch4]))
+        };
         assert_eq!(step_at_save, 3, "pair: 3 batches before save");
 
+        // Phase 2: resume and compare hash.
         let store = Arc::new(FileSplitStore::open(&store_path, config.split, config.seed).unwrap());
         let sampler = TripletSampler::new(config.clone(), Arc::clone(&store));
         sampler
@@ -12665,7 +12669,12 @@ fn resume_continues_step_counter_from_saved_value() {
             )))
             .unwrap();
 
-        let _ = sampler.next_pair_batch(SplitLabel::Train).unwrap();
+        let resumed = sampler.next_pair_batch(SplitLabel::Train).unwrap();
+        assert_eq!(
+            pair_snapshot_hash(&[resumed]),
+            expected_hash,
+            "pair batch content must be bit-identical after resume"
+        );
         assert_eq!(
             sampler.inner.lock().unwrap().ingestion.step_counter(),
             step_at_save + 1,
