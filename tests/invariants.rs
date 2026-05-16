@@ -1,3 +1,4 @@
+use siphasher::sip::SipHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -91,7 +92,7 @@ impl CountingSplitStore {
     }
 
     fn derive_label(&self, id: &str) -> SplitLabel {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let mut hasher = SipHasher::new();
         id.hash(&mut hasher);
         self.seed.hash(&mut hasher);
         let value = hasher.finish() as f64 / u64::MAX as f64;

@@ -122,7 +122,7 @@ fn shuffled_continues_across_runs_with_same_batch_size() {
     );
     assert_eq!(
         sources_second,
-        vec!["source_b", "source_a", "source_b", "source_a"]
+        vec!["source_b", "source_a", "source_a", "source_b"]
     );
 }
 

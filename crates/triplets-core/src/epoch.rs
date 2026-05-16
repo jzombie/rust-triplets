@@ -2,6 +2,7 @@ use crate::errors::SamplerError;
 use crate::hash::stable_hash_with;
 use crate::splits::{EpochStateStore, PersistedSplitMeta, SplitLabel};
 use crate::types::{RecordId, SourceId};
+use siphasher::sip::SipHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -299,14 +300,14 @@ fn shuffle_key(id: &str, epoch: u64, label: SplitLabel, seed: u64) -> u64 {
 }
 
 fn id_fingerprint(item: &(RecordId, SourceId)) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut hasher = SipHasher::new();
     item.0.hash(&mut hasher);
     item.1.hash(&mut hasher);
     hasher.finish()
 }
 
 fn population_checksum(ids: &[(RecordId, SourceId)]) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut hasher = SipHasher::new();
     let mut fingerprints: Vec<u64> = ids.iter().map(id_fingerprint).collect();
     fingerprints.sort_unstable();
     for fp in fingerprints {
@@ -482,11 +483,11 @@ mod tests {
         for (i, id) in output_sequence.iter().enumerate() {
             if id.starts_with("small") {
                 *small_counts.entry(id.clone()).or_insert(0) += 1;
-                // Sources are sorted by name: "large" (even index) then "small" (odd index).
-                assert_eq!(i % 2, 1, "Small source should be at odd indices");
+                // Sources are sorted by name: "small" (even index) then "large" (odd index).
+                assert_eq!(i % 2, 0, "Small source should be at even indices");
             } else {
                 *large_counts.entry(id.clone()).or_insert(0) += 1;
-                assert_eq!(i % 2, 0, "Large source should be at even indices");
+                assert_eq!(i % 2, 1, "Large source should be at odd indices");
             }
         }
 
@@ -554,12 +555,12 @@ mod tests {
         let mut gamma_counts = HashMap::new();
 
         for (i, id) in output_sequence.iter().enumerate() {
-            if id.starts_with("alpha") {
-                *alpha_counts.entry(id.clone()).or_insert(0) += 1;
-                assert_eq!(i % 3, 0, "Alpha source should be at index % 3 == 0");
-            } else if id.starts_with("beta") {
+            if id.starts_with("beta") {
                 *beta_counts.entry(id.clone()).or_insert(0) += 1;
-                assert_eq!(i % 3, 1, "Beta source should be at index % 3 == 1");
+                assert_eq!(i % 3, 0, "Beta source should be at index % 3 == 0");
+            } else if id.starts_with("alpha") {
+                *alpha_counts.entry(id.clone()).or_insert(0) += 1;
+                assert_eq!(i % 3, 1, "Alpha source should be at index % 3 == 1");
             } else {
                 *gamma_counts.entry(id.clone()).or_insert(0) += 1;
                 assert_eq!(i % 3, 2, "Gamma source should be at index % 3 == 2");

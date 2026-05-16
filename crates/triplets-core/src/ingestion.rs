@@ -1971,7 +1971,7 @@ mod tests {
         // (src_3 with w=2.0 outpaces all w=1.0 sources) is unchanged.)
         assert_eq!(
             totals,
-            vec![14, 14, 14, 37, 19],
+            vec![11, 11, 11, 31, 17],
             "unequal-weights: unexpected refresh distribution"
         );
     }

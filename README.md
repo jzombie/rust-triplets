@@ -1068,7 +1068,7 @@ To resume training, initialize a `FileSplitStore` at the same path. The sampler 
 **Multi-platform caveat:** The core sampler logic (RNG, cursors) is platform-independent, but two things vary across environments:
 
 - **Newlines:** On Unix the chunk text uses `\n`; on Windows it uses `\r\n` (via `platform_newline()`). The same records are selected but the text differs.
-- **Hashing instability:** `std::hash::DefaultHasher` (SipHash-2-4) is used for shuffle keys, fingerprints, and epoch ordering — its output is not guaranteed stable across Rust compiler versions. This means epoch ordering and record selection can differ between compiler versions, even on the same OS.
+- **Hashing is now pinned:** The `siphasher` crate (SipHash-2-4) is used for shuffle keys, fingerprints, and epoch ordering instead of `std::hash::DefaultHasher`. Its output is guaranteed stable across Rust compiler versions and platforms. A regression test (`stable_hash_str_is_deterministic`) verifies a known digest.
 
 ```rust,no_run
 use std::sync::Arc;

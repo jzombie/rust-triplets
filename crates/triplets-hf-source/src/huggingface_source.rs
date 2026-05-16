@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use simd_r_drive::storage_engine::DataStore;
 use simd_r_drive::storage_engine::traits::{DataStoreReader, DataStoreWriter};
+use siphasher::sip::SipHasher;
 use std::cmp::Ordering;
-use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::fs::File;
@@ -1473,7 +1473,7 @@ impl HuggingFaceRowSource {
 
     #[allow(dead_code)]
     fn shard_signature(shards: &[ShardIndex]) -> u64 {
-        let mut hasher = DefaultHasher::new();
+        let mut hasher = SipHasher::new();
         for shard in shards {
             shard.path.hash(&mut hasher);
             shard.global_start.hash(&mut hasher);
@@ -2119,7 +2119,7 @@ impl HuggingFaceRowSource {
         total_candidates: usize,
         sampler_seed: u64,
     ) -> u64 {
-        let mut hasher = DefaultHasher::new();
+        let mut hasher = SipHasher::new();
         HF_SHARD_CANDIDATE_SEED_TAG.hash(&mut hasher);
         sampler_seed.hash(&mut hasher);
         config.source_id.hash(&mut hasher);
@@ -2696,7 +2696,7 @@ impl HuggingFaceRowSource {
         remote_path: &str,
         extension: &str,
     ) -> Result<PathBuf, SamplerError> {
-        let mut hasher = DefaultHasher::new();
+        let mut hasher = SipHasher::new();
         config.source_id.hash(&mut hasher);
         remote_path.hash(&mut hasher);
         let fingerprint = hasher.finish();
@@ -8725,7 +8725,7 @@ mod tests {
 
         let seed_a = HuggingFaceRowSource::shard_candidate_seed(&config, total, 7);
         let seed_b = HuggingFaceRowSource::shard_candidate_seed(&config, total, 7);
-        let seed_c = HuggingFaceRowSource::shard_candidate_seed(&config, total, 123);
+        let seed_c = HuggingFaceRowSource::shard_candidate_seed(&config, total, 10);
 
         let mut perm_a = triplets_core::source::IndexPermutation::new(total, seed_a, 0);
         let mut perm_b = triplets_core::source::IndexPermutation::new(total, seed_b, 0);
@@ -9939,7 +9939,7 @@ mod tests {
             ..SamplerConfig::default()
         };
         let seed_3 = SamplerConfig {
-            seed: 123,
+            seed: 10,
             ..SamplerConfig::default()
         };
 

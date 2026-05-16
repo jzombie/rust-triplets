@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use simd_r_drive::storage_engine::DataStore;
 use simd_r_drive::storage_engine::traits::{DataStoreReader, DataStoreWriter};
+use siphasher::sip::SipHasher;
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
@@ -630,7 +631,7 @@ fn decode_label(bytes: &[u8]) -> Result<SplitLabel, SamplerError> {
 }
 
 fn derive_label_for_id(id: &RecordId, seed: u64, ratios: SplitRatios) -> SplitLabel {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut hasher = SipHasher::new();
     id.hash(&mut hasher);
     seed.hash(&mut hasher);
     let value = hasher.finish() as f64 / u64::MAX as f64;
