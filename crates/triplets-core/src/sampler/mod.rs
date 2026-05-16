@@ -1934,6 +1934,21 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         Ok(())
     }
 
+    /// Load persisted sampler state (ingestion cursors + sampling state) if not
+    /// already loaded, WITHOUT triggering a refresh.  This lets the wrapper
+    /// methods restore the saved step counter before bumping it for the call.
+    fn ensure_state_loaded(&mut self) -> Result<(), SamplerError> {
+        if !self.ingestion_cursors_loaded {
+            if let Some(state) = self.split_store.load_sampler_state()? {
+                self.ingestion.load_cursors(&state.source_stream_cursors);
+                self.ingestion.set_source_epoch(state.source_epoch);
+            }
+            self.ingestion_cursors_loaded = true;
+        }
+        self.ensure_source_state()?;
+        Ok(())
+    }
+
     #[cfg(test)]
     fn ingest_internal(&mut self, split: SplitLabel) -> Result<(), SamplerError> {
         self.ingest_internal_for_split(split)
@@ -2934,20 +2949,20 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     ) -> Result<SampleBatch, SamplerError> {
         let mut inner = self.inner.lock().unwrap();
         inner.ensure_split_allowed(split)?;
+        // Load persisted state BEFORE bumping step so the restored step
+        // counter is reflected before we increment it for this call.
+        inner.ensure_state_loaded()?;
+        // Bump __step__ once per public call, regardless of success/exhaustion.
+        inner.ingestion.increment_step();
         for attempt in 0..=EXHAUSTION_RETRY_LIMIT {
             match inner.next_pair_batch_inner_with_weights(split, Some(weights)) {
-                Ok(batch) => {
-                    // Bump __step__ exactly once per public batch call.
-                    inner.ingestion.increment_step();
-                    return Ok(batch);
-                }
+                Ok(batch) => return Ok(batch),
                 Err(SamplerError::Exhausted(_)) if attempt < EXHAUSTION_RETRY_LIMIT => {
                     inner.force_ingest_refresh_with_weights_for_split(split, weights)?;
                 }
                 Err(err) => return Err(err),
             }
         }
-        // Unreachable: the last attempt's Exhausted is caught by `Err(err) =>` above.
         unreachable!()
     }
 
@@ -2959,12 +2974,11 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     ) -> Result<TextBatch, SamplerError> {
         let mut inner = self.inner.lock().unwrap();
         inner.ensure_split_allowed(split)?;
+        inner.ensure_state_loaded()?;
+        inner.ingestion.increment_step();
         for attempt in 0..=EXHAUSTION_RETRY_LIMIT {
             match inner.next_text_batch_inner_with_weights(split, Some(weights)) {
-                Ok(batch) => {
-                    inner.ingestion.increment_step();
-                    return Ok(batch);
-                }
+                Ok(batch) => return Ok(batch),
                 Err(SamplerError::Exhausted(_)) if attempt < EXHAUSTION_RETRY_LIMIT => {
                     inner.force_ingest_refresh_with_weights_for_split(split, weights)?;
                 }
@@ -2982,12 +2996,11 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     ) -> Result<TripletBatch, SamplerError> {
         let mut inner = self.inner.lock().unwrap();
         inner.ensure_split_allowed(split)?;
+        inner.ensure_state_loaded()?;
+        inner.ingestion.increment_step();
         for attempt in 0..=EXHAUSTION_RETRY_LIMIT {
             match inner.next_triplet_batch_inner_with_weights(split, Some(weights)) {
-                Ok(batch) => {
-                    inner.ingestion.increment_step();
-                    return Ok(batch);
-                }
+                Ok(batch) => return Ok(batch),
                 Err(SamplerError::Exhausted(_)) if attempt < EXHAUSTION_RETRY_LIMIT => {
                     inner.force_ingest_refresh_with_weights_for_split(split, weights)?;
                 }
