@@ -112,8 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 > **Reserved source IDs.** Source identifiers matching the `__*__` pattern
 > (starting and ending with double underscores) are reserved for internal
-> synthetic/metadata use — for example, `__step__` is used to persist the
-> ingestion step counter across restarts. If a source's `id()` returns such
+> synthetic/metadata use. If a source's `id()` returns such
 > a value, `register_source` returns `SamplerError::ReservedSourceId`.
 > This ensures the `__*__` namespace can be used by the framework for
 > metadata entries without colliding with user-defined sources.
@@ -1047,7 +1046,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Deterministic Resuming
 
-To resume training, initialize a `FileSplitStore` at the same path. The sampler automatically restores cursors, RNG state, and epoch progress from that store.
+To resume training, initialize a `FileSplitStore` at the same path. The sampler automatically restores the ingestion position, RNG state, source epoch, and per-source record cursors from that store.
+
+**What resumes deterministically:**
+
+- Ingestion stream cursors (which records have been fetched from each source).
+- The epoch step counter — incremented once per `next_*_batch` call.
+- The deterministic RNG state — batch-to-batch shuffle order.
+- Per-source anchor record cursors — which records have been sampled as anchors.
+- Source epoch — the shuffling permutation counter.
+- Recipe round-robin indices for triplet and text recipes.
+
+**Resume limitations (step counter is unaffected):**
+
+* **Text batches (Deduplication resets):** The system does not save the memory of previously processed text (`emitted_text_hashes`). When you resume, this memory starts from scratch, meaning the same text might appear on both sides of a save/load boundary. *(Note: Pair and Triplet batches do not use this deduplication).*
+* **Triplet batches (State mismatch):** If you pause and resume, the output will **not** perfectly match what the session would have produced if it had never been paused. The saved state is missing some internal data (root cause unknown). However, resuming is still deterministic: loading a specific save file will always yield the exact same resumed output, and the anchor sequence continues correctly.
+
+**Source-level determinism caveat:** The sampler's determinism assumes each source returns records in a consistent order for a given cursor position. Sources that fetch from multiple shards in parallel (e.g., Hugging Face datasets with many shard files) may interleave records differently across runs depending on network timing and shard availability. Two hyperparameter tuning jobs starting from the same checkpoint could see shards in different orders and diverge from there. This is a source-level concern — the sampler itself is deterministic given consistent input.
+
+**Multi-platform caveat:** The core sampler logic (RNG, cursors) is platform-independent, but two things vary across environments:
+
+- **Newlines:** On Unix the chunk text uses `\n`; on Windows it uses `\r\n` (via `platform_newline()`). The same records are selected but the text differs.
+- **Hashing is now pinned:** The `siphasher` crate (SipHash-2-4) is used for shuffle keys, fingerprints, and epoch ordering instead of `std::hash::DefaultHasher`. Its output is guaranteed stable across Rust compiler versions and platforms. A regression test (`stable_hash_str_is_deterministic`) verifies a known digest.
 
 ```rust,no_run
 use std::sync::Arc;
@@ -1055,13 +1075,17 @@ use triplets::{SamplerConfig, TripletSampler, FileSplitStore, SplitRatios, Sampl
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
-    let seed = 42;
+    let store_seed = 42;    // controls split assignment (Train/Val/Test)
+    let sampler_seed = 42;  // controls sampling RNG and epoch ordering
 
     // Opening an existing FileSplitStore automatically loads its persisted state.
-    let store = Arc::new(FileSplitStore::open("checkpoints/splits.bin", ratios, seed)?);
+    let store = Arc::new(FileSplitStore::open("checkpoints/splits.bin", ratios, store_seed)?);
 
-    // The sampler will resume from the exact record and recipe it was on.
-    let mut sampler = TripletSampler::new(SamplerConfig::default(), store);
+    // The step counter, RNG, and record cursors are restored.
+    let mut sampler = TripletSampler::new(
+        SamplerConfig { seed: sampler_seed, ..Default::default() },
+        store,
+    );
     Ok(())
 }
 ```

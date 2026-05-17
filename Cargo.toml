@@ -28,7 +28,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.22.0-alpha"
+version = "0.23.0-alpha"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 authors = ["Jeremy Harris <jeremy.harris@zenosmosis.com>"]
@@ -54,14 +54,15 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 serial_test = "3.4.0"
 simd-r-drive = "0.16.2-alpha"
+siphasher = "1.0.3"
 tempfile = "3.27.0"
 thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["rt", "fs", "io-util"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-triplets-core = { path = "crates/triplets-core", version = "0.22.0-alpha" }
-triplets-debug = { path = "crates/triplets-debug", version = "0.22.0-alpha" }
-triplets-hf-source = { path = "crates/triplets-hf-source", version = "0.22.0-alpha" }
+triplets-core = { path = "crates/triplets-core", version = "0.23.0-alpha" }
+triplets-debug = { path = "crates/triplets-debug", version = "0.23.0-alpha" }
+triplets-hf-source = { path = "crates/triplets-hf-source", version = "0.23.0-alpha" }
 walkdir = "2.5.0"
 
 [features]
@@ -100,3 +101,4 @@ walkdir = { workspace = true }
 [dev-dependencies]
 indoc = { workspace = true }
 serde_json = { workspace = true }
+siphasher = { workspace = true }

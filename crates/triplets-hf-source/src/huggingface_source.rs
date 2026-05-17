@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use simd_r_drive::storage_engine::DataStore;
 use simd_r_drive::storage_engine::traits::{DataStoreReader, DataStoreWriter};
+use siphasher::sip::SipHasher;
 use std::cmp::Ordering;
-use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::fs::File;
@@ -1473,7 +1473,7 @@ impl HuggingFaceRowSource {
 
     #[allow(dead_code)]
     fn shard_signature(shards: &[ShardIndex]) -> u64 {
-        let mut hasher = DefaultHasher::new();
+        let mut hasher = SipHasher::new();
         for shard in shards {
             shard.path.hash(&mut hasher);
             shard.global_start.hash(&mut hasher);
@@ -2119,7 +2119,7 @@ impl HuggingFaceRowSource {
         total_candidates: usize,
         sampler_seed: u64,
     ) -> u64 {
-        let mut hasher = DefaultHasher::new();
+        let mut hasher = SipHasher::new();
         HF_SHARD_CANDIDATE_SEED_TAG.hash(&mut hasher);
         sampler_seed.hash(&mut hasher);
         config.source_id.hash(&mut hasher);
@@ -2696,7 +2696,7 @@ impl HuggingFaceRowSource {
         remote_path: &str,
         extension: &str,
     ) -> Result<PathBuf, SamplerError> {
-        let mut hasher = DefaultHasher::new();
+        let mut hasher = SipHasher::new();
         config.source_id.hash(&mut hasher);
         remote_path.hash(&mut hasher);
         let fingerprint = hasher.finish();
@@ -8686,7 +8686,7 @@ mod tests {
     #[test]
     fn shard_candidate_seed_changes_with_sampler_seed() {
         // Verifies that different sampler_seed values (which in production
-        // include the step_counter XOR from IngestionManager) produce
+        // include the epoch_step XOR from IngestionManager) produce
         // different shard permutations, while the same seed is deterministic.
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
@@ -8725,7 +8725,7 @@ mod tests {
 
         let seed_a = HuggingFaceRowSource::shard_candidate_seed(&config, total, 7);
         let seed_b = HuggingFaceRowSource::shard_candidate_seed(&config, total, 7);
-        let seed_c = HuggingFaceRowSource::shard_candidate_seed(&config, total, 123);
+        let seed_c = HuggingFaceRowSource::shard_candidate_seed(&config, total, 10);
 
         let mut perm_a = triplets_core::source::IndexPermutation::new(total, seed_a, 0);
         let mut perm_b = triplets_core::source::IndexPermutation::new(total, seed_b, 0);
@@ -9311,7 +9311,8 @@ mod tests {
         let split_state = PersistedSamplerState {
             source_cycle_idx: 0,
             source_record_cursors: vec![("cursor_test".to_string(), 0)],
-            source_epoch: 0,
+            epoch: 0,
+            epoch_step: 0,
             rng_state: 0,
             triplet_recipe_rr_idx: 0,
             text_recipe_rr_idx: 0,
@@ -9349,7 +9350,7 @@ mod tests {
     #[test]
     fn next_batch_methods_rebuild_shard_order_with_step() {
         // Each batch method gets its own source+sampler with a unique
-        // snapshot directory.  The first refresh increments step_counter
+        // snapshot directory.  The first refresh increments epoch_step
         // 0→1, XORs into the seed (42^0^1=43), set_active_sampler_config
         // rebuilds the order differently from the initial seed=0.
         let shard_body: String = (0..10)
@@ -9939,7 +9940,7 @@ mod tests {
             ..SamplerConfig::default()
         };
         let seed_3 = SamplerConfig {
-            seed: 123,
+            seed: 10,
             ..SamplerConfig::default()
         };
 
@@ -10041,7 +10042,7 @@ mod tests {
     fn set_active_sampler_config_rebuilds_order_every_call() {
         // Proves that set_active_sampler_config rebuilds the shard
         // permutation every time it's called with a different seed
-        // (the seed changes every call due to step_counter XOR in
+        // (the seed changes every call due to epoch_step XOR in
         // IngestionManager).
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());

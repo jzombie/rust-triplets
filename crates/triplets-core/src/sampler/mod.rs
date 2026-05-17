@@ -313,11 +313,15 @@ struct TripletSamplerInner<S: SplitStore + EpochStateStore + SamplerStateStore +
     /// pool is stable.  Pruned on sync_records_from_cache only when records
     /// are evicted.  Prevents the same text from being sampled again within
     /// the same ingestion window, regardless of source wrapping or epoch.
-    emitted_text_hashes: HashSet<u64>,
+    ///
+    /// Per-record tracking lets us surgically remove hashes only for evicted
+    /// records, preserving cross-batch dedup across small window advances
+    /// (e.g. window=512, batch_size=4 where only 4/512 records are swapped).
+    emitted_text_hashes: HashMap<RecordId, HashSet<u64>>,
     /// Round-robin index for text recipe cycling.
     text_recipe_rr_idx: usize,
     /// Epoch counter for per-source deterministic shuffling (seed ^ epoch).
-    source_epoch: u64,
+    epoch: u64,
 
     /// Tracks whether each source has wrapped its cursor in the current epoch.
     source_wrapped: HashMap<SourceId, bool>,
@@ -391,10 +395,10 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             source_state_dirty: false,
             source_record_indices: HashMap::new(),
             source_record_cursors: HashMap::new(),
-            emitted_text_hashes: HashSet::new(),
+            emitted_text_hashes: HashMap::new(),
             triplet_recipe_rr_idx: 0,
             text_recipe_rr_idx: 0,
-            source_epoch: 0,
+            epoch: 0,
             source_wrapped: HashMap::new(),
         };
         if !sampler.using_config_text_recipes {
@@ -407,10 +411,10 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         &self.text_recipes
     }
 
-    /// Current epoch-adjusted seed: mixes `source_epoch` into `config.seed` so every epoch
+    /// Current epoch-adjusted seed: mixes `epoch` into `config.seed` so every epoch
     /// produces a distinct permutation across all seed-dependent operations.
     fn epoch_seed(&self) -> u64 {
-        derive_epoch_seed(self.config.seed, self.source_epoch)
+        derive_epoch_seed(self.config.seed, self.epoch)
     }
 
     fn register_source(
@@ -438,12 +442,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     fn set_epoch(&mut self, epoch: u64) -> Result<(), SamplerError> {
         self.epoch_tracker.ensure_loaded()?;
         self.epoch_tracker.force_epoch(epoch);
-        self.source_epoch = epoch;
-        self.ingestion.set_source_epoch(epoch);
+        self.epoch = epoch;
+        self.ingestion.set_epoch(epoch);
         self.ingestion.reset_stream_cursors();
-        // Reset step counter at epoch boundary so each epoch
+        // Reset epoch step at epoch boundary so each epoch
         // starts with step=0, giving deterministic step sequences.
-        self.ingestion.reset_step_counter();
+        self.ingestion.reset_epoch_step();
         self.source_record_cursors.clear();
         self.source_cycle_idx = 0;
         for source in &self.source_order {
@@ -596,8 +600,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                     self.source_record_cursors.insert(source, cursor as usize);
                 }
             }
-            self.source_epoch = state.source_epoch;
-            self.ingestion.set_source_epoch(state.source_epoch);
+            self.epoch = state.epoch;
+            self.ingestion.set_epoch(state.epoch);
             self.rng = DeterministicRng::from_state(state.rng_state);
             self.triplet_recipe_rr_idx = state.triplet_recipe_rr_idx as usize;
             self.text_recipe_rr_idx = state.text_recipe_rr_idx as usize;
@@ -619,7 +623,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 .iter()
                 .map(|(source, cursor)| (source.clone(), *cursor as u64))
                 .collect(),
-            source_epoch: self.source_epoch,
+            epoch: self.epoch,
+            epoch_step: self.ingestion.epoch_step(),
             rng_state: self.rng.state(),
             triplet_recipe_rr_idx: self.triplet_recipe_rr_idx as u64,
             text_recipe_rr_idx: self.text_recipe_rr_idx as u64,
@@ -945,21 +950,22 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             .iter()
             .all(|name| self.source_wrapped.get(name).copied().unwrap_or(false));
         if all_wrapped {
-            self.advance_source_epoch();
+            self.advance_epoch();
         }
     }
 
-    fn advance_source_epoch(&mut self) {
+    fn advance_epoch(&mut self) {
         // The epoch advanced, changing the sampling permutation.
         // emitted_text_hashes is NOT cleared: the record pool is unchanged,
         // so texts already emitted are still off-limits.  The epoch
         // changes the shuffling permutation, not the dedup window.
         // Advance the epoch counter so source refreshes receive a different
         // permutation seed (seed ^ epoch), producing a fresh traversal order.
-        self.source_epoch = self.source_epoch.saturating_add(1);
-        self.ingestion.set_source_epoch(self.source_epoch);
-        // Reset step counter at epoch boundary.
-        self.ingestion.reset_step_counter();
+        self.epoch = self.epoch.saturating_add(1);
+        self.ingestion.set_epoch(self.epoch);
+        // Do NOT reset the epoch step here: it tracks the number of
+        // refresh batches, which is orthogonal to the sampling epoch.
+        // Resetting it would corrupt the persisted cursor value on resume.
         // Reset per-source record cursors so the new epoch starts from the
         // beginning of each source's permuted index space (not from where the
         // previous epoch left off).
@@ -1841,11 +1847,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     fn sync_records_from_cache(&mut self) -> Result<(), SamplerError> {
         let mut snapshot = self.ingestion.all_records_snapshot();
         snapshot.sort_by(|a, b| a.id.cmp(&b.id));
-        // Check whether the pool actually changed before clearing anything.
-        // This avoids tearing down cross-batch dedup state on every advance.
-        let old_ids: HashSet<&str> = self.records.keys().map(|s| s.as_str()).collect();
-        let incoming_ids: HashSet<&str> = snapshot.iter().map(|r| r.id.as_str()).collect();
-        let pool_changed = old_ids != incoming_ids;
+
+        // Determine which records are being evicted BEFORE clearing self.records.
+        // Use owned strings to avoid borrowing self.records across the clear().
+        let old_ids: HashSet<String> = self.records.keys().cloned().collect();
+        let incoming_ids: HashSet<String> = snapshot.iter().map(|r| r.id.clone()).collect();
+        let evicted: HashSet<&String> = old_ids.difference(&incoming_ids).collect();
 
         // Replace the record pool with the current cache snapshot so that
         // records evicted from the bounded in-memory cache no longer consume
@@ -1856,12 +1863,16 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         // clearing first, sources whose records were evicted would leave
         // stale entries, though this is bounded by num_sources in practice.
         self.sources_with_long_sections.clear();
-        // Prune emitted text hashes only when records were actually evicted
-        // or added, not on every ingestion advance.  This preserves cross-batch
-        // dedup within a stable pool.  The set is naturally bounded by the
-        // pool size (max_records unique texts).
-        if pool_changed {
-            self.emitted_text_hashes.clear();
+        // Prune emitted text hashes only for records that were actually
+        // evicted from the pool, not on every ingestion advance.  This
+        // preserves cross-batch dedup within a stable pool: with a window
+        // of 512 and batch_size of 4, only 4 records are swapped per
+        // advance, and the other 508 records' emitted hashes must survive.
+        //
+        // Old code cleared the entire set on ANY pool change, which broke
+        // cross-batch dedup on every single advance call.
+        for evicted_id in &evicted {
+            self.emitted_text_hashes.remove(*evicted_id);
         }
         // Cursor state (BM25 hard-negative caches, chunk/role cursors) must
         // never outlive a record snapshot boundary.  BM25 backend clears its
@@ -1892,7 +1903,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         if !self.ingestion_cursors_loaded {
             if let Some(state) = self.split_store.load_sampler_state()? {
                 self.ingestion.load_cursors(&state.source_stream_cursors);
-                self.ingestion.set_source_epoch(state.source_epoch);
+                self.ingestion.set_epoch(state.epoch);
+                self.ingestion.set_epoch_step(state.epoch_step);
             }
             self.ingestion_cursors_loaded = true;
         }
@@ -1924,6 +1936,26 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         Ok(())
     }
 
+    /// Ensure ingestion cursors (including epoch step) are loaded from the
+    /// persisted state so the step counter reflects the saved value before
+    /// the wrapper increments it for the current call.
+    ///
+    /// Only loads ingestion cursors and source epoch.  The sampling state
+    /// (RNG, source_record_cursors, …) is restored later by
+    /// `ingest_internal_for_split` → `ensure_source_state`, after
+    /// `sync_records_from_cache` has populated `source_record_indices`.
+    fn ensure_ingestion_cursors_loaded(&mut self) -> Result<(), SamplerError> {
+        if !self.ingestion_cursors_loaded {
+            if let Some(state) = self.split_store.load_sampler_state()? {
+                self.ingestion.load_cursors(&state.source_stream_cursors);
+                self.ingestion.set_epoch(state.epoch);
+                self.ingestion.set_epoch_step(state.epoch_step);
+            }
+            self.ingestion_cursors_loaded = true;
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     fn ingest_internal(&mut self, split: SplitLabel) -> Result<(), SamplerError> {
         self.ingest_internal_for_split(split)
@@ -1940,7 +1972,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         if !self.ingestion_cursors_loaded {
             if let Some(state) = self.split_store.load_sampler_state()? {
                 self.ingestion.load_cursors(&state.source_stream_cursors);
-                self.ingestion.set_source_epoch(state.source_epoch);
+                self.ingestion.set_epoch(state.epoch);
+                self.ingestion.set_epoch_step(state.epoch_step);
             }
             self.ingestion_cursors_loaded = true;
         }
@@ -2005,7 +2038,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         if !self.ingestion_cursors_loaded {
             if let Some(state) = self.split_store.load_sampler_state()? {
                 self.ingestion.load_cursors(&state.source_stream_cursors);
-                self.ingestion.set_source_epoch(state.source_epoch);
+                self.ingestion.set_epoch(state.epoch);
+                self.ingestion.set_epoch_step(state.epoch_step);
             }
             self.ingestion_cursors_loaded = true;
         }
@@ -2086,19 +2120,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         target_split: SplitLabel,
         weights: Option<&HashMap<SourceId, f32>>,
     ) -> Result<SampleBatch, SamplerError> {
-        if let Some(weights) = weights {
-            if weights.is_empty()
-                || weights
-                    .values()
-                    .all(|&w| w == *weights.values().next().unwrap())
-            {
-                self.ingest_internal_for_split(target_split)?;
-            } else {
-                self.ingest_internal_with_weights_for_split(target_split, weights)?;
-            }
-        } else {
-            self.ingest_internal_for_split(target_split)?;
-        }
+        self.ingest_with_weights_fallback(target_split, weights)?;
         self.ensure_split_has_records(target_split)?;
         let sources = self.source_order.clone();
         if sources.is_empty() {
@@ -2288,13 +2310,21 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         Err(SamplerError::Exhausted(RECIPE_LABEL_TRIPLETS.into()))
     }
 
-    /// Check whether `sample` passes the per-window text dedup.
-    /// Returns `true` and records a hash of the sample's text in
-    /// `emitted_text_hashes` when the text has not been emitted before
-    /// in the current record pool.
-    fn try_emit_text_sample(&mut self, sample: &TextSample) -> bool {
-        self.emitted_text_hashes
-            .insert(stable_hash_str(0, &sample.chunk.text))
+    /// Check whether `sample` passes both per-batch and per-window text dedup.
+    /// The per-batch set is never cleared mid-batch (survives epoch advances),
+    /// while `emitted_text_hashes` is cleared on epoch advance to allow fresh
+    /// permutations.  Both must pass for the sample to be emitted.
+    fn try_emit_text_sample(
+        &mut self,
+        sample: &TextSample,
+        batch_texts: &mut HashSet<String>,
+    ) -> bool {
+        batch_texts.insert(sample.chunk.text.clone())
+            && self
+                .emitted_text_hashes
+                .entry(sample.chunk.record_id.clone())
+                .or_default()
+                .insert(stable_hash_str(0, &sample.chunk.text))
     }
 
     fn next_text_batch_inner_with_weights(
@@ -2319,6 +2349,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 &mut rng,
             );
             let mut samples = Vec::new();
+            let mut batch_texts = HashSet::new();
             let mut last_recipe_name = None;
             let mut recipe_pos = 0usize;
             let mut recipe_steps = 0usize;
@@ -2334,7 +2365,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 last_recipe_name = Some(recipe.name.clone());
                 if let Some(sample) =
                     self.make_text_sample_for_split(&recipe, None, target_split, &mut rng)
-                    && self.try_emit_text_sample(&sample)
+                    && self.try_emit_text_sample(&sample, &mut batch_texts)
                 {
                     samples.push(sample);
                 }
@@ -2355,6 +2386,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         }
 
         let mut samples = Vec::new();
+        let mut batch_texts = HashSet::new();
         let mut source_steps = 0usize;
         let mut cycle = (self.source_cycle_idx / sources.len()) as u64;
         let mut idx = self.source_cycle_idx % sources.len();
@@ -2405,6 +2437,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 let recipe = recipes[recipe_idx].clone();
                 if let Some(item) =
                     self.make_text_sample_for_split(&recipe, Some(source), target_split, &mut rng)
+                    && self.try_emit_text_sample(&item, &mut batch_texts)
                 {
                     recipe_steps = recipe_steps.saturating_add(offset + 1);
                     *pos = (*pos + offset + 1) % order.len();
@@ -2415,9 +2448,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             if sample.is_none() {
                 recipe_steps = recipe_steps.saturating_add(order.len());
             }
-            if let Some((_recipe, sample)) = sample
-                && self.try_emit_text_sample(&sample)
-            {
+            if let Some((_recipe, sample)) = sample {
                 samples.push(sample);
             }
             idx += 1;
@@ -2919,26 +2950,48 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         self.next_triplet_batch_with_weights_for_split(split, &HashMap::new())
     }
 
+    /// Shared retry loop for all three batch types: load state, bump step,
+    /// retry on exhaustion up to EXHAUSTION_RETRY_LIMIT times, and return
+    /// the batch or propagate the final error.
+    fn next_batch_with_retry<B>(
+        &self,
+        split: SplitLabel,
+        weights: &HashMap<SourceId, f32>,
+        inner_fn: impl Fn(
+            &mut TripletSamplerInner<S>,
+            SplitLabel,
+            Option<&HashMap<SourceId, f32>>,
+        ) -> Result<B, SamplerError>,
+    ) -> Result<B, SamplerError> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.ensure_split_allowed(split)?;
+        // Load persisted state BEFORE bumping step so the restored step
+        // counter is reflected before we increment it for this call.
+        inner.ensure_ingestion_cursors_loaded()?;
+        // Bump epoch step once per public call, regardless of success/exhaustion.
+        inner.ingestion.increment_epoch_step();
+        for attempt in 0..=EXHAUSTION_RETRY_LIMIT {
+            match inner_fn(&mut inner, split, Some(weights)) {
+                Ok(batch) => return Ok(batch),
+                Err(SamplerError::Exhausted(_)) if attempt < EXHAUSTION_RETRY_LIMIT => {
+                    inner.force_ingest_refresh_with_weights_for_split(split, weights)?;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        // The for-loop always returns via the match arms above.
+        unreachable!()
+    }
+
     /// Return a weighted pair batch for `split` using per-source weights.
     pub fn next_pair_batch_with_weights_for_split(
         &self,
         split: SplitLabel,
         weights: &HashMap<SourceId, f32>,
     ) -> Result<SampleBatch, SamplerError> {
-        let mut inner = self.inner.lock().unwrap();
-        inner.ensure_split_allowed(split)?;
-        for attempt in 0..=EXHAUSTION_RETRY_LIMIT {
-            match inner.next_pair_batch_inner_with_weights(split, Some(weights)) {
-                Ok(batch) => return Ok(batch),
-                Err(SamplerError::Exhausted(_)) => {
-                    if attempt < EXHAUSTION_RETRY_LIMIT {
-                        inner.force_ingest_refresh_with_weights_for_split(split, weights)?;
-                    }
-                }
-                Err(err) => return Err(err),
-            }
-        }
-        Err(SamplerError::Exhausted(RECIPE_LABEL_TRIPLETS.into()))
+        self.next_batch_with_retry(split, weights, |inner, split, weights| {
+            inner.next_pair_batch_inner_with_weights(split, weights)
+        })
     }
 
     /// Return a weighted text batch for `split` using per-source weights.
@@ -2947,20 +3000,9 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         split: SplitLabel,
         weights: &HashMap<SourceId, f32>,
     ) -> Result<TextBatch, SamplerError> {
-        let mut inner = self.inner.lock().unwrap();
-        inner.ensure_split_allowed(split)?;
-        for attempt in 0..=EXHAUSTION_RETRY_LIMIT {
-            match inner.next_text_batch_inner_with_weights(split, Some(weights)) {
-                Ok(batch) => return Ok(batch),
-                Err(SamplerError::Exhausted(_)) => {
-                    if attempt < EXHAUSTION_RETRY_LIMIT {
-                        inner.force_ingest_refresh_with_weights_for_split(split, weights)?;
-                    }
-                }
-                Err(err) => return Err(err),
-            }
-        }
-        Err(SamplerError::Exhausted(RECIPE_LABEL_TEXT.into()))
+        self.next_batch_with_retry(split, weights, |inner, split, weights| {
+            inner.next_text_batch_inner_with_weights(split, weights)
+        })
     }
 
     /// Return a weighted triplet batch for `split` using per-source weights.
@@ -2969,20 +3011,9 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         split: SplitLabel,
         weights: &HashMap<SourceId, f32>,
     ) -> Result<TripletBatch, SamplerError> {
-        let mut inner = self.inner.lock().unwrap();
-        inner.ensure_split_allowed(split)?;
-        for attempt in 0..=EXHAUSTION_RETRY_LIMIT {
-            match inner.next_triplet_batch_inner_with_weights(split, Some(weights)) {
-                Ok(batch) => return Ok(batch),
-                Err(SamplerError::Exhausted(_)) => {
-                    if attempt < EXHAUSTION_RETRY_LIMIT {
-                        inner.force_ingest_refresh_with_weights_for_split(split, weights)?;
-                    }
-                }
-                Err(err) => return Err(err),
-            }
-        }
-        Err(SamplerError::Exhausted(RECIPE_LABEL_TRIPLETS.into()))
+        self.next_batch_with_retry(split, weights, |inner, split, weights| {
+            inner.next_triplet_batch_inner_with_weights(split, weights)
+        })
     }
 
     /// Spawn a background prefetcher for triplet batches.

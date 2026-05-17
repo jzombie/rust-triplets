@@ -465,9 +465,12 @@ mod tests {
         let mut cursor = None;
         let mut paged = Vec::new();
         for _ in 0..3 {
-            let snapshot = adapter.refresh(&config, cursor.as_ref(), Some(2)).unwrap();
+            let snapshot = adapter.refresh(&config, cursor.as_ref(), Some(3)).unwrap();
             cursor = Some(snapshot.cursor);
             paged.extend(snapshot.records.into_iter().map(|r| r.id));
+            if paged.len() >= full_ids.len() {
+                break;
+            }
         }
         assert_eq!(paged, full_ids);
     }

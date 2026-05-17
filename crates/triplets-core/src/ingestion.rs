@@ -1,5 +1,5 @@
 use crate::config::SamplerConfig;
-use crate::constants::splits::{STEP_CURSOR_KEY, is_reserved_source_id};
+use crate::constants::splits::is_reserved_source_id;
 use crate::data::DataRecord;
 use crate::errors::SamplerError;
 use crate::hash::derive_epoch_seed;
@@ -191,8 +191,8 @@ pub struct IngestionManager {
     sources: Vec<SourceState>,
     max_records: usize,
     sampler_config: SamplerConfig,
-    /// Current source epoch used to vary per-source permutation seeds across epochs.
-    source_epoch: u64,
+    /// Current epoch used to vary per-source permutation seeds across epochs.
+    epoch: u64,
     /// Monotonic generation incremented whenever at least one source is refreshed.
     source_refresh_generation: u64,
     /// Source ids refreshed during the most recent `refresh_all_internal` call.
@@ -207,7 +207,7 @@ pub struct IngestionManager {
     drain_start: usize,
     /// Monotonic step counter incremented on every advance/refresh_all and set
     /// on SourceCursor.step so all sources can observe per-call progress.
-    step_counter: u64,
+    epoch_step: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -232,11 +232,11 @@ impl IngestionManager {
             sources: Vec::new(),
             max_records,
             sampler_config,
-            source_epoch: 0,
+            epoch: 0,
             source_refresh_generation: 0,
             last_refreshed_sources: Vec::new(),
             drain_start: 0,
-            step_counter: 0,
+            epoch_step: 0,
         }
     }
 
@@ -250,33 +250,43 @@ impl IngestionManager {
         &self.last_refreshed_sources
     }
 
-    /// Update the current source epoch.
-    ///
-    /// Only changes the epoch value so subsequent `refresh` calls pass
+    /// Update the current epoch value so subsequent `refresh` calls pass
     /// `seed ^ epoch` to sources, producing a different permutation.
     /// Stream cursors are intentionally NOT reset here — the cursor is a raw
     /// I/O offset into the source's stream and must continue advancing so
     /// every record is eventually fetched (resetting it would repeat the
     /// leading slice of the source on every epoch boundary).
-    /// Reset step counter to 0 (called at epoch boundaries).
-    pub(crate) fn reset_step_counter(&mut self) {
-        self.step_counter = 0;
+    pub(crate) fn set_epoch(&mut self, epoch: u64) {
+        self.epoch = epoch;
     }
 
-    /// Return the current step counter.
+    /// Reset epoch step counter to 0 (called at epoch boundaries).
+    /// The step counter is a sub-counter within an epoch: each epoch starts
+    /// with step=0 so that batch calls produce deterministic seeds.
+    pub(crate) fn reset_epoch_step(&mut self) {
+        self.epoch_step = 0;
+    }
+
+    /// Increment epoch step counter by 1. Called once per `next_*_batch` call so that
+    /// the epoch step tracks model training steps, not ingestion refresh events.
+    pub(crate) fn increment_epoch_step(&mut self) {
+        self.epoch_step = self.epoch_step.saturating_add(1);
+    }
+
+    /// Return the current epoch step counter.
+    pub fn epoch_step(&self) -> u64 {
+        self.epoch_step
+    }
+
+    /// Set the epoch step counter directly (used when restoring persisted state).
+    pub(crate) fn set_epoch_step(&mut self, step: u64) {
+        self.epoch_step = step;
+    }
+
+    /// Return the current epoch.
     #[cfg(test)]
-    pub fn step_counter(&self) -> u64 {
-        self.step_counter
-    }
-
-    pub(crate) fn set_source_epoch(&mut self, epoch: u64) {
-        self.source_epoch = epoch;
-    }
-
-    /// Return the current source epoch.
-    #[cfg(test)]
-    pub fn source_epoch(&self) -> u64 {
-        self.source_epoch
+    pub fn epoch(&self) -> u64 {
+        self.epoch
     }
 
     /// Reset all raw source stream cursors and drain per-source buffers.
@@ -322,15 +332,7 @@ impl IngestionManager {
         }
         let mut map = std::collections::HashMap::with_capacity(cursors.len());
         for (id, revision) in cursors {
-            // The step counter is stored as a (STEP_CURSOR_KEY, revision)
-            // tuple inside the same source_stream_cursors Vec.  Bitcode
-            // serialises it identically to any ("source_a", 14) cursor;
-            // the special meaning is applied here at read time.
-            if id == STEP_CURSOR_KEY {
-                self.step_counter = *revision;
-            } else {
-                map.insert(id.as_str(), *revision);
-            }
+            map.insert(id.as_str(), *revision);
         }
         for state in &mut self.sources {
             if let Some(revision) = map.get(state.source.id()) {
@@ -350,11 +352,6 @@ impl IngestionManager {
                 out.push((state.source.id().to_string(), cursor.revision));
             }
         }
-        // Append the step counter as a (STEP_CURSOR_KEY, step) tuple so it
-        // survives restarts inside the same Vec that bitcode already encodes.
-        // Bitcode sees only Vec<(String, u64)> — this tuple is no different
-        // from any source cursor.  load_cursors reverses the interpretation.
-        out.push((STEP_CURSOR_KEY.to_string(), self.step_counter));
         out
     }
 
@@ -494,7 +491,6 @@ impl IngestionManager {
         }
 
         if !refresh_plan.is_empty() {
-            self.step_counter = self.step_counter.saturating_add(1);
             self.source_refresh_generation = self.source_refresh_generation.saturating_add(1);
             self.last_refreshed_sources = refresh_plan
                 .iter()
@@ -506,14 +502,14 @@ impl IngestionManager {
             results.resize_with(self.sources.len(), || None);
             let fetch_limit = self.max_records;
             let sampler_config = self.sampler_config.clone();
-            let step = self.step_counter;
+            let step = self.epoch_step;
             thread::scope(|scope| {
                 let mut handles = Vec::with_capacity(refresh_plan.len());
                 for (idx, cursor) in &refresh_plan {
                     let source = &self.sources[*idx].source;
                     let cursor = cursor.clone();
                     let sampler_config = sampler_config.clone();
-                    let source_epoch = self.source_epoch;
+                    let epoch = self.epoch;
                     handles.push((
                         *idx,
                         scope.spawn(move || {
@@ -524,7 +520,7 @@ impl IngestionManager {
                             // advance/refresh call gets a distinct seed, which
                             // sources can use for e.g. shard ordering.
                             let epoch_config = SamplerConfig {
-                                seed: derive_epoch_seed(sampler_config.seed, source_epoch) ^ step,
+                                seed: derive_epoch_seed(sampler_config.seed, epoch) ^ step,
                                 ..sampler_config
                             };
                             let result =
@@ -943,16 +939,13 @@ mod tests {
 
         manager.load_cursors(&[("cursor_source".to_string(), 7)]);
         let cursors = manager.snapshot_cursors();
-        // snapshot_cursors now includes a __step__ entry.
-        assert_eq!(cursors.len(), 2);
+        assert_eq!(cursors.len(), 1);
         assert_eq!(cursors[0], ("cursor_source".to_string(), 7));
-        assert_eq!(cursors[1].0, STEP_CURSOR_KEY);
 
         manager.refresh_all();
         let updated = manager.snapshot_cursors();
-        assert_eq!(updated.len(), 2);
+        assert_eq!(updated.len(), 1);
         assert_eq!(updated[0], ("cursor_source".to_string(), 33));
-        assert_eq!(updated[1].0, STEP_CURSOR_KEY);
         let records = manager.all_records_snapshot();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].source, "cursor_source");
@@ -1301,7 +1294,7 @@ mod tests {
     }
 
     #[test]
-    fn source_epoch_xor_changes_seed_received_by_source() {
+    fn epoch_xor_changes_seed_received_by_source() {
         // Verify that derive_epoch_seed(base, epoch) is actually threaded through to
         // the source's refresh() call, and that different epochs produce different seeds.
         let base_seed = 0xDEAD_BEEF_u64;
@@ -1321,7 +1314,7 @@ mod tests {
                 Arc::clone(&seeds_epoch0),
             )))
             .unwrap();
-        // source_epoch defaults to 0; refresh_all passes derive_epoch_seed(base, 0)
+        // epoch defaults to 0; refresh_all passes derive_epoch_seed(base, 0)
         manager.refresh_all();
 
         // --- epoch 1 ---
@@ -1332,7 +1325,7 @@ mod tests {
                 Arc::clone(&seeds_epoch1),
             )))
             .unwrap();
-        manager2.set_source_epoch(1);
+        manager2.set_epoch(1);
         manager2.refresh_all();
 
         let received0 = seeds_epoch0.lock().unwrap();
@@ -1352,23 +1345,23 @@ mod tests {
         );
 
         // They must match the expected derive_epoch_seed values.
-        // The step_counter starts at 0 and is incremented to 1 before
-        // refresh_all passes the seed.  So each seed is epoch-seed XOR 1.
+        // epoch_step stays at 0 for direct refresh_all calls
+        // (it's only bumped by next_*_batch calls).
         assert_eq!(
             seed_at_epoch0,
-            derive_epoch_seed(base_seed, 0) ^ 1,
-            "epoch-0 seed mismatch (step_counter=1)"
+            derive_epoch_seed(base_seed, 0),
+            "epoch-0 seed mismatch (epoch_step=0)"
         );
         assert_eq!(
             seed_at_epoch1,
-            derive_epoch_seed(base_seed, 1) ^ 1,
-            "epoch-1 seed mismatch (step_counter=1)"
+            derive_epoch_seed(base_seed, 1),
+            "epoch-1 seed mismatch (epoch_step=0)"
         );
     }
 
     #[test]
-    fn step_counter_resets_on_epoch_change() {
-        // Proves that set_source_epoch resets step_counter to 0 so each
+    fn epoch_step_resets_on_epoch_change() {
+        // Proves that set_epoch + reset_epoch_step gives epoch_step=0 so each
         // epoch produces the same step sequence starting from step 1.
         let config = SamplerConfig::default();
         let seeds = Arc::new(Mutex::new(Vec::new()));
@@ -1381,34 +1374,34 @@ mod tests {
             )))
             .unwrap();
 
-        // Epoch 0, first refresh: step_counter goes 0→1, seed = derive(A, 0) ^ 1
+        // Epoch 0, first refresh: epoch_step stays at 0 (no longer
+        // incremented by refresh_all — it's bumped per batch call instead).
         manager.refresh_all();
         let step1_seed = seeds.lock().unwrap()[0];
         assert_eq!(
             step1_seed,
-            derive_epoch_seed(config.seed, 0) ^ 1,
-            "epoch 0 step 1 seed"
+            derive_epoch_seed(config.seed, 0),
+            "epoch 0 step 0 seed"
         );
 
-        // Advance epoch — step_counter must reset to 0.
-        manager.set_source_epoch(1);
-        manager.reset_step_counter();
+        // Advance epoch — epoch_step must stay 0 (no batch calls yet).
+        manager.set_epoch(1);
+        assert_eq!(manager.epoch_step(), 0);
         seeds.lock().unwrap().clear();
 
-        // Epoch 1, first refresh: step_counter goes 0→1 again.
-        // WITHOUT reset it would be 2.
+        // Epoch 1, first refresh: step stays at 0 (no batch calls in this test).
         manager.refresh_all();
         let step1_epoch1 = seeds.lock().unwrap()[0];
         assert_eq!(
             step1_epoch1,
-            derive_epoch_seed(config.seed, 1) ^ 1,
-            "epoch 1 step 1 seed (must be ^1, not ^2)"
+            derive_epoch_seed(config.seed, 1),
+            "epoch 1 step 0 seed (must be ^0 since refresh_all no longer bumps step)"
         );
     }
 
     #[test]
-    fn step_counter_survives_sampler_save_and_load_state() {
-        // Proves the step counter survives through the REAL API path:
+    fn epoch_step_survives_sampler_save_and_load_state() {
+        // Proves the epoch step survives through the REAL API path:
         //   TripletSampler::save_sampler_state → persist_source_state
         //   → self.ingestion.snapshot_cursors() internally
         //   → DeterministicSplitStore.save_sampler_state
@@ -1448,15 +1441,10 @@ mod tests {
 
         // Load back what the sampler saved
         let loaded = store.load_sampler_state().unwrap().unwrap();
-        let step_saved = loaded
-            .source_stream_cursors
-            .iter()
-            .find(|(k, _)| k == STEP_CURSOR_KEY)
-            .map(|(_, v)| *v)
-            .expect("STEP_CURSOR_KEY must be in persisted source_stream_cursors");
+        let step_saved = loaded.epoch_step;
         assert!(
             step_saved > 0,
-            "step_counter must be >0 after batch call through TripletSampler"
+            "epoch_step must be >0 after batch call through TripletSampler"
         );
 
         // Feed the REAL loaded cursors to a new manager
@@ -1475,30 +1463,23 @@ mod tests {
             )))
             .unwrap();
         manager2.load_cursors(&loaded.source_stream_cursors);
+        manager2.set_epoch_step(loaded.epoch_step);
 
-        // step_counter restored to saved value, refresh increments
-        let step_before = manager2
-            .snapshot_cursors()
-            .iter()
-            .find(|(k, _)| k == STEP_CURSOR_KEY)
-            .map(|(_, v)| *v)
-            .unwrap();
+        // epoch_step restored to saved value; verify it's stable (no batch
+        // call was made, so step does not change).
+        let step_before = manager2.epoch_step();
         assert_eq!(
             step_before, step_saved,
-            "load_cursors must restore __step__ to saved value"
+            "load_cursors must restore epoch_step to saved value"
         );
 
+        // Verify the step is still present after a refresh (no increment).
         manager2.refresh_all();
-        let step_after = manager2
-            .snapshot_cursors()
-            .iter()
-            .find(|(k, _)| k == STEP_CURSOR_KEY)
-            .map(|(_, v)| *v)
-            .unwrap();
+        let step_after = manager2.epoch_step();
         assert_eq!(
-            step_after,
-            step_saved + 1,
-            "step must continue: loaded {step_saved}, refresh incremented to {step_saved}+1"
+            step_after, step_saved,
+            "epoch_step must survive refresh_all without increment (step is per-batch,
+             not per-refresh): loaded {step_saved}, got {step_after}"
         );
     }
 
@@ -1957,9 +1938,14 @@ mod tests {
             "src_3 (w=2.0) must outpace all w=1.0 sources (totals: {totals:?})"
         );
         // Lock in the exact deterministic distribution.
+        // (Distribution changed after the cross-batch dedup fix: with proper
+        // per-record hash tracking, the sampler exhausts and force-refreshes
+        // more often, which increases the total number of refresh cycles but
+        // preserves the weighted distribution pattern. The key invariant
+        // (src_3 with w=2.0 outpaces all w=1.0 sources) is unchanged.)
         assert_eq!(
             totals,
-            vec![6, 6, 6, 26, 11],
+            vec![11, 11, 11, 31, 17],
             "unequal-weights: unexpected refresh distribution"
         );
     }
@@ -1971,7 +1957,6 @@ mod tests {
         let mut manager = IngestionManager::new(4, SamplerConfig::default());
 
         // Verify the utility function catches common patterns
-        assert!(is_reserved_source_id("__step__"));
         assert!(is_reserved_source_id("__meta__"));
         assert!(is_reserved_source_id("__anything__"));
         assert!(is_reserved_source_id("__x__"));

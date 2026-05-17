@@ -26,6 +26,7 @@ reqwest-drive = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 simd-r-drive = { workspace = true }
+siphasher = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
