@@ -1386,7 +1386,7 @@ mod tests {
 
         // Advance epoch — epoch_step must stay 0 (no batch calls yet).
         manager.set_epoch(1);
-        manager.reset_epoch_step();
+        assert_eq!(manager.epoch_step(), 0);
         seeds.lock().unwrap().clear();
 
         // Epoch 1, first refresh: step stays at 0 (no batch calls in this test).
