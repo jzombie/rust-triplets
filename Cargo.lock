@@ -2796,7 +2796,7 @@ dependencies = [
 
 [[package]]
 name = "triplets"
-version = "0.22.0-alpha"
+version = "0.23.0-alpha"
 dependencies = [
  "bitcode",
  "bm25",
@@ -2829,7 +2829,7 @@ dependencies = [
 
 [[package]]
 name = "triplets-core"
-version = "0.22.0-alpha"
+version = "0.23.0-alpha"
 dependencies = [
  "bitcode",
  "bm25",
@@ -2853,7 +2853,7 @@ dependencies = [
 
 [[package]]
 name = "triplets-debug"
-version = "0.22.0-alpha"
+version = "0.23.0-alpha"
 dependencies = [
  "cache-manager",
  "chrono",
@@ -2869,7 +2869,7 @@ dependencies = [
 
 [[package]]
 name = "triplets-hf-source"
-version = "0.22.0-alpha"
+version = "0.23.0-alpha"
 dependencies = [
  "cache-manager",
  "chrono",
