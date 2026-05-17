@@ -624,6 +624,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 .map(|(source, cursor)| (source.clone(), *cursor as u64))
                 .collect(),
             epoch: self.epoch,
+            epoch_step: self.ingestion.epoch_step(),
             rng_state: self.rng.state(),
             triplet_recipe_rr_idx: self.triplet_recipe_rr_idx as u64,
             text_recipe_rr_idx: self.text_recipe_rr_idx as u64,
@@ -962,7 +963,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         // permutation seed (seed ^ epoch), producing a fresh traversal order.
         self.epoch = self.epoch.saturating_add(1);
         self.ingestion.set_epoch(self.epoch);
-        // Do NOT reset the epoch step here: __step__ tracks the number of
+        // Do NOT reset the epoch step here: it tracks the number of
         // refresh batches, which is orthogonal to the sampling epoch.
         // Resetting it would corrupt the persisted cursor value on resume.
         // Reset per-source record cursors so the new epoch starts from the
@@ -1903,6 +1904,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             if let Some(state) = self.split_store.load_sampler_state()? {
                 self.ingestion.load_cursors(&state.source_stream_cursors);
                 self.ingestion.set_epoch(state.epoch);
+                self.ingestion.set_epoch_step(state.epoch_step);
             }
             self.ingestion_cursors_loaded = true;
         }
@@ -1934,7 +1936,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         Ok(())
     }
 
-    /// Ensure ingestion cursors (including `__step__`) are loaded from the
+    /// Ensure ingestion cursors (including epoch step) are loaded from the
     /// persisted state so the step counter reflects the saved value before
     /// the wrapper increments it for the current call.
     ///
@@ -1947,6 +1949,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             if let Some(state) = self.split_store.load_sampler_state()? {
                 self.ingestion.load_cursors(&state.source_stream_cursors);
                 self.ingestion.set_epoch(state.epoch);
+                self.ingestion.set_epoch_step(state.epoch_step);
             }
             self.ingestion_cursors_loaded = true;
         }
@@ -1970,6 +1973,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             if let Some(state) = self.split_store.load_sampler_state()? {
                 self.ingestion.load_cursors(&state.source_stream_cursors);
                 self.ingestion.set_epoch(state.epoch);
+                self.ingestion.set_epoch_step(state.epoch_step);
             }
             self.ingestion_cursors_loaded = true;
         }
@@ -2035,6 +2039,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             if let Some(state) = self.split_store.load_sampler_state()? {
                 self.ingestion.load_cursors(&state.source_stream_cursors);
                 self.ingestion.set_epoch(state.epoch);
+                self.ingestion.set_epoch_step(state.epoch_step);
             }
             self.ingestion_cursors_loaded = true;
         }
@@ -2963,7 +2968,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         // Load persisted state BEFORE bumping step so the restored step
         // counter is reflected before we increment it for this call.
         inner.ensure_ingestion_cursors_loaded()?;
-        // Bump __step__ once per public call, regardless of success/exhaustion.
+        // Bump epoch step once per public call, regardless of success/exhaustion.
         inner.ingestion.increment_epoch_step();
         for attempt in 0..=EXHAUSTION_RETRY_LIMIT {
             match inner_fn(&mut inner, split, Some(weights)) {

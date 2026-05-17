@@ -58,11 +58,11 @@ pub const READABLE_NON_BM25_TITLES: [&str; 8] = [
     "Energy transition memo",
     "Archaeology field note",
     "Archaeology field note",
+    "Carbon market and emissions policy",
     "Energy transition memo",
+    "Carbon market and emissions policy",
     "Energy transition memo",
-    "Energy transition memo",
-    "Energy transition memo",
-    "Archaeology field note",
+    "Carbon policy update",
 ];
 
 /// Expected readable wrong-article sequence with BM25 mining enabled.
@@ -78,7 +78,6 @@ pub const READABLE_BM25_TITLES: [&str; 8] = [
     "Carbon policy update",
 ];
 
-use crate::constants::splits::STEP_CURSOR_KEY;
 use crate::data::{ChunkView, QualityScore, RecordChunk, RecordSection};
 use crate::kvp::{KvpField, KvpPrefixSampler};
 use crate::metadata::META_FIELD_DATE;
@@ -8656,12 +8655,7 @@ fn resume_restores_epoch_and_epoch_step_together() {
 
         // Read back what was persisted.
         let persisted = store.load_sampler_state().unwrap().unwrap();
-        let persisted_step = persisted
-            .source_stream_cursors
-            .iter()
-            .find(|(k, _)| k == STEP_CURSOR_KEY)
-            .map(|(_, v)| *v)
-            .expect("step must be persisted via STEP_CURSOR_KEY in source_stream_cursors");
+        let persisted_step = persisted.epoch_step;
 
         assert_eq!(
             persisted.epoch, pre_save_epoch,
@@ -8686,12 +8680,7 @@ fn resume_restores_epoch_and_epoch_step_together() {
             persisted.epoch, saved_epoch,
             "persisted epoch must match saved value"
         );
-        let persisted_step = persisted
-            .source_stream_cursors
-            .iter()
-            .find(|(k, _)| k == STEP_CURSOR_KEY)
-            .map(|(_, v)| *v)
-            .expect("step must be in source_stream_cursors after save");
+        let persisted_step = persisted.epoch_step;
         assert_eq!(
             persisted_step, saved_step,
             "persisted step must match saved value"
@@ -12330,7 +12319,7 @@ fn text_batch_duplicate_text_different_records() {
 
 #[test]
 fn epoch_step_increments_through_public_batch_apis() {
-    // Prove __step__ increments per call through the PUBLIC next_*_batch methods.
+    // Prove epoch step increments per call through the PUBLIC next_*_batch methods.
     // Uses pair and triplet paths (no cross-batch dedup) so we can
     // call them multiple times without exhausting on text dedup.
     let mut config = base_config();
@@ -12409,7 +12398,7 @@ fn epoch_step_increments_through_public_batch_apis() {
 
 #[test]
 fn explicit_set_epoch_resets_epoch_step_then_increments_per_batch() {
-    // Explicit set_epoch MUST reset __step__ to 0 so each epoch produces
+    // Explicit set_epoch MUST reset the epoch step to 0 so each epoch produces
     // the same step sequence (1, 2, 3, …).  This is the user-visible
     // contract for curriculum / multi-stage training.
     let mut config = base_config();
@@ -12581,8 +12570,8 @@ fn resume_continues_epoch_step_from_saved_value() {
     // step counter survives save/resume correctly.
     //
     // Content identity is NOT checked here (see each section's note below).
-    // All three sections verify only that __step__ continues correctly after
-    // save → resume: the first resumed batch produces step = saved + 1.
+    // All three sections verify only that the epoch step continues correctly
+    // after save → resume: the first resumed batch produces step = saved + 1.
     let split = SplitRatios::default();
 
     let make_records = |source: &str| -> Vec<DataRecord> {
