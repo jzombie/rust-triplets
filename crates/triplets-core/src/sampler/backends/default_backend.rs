@@ -38,10 +38,11 @@ impl NegativeBackend for DefaultBackend {
         if pool.is_empty() {
             return None;
         }
-        // Use a single next_u64() call instead of rand::IndexedRandom::choose so the
-        // number of RNG calls per selection is fixed (1) regardless of how rustc
-        // monomorphises the bias-rejection logic in rand's uniform distribution.
-        // This keeps the negative-selection sequence portable across compiler versions.
+        // Use next_u64() directly instead of rand::IndexedRandom::choose so that
+        // the number of RNG calls per selection is always exactly 1.  rand's choose
+        // can make a variable number of calls (bias rejection in gen_range), which
+        // makes the negative-selection sequence change between incremental vs. clean
+        // rebuilds, breaking deterministic test assertions.
         let idx = rng.next_u64() as usize % pool.len();
         Some((pool[idx].clone(), fallback_used))
     }
