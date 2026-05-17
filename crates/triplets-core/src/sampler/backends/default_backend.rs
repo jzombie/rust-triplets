@@ -35,10 +35,15 @@ impl NegativeBackend for DefaultBackend {
         _anchor_query_text: Option<&str>,
         rng: &mut dyn rand::RngCore,
     ) -> Option<(Arc<DataRecord>, bool)> {
-        use rand::prelude::IndexedRandom as _;
-        pool.choose(rng)
-            .cloned()
-            .map(|record| (record, fallback_used))
+        if pool.is_empty() {
+            return None;
+        }
+        // Use a single next_u64() call instead of rand::IndexedRandom::choose so the
+        // number of RNG calls per selection is fixed (1) regardless of how rustc
+        // monomorphises the bias-rejection logic in rand's uniform distribution.
+        // This keeps the negative-selection sequence portable across compiler versions.
+        let idx = rng.next_u64() as usize % pool.len();
+        Some((pool[idx].clone(), fallback_used))
     }
 
     fn on_sync_start(&mut self) {}
