@@ -939,7 +939,6 @@ mod tests {
 
         manager.load_cursors(&[("cursor_source".to_string(), 7)]);
         let cursors = manager.snapshot_cursors();
-        // snapshot_cursors no longer includes a __step__ entry.
         assert_eq!(cursors.len(), 1);
         assert_eq!(cursors[0], ("cursor_source".to_string(), 7));
 
