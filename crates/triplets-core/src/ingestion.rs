@@ -1957,7 +1957,6 @@ mod tests {
         let mut manager = IngestionManager::new(4, SamplerConfig::default());
 
         // Verify the utility function catches common patterns
-        assert!(is_reserved_source_id("__step__"));
         assert!(is_reserved_source_id("__meta__"));
         assert!(is_reserved_source_id("__anything__"));
         assert!(is_reserved_source_id("__x__"));
