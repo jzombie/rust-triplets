@@ -112,8 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 > **Reserved source IDs.** Source identifiers matching the `__*__` pattern
 > (starting and ending with double underscores) are reserved for internal
-> synthetic/metadata use — for example, `__step__` is used to persist the
-> ingestion step counter across restarts. If a source's `id()` returns such
+> synthetic/metadata use. If a source's `id()` returns such
 > a value, `register_source` returns `SamplerError::ReservedSourceId`.
 > This ensures the `__*__` namespace can be used by the framework for
 > metadata entries without colliding with user-defined sources.
@@ -1052,7 +1051,7 @@ To resume training, initialize a `FileSplitStore` at the same path. The sampler 
 **What resumes deterministically:**
 
 - Ingestion stream cursors (which records have been fetched from each source).
-- The step counter (`__step__`) — incremented once per `next_*_batch` call.
+- The epoch step counter — incremented once per `next_*_batch` call.
 - The deterministic RNG state — batch-to-batch shuffle order.
 - Per-source anchor record cursors — which records have been sampled as anchors.
 - Source epoch — the shuffling permutation counter.

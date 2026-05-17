@@ -9312,6 +9312,7 @@ mod tests {
             source_cycle_idx: 0,
             source_record_cursors: vec![("cursor_test".to_string(), 0)],
             epoch: 0,
+            epoch_step: 0,
             rng_state: 0,
             triplet_recipe_rr_idx: 0,
             text_recipe_rr_idx: 0,

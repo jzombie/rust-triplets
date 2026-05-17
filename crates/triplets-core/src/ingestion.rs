@@ -1,5 +1,5 @@
 use crate::config::SamplerConfig;
-use crate::constants::splits::{STEP_CURSOR_KEY, is_reserved_source_id};
+use crate::constants::splits::is_reserved_source_id;
 use crate::data::DataRecord;
 use crate::errors::SamplerError;
 use crate::hash::derive_epoch_seed;
@@ -268,15 +268,19 @@ impl IngestionManager {
     }
 
     /// Increment epoch step counter by 1. Called once per `next_*_batch` call so that
-    /// `__step__` tracks model training steps, not ingestion refresh events.
+    /// the epoch step tracks model training steps, not ingestion refresh events.
     pub(crate) fn increment_epoch_step(&mut self) {
         self.epoch_step = self.epoch_step.saturating_add(1);
     }
 
     /// Return the current epoch step counter.
-    #[cfg(test)]
     pub fn epoch_step(&self) -> u64 {
         self.epoch_step
+    }
+
+    /// Set the epoch step counter directly (used when restoring persisted state).
+    pub(crate) fn set_epoch_step(&mut self, step: u64) {
+        self.epoch_step = step;
     }
 
     /// Return the current epoch.
@@ -328,15 +332,7 @@ impl IngestionManager {
         }
         let mut map = std::collections::HashMap::with_capacity(cursors.len());
         for (id, revision) in cursors {
-            // The step counter is stored as a (STEP_CURSOR_KEY, revision)
-            // tuple inside the same source_stream_cursors Vec.  Bitcode
-            // serialises it identically to any ("source_a", 14) cursor;
-            // the special meaning is applied here at read time.
-            if id == STEP_CURSOR_KEY {
-                self.epoch_step = *revision;
-            } else {
-                map.insert(id.as_str(), *revision);
-            }
+            map.insert(id.as_str(), *revision);
         }
         for state in &mut self.sources {
             if let Some(revision) = map.get(state.source.id()) {
@@ -356,11 +352,6 @@ impl IngestionManager {
                 out.push((state.source.id().to_string(), cursor.revision));
             }
         }
-        // Append the step counter as a (STEP_CURSOR_KEY, step) tuple so it
-        // survives restarts inside the same Vec that bitcode already encodes.
-        // Bitcode sees only Vec<(String, u64)> — this tuple is no different
-        // from any source cursor.  load_cursors reverses the interpretation.
-        out.push((STEP_CURSOR_KEY.to_string(), self.epoch_step));
         out
     }
 
@@ -948,16 +939,14 @@ mod tests {
 
         manager.load_cursors(&[("cursor_source".to_string(), 7)]);
         let cursors = manager.snapshot_cursors();
-        // snapshot_cursors now includes a __step__ entry.
-        assert_eq!(cursors.len(), 2);
+        // snapshot_cursors no longer includes a __step__ entry.
+        assert_eq!(cursors.len(), 1);
         assert_eq!(cursors[0], ("cursor_source".to_string(), 7));
-        assert_eq!(cursors[1].0, STEP_CURSOR_KEY);
 
         manager.refresh_all();
         let updated = manager.snapshot_cursors();
-        assert_eq!(updated.len(), 2);
+        assert_eq!(updated.len(), 1);
         assert_eq!(updated[0], ("cursor_source".to_string(), 33));
-        assert_eq!(updated[1].0, STEP_CURSOR_KEY);
         let records = manager.all_records_snapshot();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].source, "cursor_source");
@@ -1453,12 +1442,7 @@ mod tests {
 
         // Load back what the sampler saved
         let loaded = store.load_sampler_state().unwrap().unwrap();
-        let step_saved = loaded
-            .source_stream_cursors
-            .iter()
-            .find(|(k, _)| k == STEP_CURSOR_KEY)
-            .map(|(_, v)| *v)
-            .expect("STEP_CURSOR_KEY must be in persisted source_stream_cursors");
+        let step_saved = loaded.epoch_step;
         assert!(
             step_saved > 0,
             "epoch_step must be >0 after batch call through TripletSampler"
@@ -1480,31 +1464,22 @@ mod tests {
             )))
             .unwrap();
         manager2.load_cursors(&loaded.source_stream_cursors);
+        manager2.set_epoch_step(loaded.epoch_step);
 
         // epoch_step restored to saved value; verify it's stable (no batch
         // call was made, so step does not change).
-        let step_before = manager2
-            .snapshot_cursors()
-            .iter()
-            .find(|(k, _)| k == STEP_CURSOR_KEY)
-            .map(|(_, v)| *v)
-            .unwrap();
+        let step_before = manager2.epoch_step();
         assert_eq!(
             step_before, step_saved,
-            "load_cursors must restore __step__ to saved value"
+            "load_cursors must restore epoch_step to saved value"
         );
 
         // Verify the step is still present after a refresh (no increment).
         manager2.refresh_all();
-        let step_after = manager2
-            .snapshot_cursors()
-            .iter()
-            .find(|(k, _)| k == STEP_CURSOR_KEY)
-            .map(|(_, v)| *v)
-            .unwrap();
+        let step_after = manager2.epoch_step();
         assert_eq!(
             step_after, step_saved,
-            "step must survive refresh_all without increment (step is per-batch,
+            "epoch_step must survive refresh_all without increment (step is per-batch,
              not per-refresh): loaded {step_saved}, got {step_after}"
         );
     }
