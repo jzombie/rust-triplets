@@ -55,14 +55,14 @@ pub const PREFETCH_PAIR_BATCH_SEQUENCE_HASH: u64 = 16725467462822671025;
 
 /// Expected readable wrong-article sequence without BM25 mining.
 pub const READABLE_NON_BM25_TITLES: [&str; 8] = [
-    "Energy transition memo",
-    "Archaeology field note",
-    "Archaeology field note",
     "Carbon market and emissions policy",
     "Energy transition memo",
+    "Archaeology field note",
     "Carbon market and emissions policy",
+    "Regulatory market digest",
     "Energy transition memo",
-    "Carbon policy update",
+    "Regulatory market digest",
+    "Marine geology report",
 ];
 
 /// Expected readable wrong-article sequence with BM25 mining enabled.
