@@ -17,7 +17,8 @@ pub use constants::{
 };
 pub use huggingface_source::{
     HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE, HfListRoots, HfSourceEntry, build_hf_sources,
-    load_hf_sources_from_list, managed_hf_list_snapshot_dir, managed_hf_snapshot_dir,
-    parse_csv_fields, parse_hf_source_line, parse_hf_uri, resolve_hf_list_roots,
+    build_hf_sources_with_weights, load_hf_sources_from_list, managed_hf_list_snapshot_dir,
+    managed_hf_snapshot_dir, parse_csv_fields, parse_hf_source_line, parse_hf_uri,
+    resolve_hf_list_roots,
 };
 pub use huggingface_source::{HuggingFaceRowSource, HuggingFaceRowsConfig};

@@ -526,6 +526,7 @@ fn huggingface_list_root_and_builder_helpers_cover_invalid_inputs() {
             context_columns: Vec::new(),
             text_columns: Vec::new(),
             trust: None,
+            weight: None,
             source_id: None,
         }],
     };
@@ -2350,6 +2351,7 @@ fn duplicate_build_hf_sources_produces_independent_sources() {
         context_columns: Vec::new(),
         text_columns: Vec::new(),
         trust: None,
+        weight: None,
         source_id: None,
     };
     let roots = HfListRoots {
@@ -2465,9 +2467,7 @@ fn huggingface_dict_dataset_end_to_end() {
     };
 
     // Refresh should pick up the 3 rows.
-    let snap = source
-        .refresh(&sampler_cfg, None, None)
-        .expect("refresh");
+    let snap = source.refresh(&sampler_cfg, None, None).expect("refresh");
     assert_eq!(snap.records.len(), 3, "should have 3 records");
 
     // Each record should have: Anchor (query) + Context (pos) + 2× Context (neg)
@@ -2478,14 +2478,19 @@ fn huggingface_dict_dataset_end_to_end() {
             "each record should have 4 sections (anchor + positive + 2 negatives), got {}",
             record.sections.len()
         );
-        assert_eq!(record.sections[0].role, triplets_core::data::SectionRole::Anchor);
-        assert_eq!(record.sections[1].role, triplets_core::data::SectionRole::Context);
+        assert_eq!(
+            record.sections[0].role,
+            triplets_core::data::SectionRole::Anchor
+        );
+        assert_eq!(
+            record.sections[1].role,
+            triplets_core::data::SectionRole::Context
+        );
     }
 
     // Build a sampler and produce triplet batches.
-    let split_store =
-        Arc::new(DeterministicSplitStore::new(SplitRatios::default(), 42).unwrap());
-    let mut sampler = TripletSampler::new(sampler_cfg, split_store);
+    let split_store = Arc::new(DeterministicSplitStore::new(SplitRatios::default(), 42).unwrap());
+    let sampler = TripletSampler::new(sampler_cfg, split_store);
     sampler
         .register_source(Box::new(source))
         .expect("register source");
@@ -2504,4 +2509,49 @@ fn huggingface_dict_dataset_end_to_end() {
         assert_ne!(triplet.negative.text, triplet.positive.text);
         assert_ne!(triplet.negative.text, triplet.anchor.text);
     }
+}
+
+#[test]
+#[serial_test::serial(all_integration)]
+fn build_hf_sources_with_weights_extracts_weights() {
+    use triplets_hf_source::build_hf_sources_with_weights;
+
+    let roots = HfListRoots {
+        source_list: "inline".to_string(),
+        sources: vec![
+            HfSourceEntry {
+                uri: "hf://org/dataset/default/train".to_string(),
+                anchor_columns: vec!["text".to_string()],
+                positive_columns: vec!["text".to_string()],
+                negative_columns: Vec::new(),
+                context_columns: Vec::new(),
+                text_columns: Vec::new(),
+                trust: None,
+                weight: Some(0.4),
+                source_id: Some("src_a".to_string()),
+            },
+            HfSourceEntry {
+                uri: "hf://org/other/default/train".to_string(),
+                anchor_columns: vec!["text".to_string()],
+                positive_columns: vec!["text".to_string()],
+                negative_columns: Vec::new(),
+                context_columns: Vec::new(),
+                text_columns: Vec::new(),
+                trust: None,
+                weight: None,
+                source_id: Some("src_b".to_string()),
+            },
+        ],
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let orig_cwd = std::env::current_dir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    let (sources, weights) = build_hf_sources_with_weights(&roots);
+    std::env::set_current_dir(&orig_cwd).unwrap();
+    assert_eq!(sources.len(), 2);
+    assert_eq!(weights.len(), 1);
+    assert_eq!(weights.get("src_a"), Some(&0.4));
+    assert!(!weights.contains_key("src_b"));
 }

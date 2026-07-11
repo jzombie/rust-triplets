@@ -68,6 +68,7 @@ const HF_SOURCE_KEY_CONTEXT: &str = "context";
 const HF_SOURCE_KEY_TEXT: &str = "text";
 const HF_SOURCE_KEY_TEXT_COLUMNS: &str = "text_columns";
 const HF_SOURCE_KEY_TRUST: &str = "trust";
+const HF_SOURCE_KEY_WEIGHT: &str = "weight";
 const HF_SOURCE_KEY_SOURCE_ID: &str = "source_id";
 
 /// Default HF text-columns-mode SimCSE-style recipe name.
@@ -209,6 +210,12 @@ pub struct HfSourceEntry {
     /// When set, overrides the default `QualityScore::default().trust` (0.5)
     /// for every record emitted by this source.  Must be in `[0.0, 1.0]`.
     pub trust: Option<f32>,
+    /// Optional weight for weighted source scheduling.
+    ///
+    /// When set, used by [`build_hf_sources_with_weights`] to populate a
+    /// per-source weight map that callers pass to
+    /// [`TripletSampler::advance_with_weights`].  Must be `> 0.0`.
+    pub weight: Option<f32>,
     /// Optional source ID override.
     ///
     /// When set, this string is used as the source identifier instead of the
@@ -230,6 +237,7 @@ impl PartialEq for HfSourceEntry {
             // Compare f32 bits so that identical bit patterns are considered equal.
             // Valid trust values are never NaN, so bit-level comparison is correct.
             && self.trust.map(f32::to_bits) == other.trust.map(f32::to_bits)
+            && self.weight.map(f32::to_bits) == other.weight.map(f32::to_bits)
     }
 }
 
@@ -273,6 +281,7 @@ pub fn parse_hf_source_line(line: &str) -> Result<HfSourceEntry, String> {
         context_columns: Vec::new(),
         text_columns: Vec::new(),
         trust: None,
+        weight: None,
         source_id: None,
     };
 
@@ -314,6 +323,15 @@ pub fn parse_hf_source_line(line: &str) -> Result<HfSourceEntry, String> {
                     return Err("source_id must not be empty".to_string());
                 }
                 entry.source_id = Some(value.to_string());
+            }
+            HF_SOURCE_KEY_WEIGHT => {
+                let w: f32 = value.parse().map_err(|_| {
+                    format!("invalid weight value '{value}': expected a positive float")
+                })?;
+                if w <= 0.0 {
+                    return Err(format!("weight value {w} must be > 0.0"));
+                }
+                entry.weight = Some(w);
             }
             _ => {
                 return Err(format!("unsupported mapping key '{raw_key}'"));
@@ -553,6 +571,115 @@ pub fn build_hf_sources(roots: &HfListRoots) -> Vec<Box<dyn DataSource + 'static
             }
         })
         .collect()
+}
+
+/// Build Hugging Face row sources from a parsed source list, returning
+/// both the sources and a per-source weight map.
+///
+/// Entries with a `weight=` value in their URI are included in the returned
+/// `HashMap<String, f32>` (keyed by source ID).  Callers pass this map to
+/// [`TripletSampler::advance_with_weights`] for weighted scheduling.
+pub fn build_hf_sources_with_weights(
+    roots: &HfListRoots,
+) -> (Vec<Box<dyn DataSource + 'static>>, HashMap<String, f32>) {
+    let mut weights = HashMap::new();
+
+    // Phase 1: compute auto-slugs for entries that don't have an explicit source_id.
+    let base_slugs: Vec<Option<String>> = roots
+        .sources
+        .iter()
+        .enumerate()
+        .map(|(idx, source)| {
+            if source.source_id.is_some() {
+                None
+            } else {
+                Some(match parse_hf_uri(&source.uri) {
+                    Ok((dataset, config, split)) => hf_source_id_slug(&dataset, &config, &split),
+                    Err(_) => format!("hf_list_{idx}"),
+                })
+            }
+        })
+        .collect();
+
+    // Phase 2: find duplicate slugs for disambiguation.
+    let mut slug_count: HashMap<&str, usize> = HashMap::new();
+    for slug in base_slugs.iter().flatten() {
+        *slug_count.entry(slug.as_str()).or_insert(0) += 1;
+    }
+    let mut slug_idx: HashMap<&str, usize> = HashMap::new();
+
+    let shared_client = std::sync::OnceLock::<ClientWithMiddleware>::new();
+
+    let sources: Vec<Box<dyn DataSource + 'static>> = roots
+        .sources
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, source)| {
+            let (dataset, config, split) = match parse_hf_uri(&source.uri) {
+                Ok(v) => v,
+                Err(err) => {
+                    eprintln!("Skipping Hugging Face source '{}': {}", source.uri, err);
+                    return None;
+                }
+            };
+
+            let source_id = if let Some(ref sid) = source.source_id {
+                sid.clone()
+            } else {
+                let base = base_slugs[idx].as_deref().unwrap_or("hf");
+                let count = slug_count.get(base).copied().unwrap_or(0);
+                if count > 1 {
+                    let i = slug_idx.entry(base).or_insert(0);
+                    let id = format!("{base}.{i}");
+                    *i += 1;
+                    id
+                } else {
+                    base.to_string()
+                }
+            };
+
+            let snapshot_dir = match managed_hf_list_snapshot_dir(&dataset, &config, &split, idx) {
+                Ok(dir) => dir,
+                Err(err) => {
+                    eprintln!("Skipping Hugging Face source '{}': {}", source.uri, err);
+                    return None;
+                }
+            };
+
+            let mut hf =
+                HuggingFaceRowsConfig::new(source_id, dataset, config, split, snapshot_dir);
+            hf.anchor_columns = source.anchor_columns.clone();
+            hf.positive_columns = source.positive_columns.clone();
+            hf.negative_columns = source.negative_columns.clone();
+            hf.context_columns = source.context_columns.clone();
+            hf.text_columns = source.text_columns.clone();
+            hf.trust_override = source.trust;
+            let client = shared_client.get_or_init(|| {
+                HuggingFaceRowSource::build_http_client(&hf).unwrap_or_else(|_| {
+                    HuggingFaceRowSource::build_http_client(&hf).expect("http client")
+                })
+            });
+            hf.http_client = Some(client.clone());
+
+            // Record weight if set.
+            if let Some(w) = source.weight {
+                weights.insert(hf.source_id.clone(), w);
+            }
+
+            match HuggingFaceRowSource::new(hf) {
+                Ok(source) => Some(Box::new(source) as Box<dyn DataSource + 'static>),
+                Err(err) => {
+                    eprintln!(
+                        "Skipping Hugging Face source initialization for '{}': {}",
+                        source.uri, err
+                    );
+                    None
+                }
+            }
+        })
+        .collect();
+
+    (sources, weights)
 }
 
 /// Shared handle to the open-store cache.  Stored on `HuggingFaceRowsConfig`
@@ -4227,10 +4354,7 @@ impl HuggingFaceRowSource {
     /// (e.g. `{"set": {"query": "...", "pos": [...]}}`).
     ///
     /// Returns `None` when the column is not found at either level.
-    fn resolve_json_path(
-        row_obj: &serde_json::Map<String, Value>,
-        name: &str,
-    ) -> Option<Value> {
+    fn resolve_json_path(row_obj: &serde_json::Map<String, Value>, name: &str) -> Option<Value> {
         if let Some(value) = row_obj.get(name) {
             return Some(value.clone());
         }
@@ -4291,12 +4415,18 @@ impl HuggingFaceRowSource {
                         })
                     })
                     .collect();
-                if fields.is_empty() { None } else { Some(fields) }
+                if fields.is_empty() {
+                    None
+                } else {
+                    Some(fields)
+                }
             }
-            other => Self::value_to_text(other, label_names).map(|text| vec![RowTextField {
-                name: name.to_string(),
-                text,
-            }]),
+            other => Self::value_to_text(other, label_names).map(|text| {
+                vec![RowTextField {
+                    name: name.to_string(),
+                    text,
+                }]
+            }),
         }
     }
 
@@ -4390,8 +4520,7 @@ impl HuggingFaceRowSource {
                 let Some(value) = Self::resolve_json_path(row_obj, name) else {
                     return Ok(None);
                 };
-                let Some(fields) =
-                    Self::coalesce_list_field(name, &value, &self.config.label_maps)
+                let Some(fields) = Self::coalesce_list_field(name, &value, &self.config.label_maps)
                 else {
                     return Ok(None);
                 };
@@ -5646,6 +5775,7 @@ mod tests {
                     context_columns: Vec::new(),
                     text_columns: Vec::new(),
                     trust: None,
+                    weight: None,
                     source_id: None,
                 },
                 HfSourceEntry {
@@ -5656,6 +5786,7 @@ mod tests {
                     context_columns: Vec::new(),
                     text_columns: Vec::new(),
                     trust: None,
+                    weight: None,
                     source_id: None,
                 },
             ],
@@ -5692,6 +5823,7 @@ mod tests {
             context_columns: Vec::new(),
             text_columns: Vec::new(),
             trust: None,
+            weight: None,
             source_id: None,
         };
         let roots = HfListRoots {
@@ -5758,6 +5890,7 @@ mod tests {
                 context_columns: Vec::new(),
                 text_columns: Vec::new(),
                 trust: None,
+                weight: None,
                 source_id: Some(format!("src_{i}")),
             })
             .collect();
@@ -5866,6 +5999,7 @@ mod tests {
                 text_columns: Vec::new(),
                 trust: None,
                 source_id: None,
+                weight: None,
             },
             HfSourceEntry {
                 uri: "hf://org/dataset/default/train".to_string(),
@@ -5875,6 +6009,7 @@ mod tests {
                 context_columns: Vec::new(),
                 text_columns: Vec::new(),
                 trust: None,
+                weight: None,
                 source_id: None,
             },
         ];
@@ -10840,6 +10975,7 @@ mod tests {
             context_columns: vec!["meta".to_string()],
             text_columns: Vec::new(),
             trust: Some(0.8),
+            weight: None,
             source_id: None,
         };
         let same = HfSourceEntry { ..base.clone() };
@@ -11277,6 +11413,7 @@ mod tests {
                 context_columns: Vec::new(),
                 text_columns: Vec::new(),
                 trust: None,
+                weight: None,
                 source_id: None,
             }],
         };
@@ -11447,9 +11584,10 @@ mod tests {
 
     #[test]
     fn parse_hf_source_line_negative_key() {
-        let entry =
-            parse_hf_source_line("hf://embedding-data/QQP_triplets anchor=query positive=pos negative=neg")
-                .unwrap();
+        let entry = parse_hf_source_line(
+            "hf://embedding-data/QQP_triplets anchor=query positive=pos negative=neg",
+        )
+        .unwrap();
         assert_eq!(entry.anchor_columns, vec!["query"]);
         assert_eq!(entry.positive_columns, vec!["pos"]);
         assert_eq!(entry.negative_columns, vec!["neg"]);
@@ -11484,7 +11622,10 @@ mod tests {
     fn resolve_json_path_missing_returns_none() {
         let row = json!({"set": {"query": "hello"}});
         let obj = row.as_object().unwrap();
-        assert_eq!(HuggingFaceRowSource::resolve_json_path(obj, "missing"), None);
+        assert_eq!(
+            HuggingFaceRowSource::resolve_json_path(obj, "missing"),
+            None
+        );
     }
 
     #[test]
@@ -11497,10 +11638,7 @@ mod tests {
             HuggingFaceRowSource::value_to_text(&json!(["a", "b", "c"]), None),
             Some("a".into())
         );
-        assert_eq!(
-            HuggingFaceRowSource::value_to_text(&json!([]), None),
-            None
-        );
+        assert_eq!(HuggingFaceRowSource::value_to_text(&json!([]), None), None);
         assert_eq!(
             HuggingFaceRowSource::value_to_text(&json!([null, "valid"]), None),
             Some("valid".into())
@@ -11584,10 +11722,7 @@ mod tests {
 
         // Flat (non-dict) row — should work exactly as before.
         let row = source
-            .parse_row(
-                0,
-                &json!({"id": "r1", "anchor": "a", "positive": "p"}),
-            )
+            .parse_row(0, &json!({"id": "r1", "anchor": "a", "positive": "p"}))
             .unwrap()
             .unwrap();
         assert_eq!(row.text_fields.len(), 2);
@@ -11608,10 +11743,22 @@ mod tests {
             row_id: Some("dict:0".into()),
             timestamp: None,
             text_fields: vec![
-                RowTextField { name: "query".into(), text: "anchor text".into() },
-                RowTextField { name: "pos".into(), text: "positive text".into() },
-                RowTextField { name: "neg[0]".into(), text: "negative one".into() },
-                RowTextField { name: "neg[1]".into(), text: "negative two".into() },
+                RowTextField {
+                    name: "query".into(),
+                    text: "anchor text".into(),
+                },
+                RowTextField {
+                    name: "pos".into(),
+                    text: "positive text".into(),
+                },
+                RowTextField {
+                    name: "neg[0]".into(),
+                    text: "negative one".into(),
+                },
+                RowTextField {
+                    name: "neg[1]".into(),
+                    text: "negative two".into(),
+                },
             ],
         };
 
