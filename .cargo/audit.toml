@@ -1,0 +1,7 @@
+[advisories]
+ignore = [
+  "RUSTSEC-2025-0057",  # fxhash unmaintained (transitive via bm25)
+  "RUSTSEC-2024-0436",  # paste unmaintained (transitive via parquet)
+  "RUSTSEC-2026-0190",  # anyhow unsound (transitive via reqwest-middleware/wasm)
+  "RUSTSEC-2026-0186",  # memmap2 unsound (transitive via simd-r-drive)
+]
