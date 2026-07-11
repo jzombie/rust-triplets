@@ -10,6 +10,20 @@ allow = [
 ]
 confidence-threshold = 0.8
 
+[bans]
+multiple-versions = "warn"
+skip = [
+  # getrandom 0.3.x (via rand_core) vs 0.4.x (via tempfile) — semver-incompatible
+  { name = "getrandom", version = ">=0.3, <0.4" },
+  { name = "getrandom", version = ">=0.4, <0.5" },
+  # hashbrown 0.14.x (via dashmap/simd-r-drive) vs 0.17.x (via indexmap)
+  { name = "hashbrown", version = ">=0.14, <0.15" },
+  { name = "hashbrown", version = ">=0.17, <0.18" },
+  # r-efi follows getrandom version split
+  { name = "r-efi", version = ">=5, <6" },
+  { name = "r-efi", version = ">=6, <7" },
+]
+
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
