@@ -37,7 +37,7 @@ repository = "https://github.com/jzombie/rust-triplets"
 [workspace.dependencies]
 bitcode = "0.6.9"
 bm25 = { version = "2.3.2", features = ["parallelism"] }
-cache-manager = "0.4.0"
+cache-manager = "0.4.1"
 chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.1", features = ["derive"] }
 csv = "1.4.0"
