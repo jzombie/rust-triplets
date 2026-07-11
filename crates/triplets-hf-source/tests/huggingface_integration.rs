@@ -522,6 +522,7 @@ fn huggingface_list_root_and_builder_helpers_cover_invalid_inputs() {
             uri: "hf://org".to_string(),
             anchor_columns: vec!["a".to_string()],
             positive_columns: Vec::new(),
+            negative_columns: Vec::new(),
             context_columns: Vec::new(),
             text_columns: Vec::new(),
             trust: None,
@@ -2345,6 +2346,7 @@ fn duplicate_build_hf_sources_produces_independent_sources() {
         uri: "hf://org/dataset/default/train".to_string(),
         anchor_columns: vec!["text".to_string()],
         positive_columns: vec!["text".to_string()],
+        negative_columns: Vec::new(),
         context_columns: Vec::new(),
         text_columns: Vec::new(),
         trust: None,
@@ -2416,4 +2418,90 @@ fn e2e_refresh_honors_limit_and_wraps_cursor() {
     eprintln!("wrapped refresh returned {} records", snap3.records.len());
 
     server.shut_down();
+}
+
+#[test]
+fn huggingface_dict_dataset_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let shard_path = dir.path().join("data.jsonl");
+
+    // Write dict-format rows matching the QQP_triplets structure.
+    let rows = [
+        r#"{"set": {"query": "What is Rust?", "pos": ["How does Rust work?"], "neg": ["Is Python better?", "What is Java?"]}}"#,
+        r#"{"set": {"query": "What is Go?", "pos": ["How does Go work?"], "neg": ["Is Rust better?", "What is C++?"]}}"#,
+        r#"{"set": {"query": "What is Python?", "pos": ["How does Python work?"], "neg": ["Is Go better?", "What is JavaScript?"]}}"#,
+    ];
+    let content: String = rows.join("\n") + "\n";
+    fs::write(&shard_path, content).unwrap();
+
+    let mut config = HuggingFaceRowsConfig::new(
+        "hf_dict_test",
+        "test/dict-dataset",
+        "default",
+        "train",
+        dir.path().to_path_buf(),
+    );
+    config.anchor_columns = vec!["query".to_string()];
+    config.positive_columns = vec!["pos".to_string()];
+    config.negative_columns = vec!["neg".to_string()];
+    config.hf_token = None;
+    config.info_endpoint = format!(
+        "{}/unreachable",
+        triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
+    );
+    config.size_endpoint = format!(
+        "{}/unreachable",
+        triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
+    );
+    config.parquet_endpoint = format!(
+        "{}/unreachable",
+        triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
+    );
+
+    let source = HuggingFaceRowSource::new(config).expect("new source");
+    let sampler_cfg = SamplerConfig {
+        seed: 42,
+        ..SamplerConfig::default()
+    };
+
+    // Refresh should pick up the 3 rows.
+    let snap = source
+        .refresh(&sampler_cfg, None, None)
+        .expect("refresh");
+    assert_eq!(snap.records.len(), 3, "should have 3 records");
+
+    // Each record should have: Anchor (query) + Context (pos) + 2× Context (neg)
+    for record in &snap.records {
+        assert_eq!(
+            record.sections.len(),
+            4,
+            "each record should have 4 sections (anchor + positive + 2 negatives), got {}",
+            record.sections.len()
+        );
+        assert_eq!(record.sections[0].role, triplets_core::data::SectionRole::Anchor);
+        assert_eq!(record.sections[1].role, triplets_core::data::SectionRole::Context);
+    }
+
+    // Build a sampler and produce triplet batches.
+    let split_store =
+        Arc::new(DeterministicSplitStore::new(SplitRatios::default(), 42).unwrap());
+    let mut sampler = TripletSampler::new(sampler_cfg, split_store);
+    sampler
+        .register_source(Box::new(source))
+        .expect("register source");
+
+    let batch = sampler
+        .next_triplet_batch(SplitLabel::Train)
+        .expect("next triplet batch");
+    assert!(
+        !batch.triplets.is_empty(),
+        "should produce at least one triplet"
+    );
+
+    // Verify each triplet has distinct anchor/positive/negative.
+    for triplet in &batch.triplets {
+        assert_ne!(triplet.anchor.text, triplet.positive.text);
+        assert_ne!(triplet.negative.text, triplet.positive.text);
+        assert_ne!(triplet.negative.text, triplet.anchor.text);
+    }
 }

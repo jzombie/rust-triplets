@@ -271,6 +271,13 @@ pub enum NegativeStrategy {
     WrongArticle,
     /// Choose a mismatched Q/A pair.
     QuestionAnswerMismatch,
+    /// Choose a negative from the SAME record.
+    ///
+    /// Used for HuggingFace "dict" datasets where negatives are embedded
+    /// in the same row as the anchor/positive pair.  The sampler returns
+    /// the anchor record itself as the "negative record", and
+    /// `select_chunk` picks from its Context sections.
+    SameRecord,
 }
 
 /// Top-level sampler configuration.
