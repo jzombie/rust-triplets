@@ -56,6 +56,8 @@ pub mod sampler {
     pub const NEG_REASON_WRONG_ARTICLE: &str = "wrong_article";
     /// Negative-pair reason tag for mismatched question/answer pairings.
     pub const NEG_REASON_WRONG_QA: &str = "wrong_qa_pairing";
+    /// Negative-pair reason tag for negatives from the same record.
+    pub const NEG_REASON_SAME_RECORD: &str = "same_record";
     /// Recipe name auto-injected when long sections require chunk-window pairing.
     ///
     /// This recipe is appended for eligible sources during normal ingest sync,
