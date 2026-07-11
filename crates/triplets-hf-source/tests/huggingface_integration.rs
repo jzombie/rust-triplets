@@ -2443,9 +2443,9 @@ fn huggingface_dict_dataset_end_to_end() {
         "train",
         dir.path().to_path_buf(),
     );
-    config.anchor_columns = vec!["query".to_string()];
-    config.positive_columns = vec!["pos".to_string()];
-    config.negative_columns = vec!["neg".to_string()];
+    config.anchor_columns = vec!["set.query".to_string()];
+    config.positive_columns = vec!["set.pos".to_string()];
+    config.negative_columns = vec!["set.neg".to_string()];
     config.hf_token = None;
     config.info_endpoint = format!(
         "{}/unreachable",

@@ -4344,28 +4344,23 @@ impl HuggingFaceRowSource {
         }
     }
 
-    /// Resolve a column name against a JSON object, supporting one level of
-    /// dict nesting.
+    /// Resolve a dot-separated column path against a JSON object.
     ///
-    /// First tries a direct top-level lookup (`row_obj.get(name)`).  When that
-    /// fails, walks the object's keys for any whose value is a JSON object, and
-    /// tries `inner.get(name)` on each.  This handles the common HuggingFace
-    /// "dict" pattern where columns are nested under a single wrapper key
-    /// (e.g. `{"set": {"query": "...", "pos": [...]}}`).
+    /// Splits `name` on `.` and walks the JSON hierarchy.  For example
+    /// `"set.query"` resolves to `row["set"]["query"]`.  A bare name
+    /// without dots (e.g. `"query"`) performs a simple top-level lookup.
     ///
-    /// Returns `None` when the column is not found at either level.
+    /// Returns `None` when any segment of the path is missing or when an
+    /// intermediate value is not a JSON object.
     fn resolve_json_path(row_obj: &serde_json::Map<String, Value>, name: &str) -> Option<Value> {
-        if let Some(value) = row_obj.get(name) {
-            return Some(value.clone());
+        let mut current = Value::Object(row_obj.clone());
+        for segment in name.split('.') {
+            current = match current {
+                Value::Object(map) => map.get(segment)?.clone(),
+                _ => return None,
+            };
         }
-        for (_, v) in row_obj {
-            if let Value::Object(inner) = v
-                && let Some(value) = inner.get(name)
-            {
-                return Some(value.clone());
-            }
-        }
-        None
+        Some(current)
     }
 
     /// Try each candidate column name in order and return the first one that
@@ -11609,11 +11604,11 @@ mod tests {
         let row = json!({"set": {"query": "hello", "pos": ["p"], "neg": ["n"]}});
         let obj = row.as_object().unwrap();
         assert_eq!(
-            HuggingFaceRowSource::resolve_json_path(obj, "query"),
+            HuggingFaceRowSource::resolve_json_path(obj, "set.query"),
             Some(json!("hello"))
         );
         assert_eq!(
-            HuggingFaceRowSource::resolve_json_path(obj, "pos"),
+            HuggingFaceRowSource::resolve_json_path(obj, "set.pos"),
             Some(json!(["p"]))
         );
     }
@@ -11677,9 +11672,9 @@ mod tests {
     fn parse_row_dict_dataset() {
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path().to_path_buf());
-        config.anchor_columns = vec!["query".into()];
-        config.positive_columns = vec!["pos".into()];
-        config.negative_columns = vec!["neg".into()];
+        config.anchor_columns = vec!["set.query".into()];
+        config.positive_columns = vec!["set.pos".into()];
+        config.negative_columns = vec!["set.neg".into()];
         config.id_column = None;
         let source = test_source(config);
 
@@ -11697,17 +11692,17 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        // anchor = query, positive = first pos element, negatives = expanded neg elements
+        // anchor = set.query, positive = first set.pos element, negatives = expanded set.neg elements
         assert_eq!(row.text_fields.len(), 5);
-        assert_eq!(row.text_fields[0].name, "query");
+        assert_eq!(row.text_fields[0].name, "set.query");
         assert_eq!(row.text_fields[0].text, "What is Rust?");
-        assert_eq!(row.text_fields[1].name, "pos");
+        assert_eq!(row.text_fields[1].name, "set.pos");
         assert_eq!(row.text_fields[1].text, "How does Rust work?");
-        assert_eq!(row.text_fields[2].name, "neg[0]");
+        assert_eq!(row.text_fields[2].name, "set.neg[0]");
         assert_eq!(row.text_fields[2].text, "Is Python better?");
-        assert_eq!(row.text_fields[3].name, "neg[1]");
+        assert_eq!(row.text_fields[3].name, "set.neg[1]");
         assert_eq!(row.text_fields[3].text, "What is Java?");
-        assert_eq!(row.text_fields[4].name, "neg[2]");
+        assert_eq!(row.text_fields[4].name, "set.neg[2]");
         assert_eq!(row.text_fields[4].text, "Tell me a joke");
     }
 
