@@ -37,8 +37,8 @@ repository = "https://github.com/jzombie/rust-triplets"
 [workspace.dependencies]
 bitcode = "0.6.9"
 bm25 = { version = "2.3.2", features = ["parallelism"] }
-cache-manager = "0.4.0"
-chrono = { version = "0.4.44", features = ["serde"] }
+cache-manager = "0.4.1"
+chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.1", features = ["derive"] }
 csv = "1.4.0"
 hf-hub = { version = "0.5.0", default-features = false, features = ["tokio", "rustls-tls"] }
@@ -48,10 +48,10 @@ line-ending = "1.5.1"
 parquet = { version = "58.3.0", features = ["json"] }
 rand = { version = "0.9.3", features = ["std", "small_rng"] }
 rayon = "1.12.0"
-reqwest = { version = "0.13.3", default-features = false, features = ["rustls", "stream", "json", "query"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "stream", "json", "query"] }
 reqwest-drive = "0.13.3-alpha"
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
+serde_json = "1.0.150"
 serial_test = "3.4.0"
 simd-r-drive = "0.16.2-alpha"
 siphasher = "1.0.3"
