@@ -38,7 +38,7 @@ repository = "https://github.com/jzombie/rust-triplets"
 bitcode = "0.6.9"
 bm25 = { version = "2.3.2", features = ["parallelism"] }
 cache-manager = "0.4.0"
-chrono = { version = "0.4.44", features = ["serde"] }
+chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.1", features = ["derive"] }
 csv = "1.4.0"
 hf-hub = { version = "0.5.0", default-features = false, features = ["tokio", "rustls-tls"] }
