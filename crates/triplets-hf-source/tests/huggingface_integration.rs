@@ -2555,3 +2555,124 @@ fn build_hf_sources_with_weights_extracts_weights() {
     assert_eq!(weights.get("src_a"), Some(&0.4));
     assert!(!weights.contains_key("src_b"));
 }
+
+#[test]
+#[serial_test::serial(all_integration)]
+fn build_hf_sources_with_weights_auto_derives_source_id() {
+    use triplets_hf_source::build_hf_sources_with_weights;
+
+    let roots = HfListRoots {
+        source_list: "inline".to_string(),
+        sources: vec![HfSourceEntry {
+            uri: "hf://org/my-dataset/default/train".to_string(),
+            anchor_columns: vec!["text".to_string()],
+            positive_columns: vec!["text".to_string()],
+            negative_columns: Vec::new(),
+            context_columns: Vec::new(),
+            text_columns: Vec::new(),
+            trust: None,
+            weight: Some(1.0),
+            source_id: None, // auto-derive
+        }],
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let orig_cwd = std::env::current_dir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    let (sources, weights) = build_hf_sources_with_weights(&roots);
+    std::env::set_current_dir(&orig_cwd).unwrap();
+    assert_eq!(sources.len(), 1);
+    // Auto-derived slug from "hf://org/my-dataset/default/train" → "my-dataset"
+    assert!(weights.contains_key("my-dataset"));
+    assert_eq!(weights.get("my-dataset"), Some(&1.0));
+}
+
+#[test]
+#[serial_test::serial(all_integration)]
+fn build_hf_sources_with_weights_skips_invalid_uri() {
+    use triplets_hf_source::build_hf_sources_with_weights;
+
+    let roots = HfListRoots {
+        source_list: "inline".to_string(),
+        sources: vec![
+            HfSourceEntry {
+                uri: "hf://incomplete".to_string(), // invalid — only 1 segment
+                anchor_columns: vec!["text".to_string()],
+                positive_columns: vec!["text".to_string()],
+                negative_columns: Vec::new(),
+                context_columns: Vec::new(),
+                text_columns: Vec::new(),
+                trust: None,
+                weight: None,
+                source_id: None,
+            },
+            HfSourceEntry {
+                uri: "hf://org/valid/default/train".to_string(),
+                anchor_columns: vec!["text".to_string()],
+                positive_columns: vec!["text".to_string()],
+                negative_columns: Vec::new(),
+                context_columns: Vec::new(),
+                text_columns: Vec::new(),
+                trust: None,
+                weight: Some(0.5),
+                source_id: Some("valid".to_string()),
+            },
+        ],
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let orig_cwd = std::env::current_dir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    let (sources, weights) = build_hf_sources_with_weights(&roots);
+    std::env::set_current_dir(&orig_cwd).unwrap();
+    // Invalid URI is skipped, only valid source is built.
+    assert_eq!(sources.len(), 1);
+    assert_eq!(weights.get("valid"), Some(&0.5));
+}
+
+#[test]
+#[serial_test::serial(all_integration)]
+fn build_hf_sources_with_weights_disambiguates_duplicate_slugs() {
+    use triplets_hf_source::build_hf_sources_with_weights;
+
+    let roots = HfListRoots {
+        source_list: "inline".to_string(),
+        sources: vec![
+            HfSourceEntry {
+                uri: "hf://org/a-dataset/default/train".to_string(),
+                anchor_columns: vec!["text".to_string()],
+                positive_columns: vec!["text".to_string()],
+                negative_columns: Vec::new(),
+                context_columns: Vec::new(),
+                text_columns: Vec::new(),
+                trust: None,
+                weight: Some(0.6),
+                source_id: None,
+            },
+            HfSourceEntry {
+                uri: "hf://org/b-dataset/default/train".to_string(),
+                anchor_columns: vec!["text".to_string()],
+                positive_columns: vec!["text".to_string()],
+                negative_columns: Vec::new(),
+                context_columns: Vec::new(),
+                text_columns: Vec::new(),
+                trust: None,
+                weight: Some(0.4),
+                source_id: None,
+            },
+        ],
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let orig_cwd = std::env::current_dir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    let (sources, weights) = build_hf_sources_with_weights(&roots);
+    std::env::set_current_dir(&orig_cwd).unwrap();
+    assert_eq!(sources.len(), 2);
+    // No duplicate slugs since dataset names differ, so no disambiguation needed.
+    assert!(weights.contains_key("a-dataset"));
+    assert!(weights.contains_key("b-dataset"));
+}

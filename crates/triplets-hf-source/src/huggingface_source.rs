@@ -214,7 +214,7 @@ pub struct HfSourceEntry {
     ///
     /// When set, used by [`build_hf_sources_with_weights`] to populate a
     /// per-source weight map that callers pass to
-    /// [`TripletSampler::advance_with_weights`].  Must be `> 0.0`.
+    /// `TripletSampler::advance_with_weights`.  Must be `> 0.0`.
     pub weight: Option<f32>,
     /// Optional source ID override.
     ///
@@ -578,7 +578,7 @@ pub fn build_hf_sources(roots: &HfListRoots) -> Vec<Box<dyn DataSource + 'static
 ///
 /// Entries with a `weight=` value in their URI are included in the returned
 /// `HashMap<String, f32>` (keyed by source ID).  Callers pass this map to
-/// [`TripletSampler::advance_with_weights`] for weighted scheduling.
+/// `TripletSampler::advance_with_weights` for weighted scheduling.
 pub fn build_hf_sources_with_weights(
     roots: &HfListRoots,
 ) -> (Vec<Box<dyn DataSource + 'static>>, HashMap<String, f32>) {
@@ -11768,5 +11768,40 @@ mod tests {
         assert_eq!(record.sections[2].text, "negative one");
         assert_eq!(record.sections[3].role, SectionRole::Context);
         assert_eq!(record.sections[3].text, "negative two");
+    }
+
+    #[test]
+    fn parse_hf_source_line_weight_key() {
+        let entry = parse_hf_source_line("hf://org/ds anchor=t positive=p weight=0.7").unwrap();
+        assert_eq!(entry.weight, Some(0.7));
+    }
+
+    #[test]
+    fn parse_hf_source_line_weight_zero_rejected() {
+        let err = parse_hf_source_line("hf://org/ds anchor=t positive=p weight=0").unwrap_err();
+        assert!(err.contains("must be > 0.0"));
+    }
+
+    #[test]
+    fn parse_hf_source_line_weight_negative_rejected() {
+        let err = parse_hf_source_line("hf://org/ds anchor=t positive=p weight=-1.0").unwrap_err();
+        assert!(err.contains("must be > 0.0"));
+    }
+
+    #[test]
+    fn parse_hf_source_line_weight_invalid_rejected() {
+        let err = parse_hf_source_line("hf://org/ds anchor=t positive=p weight=abc").unwrap_err();
+        assert!(err.contains("invalid weight"));
+    }
+
+    #[test]
+    fn resolve_json_path_non_object_intermediate_returns_none() {
+        let row = json!({"set": "not-an-object"});
+        let obj = row.as_object().unwrap();
+        // "set" exists but is a string, not an object — inner.get should fail.
+        assert_eq!(
+            HuggingFaceRowSource::resolve_json_path(obj, "set.query"),
+            None
+        );
     }
 }
