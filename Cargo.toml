@@ -23,8 +23,8 @@ members = [
     ".",
     "crates/triplets-core",
     "crates/triplets-debug",
-    "crates/triplets-offline-embedder",
     "crates/triplets-hf-source",
+    "crates/triplets-offline-embedder",
     "crates/triplets-srd-source",
 ]
 resolver = "2"
@@ -65,10 +65,13 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 triplets = { path = ".", version = "0.24.1-alpha" }
 triplets-core = { path = "crates/triplets-core", version = "0.24.1-alpha" }
 triplets-debug = { path = "crates/triplets-debug", version = "0.24.1-alpha" }
-triplets-offline-embedder = { path = "crates/triplets-offline-embedder", version = "0.24.1-alpha" }
 triplets-hf-source = { path = "crates/triplets-hf-source", version = "0.24.1-alpha" }
+triplets-offline-embedder = { path = "crates/triplets-offline-embedder", version = "0.24.1-alpha" }
 triplets-srd-source = { path = "crates/triplets-srd-source", version = "0.24.1-alpha" }
 walkdir = "2.5.0"
+
+[workspace.metadata.cargo-udeps.ignore]
+development = ["triplets-srd-source"]
 
 [features]
 default = []
