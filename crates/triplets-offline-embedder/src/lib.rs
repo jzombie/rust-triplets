@@ -8,7 +8,7 @@
 pub mod loop_runner;
 /// High-level orchestration helpers (flush, announce, etc.).
 pub mod orchestration;
-/// [`TripletSampler`] adapter for the [`BatchProvider`] trait.
+/// [`Sampler`](triplets_core::Sampler) adapter for the [`BatchProvider`] trait.
 pub mod sampler_adapter;
 /// Background-thread sampler prefetcher.
 pub mod sampler_prefetcher;

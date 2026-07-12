@@ -1,4 +1,4 @@
-//! Adapter bridging a [`Sampler`] trait object to the [`BatchProvider`] trait.
+//! Adapter bridging a [`Sampler`](triplets_core::Sampler) trait object to the [`BatchProvider`] trait.
 
 use std::sync::Arc;
 
@@ -9,7 +9,7 @@ use crate::sampler_prefetcher::{filter_pair_batch, filter_triplet_batch};
 use crate::traits::{BatchProvider, Result, SamplerBatch, SchedulerError};
 
 /// Adapter that routes batch-fetching calls to a [`Sampler`] trait object
-/// and converts the core [`SampleBatch`] / [`TripletBatch`] types into the
+/// and converts the core [`SampleBatch`](triplets_core::data::SampleBatch) / [`TripletBatch`](triplets_core::data::TripletBatch) types into the
 /// scheduler's [`SamplerBatch`].
 pub struct SamplerAdapter {
     /// The underlying sampler (trait object for testability).
