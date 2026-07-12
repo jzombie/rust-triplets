@@ -222,7 +222,7 @@ impl<T: Send + 'static> BatchPrefetcher<T> {
         });
         self.stats
             .queued
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
                 Some(value.saturating_sub(1))
             })
             .ok();
