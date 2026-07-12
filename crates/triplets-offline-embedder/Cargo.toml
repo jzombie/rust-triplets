@@ -1,0 +1,25 @@
+[package]
+name = "triplets-offline-embedder"
+description = "Offline teacher-embedding precompute pipeline for the triplets data framework."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+categories = ["algorithms", "artificial-intelligence", "science", "text-processing"]
+keywords = [
+    "train-test-split",
+    "triplet-mining",
+    "embedding",
+    "dataset-sampling",
+    "preprocessing",
+]
+
+[dependencies]
+simd-r-drive = { workspace = true }
+triplets-core = { workspace = true }
+triplets-srd-source = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+triplets-offline-embedder = { path = "." }

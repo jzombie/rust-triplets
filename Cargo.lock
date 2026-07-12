@@ -2790,7 +2790,7 @@ dependencies = [
 
 [[package]]
 name = "triplets"
-version = "0.24.0-alpha"
+version = "0.24.1-alpha"
 dependencies = [
  "bitcode",
  "bm25",
@@ -2806,6 +2806,7 @@ dependencies = [
  "rand 0.9.4",
  "rayon",
  "reqwest 0.13.4",
+ "reqwest-drive",
  "serde",
  "serde_json",
  "simd-r-drive",
@@ -2823,7 +2824,7 @@ dependencies = [
 
 [[package]]
 name = "triplets-core"
-version = "0.24.0-alpha"
+version = "0.24.1-alpha"
 dependencies = [
  "bitcode",
  "bm25",
@@ -2847,7 +2848,7 @@ dependencies = [
 
 [[package]]
 name = "triplets-debug"
-version = "0.24.0-alpha"
+version = "0.24.1-alpha"
 dependencies = [
  "cache-manager",
  "chrono",
@@ -2863,7 +2864,7 @@ dependencies = [
 
 [[package]]
 name = "triplets-hf-source"
-version = "0.24.0-alpha"
+version = "0.24.1-alpha"
 dependencies = [
  "cache-manager",
  "chrono",
@@ -2884,6 +2885,30 @@ dependencies = [
  "triplets-core",
  "triplets-hf-source",
  "walkdir",
+]
+
+[[package]]
+name = "triplets-offline-embedder"
+version = "0.24.1-alpha"
+dependencies = [
+ "simd-r-drive",
+ "tempfile",
+ "triplets-core",
+ "triplets-offline-embedder",
+ "triplets-srd-source",
+]
+
+[[package]]
+name = "triplets-srd-source"
+version = "0.24.1-alpha"
+dependencies = [
+ "chrono",
+ "simd-r-drive",
+ "tempfile",
+ "thiserror",
+ "triplets",
+ "triplets-core",
+ "triplets-srd-source",
 ]
 
 [[package]]
