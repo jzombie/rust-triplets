@@ -121,11 +121,14 @@ fn strategy_reason_and_chunk_key_cover_all_variants() {
     let reason_a = strategy_reason(&NegativeStrategy::WrongPublicationDate);
     let reason_b = strategy_reason(&NegativeStrategy::WrongArticle);
     let reason_c = strategy_reason(&NegativeStrategy::QuestionAnswerMismatch);
+    let reason_d = strategy_reason(&NegativeStrategy::SameRecord);
     assert!(!reason_a.is_empty());
     assert!(!reason_b.is_empty());
     assert!(!reason_c.is_empty());
+    assert!(!reason_d.is_empty());
     assert_ne!(reason_a, reason_b);
     assert_ne!(reason_b, reason_c);
+    assert_ne!(reason_c, reason_d);
 
     let base = RecordChunk {
         record_id: "r1".into(),

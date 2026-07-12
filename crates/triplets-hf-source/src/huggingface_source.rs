@@ -63,10 +63,12 @@ use triplets_core::source::{DataSource, SourceCursor, SourceSnapshot};
 
 const HF_SOURCE_KEY_ANCHOR: &str = "anchor";
 const HF_SOURCE_KEY_POSITIVE: &str = "positive";
+const HF_SOURCE_KEY_NEGATIVE: &str = "negative";
 const HF_SOURCE_KEY_CONTEXT: &str = "context";
 const HF_SOURCE_KEY_TEXT: &str = "text";
 const HF_SOURCE_KEY_TEXT_COLUMNS: &str = "text_columns";
 const HF_SOURCE_KEY_TRUST: &str = "trust";
+const HF_SOURCE_KEY_WEIGHT: &str = "weight";
 const HF_SOURCE_KEY_SOURCE_ID: &str = "source_id";
 
 /// Default HF text-columns-mode SimCSE-style recipe name.
@@ -173,6 +175,16 @@ pub struct HfSourceEntry {
     /// non-empty is used as the positive role for the row.  When the list is
     /// non-empty and no candidate yields content, the row is skipped.
     pub positive_columns: Vec<String>,
+    /// Negative candidate columns (ordered).
+    ///
+    /// Used only in **role-based mode**.  Every listed column is required: if
+    /// any is missing or blank the row is skipped.
+    ///
+    /// When a column value is a list (e.g. `["neg1", "neg2"]`), each element
+    /// is expanded into a separate `SectionRole::Context` section.  This
+    /// supports HuggingFace "dict" datasets where negatives are provided as
+    /// a list within the same row.
+    pub negative_columns: Vec<String>,
     /// Optional context columns (ordered).
     ///
     /// Used only in **role-based mode** (i.e. when `anchor_columns` and/or
@@ -198,6 +210,12 @@ pub struct HfSourceEntry {
     /// When set, overrides the default `QualityScore::default().trust` (0.5)
     /// for every record emitted by this source.  Must be in `[0.0, 1.0]`.
     pub trust: Option<f32>,
+    /// Optional weight for weighted source scheduling.
+    ///
+    /// When set, used by [`build_hf_sources_with_weights`] to populate a
+    /// per-source weight map that callers pass to
+    /// `TripletSampler::advance_with_weights`.  Must be `> 0.0`.
+    pub weight: Option<f32>,
     /// Optional source ID override.
     ///
     /// When set, this string is used as the source identifier instead of the
@@ -212,12 +230,14 @@ impl PartialEq for HfSourceEntry {
         self.uri == other.uri
             && self.anchor_columns == other.anchor_columns
             && self.positive_columns == other.positive_columns
+            && self.negative_columns == other.negative_columns
             && self.context_columns == other.context_columns
             && self.text_columns == other.text_columns
             && self.source_id == other.source_id
             // Compare f32 bits so that identical bit patterns are considered equal.
             // Valid trust values are never NaN, so bit-level comparison is correct.
             && self.trust.map(f32::to_bits) == other.trust.map(f32::to_bits)
+            && self.weight.map(f32::to_bits) == other.weight.map(f32::to_bits)
     }
 }
 
@@ -257,9 +277,11 @@ pub fn parse_hf_source_line(line: &str) -> Result<HfSourceEntry, String> {
         uri: uri.to_string(),
         anchor_columns: Vec::new(),
         positive_columns: Vec::new(),
+        negative_columns: Vec::new(),
         context_columns: Vec::new(),
         text_columns: Vec::new(),
         trust: None,
+        weight: None,
         source_id: None,
     };
 
@@ -277,6 +299,9 @@ pub fn parse_hf_source_line(line: &str) -> Result<HfSourceEntry, String> {
             }
             HF_SOURCE_KEY_POSITIVE => {
                 entry.positive_columns = parse_csv_fields(value);
+            }
+            HF_SOURCE_KEY_NEGATIVE => {
+                entry.negative_columns = parse_csv_fields(value);
             }
             HF_SOURCE_KEY_CONTEXT => {
                 entry.context_columns = parse_csv_fields(value);
@@ -299,6 +324,15 @@ pub fn parse_hf_source_line(line: &str) -> Result<HfSourceEntry, String> {
                 }
                 entry.source_id = Some(value.to_string());
             }
+            HF_SOURCE_KEY_WEIGHT => {
+                let w: f32 = value.parse().map_err(|_| {
+                    format!("invalid weight value '{value}': expected a positive float")
+                })?;
+                if w <= 0.0 {
+                    return Err(format!("weight value {w} must be > 0.0"));
+                }
+                entry.weight = Some(w);
+            }
             _ => {
                 return Err(format!("unsupported mapping key '{raw_key}'"));
             }
@@ -307,11 +341,12 @@ pub fn parse_hf_source_line(line: &str) -> Result<HfSourceEntry, String> {
 
     let has_explicit_mapping = !entry.anchor_columns.is_empty()
         || !entry.positive_columns.is_empty()
+        || !entry.negative_columns.is_empty()
         || !entry.context_columns.is_empty()
         || !entry.text_columns.is_empty();
     if !has_explicit_mapping {
         return Err(format!(
-            "source '{}' has no field mapping; expected at least one of anchor=, positive=, context=, text=",
+            "source '{}' has no field mapping; expected at least one of anchor=, positive=, negative=, context=, text=",
             entry.uri
         ));
     }
@@ -504,6 +539,7 @@ pub fn build_hf_sources(roots: &HfListRoots) -> Vec<Box<dyn DataSource + 'static
                 HuggingFaceRowsConfig::new(source_id, dataset, config, split, snapshot_dir);
             hf.anchor_columns = source.anchor_columns.clone();
             hf.positive_columns = source.positive_columns.clone();
+            hf.negative_columns = source.negative_columns.clone();
             hf.context_columns = source.context_columns.clone();
             hf.text_columns = source.text_columns.clone();
             hf.trust_override = source.trust;
@@ -512,12 +548,13 @@ pub fn build_hf_sources(roots: &HfListRoots) -> Vec<Box<dyn DataSource + 'static
             }
             hf.http_client = shared_client.clone();
             println!(
-                "source {idx}: hf://{}/{}/{} -> anchor={:?}, positive={:?}, context={:?}, text_columns={:?}",
+                "source {idx}: hf://{}/{}/{} -> anchor={:?}, positive={:?}, negative={:?}, context={:?}, text_columns={:?}",
                 hf.dataset_name,
                 hf.config_name,
                 hf.split_name,
                 hf.anchor_columns,
                 hf.positive_columns,
+                hf.negative_columns,
                 hf.context_columns,
                 hf.text_columns
             );
@@ -534,6 +571,115 @@ pub fn build_hf_sources(roots: &HfListRoots) -> Vec<Box<dyn DataSource + 'static
             }
         })
         .collect()
+}
+
+/// Build Hugging Face row sources from a parsed source list, returning
+/// both the sources and a per-source weight map.
+///
+/// Entries with a `weight=` value in their URI are included in the returned
+/// `HashMap<String, f32>` (keyed by source ID).  Callers pass this map to
+/// `TripletSampler::advance_with_weights` for weighted scheduling.
+pub fn build_hf_sources_with_weights(
+    roots: &HfListRoots,
+) -> (Vec<Box<dyn DataSource + 'static>>, HashMap<String, f32>) {
+    let mut weights = HashMap::new();
+
+    // Phase 1: compute auto-slugs for entries that don't have an explicit source_id.
+    let base_slugs: Vec<Option<String>> = roots
+        .sources
+        .iter()
+        .enumerate()
+        .map(|(idx, source)| {
+            if source.source_id.is_some() {
+                None
+            } else {
+                Some(match parse_hf_uri(&source.uri) {
+                    Ok((dataset, config, split)) => hf_source_id_slug(&dataset, &config, &split),
+                    Err(_) => format!("hf_list_{idx}"),
+                })
+            }
+        })
+        .collect();
+
+    // Phase 2: find duplicate slugs for disambiguation.
+    let mut slug_count: HashMap<&str, usize> = HashMap::new();
+    for slug in base_slugs.iter().flatten() {
+        *slug_count.entry(slug.as_str()).or_insert(0) += 1;
+    }
+    let mut slug_idx: HashMap<&str, usize> = HashMap::new();
+
+    let shared_client = std::sync::OnceLock::<ClientWithMiddleware>::new();
+
+    let sources: Vec<Box<dyn DataSource + 'static>> = roots
+        .sources
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, source)| {
+            let (dataset, config, split) = match parse_hf_uri(&source.uri) {
+                Ok(v) => v,
+                Err(err) => {
+                    eprintln!("Skipping Hugging Face source '{}': {}", source.uri, err);
+                    return None;
+                }
+            };
+
+            let source_id = if let Some(ref sid) = source.source_id {
+                sid.clone()
+            } else {
+                let base = base_slugs[idx].as_deref().unwrap_or("hf");
+                let count = slug_count.get(base).copied().unwrap_or(0);
+                if count > 1 {
+                    let i = slug_idx.entry(base).or_insert(0);
+                    let id = format!("{base}.{i}");
+                    *i += 1;
+                    id
+                } else {
+                    base.to_string()
+                }
+            };
+
+            let snapshot_dir = match managed_hf_list_snapshot_dir(&dataset, &config, &split, idx) {
+                Ok(dir) => dir,
+                Err(err) => {
+                    eprintln!("Skipping Hugging Face source '{}': {}", source.uri, err);
+                    return None;
+                }
+            };
+
+            let mut hf =
+                HuggingFaceRowsConfig::new(source_id, dataset, config, split, snapshot_dir);
+            hf.anchor_columns = source.anchor_columns.clone();
+            hf.positive_columns = source.positive_columns.clone();
+            hf.negative_columns = source.negative_columns.clone();
+            hf.context_columns = source.context_columns.clone();
+            hf.text_columns = source.text_columns.clone();
+            hf.trust_override = source.trust;
+            let client = shared_client.get_or_init(|| {
+                HuggingFaceRowSource::build_http_client(&hf).unwrap_or_else(|_| {
+                    HuggingFaceRowSource::build_http_client(&hf).expect("http client")
+                })
+            });
+            hf.http_client = Some(client.clone());
+
+            // Record weight if set.
+            if let Some(w) = source.weight {
+                weights.insert(hf.source_id.clone(), w);
+            }
+
+            match HuggingFaceRowSource::new(hf) {
+                Ok(source) => Some(Box::new(source) as Box<dyn DataSource + 'static>),
+                Err(err) => {
+                    eprintln!(
+                        "Skipping Hugging Face source initialization for '{}': {}",
+                        source.uri, err
+                    );
+                    None
+                }
+            }
+        })
+        .collect();
+
+    (sources, weights)
 }
 
 /// Shared handle to the open-store cache.  Stored on `HuggingFaceRowsConfig`
@@ -626,6 +772,13 @@ pub struct HuggingFaceRowsConfig {
     ///
     /// Positive text is emitted as a `SectionRole::Context` section.
     pub positive_columns: Vec<String>,
+    /// Negative candidate columns (ordered).
+    ///
+    /// Used only in **role-based mode**.  When a column value is a JSON array,
+    /// each element is expanded into a separate `SectionRole::Context` section.
+    /// This supports HuggingFace "dict" datasets where negatives are embedded
+    /// as a list in the same row (e.g. `embedding-data/QQP_triplets`).
+    pub negative_columns: Vec<String>,
     /// Optional ordered context columns.
     ///
     /// Used only in **role-based mode** (i.e. when `anchor_columns` and/or
@@ -721,6 +874,7 @@ impl HuggingFaceRowsConfig {
             text_columns: vec!["text".to_string()],
             anchor_columns: Vec::new(),
             positive_columns: Vec::new(),
+            negative_columns: Vec::new(),
             context_columns: Vec::new(),
             trust_override: None,
             label_maps: HashMap::new(),
@@ -738,6 +892,7 @@ impl HuggingFaceRowsConfig {
     fn has_explicit_mapping(&self) -> bool {
         !self.anchor_columns.is_empty()
             || !self.positive_columns.is_empty()
+            || !self.negative_columns.is_empty()
             || !self.context_columns.is_empty()
             || !self.text_columns.is_empty()
     }
@@ -4177,9 +4332,35 @@ impl HuggingFaceRowSource {
                 }
                 Some(n.to_string())
             }
-            Value::Array(arr) => serde_json::to_string(arr).ok().filter(|s| !s.is_empty()),
+            Value::Array(arr) => {
+                for element in arr {
+                    if let Some(text) = Self::value_to_text(element, label_names) {
+                        return Some(text);
+                    }
+                }
+                None
+            }
             Value::Object(obj) => serde_json::to_string(obj).ok().filter(|s| !s.is_empty()),
         }
+    }
+
+    /// Resolve a dot-separated column path against a JSON object.
+    ///
+    /// Splits `name` on `.` and walks the JSON hierarchy.  For example
+    /// `"set.query"` resolves to `row["set"]["query"]`.  A bare name
+    /// without dots (e.g. `"query"`) performs a simple top-level lookup.
+    ///
+    /// Returns `None` when any segment of the path is missing or when an
+    /// intermediate value is not a JSON object.
+    fn resolve_json_path(row_obj: &serde_json::Map<String, Value>, name: &str) -> Option<Value> {
+        let mut current = Value::Object(row_obj.clone());
+        for segment in name.split('.') {
+            current = match current {
+                Value::Object(map) => map.get(segment)?.clone(),
+                _ => return None,
+            };
+        }
+        Some(current)
     }
 
     /// Try each candidate column name in order and return the first one that
@@ -4192,7 +4373,7 @@ impl HuggingFaceRowSource {
     ) -> Option<RowTextField> {
         for name in candidates {
             let label_names = label_maps.get(name).map(|v| v.as_slice());
-            if let Some(value) = row_obj.get(name)
+            if let Some(ref value) = Self::resolve_json_path(row_obj, name)
                 && let Some(text) = Self::value_to_text(value, label_names)
             {
                 return Some(RowTextField {
@@ -4202,6 +4383,46 @@ impl HuggingFaceRowSource {
             }
         }
         None
+    }
+
+    /// Extract all elements from a list-valued column, returning one
+    /// `RowTextField` per element.
+    ///
+    /// For non-list values, returns a single-element vector (same behavior
+    /// as `coalesce_field`).  For lists, each non-empty element becomes a
+    /// separate field.  Empty/blank elements are skipped.  Returns `None`
+    /// when no non-empty elements are found.
+    fn coalesce_list_field(
+        name: &str,
+        value: &Value,
+        label_maps: &HashMap<String, Vec<String>>,
+    ) -> Option<Vec<RowTextField>> {
+        let label_names = label_maps.get(name).map(|v| v.as_slice());
+        match value {
+            Value::Array(arr) => {
+                let fields: Vec<RowTextField> = arr
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, element)| {
+                        Self::value_to_text(element, label_names).map(|text| RowTextField {
+                            name: format!("{name}[{i}]"),
+                            text,
+                        })
+                    })
+                    .collect();
+                if fields.is_empty() {
+                    None
+                } else {
+                    Some(fields)
+                }
+            }
+            other => Self::value_to_text(other, label_names).map(|text| {
+                vec![RowTextField {
+                    name: name.to_string(),
+                    text,
+                }]
+            }),
+        }
     }
 
     /// Parse a raw row payload into normalized `RowView` fields.
@@ -4231,8 +4452,8 @@ impl HuggingFaceRowSource {
             .config
             .id_column
             .as_ref()
-            .and_then(|col| row_obj.get(col))
-            .and_then(|v| Self::value_to_text(v, None))
+            .and_then(|col| Self::resolve_json_path(row_obj, col))
+            .and_then(|v| Self::value_to_text(&v, None))
             .unwrap_or_else(|| {
                 format!(
                     "{}:{}:{}",
@@ -4243,6 +4464,7 @@ impl HuggingFaceRowSource {
         let mut text_fields = Vec::new();
         let use_role_columns = !self.config.anchor_columns.is_empty()
             || !self.config.positive_columns.is_empty()
+            || !self.config.negative_columns.is_empty()
             || !self.config.context_columns.is_empty();
 
         if use_role_columns {
@@ -4275,17 +4497,29 @@ impl HuggingFaceRowSource {
             }
 
             for name in &self.config.context_columns {
-                let Some(value) = row_obj.get(name) else {
+                let Some(value) = Self::resolve_json_path(row_obj, name) else {
                     return Ok(None);
                 };
                 let label_names = self.config.label_maps.get(name).map(|v| v.as_slice());
-                let Some(text) = Self::value_to_text(value, label_names) else {
+                let Some(text) = Self::value_to_text(&value, label_names) else {
                     return Ok(None);
                 };
                 text_fields.push(RowTextField {
                     name: name.clone(),
                     text,
                 });
+            }
+
+            // Negative columns: expand list values into multiple Context sections.
+            for name in &self.config.negative_columns {
+                let Some(value) = Self::resolve_json_path(row_obj, name) else {
+                    return Ok(None);
+                };
+                let Some(fields) = Self::coalesce_list_field(name, &value, &self.config.label_maps)
+                else {
+                    return Ok(None);
+                };
+                text_fields.extend(fields);
             }
         } else {
             // Text-columns mode: try each candidate column in order; use the
@@ -5001,6 +5235,21 @@ impl DataSource for HuggingFaceRowSource {
 
     /// Return mixed default triplet recipes used by Hugging Face row sources.
     fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {
+        // Dict-dataset mode: negative_columns is set, meaning negatives come
+        // from the same row rather than different records.
+        if !self.config.negative_columns.is_empty() {
+            return vec![TripletRecipe {
+                name: "huggingface_dict_anchor_positive_same_record".into(),
+                anchor: Selector::Role(SectionRole::Anchor),
+                positive_selector: Selector::Role(SectionRole::Context),
+                negative_selector: Selector::Role(SectionRole::Context),
+                negative_strategy: NegativeStrategy::SameRecord,
+                weight: 1.0,
+                instruction: None,
+                allow_same_anchor_positive: false,
+            }];
+        }
+
         // Text-columns mode: anchor_columns is empty and only a plain text column is
         // mapped.  In this configuration every record's Anchor and Context sections
         // carry identical text (the single text field is duplicated by row_to_record).
@@ -5517,18 +5766,22 @@ mod tests {
                     uri: "hf://onlyorg".to_string(),
                     anchor_columns: vec!["title".to_string()],
                     positive_columns: Vec::new(),
+                    negative_columns: Vec::new(),
                     context_columns: Vec::new(),
                     text_columns: Vec::new(),
                     trust: None,
+                    weight: None,
                     source_id: None,
                 },
                 HfSourceEntry {
                     uri: "hf://org/dataset/default/train".to_string(),
                     anchor_columns: vec!["title".to_string()],
                     positive_columns: vec!["body".to_string()],
+                    negative_columns: Vec::new(),
                     context_columns: Vec::new(),
                     text_columns: Vec::new(),
                     trust: None,
+                    weight: None,
                     source_id: None,
                 },
             ],
@@ -5561,9 +5814,11 @@ mod tests {
             uri: "hf://org/dataset/default/train".to_string(),
             anchor_columns: vec!["title".to_string()],
             positive_columns: vec!["body".to_string()],
+            negative_columns: Vec::new(),
             context_columns: Vec::new(),
             text_columns: Vec::new(),
             trust: None,
+            weight: None,
             source_id: None,
         };
         let roots = HfListRoots {
@@ -5626,9 +5881,11 @@ mod tests {
                 uri: "hf://org/dataset/default/train".to_string(),
                 anchor_columns: vec!["title".to_string()],
                 positive_columns: vec!["body".to_string()],
+                negative_columns: Vec::new(),
                 context_columns: Vec::new(),
                 text_columns: Vec::new(),
                 trust: None,
+                weight: None,
                 source_id: Some(format!("src_{i}")),
             })
             .collect();
@@ -5732,18 +5989,22 @@ mod tests {
                 uri: "hf://org/dataset/default/train".to_string(),
                 anchor_columns: vec!["title".to_string()],
                 positive_columns: vec!["body".to_string()],
+                negative_columns: Vec::new(),
                 context_columns: Vec::new(),
                 text_columns: Vec::new(),
                 trust: None,
                 source_id: None,
+                weight: None,
             },
             HfSourceEntry {
                 uri: "hf://org/dataset/default/train".to_string(),
                 anchor_columns: vec!["title".to_string()],
                 positive_columns: vec!["body".to_string()],
+                negative_columns: Vec::new(),
                 context_columns: Vec::new(),
                 text_columns: Vec::new(),
                 trust: None,
+                weight: None,
                 source_id: None,
             },
         ];
@@ -8839,7 +9100,7 @@ mod tests {
         );
         assert_eq!(
             HuggingFaceRowSource::value_to_text(&json!([1, 2]), None),
-            Some("[1,2]".into())
+            Some("1".into())
         );
     }
 
@@ -10705,9 +10966,11 @@ mod tests {
             uri: "hf://org/ds/default/train".to_string(),
             anchor_columns: vec!["title".to_string()],
             positive_columns: vec!["body".to_string()],
+            negative_columns: Vec::new(),
             context_columns: vec!["meta".to_string()],
             text_columns: Vec::new(),
             trust: Some(0.8),
+            weight: None,
             source_id: None,
         };
         let same = HfSourceEntry { ..base.clone() };
@@ -11141,9 +11404,11 @@ mod tests {
                 uri: "hf://incomplete".to_string(),
                 anchor_columns: vec!["title".to_string()],
                 positive_columns: Vec::new(),
+                negative_columns: Vec::new(),
                 context_columns: Vec::new(),
                 text_columns: Vec::new(),
                 trust: None,
+                weight: None,
                 source_id: None,
             }],
         };
@@ -11308,5 +11573,235 @@ mod tests {
         assert_eq!(o1, o2);
         let o3 = HuggingFaceRowSource::build_candidate_order(&config, &c1, 99);
         assert_ne!(o1, o3);
+    }
+
+    // ── Dict dataset / nested dict / list expansion tests ──────────────────
+
+    #[test]
+    fn parse_hf_source_line_negative_key() {
+        let entry = parse_hf_source_line(
+            "hf://embedding-data/QQP_triplets anchor=query positive=pos negative=neg",
+        )
+        .unwrap();
+        assert_eq!(entry.anchor_columns, vec!["query"]);
+        assert_eq!(entry.positive_columns, vec!["pos"]);
+        assert_eq!(entry.negative_columns, vec!["neg"]);
+        assert!(entry.context_columns.is_empty());
+    }
+
+    #[test]
+    fn resolve_json_path_top_level() {
+        let row = json!({"query": "hello", "pos": ["p"], "neg": ["n"]});
+        let obj = row.as_object().unwrap();
+        assert_eq!(
+            HuggingFaceRowSource::resolve_json_path(obj, "query"),
+            Some(json!("hello"))
+        );
+    }
+
+    #[test]
+    fn resolve_json_path_nested_dict() {
+        let row = json!({"set": {"query": "hello", "pos": ["p"], "neg": ["n"]}});
+        let obj = row.as_object().unwrap();
+        assert_eq!(
+            HuggingFaceRowSource::resolve_json_path(obj, "set.query"),
+            Some(json!("hello"))
+        );
+        assert_eq!(
+            HuggingFaceRowSource::resolve_json_path(obj, "set.pos"),
+            Some(json!(["p"]))
+        );
+    }
+
+    #[test]
+    fn resolve_json_path_missing_returns_none() {
+        let row = json!({"set": {"query": "hello"}});
+        let obj = row.as_object().unwrap();
+        assert_eq!(
+            HuggingFaceRowSource::resolve_json_path(obj, "missing"),
+            None
+        );
+    }
+
+    #[test]
+    fn value_to_text_array_first_element() {
+        assert_eq!(
+            HuggingFaceRowSource::value_to_text(&json!(["single"]), None),
+            Some("single".into())
+        );
+        assert_eq!(
+            HuggingFaceRowSource::value_to_text(&json!(["a", "b", "c"]), None),
+            Some("a".into())
+        );
+        assert_eq!(HuggingFaceRowSource::value_to_text(&json!([]), None), None);
+        assert_eq!(
+            HuggingFaceRowSource::value_to_text(&json!([null, "valid"]), None),
+            Some("valid".into())
+        );
+    }
+
+    #[test]
+    fn coalesce_list_field_expands_array() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let value = json!(["neg1", "neg2", "neg3"]);
+        let fields =
+            HuggingFaceRowSource::coalesce_list_field("neg", &value, &config.label_maps).unwrap();
+        assert_eq!(fields.len(), 3);
+        assert_eq!(fields[0].name, "neg[0]");
+        assert_eq!(fields[0].text, "neg1");
+        assert_eq!(fields[1].name, "neg[1]");
+        assert_eq!(fields[1].text, "neg2");
+        assert_eq!(fields[2].name, "neg[2]");
+        assert_eq!(fields[2].text, "neg3");
+    }
+
+    #[test]
+    fn coalesce_list_field_scalar_returns_single() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let value = json!("single_value");
+        let fields =
+            HuggingFaceRowSource::coalesce_list_field("col", &value, &config.label_maps).unwrap();
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].name, "col");
+        assert_eq!(fields[0].text, "single_value");
+    }
+
+    #[test]
+    fn parse_row_dict_dataset() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.anchor_columns = vec!["set.query".into()];
+        config.positive_columns = vec!["set.pos".into()];
+        config.negative_columns = vec!["set.neg".into()];
+        config.id_column = None;
+        let source = test_source(config);
+
+        let row = source
+            .parse_row(
+                0,
+                &json!({
+                    "set": {
+                        "query": "What is Rust?",
+                        "pos": ["How does Rust work?"],
+                        "neg": ["Is Python better?", "What is Java?", "Tell me a joke"]
+                    }
+                }),
+            )
+            .unwrap()
+            .unwrap();
+
+        // anchor = set.query, positive = first set.pos element, negatives = expanded set.neg elements
+        assert_eq!(row.text_fields.len(), 5);
+        assert_eq!(row.text_fields[0].name, "set.query");
+        assert_eq!(row.text_fields[0].text, "What is Rust?");
+        assert_eq!(row.text_fields[1].name, "set.pos");
+        assert_eq!(row.text_fields[1].text, "How does Rust work?");
+        assert_eq!(row.text_fields[2].name, "set.neg[0]");
+        assert_eq!(row.text_fields[2].text, "Is Python better?");
+        assert_eq!(row.text_fields[3].name, "set.neg[1]");
+        assert_eq!(row.text_fields[3].text, "What is Java?");
+        assert_eq!(row.text_fields[4].name, "set.neg[2]");
+        assert_eq!(row.text_fields[4].text, "Tell me a joke");
+    }
+
+    #[test]
+    fn parse_row_dict_flat_columns_unaffected() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.anchor_columns = vec!["anchor".into()];
+        config.positive_columns = vec!["positive".into()];
+        config.id_column = Some("id".into());
+        let source = test_source(config);
+
+        // Flat (non-dict) row — should work exactly as before.
+        let row = source
+            .parse_row(0, &json!({"id": "r1", "anchor": "a", "positive": "p"}))
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.text_fields.len(), 2);
+        assert_eq!(row.text_fields[0].text, "a");
+        assert_eq!(row.text_fields[1].text, "p");
+    }
+
+    #[test]
+    fn row_to_record_dict_dataset_sections() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.anchor_columns = vec!["query".into()];
+        config.positive_columns = vec!["pos".into()];
+        config.negative_columns = vec!["neg".into()];
+        let source = test_source(config);
+
+        let row = RowView {
+            row_id: Some("dict:0".into()),
+            timestamp: None,
+            text_fields: vec![
+                RowTextField {
+                    name: "query".into(),
+                    text: "anchor text".into(),
+                },
+                RowTextField {
+                    name: "pos".into(),
+                    text: "positive text".into(),
+                },
+                RowTextField {
+                    name: "neg[0]".into(),
+                    text: "negative one".into(),
+                },
+                RowTextField {
+                    name: "neg[1]".into(),
+                    text: "negative two".into(),
+                },
+            ],
+        };
+
+        let record = source.row_to_record(&row, 0).unwrap().unwrap();
+        // First field → Anchor, second → Context (positive), rest → Context (negatives)
+        assert_eq!(record.sections.len(), 4);
+        assert_eq!(record.sections[0].role, SectionRole::Anchor);
+        assert_eq!(record.sections[0].text, "anchor text");
+        assert_eq!(record.sections[1].role, SectionRole::Context);
+        assert_eq!(record.sections[1].text, "positive text");
+        assert_eq!(record.sections[2].role, SectionRole::Context);
+        assert_eq!(record.sections[2].text, "negative one");
+        assert_eq!(record.sections[3].role, SectionRole::Context);
+        assert_eq!(record.sections[3].text, "negative two");
+    }
+
+    #[test]
+    fn parse_hf_source_line_weight_key() {
+        let entry = parse_hf_source_line("hf://org/ds anchor=t positive=p weight=0.7").unwrap();
+        assert_eq!(entry.weight, Some(0.7));
+    }
+
+    #[test]
+    fn parse_hf_source_line_weight_zero_rejected() {
+        let err = parse_hf_source_line("hf://org/ds anchor=t positive=p weight=0").unwrap_err();
+        assert!(err.contains("must be > 0.0"));
+    }
+
+    #[test]
+    fn parse_hf_source_line_weight_negative_rejected() {
+        let err = parse_hf_source_line("hf://org/ds anchor=t positive=p weight=-1.0").unwrap_err();
+        assert!(err.contains("must be > 0.0"));
+    }
+
+    #[test]
+    fn parse_hf_source_line_weight_invalid_rejected() {
+        let err = parse_hf_source_line("hf://org/ds anchor=t positive=p weight=abc").unwrap_err();
+        assert!(err.contains("invalid weight"));
+    }
+
+    #[test]
+    fn resolve_json_path_non_object_intermediate_returns_none() {
+        let row = json!({"set": "not-an-object"});
+        let obj = row.as_object().unwrap();
+        // "set" exists but is a string, not an object — inner.get should fail.
+        assert_eq!(
+            HuggingFaceRowSource::resolve_json_path(obj, "set.query"),
+            None
+        );
     }
 }
