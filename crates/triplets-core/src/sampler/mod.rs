@@ -18,10 +18,11 @@ use crate::config::{
 };
 use crate::constants::sampler::AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME;
 use crate::constants::sampler::{
-    ANCHOR_POSITIVE_SWAP_MASK, EPOCH_SEED_OFFSET, EXHAUSTION_RETRY_LIMIT, NEG_REASON_WRONG_ARTICLE,
-    NEG_REASON_WRONG_DATE, NEG_REASON_WRONG_QA, PREFETCHER_SOURCE_ID, PREFETCHER_STOPPED_REASON,
-    RECIPE_LABEL_TEXT, RECIPE_LABEL_TRIPLETS, RECIPE_ORDER_MAX_WEIGHT_MULTIPLIER,
-    ROLE_LABEL_ANCHOR, ROLE_LABEL_CONTEXT, SAME_SELECTOR_PAIR_RETRY_LIMIT,
+    ANCHOR_POSITIVE_SWAP_MASK, EPOCH_SEED_OFFSET, EXHAUSTION_RETRY_LIMIT, NEG_REASON_SAME_RECORD,
+    NEG_REASON_WRONG_ARTICLE, NEG_REASON_WRONG_DATE, NEG_REASON_WRONG_QA, PREFETCHER_SOURCE_ID,
+    PREFETCHER_STOPPED_REASON, RECIPE_LABEL_TEXT, RECIPE_LABEL_TRIPLETS,
+    RECIPE_ORDER_MAX_WEIGHT_MULTIPLIER, ROLE_LABEL_ANCHOR, ROLE_LABEL_CONTEXT,
+    SAME_SELECTOR_PAIR_RETRY_LIMIT,
 };
 use crate::data::{
     ChunkView, DataRecord, PairLabel, RecordChunk, RecordSection, SampleBatch, SamplePair,
@@ -1180,6 +1181,14 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                     anchor_query_text,
                     rng,
                 )
+            }
+            NegativeStrategy::SameRecord => {
+                // Return the anchor record itself.  The caller
+                // (finalize_triplet_with_negative) will call select_chunk on
+                // this record using the recipe's negative_selector, which
+                // picks from Context sections.  The dedup guard rejects
+                // triplets where any two slots share identical text.
+                Some((Arc::new(anchor_record.clone()), false))
             }
         }
     }
@@ -3188,6 +3197,7 @@ fn strategy_reason(strategy: &NegativeStrategy) -> &'static str {
         NegativeStrategy::WrongPublicationDate => NEG_REASON_WRONG_DATE,
         NegativeStrategy::WrongArticle => NEG_REASON_WRONG_ARTICLE,
         NegativeStrategy::QuestionAnswerMismatch => NEG_REASON_WRONG_QA,
+        NegativeStrategy::SameRecord => NEG_REASON_SAME_RECORD,
     }
 }
 

@@ -169,9 +169,10 @@ The HF source supports two exclusive extraction modes, selected by which fields 
 |--------------------|------------|---------------------------------|--------------------------------------------------|
 | `anchor_columns`   | Yes        | `Anchor`                        | Row is skipped                                   |
 | `positive_columns` | Yes        | `Context`                       | Row is skipped                                   |
+| `negative_columns` | No (expanded) | `Context` (one section per list element) | Row is skipped if any column is absent/blank |
 | `context_columns`  | No         | `Context` (one section per col) | Row is skipped if **any** column is absent/blank |
 
-*Coalescing* means multiple candidate column names can be supplied; the first with a non-empty value is used and the rest are ignored. `context_columns` does **not** coalesce — every listed column is strictly required and each contributes its own independent section.
+*Coalescing* means multiple candidate column names can be supplied; the first with a non-empty value is used and the rest are ignored. `negative_columns` does **not** coalesce — every listed column is strictly required, and list values are expanded into individual sections. `context_columns` behaves the same way.
 
 **Text mode** — used when `anchor_columns` is empty and `text_columns` is non-empty. The first non-empty candidate column supplies the sole content for the row. This is the SimCSE-style path where the model learns from augmented views of the same text.
 
@@ -229,6 +230,51 @@ Multiple context columns are supported and each produces its own section, in the
 hf://my-org/my-dataset/default/train anchor=title positive=summary context=body,tags
 ```
 
+##### Role mode: dict datasets (anchor / positive / negatives in the same row)
+
+HuggingFace datasets like [`embedding-data/QQP_triplets`](https://huggingface.co/datasets/embedding-data/QQP_triplets) store anchor, positive, and negative examples as nested dict fields in a single row:
+
+```json
+{"set": {"query": "How do I reset my password?", "pos": ["Click forgot password on the login page."], "neg": ["Contact support for assistance.", "Check the FAQ section."]}}
+```
+
+Map these with `negative=` — each list element becomes a separate `SectionRole::Context` section, and the sampler uses the `SameRecord` negative strategy to select from them:
+
+```text
+hf://embedding-data/QQP_triplets anchor=set.query positive=set.pos negative=set.neg
+```
+
+Or programmatically:
+
+```rust,no_run
+#[cfg(feature = "huggingface")]
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    use triplets::{HuggingFaceRowSource, HuggingFaceRowsConfig};
+
+    let mut config = HuggingFaceRowsConfig::new(
+        "qqp_triplets",
+        "embedding-data/QQP_triplets",
+        "default",
+        "train",
+        "cache/hf_snapshots",
+    );
+    config.anchor_columns   = vec!["set.query".to_string()];
+    config.positive_columns = vec!["set.pos".to_string()];
+    config.negative_columns = vec!["set.neg".to_string()];
+
+    let source = HuggingFaceRowSource::new(config)?;
+    let _ = source;
+    Ok(())
+}
+
+#[cfg(not(feature = "huggingface"))]
+fn main() {}
+```
+
+List values in `negative_columns` are automatically expanded into individual sections, so a row with 3 negatives produces 3 `Context` sections. The `SameRecord` negative strategy (auto-emitted by the source's `default_triplet_recipes()`) picks a negative chunk from those sections.
+
+> **User-derived negatives**: this lets you supply your own hard negatives directly in the dataset rather than relying on BM25 mining.  The sampler still applies its chunk selection and quality scoring — the difference is that the negative pool comes from the row's own `negative` field instead of from a different record.
+
 #### Source-list file format
 
 When using `build_hf_sources` / `load_hf_sources_from_list`, sources are described one per line in a plain-text file. Lines starting with `#` are comments; blank lines are ignored.
@@ -243,9 +289,11 @@ Every accepted key and its semantics:
 |---------------------------|-----------------------------|-----------------|------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `anchor=`                 | one or more column names    | Yes             | At least one of `anchor`, `positive`, `context`, or `text` is required | Activates role mode. Columns are tried in order; the first non-empty value is used as the `Anchor` section. Row skipped if all candidates are absent/empty.                              |
 | `positive=`               | one or more column names    | Yes             | No                                                                     | Activates role mode. Columns are tried in order; the first non-empty value becomes a `Context` section. Row skipped if all candidates are absent/empty.                                  |
+| `negative=`               | one or more column names    | Yes             | No                                                                     | Activates role mode. Every listed column is required — if any is absent or blank the row is dropped. List values (e.g. JSON arrays) are expanded into individual `Context` sections. Enables `SameRecord` negative strategy in the auto-emitted recipe. |
 | `context=`                | one or more column names    | Yes             | No                                                                     | Activates role mode. Every listed column is required — if any is absent or blank the row is dropped. Each column becomes its own `Context` section, in declaration order. No coalescing. |
 | `text=` / `text_columns=` | one or more column names    | Yes             | At least one mapping key is required                                   | Activates text mode (SimCSE). Columns are tried in order; the first non-empty value is the sole content of the record. Ignored when role mode is active. Both spellings are equivalent.  |
 | `trust=`                  | float in `[0.0, 1.0]`       | No              | No (default: `0.5`)                                                    | Overrides the quality trust score stamped on every record produced by this source. Out-of-range values or non-float strings are hard errors at parse time.                               |
+| `weight=`                 | float `> 0.0`               | No              | No                                                                     | Per-source weight for weighted scheduling. Populates a weight map returned by `build_hf_sources_with_weights` for use with `Sampler::next_triplet_batch_with_weights`.                  |
 | `source_id=`              | non-empty identifier string | No              | No (auto-derived when absent)                                          | Overrides the automatically generated source identifier. Must not be empty.                                                                                                              |
 
 **Auto-derived `source_id`**
@@ -262,7 +310,7 @@ Examples: `hf://org/wikipedia/20231101.en/train` → `wikipedia.20231101_en`; `h
 
 **Error behavior**
 
-Unknown keys (including typos such as `positve=`) are hard errors — the parser rejects the line immediately rather than silently ignoring the key. This prevents misconfigured sources from being silently loaded with missing column mappings. A line with no recognized mapping key (`anchor=`, `positive=`, `context=`, or `text=`) is also rejected.
+Unknown keys (including typos such as `positve=`) are hard errors — the parser rejects the line immediately rather than silently ignoring the key. This prevents misconfigured sources from being silently loaded with missing column mappings. A line with no recognized mapping key (`anchor=`, `positive=`, `negative=`, `context=`, or `text=`) is also rejected.
 
 #### Authenticating with Private Datasets
 
@@ -356,6 +404,39 @@ for dataset in datasets {
     cfg.http_client = Some(client.clone());  // clone is cheap (Arc'd)
     let source = HuggingFaceRowSource::new(cfg)?;
     sampler.register_source(Box::new(source))?;
+}
+```
+
+#### Weighted Source Scheduling
+
+Sources can carry a `weight=` key for per-source scheduling. Use `build_hf_sources_with_weights` instead of `build_hf_sources` to extract both sources and a weight map, then pass the map to `next_triplet_batch_with_weights`:
+
+```text
+# in hf_sources.txt
+hf://org/high-quality-dataset/default/train anchor=query positive=answer weight=0.7
+hf://org/large-corpus/default/train anchor=query positive=answer weight=0.3
+```
+
+```rust,no_run
+#[cfg(feature = "huggingface")]
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    use triplets::{TripletSampler, SplitRatios, DeterministicSplitStore, SplitLabel, Sampler};
+    use triplets_hf_source::{load_hf_sources_from_list, resolve_hf_list_roots, build_hf_sources_with_weights};
+
+    let roots = resolve_hf_list_roots("hf_sources.txt")?;
+    let (sources, weights) = build_hf_sources_with_weights(&roots);
+
+    let ratios = SplitRatios { train: 0.8, validation: 0.1, test: 0.1 };
+    let store = std::sync::Arc::new(DeterministicSplitStore::new(ratios, 42)?);
+    let mut sampler = TripletSampler::new(triplets::SamplerConfig::default(), store);
+
+    for source in sources {
+        sampler.register_source(source)?;
+    }
+
+    // Pass the weight map to schedule sources proportionally.
+    let batch = sampler.next_triplet_batch_with_weights(SplitLabel::Train, &weights)?;
+    Ok(())
 }
 ```
 
@@ -1279,6 +1360,20 @@ Negative selection is delegated to a pluggable backend.
 - **DefaultBackend**: Uniform random selection from the candidate pool.
 - **Bm25Backend**: (Requires `bm25-mining`) Ranks candidates by lexical overlap with the anchor to provide harder training examples.
 
+#### User-Derived Negatives
+
+Beyond automatic negative mining, you can supply your own negatives directly in the dataset. This is useful when you already have hard negatives (e.g. from a retrieval system, human annotation, or dataset-specific knowledge).
+
+For HuggingFace dict datasets with embedded negatives (like `embedding-data/QQP_triplets`), use the `negative=` column mapping. The sampler automatically selects the `SameRecord` negative strategy, which picks a negative chunk from the anchor record's own Context sections:
+
+```text
+hf://embedding-data/QQP_triplets anchor=set.query positive=set.pos negative=set.neg
+```
+
+The list values in the negative column are expanded into individual sections, so each row contributes multiple negative candidates. The `SameRecord` strategy ensures the sampler selects from those candidates rather than drawing from a different record.
+
+You can also combine user-derived negatives with BM25 mining by registering both a dict source and a standard source — the sampler blends them according to recipe weights and source mixing ratios.
+
 ## Capabilities
 
 | Capability              | Description                                                                   |
@@ -1290,6 +1385,7 @@ Negative selection is delegated to a pluggable backend.
 | **Metadata Decorators** | Inject structured prefixes into sampled text via `KvpPrefixSampler`.          |
 | **Anti-Shortcut**       | Includes anchor/positive swapping to avoid asymmetric slot bias.              |
 | **OCR & Markdown Denoiser** | Preprocessing step: strips digit-heavy OCR noise and markdown table formatting before chunking. |
+| **User-Derived Negatives** | Supply your own negatives via `negative=` column mapping on HuggingFace dict datasets. |
 
 ## License
 
