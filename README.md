@@ -293,7 +293,7 @@ Every accepted key and its semantics:
 | `context=`                | one or more column names    | Yes             | No                                                                     | Activates role mode. Every listed column is required — if any is absent or blank the row is dropped. Each column becomes its own `Context` section, in declaration order. No coalescing. |
 | `text=` / `text_columns=` | one or more column names    | Yes             | At least one mapping key is required                                   | Activates text mode (SimCSE). Columns are tried in order; the first non-empty value is the sole content of the record. Ignored when role mode is active. Both spellings are equivalent.  |
 | `trust=`                  | float in `[0.0, 1.0]`       | No              | No (default: `0.5`)                                                    | Overrides the quality trust score stamped on every record produced by this source. Out-of-range values or non-float strings are hard errors at parse time.                               |
-| `weight=`                 | float `> 0.0`               | No              | No                                                                     | Per-source weight for weighted scheduling. Populates a weight map returned by `build_hf_sources_with_weights` for use with `TripletSampler::advance_with_weights`.                      |
+| `weight=`                 | float `> 0.0`               | No              | No                                                                     | Per-source weight for weighted scheduling. Populates a weight map returned by `build_hf_sources_with_weights` for use with `Sampler::next_triplet_batch_with_weights`.                  |
 | `source_id=`              | non-empty identifier string | No              | No (auto-derived when absent)                                          | Overrides the automatically generated source identifier. Must not be empty.                                                                                                              |
 
 **Auto-derived `source_id`**
@@ -409,7 +409,7 @@ for dataset in datasets {
 
 #### Weighted Source Scheduling
 
-Sources can carry a `weight=` key for per-source scheduling. Use `build_hf_sources_with_weights` instead of `build_hf_sources` to extract both sources and a weight map, then pass the map to `advance_with_weights`:
+Sources can carry a `weight=` key for per-source scheduling. Use `build_hf_sources_with_weights` instead of `build_hf_sources` to extract both sources and a weight map, then pass the map to `next_triplet_batch_with_weights`:
 
 ```text
 # in hf_sources.txt

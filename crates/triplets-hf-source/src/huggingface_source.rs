@@ -214,7 +214,8 @@ pub struct HfSourceEntry {
     ///
     /// When set, used by [`build_hf_sources_with_weights`] to populate a
     /// per-source weight map that callers pass to
-    /// `TripletSampler::advance_with_weights`.  Must be `> 0.0`.
+    /// `Sampler::next_triplet_batch_with_weights` for weighted scheduling.
+    /// Must be `> 0.0`.
     pub weight: Option<f32>,
     /// Optional source ID override.
     ///
@@ -578,7 +579,7 @@ pub fn build_hf_sources(roots: &HfListRoots) -> Vec<Box<dyn DataSource + 'static
 ///
 /// Entries with a `weight=` value in their URI are included in the returned
 /// `HashMap<String, f32>` (keyed by source ID).  Callers pass this map to
-/// `TripletSampler::advance_with_weights` for weighted scheduling.
+/// `Sampler::next_triplet_batch_with_weights` for weighted scheduling.
 pub fn build_hf_sources_with_weights(
     roots: &HfListRoots,
 ) -> (Vec<Box<dyn DataSource + 'static>>, HashMap<String, f32>) {
