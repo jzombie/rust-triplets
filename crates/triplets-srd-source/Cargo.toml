@@ -1,0 +1,27 @@
+[package]
+name = "triplets-srd-source"
+description = "Experimental simd-r-drive integration for the triplets data pipeline framework."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+categories = ["algorithms", "artificial-intelligence", "science", "text-processing"]
+keywords = [
+    "train-test-split",
+    "triplet-mining",
+    "simd-r-drive",
+    "dataset-sampling",
+    "preprocessing",
+]
+
+[dependencies]
+chrono = { workspace = true }
+simd-r-drive = { workspace = true }
+thiserror = { workspace = true }
+triplets = { workspace = true }
+triplets-core = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+triplets-srd-source = { path = "." }

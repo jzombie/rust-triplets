@@ -154,6 +154,12 @@ pub trait Sampler {
         split: SplitLabel,
         weights: &HashMap<SourceId, f32>,
     ) -> Result<TripletBatch, SamplerError>;
+    /// Persist sampler and split runtime state for restart-resume.
+    ///
+    /// Default is a no-op, allowing mock/test implementations to skip persistence.
+    fn save_sampler_state(&self, _save_to: Option<&std::path::Path>) -> Result<(), SamplerError> {
+        Ok(())
+    }
 }
 
 /// Background prefetcher that fills a bounded queue with sample batches.
@@ -216,7 +222,7 @@ impl<T: Send + 'static> BatchPrefetcher<T> {
         });
         self.stats
             .queued
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
                 Some(value.saturating_sub(1))
             })
             .ok();
@@ -3170,6 +3176,10 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> Sampler for 
         weights: &HashMap<SourceId, f32>,
     ) -> Result<TripletBatch, SamplerError> {
         self.next_triplet_batch_with_weights_for_split(split, weights)
+    }
+
+    fn save_sampler_state(&self, save_to: Option<&std::path::Path>) -> Result<(), SamplerError> {
+        TripletSampler::save_sampler_state(self, save_to)
     }
 }
 

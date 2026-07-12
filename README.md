@@ -9,6 +9,7 @@
     <a href="#epochs-and-determinism">Epochs</a> &middot;
     <a href="#chunking--preprocessing">Chunking &amp; Preprocessing</a> &middot;
     <a href="#ocr--markdown-denoiser">Denoiser</a> &middot;
+    <a href="#offline-teacher-embedding-pre-computation-triplets-offline-embedder">Offline Embedding</a> &middot;
     <a href="#license">License</a>
   </p>
   <p align="center">
@@ -29,7 +30,7 @@ Generate an effectively unlimited stream of [training triplets](https://en.wikip
 
 > A training loop has two halves: the *data side* and the *model side*. `triplets` owns the data side — deterministic and reproducible train/validation/test splitting, seeded shuffling across epochs, weighted multi-source mixing, BM25 hard-negative mining, and static per-record KVP metadata for input conditioning. What it intentionally does *not* include is the model side: forward passes, loss computation, and optimizer steps. The design goal is that you plug this crate's output stream directly into your training framework (crates like [Candle](https://github.com/huggingface/candle), [burn](https://crates.io/crates/burn), [tch](https://crates.io/crates/tch), [PyO3](https://crates.io/crates/pyo3)) and it already handles the parts of the data pipeline that are hardest to get right — correctness, reproducibility, and scale.
 
-**Work in progress.**
+**WORK IN PROGRESS. API MAY BE SUBJECT TO CHANGE.**
 
 ## Overview
 
@@ -417,8 +418,7 @@ hf://org/high-quality-dataset/default/train anchor=query positive=answer weight=
 hf://org/large-corpus/default/train anchor=query positive=answer weight=0.3
 ```
 
-```rust,no_run
-#[cfg(feature = "huggingface")]
+```rust,ignore
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use triplets::{TripletSampler, SplitRatios, DeterministicSplitStore, SplitLabel, Sampler};
     use triplets_hf_source::{load_hf_sources_from_list, resolve_hf_list_roots, build_hf_sources_with_weights};
@@ -1374,6 +1374,22 @@ The list values in the negative column are expanded into individual sections, so
 
 You can also combine user-derived negatives with BM25 mining by registering both a dict source and a standard source — the sampler blends them according to recipe weights and source mixing ratios.
 
+## Offline Teacher Embedding Pre-computation (`triplets-offline-embedder`)
+
+The [`triplets-offline-embedder`](crates/triplets-offline-embedder) crate is an offline data materialization engine for knowledge distillation pipelines. It extracts text from the sampler, executes batch inference against a teacher model, and persists the resulting vectors to per-split stores via the pluggable `EmbedStore` trait.
+
+When used with [`triplets-srd-source`](crates/triplets-srd-source), results are written to [`simd-r-drive`](https://crates.io/crates/simd-r-drive) stores, but any storage backend implementing `EmbedStore` can be substituted. This means knowledge-distilled embeddings can be consumed by downstream pipelines regardless of their source format.
+
+This executes strictly **prior** to the training loop. The student model optimization phase reads these precomputed target embeddings directly from disk, eliminating redundant inference overhead.
+
+**Core Guarantees:**
+
+* **Zero-Copy I/O:** Reads and writes bypass vector cloning via direct memory-mapped slices.
+* **State Resumption:** Automatically opens existing stores and advances the epoch cursor to skip materialized samples.
+* **Interleaved Scheduling:** Balances execution proportionally across train/val splits to prevent temporal dataset skew.
+* **Circuit Breaker:** Enforces a hard pipeline halt if the inference or validation failure rate breaches 5% after the 10-batch warmup window, preventing silent dataset attrition.
+* **Interrupt Safety:** Traps `SIGINT` (Ctrl+C) to guarantee pending split buffers are persisted to disk before process termination.
+
 ## Capabilities
 
 | Capability              | Description                                                                   |
@@ -1386,6 +1402,7 @@ You can also combine user-derived negatives with BM25 mining by registering both
 | **Anti-Shortcut**       | Includes anchor/positive swapping to avoid asymmetric slot bias.              |
 | **OCR & Markdown Denoiser** | Preprocessing step: strips digit-heavy OCR noise and markdown table formatting before chunking. |
 | **User-Derived Negatives** | Supply your own negatives via `negative=` column mapping on HuggingFace dict datasets. |
+| **Offline Embedding** | Offline data materialization engine for knowledge distillation; zero-copy, resumable, circuit-breaker protected. |
 
 ## License
 
