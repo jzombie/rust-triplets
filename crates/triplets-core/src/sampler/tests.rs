@@ -12793,3 +12793,400 @@ fn resume_continues_epoch_step_from_saved_value() {
         );
     }
 }
+
+// ── SameRecord strategy tests ────────────────────────────────────────────────
+
+/// Verify that `SameRecord` strategy returns the anchor record itself as the
+/// negative record, bypassing any backend selection.
+#[test]
+fn same_record_strategy_returns_anchor_as_negative() {
+    let split = SplitRatios {
+        train: 0.7,
+        validation: 0.2,
+        test: 0.1,
+    };
+    let config = SamplerConfig {
+        seed: 42,
+        batch_size: 1,
+        chunking: ChunkingStrategy::default(),
+        recipes: Vec::new(),
+        text_recipes: Vec::new(),
+        split,
+        ..SamplerConfig::default()
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 42).unwrap());
+
+    let anchor = trader_record(
+        "same_rec_anchor",
+        "2025-01-01",
+        "Anchor title",
+        "Anchor body text with enough words for sampling purposes here",
+    );
+    let other = trader_record(
+        "same_rec_other",
+        "2025-01-02",
+        "Other title",
+        "Other body text with enough words for sampling purposes here",
+    );
+
+    let sampler = TripletSampler::new(config, Arc::clone(&store));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "test_src",
+            vec![anchor.clone(), other],
+        )))
+        .unwrap();
+    sampler
+        .inner
+        .lock()
+        .unwrap()
+        .ingest_internal(SplitLabel::Train)
+        .unwrap();
+
+    let mut inner = sampler.inner.lock().unwrap();
+    let (negative, fallback_used) = inner
+        .select_negative_record_seeded(&anchor, &NegativeStrategy::SameRecord, None)
+        .expect("SameRecord must return a negative");
+
+    assert_eq!(
+        negative.id, anchor.id,
+        "SameRecord must return the anchor record itself as the negative"
+    );
+    assert!(!fallback_used, "SameRecord never uses fallback");
+}
+
+/// Verify that `SameRecord` strategy never invokes the negative backend.
+///
+/// When both `bm25-mining` and `extended-metrics` features are active, the
+/// BM25 fallback stats must remain at `(0, 0)` after calling
+/// `select_negative_record` with `SameRecord`, proving the backend was never
+/// called.
+#[cfg(all(feature = "bm25-mining", feature = "extended-metrics"))]
+#[test]
+fn same_record_strategy_bypasses_negative_backend() {
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+    let config = SamplerConfig {
+        seed: 99,
+        batch_size: 1,
+        chunking: ChunkingStrategy::default(),
+        recipes: Vec::new(),
+        text_recipes: Vec::new(),
+        split,
+        ..SamplerConfig::default()
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 99).unwrap());
+
+    let anchor = trader_record(
+        "bm25_bypass_anchor",
+        "2025-03-15",
+        "Quarterly revenue report",
+        "revenue profit margin guidance outlook fiscal year analysis",
+    );
+    let peer = trader_record(
+        "bm25_bypass_peer",
+        "2025-03-16",
+        "Annual financial summary",
+        "revenue profit margin guidance outlook fiscal year analysis",
+    );
+
+    let sampler = TripletSampler::new(config, Arc::clone(&store));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "test_src",
+            vec![anchor.clone(), peer],
+        )))
+        .unwrap();
+    sampler
+        .inner
+        .lock()
+        .unwrap()
+        .ingest_internal(SplitLabel::Train)
+        .unwrap();
+
+    let mut inner = sampler.inner.lock().unwrap();
+
+    // Verify stats are zero before any call.
+    let (fb0, sel0) = inner.bm25_fallback_stats();
+    assert_eq!(sel0, 0, "selection count must be 0 before any call");
+    assert_eq!(fb0, 0, "fallback count must be 0 before any call");
+
+    // Call with SameRecord — backend must NOT be invoked.
+    let result = inner.select_negative_record_seeded(
+        &anchor,
+        &NegativeStrategy::SameRecord,
+        Some("revenue profit margin guidance"),
+    );
+    assert!(result.is_some(), "SameRecord must return a negative");
+
+    let (fb1, sel1) = inner.bm25_fallback_stats();
+    assert_eq!(
+        sel1, 0,
+        "selection count must still be 0 — SameRecord bypasses the backend"
+    );
+    assert_eq!(
+        fb1, 0,
+        "fallback count must still be 0 — SameRecord bypasses the backend"
+    );
+}
+
+/// Verify that `SameRecord` with a `Context` selector picks the negative
+/// chunk from the Context section of the same record (not a different record).
+#[test]
+fn same_record_negative_selector_picks_from_context() {
+    let split = SplitRatios {
+        train: 0.7,
+        validation: 0.2,
+        test: 0.1,
+    };
+    // Use a small window so even short text produces multiple chunks,
+    // enabling the same-selector anchor/positive pair selection.
+    let config = SamplerConfig {
+        seed: 7,
+        batch_size: 1,
+        chunking: ChunkingStrategy {
+            max_window_tokens: 8,
+            overlap_tokens: vec![2],
+            ..ChunkingStrategy::default()
+        },
+        recipes: Vec::new(),
+        text_recipes: Vec::new(),
+        split,
+        ..SamplerConfig::default()
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 7).unwrap());
+
+    // Build a record with distinct Anchor and Context sections.
+    // Use long enough text so that the default sliding-window chunker produces
+    // at least two window chunks for the Anchor selector.
+    let now = Utc::now();
+    let anchor = DataRecord {
+        id: "ctx_anchor".into(),
+        source: "unit".into(),
+        created_at: now,
+        updated_at: now,
+        quality: QualityScore { trust: 0.9 },
+        taxonomy: vec!["unit".into()],
+        sections: vec![
+            RecordSection {
+                role: SectionRole::Anchor,
+                heading: Some("Title".into()),
+                text: "The quick brown fox jumps over the lazy dog. \
+                       Pack my box with five dozen liquor jugs. \
+                       How vexingly quick daft zebras jump. \
+                       The five boxing wizards jump quickly. \
+                       Sphinx of black quartz judge my vow. \
+                       Two driven jocks help fax my big quiz."
+                    .into(),
+                sentences: vec![
+                    "The quick brown fox jumps over the lazy dog.".into(),
+                    "Pack my box with five dozen liquor jugs.".into(),
+                    "How vexingly quick daft zebras jump.".into(),
+                    "The five boxing wizards jump quickly.".into(),
+                    "Sphinx of black quartz judge my vow.".into(),
+                    "Two driven jocks help fax my big quiz.".into(),
+                ],
+            },
+            RecordSection {
+                role: SectionRole::Context,
+                heading: Some("Body".into()),
+                text: "Context section text for negative selection".into(),
+                sentences: vec!["Context section text for negative selection".into()],
+            },
+        ],
+        meta_prefix: None,
+    };
+
+    let sampler = TripletSampler::new(config, Arc::clone(&store));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "test_src",
+            vec![anchor.clone()],
+        )))
+        .unwrap();
+    sampler
+        .inner
+        .lock()
+        .unwrap()
+        .ingest_internal(SplitLabel::Train)
+        .unwrap();
+
+    let recipe = TripletRecipe {
+        name: "same_record_ctx".into(),
+        anchor: Selector::Role(SectionRole::Anchor),
+        positive_selector: Selector::Role(SectionRole::Anchor),
+        negative_selector: Selector::Role(SectionRole::Context),
+        negative_strategy: NegativeStrategy::SameRecord,
+        weight: 1.0,
+        instruction: None,
+        allow_same_anchor_positive: false,
+    };
+
+    let mut inner = sampler.inner.lock().unwrap();
+    let triplet = inner.make_triplet_with_anchor_seeded(&recipe, &anchor);
+    let triplet = triplet.expect("SameRecord + Context selector must produce a triplet");
+
+    // The negative chunk must come from the same record.
+    assert_eq!(
+        triplet.negative.record_id, anchor.id,
+        "negative must come from the same record as the anchor"
+    );
+    // The negative chunk must be from the Context section.
+    assert_eq!(
+        triplet.negative.text, "Context section text for negative selection",
+        "negative chunk must be the Context section text"
+    );
+    // The negative must differ from the anchor (dedup guard).
+    assert_ne!(
+        triplet.negative.text, triplet.anchor.text,
+        "negative must differ from anchor"
+    );
+}
+
+/// Verify that `SameRecord` and `WrongArticle` recipes coexist in the same
+/// sampler — triplets produced by each recipe respect their respective strategy.
+#[test]
+fn same_record_and_wrong_article_recipes_coexist() {
+    let split = SplitRatios {
+        train: 0.7,
+        validation: 0.2,
+        test: 0.1,
+    };
+    let config = SamplerConfig {
+        seed: 55,
+        batch_size: 8,
+        chunking: ChunkingStrategy::default(),
+        recipes: vec![
+            TripletRecipe {
+                name: "same_record_recipe".into(),
+                anchor: Selector::Role(SectionRole::Anchor),
+                positive_selector: Selector::Role(SectionRole::Anchor),
+                negative_selector: Selector::Role(SectionRole::Context),
+                negative_strategy: NegativeStrategy::SameRecord,
+                weight: 1.0,
+                instruction: None,
+                allow_same_anchor_positive: false,
+            },
+            TripletRecipe {
+                name: "wrong_article_recipe".into(),
+                anchor: Selector::Role(SectionRole::Anchor),
+                positive_selector: Selector::Role(SectionRole::Anchor),
+                negative_selector: Selector::Role(SectionRole::Context),
+                negative_strategy: NegativeStrategy::WrongArticle,
+                weight: 1.0,
+                instruction: None,
+                allow_same_anchor_positive: false,
+            },
+        ],
+        text_recipes: Vec::new(),
+        split,
+        ..SamplerConfig::default()
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 55).unwrap());
+
+    // Build records with distinct Anchor AND Context texts so that:
+    // - the dedup guard doesn't reject triplets (anchor/positive/negative differ),
+    // - we can identify which strategy was used for each triplet.
+    let make_record = |id: &str, anchor_text: &str, ctx: &str| -> DataRecord {
+        let now = Utc::now();
+        DataRecord {
+            id: id.into(),
+            source: PRIMARY_SOURCE_ID.into(),
+            created_at: now,
+            updated_at: now,
+            quality: QualityScore { trust: 0.9 },
+            taxonomy: vec![PRIMARY_SOURCE_ID.into()],
+            sections: vec![
+                RecordSection {
+                    role: SectionRole::Anchor,
+                    heading: Some("Title".into()),
+                    text: anchor_text.into(),
+                    sentences: vec![anchor_text.into()],
+                },
+                RecordSection {
+                    role: SectionRole::Context,
+                    heading: Some("Body".into()),
+                    text: ctx.into(),
+                    sentences: vec![ctx.into()],
+                },
+            ],
+            meta_prefix: None,
+        }
+    };
+
+    let records = vec![
+        make_record(
+            "mix_a",
+            "Unique anchor text for record A",
+            "context_a_unique_text",
+        ),
+        make_record(
+            "mix_b",
+            "Unique anchor text for record B",
+            "context_b_unique_text",
+        ),
+        make_record(
+            "mix_c",
+            "Unique anchor text for record C",
+            "context_c_unique_text",
+        ),
+        make_record(
+            "mix_d",
+            "Unique anchor text for record D",
+            "context_d_unique_text",
+        ),
+    ];
+
+    let sampler = TripletSampler::new(config, Arc::clone(&store));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            PRIMARY_SOURCE_ID,
+            records,
+        )))
+        .unwrap();
+    sampler
+        .inner
+        .lock()
+        .unwrap()
+        .ingest_internal(SplitLabel::Train)
+        .unwrap();
+
+    let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
+    assert!(
+        !batch.triplets.is_empty(),
+        "must produce at least one triplet"
+    );
+
+    let mut saw_same_record = false;
+    let mut saw_wrong_article = false;
+
+    for triplet in &batch.triplets {
+        if triplet.recipe.starts_with("same_record_recipe") {
+            saw_same_record = true;
+            // SameRecord: negative must come from the SAME record as the anchor.
+            assert_eq!(
+                triplet.negative.record_id, triplet.anchor.record_id,
+                "SameRecord triplet: negative record must match anchor record"
+            );
+        } else if triplet.recipe.starts_with("wrong_article_recipe") {
+            saw_wrong_article = true;
+            // WrongArticle: negative must come from a DIFFERENT record.
+            assert_ne!(
+                triplet.negative.record_id, triplet.anchor.record_id,
+                "WrongArticle triplet: negative record must differ from anchor record"
+            );
+        }
+    }
+
+    assert!(
+        saw_same_record,
+        "batch must contain at least one SameRecord triplet"
+    );
+    assert!(
+        saw_wrong_article,
+        "batch must contain at least one WrongArticle triplet"
+    );
+}
