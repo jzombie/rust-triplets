@@ -12852,10 +12852,7 @@ fn same_record_strategy_returns_anchor_as_negative() {
         negative.id, anchor.id,
         "SameRecord must return the anchor record itself as the negative"
     );
-    assert!(
-        !fallback_used,
-        "SameRecord never uses fallback"
-    );
+    assert!(!fallback_used, "SameRecord never uses fallback");
 }
 
 /// Verify that `SameRecord` strategy never invokes the negative backend.
@@ -12945,10 +12942,16 @@ fn same_record_negative_selector_picks_from_context() {
         validation: 0.2,
         test: 0.1,
     };
+    // Use a small window so even short text produces multiple chunks,
+    // enabling the same-selector anchor/positive pair selection.
     let config = SamplerConfig {
         seed: 7,
         batch_size: 1,
-        chunking: ChunkingStrategy::default(),
+        chunking: ChunkingStrategy {
+            max_window_tokens: 8,
+            overlap_tokens: vec![2],
+            ..ChunkingStrategy::default()
+        },
         recipes: Vec::new(),
         text_recipes: Vec::new(),
         split,
@@ -13040,5 +13043,150 @@ fn same_record_negative_selector_picks_from_context() {
     assert_ne!(
         triplet.negative.text, triplet.anchor.text,
         "negative must differ from anchor"
+    );
+}
+
+/// Verify that `SameRecord` and `WrongArticle` recipes coexist in the same
+/// sampler — triplets produced by each recipe respect their respective strategy.
+#[test]
+fn same_record_and_wrong_article_recipes_coexist() {
+    let split = SplitRatios {
+        train: 0.7,
+        validation: 0.2,
+        test: 0.1,
+    };
+    let config = SamplerConfig {
+        seed: 55,
+        batch_size: 8,
+        chunking: ChunkingStrategy::default(),
+        recipes: vec![
+            TripletRecipe {
+                name: "same_record_recipe".into(),
+                anchor: Selector::Role(SectionRole::Anchor),
+                positive_selector: Selector::Role(SectionRole::Anchor),
+                negative_selector: Selector::Role(SectionRole::Context),
+                negative_strategy: NegativeStrategy::SameRecord,
+                weight: 1.0,
+                instruction: None,
+                allow_same_anchor_positive: false,
+            },
+            TripletRecipe {
+                name: "wrong_article_recipe".into(),
+                anchor: Selector::Role(SectionRole::Anchor),
+                positive_selector: Selector::Role(SectionRole::Anchor),
+                negative_selector: Selector::Role(SectionRole::Context),
+                negative_strategy: NegativeStrategy::WrongArticle,
+                weight: 1.0,
+                instruction: None,
+                allow_same_anchor_positive: false,
+            },
+        ],
+        text_recipes: Vec::new(),
+        split,
+        ..SamplerConfig::default()
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 55).unwrap());
+
+    // Build records with distinct Anchor AND Context texts so that:
+    // - the dedup guard doesn't reject triplets (anchor/positive/negative differ),
+    // - we can identify which strategy was used for each triplet.
+    let make_record = |id: &str, anchor_text: &str, ctx: &str| -> DataRecord {
+        let now = Utc::now();
+        DataRecord {
+            id: id.into(),
+            source: PRIMARY_SOURCE_ID.into(),
+            created_at: now,
+            updated_at: now,
+            quality: QualityScore { trust: 0.9 },
+            taxonomy: vec![PRIMARY_SOURCE_ID.into()],
+            sections: vec![
+                RecordSection {
+                    role: SectionRole::Anchor,
+                    heading: Some("Title".into()),
+                    text: anchor_text.into(),
+                    sentences: vec![anchor_text.into()],
+                },
+                RecordSection {
+                    role: SectionRole::Context,
+                    heading: Some("Body".into()),
+                    text: ctx.into(),
+                    sentences: vec![ctx.into()],
+                },
+            ],
+            meta_prefix: None,
+        }
+    };
+
+    let records = vec![
+        make_record(
+            "mix_a",
+            "Unique anchor text for record A",
+            "context_a_unique_text",
+        ),
+        make_record(
+            "mix_b",
+            "Unique anchor text for record B",
+            "context_b_unique_text",
+        ),
+        make_record(
+            "mix_c",
+            "Unique anchor text for record C",
+            "context_c_unique_text",
+        ),
+        make_record(
+            "mix_d",
+            "Unique anchor text for record D",
+            "context_d_unique_text",
+        ),
+    ];
+
+    let sampler = TripletSampler::new(config, Arc::clone(&store));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            PRIMARY_SOURCE_ID,
+            records,
+        )))
+        .unwrap();
+    sampler
+        .inner
+        .lock()
+        .unwrap()
+        .ingest_internal(SplitLabel::Train)
+        .unwrap();
+
+    let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
+    assert!(
+        !batch.triplets.is_empty(),
+        "must produce at least one triplet"
+    );
+
+    let mut saw_same_record = false;
+    let mut saw_wrong_article = false;
+
+    for triplet in &batch.triplets {
+        if triplet.recipe.starts_with("same_record_recipe") {
+            saw_same_record = true;
+            // SameRecord: negative must come from the SAME record as the anchor.
+            assert_eq!(
+                triplet.negative.record_id, triplet.anchor.record_id,
+                "SameRecord triplet: negative record must match anchor record"
+            );
+        } else if triplet.recipe.starts_with("wrong_article_recipe") {
+            saw_wrong_article = true;
+            // WrongArticle: negative must come from a DIFFERENT record.
+            assert_ne!(
+                triplet.negative.record_id, triplet.anchor.record_id,
+                "WrongArticle triplet: negative record must differ from anchor record"
+            );
+        }
+    }
+
+    assert!(
+        saw_same_record,
+        "batch must contain at least one SameRecord triplet"
+    );
+    assert!(
+        saw_wrong_article,
+        "batch must contain at least one WrongArticle triplet"
     );
 }
