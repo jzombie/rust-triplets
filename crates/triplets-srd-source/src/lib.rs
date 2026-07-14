@@ -13,8 +13,8 @@ pub mod srd_triplet;
 pub use error::SrdError;
 pub use srd_source::SrdSource;
 pub use srd_triplet::{
-    FLAG_LABEL_NEGATIVE, SrdEntry, SrdMode, SrdPairWriteEntry, SrdTripletWriteEntry,
-    batch_read_entries, decode_entry, encode_entry, validate_write_batch, write_pair_entries,
-    write_triplet_entries,
+    FLAG_LABEL_NEGATIVE, SrdMode, SrdPairRecord, SrdPairWriteEntry, SrdRecord, SrdTripletRecord,
+    SrdTripletWriteEntry, batch_read_entries, decode_entry, encode_entry, validate_write_batch,
+    write_pair_entries, write_triplet_entries,
 };
 pub use triplets_core::data::PairLabel;

@@ -11,7 +11,7 @@ use triplets::source::{DataSource, SourceCursor, SourceSnapshot};
 use triplets::types::RecordId;
 
 use crate::error::SrdError;
-use crate::srd_triplet::{self, SrdMode};
+use crate::srd_triplet::{self, SrdMode, SrdRecord};
 
 /// A [`DataSource`] backed by a simd-r-drive embedding store.
 ///
@@ -85,45 +85,49 @@ impl DataSource for SrdSource {
 
         let now = Utc::now();
         let mut records = Vec::with_capacity(entries.len());
-        for (offset, entry) in indices.iter().zip(entries.iter()) {
+        for (offset, record) in indices.iter().zip(entries.iter()) {
             let id: RecordId = (*offset as u64).to_string();
-            let sections = match entry.mode {
-                SrdMode::Pair => vec![
-                    RecordSection {
-                        role: SectionRole::Anchor,
-                        heading: None,
-                        text: entry.anchor_text.clone(),
-                        sentences: vec![],
-                    },
-                    RecordSection {
-                        role: SectionRole::Context,
-                        heading: None,
-                        text: entry.pos_text.clone(),
-                        sentences: vec![],
-                    },
-                ],
-                SrdMode::Triplet => vec![
-                    RecordSection {
-                        role: SectionRole::Anchor,
-                        heading: None,
-                        text: entry.anchor_text.clone(),
-                        sentences: vec![],
-                    },
-                    RecordSection {
-                        role: SectionRole::Context,
-                        heading: None,
-                        text: entry.pos_text.clone(),
-                        sentences: vec![],
-                    },
-                    RecordSection {
-                        role: SectionRole::Context,
-                        heading: None,
-                        text: entry.neg_text.clone().ok_or_else(|| {
-                            SamplerError::Configuration("triplet entry missing neg_text".into())
-                        })?,
-                        sentences: vec![],
-                    },
-                ],
+            let (sections, label) = match record {
+                SrdRecord::Pair(pair) => (
+                    vec![
+                        RecordSection {
+                            role: SectionRole::Anchor,
+                            heading: None,
+                            text: pair.anchor_text.clone(),
+                            sentences: vec![],
+                        },
+                        RecordSection {
+                            role: SectionRole::Context,
+                            heading: None,
+                            text: pair.candidate_text.clone(),
+                            sentences: vec![],
+                        },
+                    ],
+                    Some(pair.label.clone()),
+                ),
+                SrdRecord::Triplet(triplet) => (
+                    vec![
+                        RecordSection {
+                            role: SectionRole::Anchor,
+                            heading: None,
+                            text: triplet.anchor_text.clone(),
+                            sentences: vec![],
+                        },
+                        RecordSection {
+                            role: SectionRole::Context,
+                            heading: None,
+                            text: triplet.pos_text.clone(),
+                            sentences: vec![],
+                        },
+                        RecordSection {
+                            role: SectionRole::Context,
+                            heading: None,
+                            text: triplet.neg_text.clone(),
+                            sentences: vec![],
+                        },
+                    ],
+                    None,
+                ),
             };
             records.push(DataRecord {
                 id,
@@ -134,6 +138,7 @@ impl DataSource for SrdSource {
                 taxonomy: vec![],
                 sections,
                 meta_prefix: None,
+                label,
             });
         }
 

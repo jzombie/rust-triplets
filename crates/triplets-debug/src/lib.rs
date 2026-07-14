@@ -1636,6 +1636,7 @@ mod tests {
                 make_section(SectionRole::Context, Some("body"), body),
             ],
             meta_prefix: None,
+            label: None,
         }
     }
 
@@ -1874,6 +1875,7 @@ mod tests {
                             },
                         ],
                         meta_prefix: None,
+                        label: None,
                     }],
                     cursor: SourceCursor {
                         last_seen: now,

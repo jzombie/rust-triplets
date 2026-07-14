@@ -481,6 +481,58 @@ fn pair_write_and_read_via_srd_source() {
     assert_eq!(snapshot.records[2].sections[1].text, "bar");
 }
 
+#[test]
+fn pair_negative_label_roundtrip_via_srd_source() {
+    let dir = TempDir::new().unwrap();
+    let store_path = dir.path().join("data.srd");
+
+    // --- scope 1: write pairs with Negative labels ---
+    {
+        let store = DataStore::open(&store_path).unwrap();
+        let anchor_vecs = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]];
+        let anchor_texts = ["a1", "a2"];
+        let candidate_vecs = [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]];
+        let candidate_texts = ["neg1", "neg2"];
+        let labels = [PairLabel::Negative, PairLabel::Negative];
+        let entries: Vec<srd_triplet::SrdPairWriteEntry> = (0..2)
+            .map(|i| srd_triplet::SrdPairWriteEntry {
+                anchor_vec: &anchor_vecs[i],
+                anchor_text: anchor_texts[i],
+                candidate_vec: &candidate_vecs[i],
+                candidate_text: candidate_texts[i],
+                label: &labels[i],
+            })
+            .collect();
+        srd_triplet::write_pair_entries(&store, 0, &entries).unwrap();
+        assert_eq!(store.len().unwrap(), 2);
+    }
+
+    // --- scope 2: open as SrdSource and read back ---
+    let source = SrdSource::open(&store_path, "test_neg", 3, SrdMode::Pair).unwrap();
+    let snapshot = source
+        .refresh(&SamplerConfig::default(), None, None)
+        .unwrap();
+    assert_eq!(snapshot.records.len(), 2);
+
+    // Verify texts are correct
+    assert_eq!(snapshot.records[0].sections[0].text, "a1");
+    assert_eq!(snapshot.records[0].sections[1].text, "neg1");
+    assert_eq!(snapshot.records[1].sections[0].text, "a2");
+    assert_eq!(snapshot.records[1].sections[1].text, "neg2");
+
+    // Verify labels are preserved as Negative
+    assert_eq!(
+        snapshot.records[0].label,
+        Some(PairLabel::Negative),
+        "first record should have Negative label"
+    );
+    assert_eq!(
+        snapshot.records[1].label,
+        Some(PairLabel::Negative),
+        "second record should have Negative label"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Triplet mode
 // ---------------------------------------------------------------------------

@@ -797,6 +797,7 @@ mod tests {
                 sentences: vec![id.to_string()],
             }],
             meta_prefix: None,
+            label: None,
         }
     }
 
@@ -1681,6 +1682,7 @@ mod tests {
                         taxonomy: Vec::new(),
                         sections: Vec::new(),
                         meta_prefix: None,
+                        label: None,
                     })
                     .collect();
                 Ok(SourceSnapshot {
@@ -1763,6 +1765,7 @@ mod tests {
                             sentences: vec![format!("x{i}")],
                         }],
                         meta_prefix: None,
+                        label: None,
                     })
                     .collect();
                 Ok(SourceSnapshot {

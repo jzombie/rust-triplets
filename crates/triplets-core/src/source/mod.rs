@@ -437,6 +437,7 @@ mod tests {
                     sentences: vec!["stub".into()],
                 }],
                 meta_prefix: None,
+                label: None,
             }))
         }
     }
@@ -583,6 +584,7 @@ mod tests {
                         sentences: vec!["t".to_string()],
                     }],
                     meta_prefix: None,
+                    label: None,
                 }))
             })
             .unwrap();
@@ -649,6 +651,7 @@ mod tests {
                             sentences: vec!["t".to_string()],
                         }],
                         meta_prefix: None,
+                        label: None,
                     }))
                 }
             })

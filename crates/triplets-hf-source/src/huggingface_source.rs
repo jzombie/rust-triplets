@@ -4106,6 +4106,7 @@ impl HuggingFaceRowSource {
             ],
             sections,
             meta_prefix: None,
+            label: None,
         }))
     }
 

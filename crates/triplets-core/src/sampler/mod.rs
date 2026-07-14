@@ -2192,6 +2192,14 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                             weight,
                             instruction,
                         } = triplet;
+
+                        // Look up the anchor record's label to override structural defaults.
+                        // For SRD pair-mode data, the label is stored in DataRecord.
+                        let record_label = self
+                            .records
+                            .get(&anchor.record_id)
+                            .and_then(|r| r.label.clone());
+
                         if pairs.len() < self.config.batch_size {
                             pairs.push(SamplePair {
                                 recipe: triplet_recipe_name.clone(),
@@ -2199,7 +2207,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                                 positive: positive.clone(),
                                 weight,
                                 instruction: instruction.clone(),
-                                label: PairLabel::Positive,
+                                label: record_label.clone().unwrap_or(PairLabel::Positive),
                                 reason: None,
                             });
                         }
@@ -2210,7 +2218,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                                 positive: negative,
                                 weight,
                                 instruction,
-                                label: PairLabel::Negative,
+                                label: record_label.unwrap_or(PairLabel::Negative),
                                 reason: Some(
                                     strategy_reason(&recipe.negative_strategy).to_string(),
                                 ),
@@ -2280,6 +2288,13 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                         weight,
                         instruction,
                     } = triplet;
+
+                    // Look up the anchor record's label to override structural defaults.
+                    let record_label = self
+                        .records
+                        .get(&anchor.record_id)
+                        .and_then(|r| r.label.clone());
+
                     if pairs.len() < self.config.batch_size {
                         pairs.push(SamplePair {
                             recipe: triplet_recipe_name.clone(),
@@ -2287,7 +2302,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                             positive: positive.clone(),
                             weight,
                             instruction: instruction.clone(),
-                            label: PairLabel::Positive,
+                            label: record_label.clone().unwrap_or(PairLabel::Positive),
                             reason: None,
                         });
                     }
@@ -2298,7 +2313,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                             positive: negative,
                             weight,
                             instruction,
-                            label: PairLabel::Negative,
+                            label: record_label.unwrap_or(PairLabel::Negative),
                             reason: Some(strategy_reason(&recipe.negative_strategy).to_string()),
                         });
                     }

@@ -55,15 +55,24 @@ impl SrdMode {
     }
 }
 
-/// A decoded simd-r-drive entry containing embeddings and text.
+/// A decoded pair-mode entry from SRD storage.
 #[derive(Clone, Debug)]
-pub struct SrdEntry {
-    /// Whether this entry is pair or triplet mode.
-    pub mode: SrdMode,
-    /// True when the positive embedding is the same pointer as the anchor.
-    pub same_as_anchor: bool,
-    /// Label for pair entries (Positive or Negative).
+pub struct SrdPairRecord {
+    /// Anchor embedding vector.
+    pub anchor_emb: Vec<f32>,
+    /// Anchor text string.
+    pub anchor_text: String,
+    /// Candidate embedding vector (positive or negative).
+    pub candidate_emb: Vec<f32>,
+    /// Candidate text string (positive or negative).
+    pub candidate_text: String,
+    /// Pair label (Positive or Negative).
     pub label: PairLabel,
+}
+
+/// A decoded triplet-mode entry from SRD storage.
+#[derive(Clone, Debug)]
+pub struct SrdTripletRecord {
     /// Anchor embedding vector.
     pub anchor_emb: Vec<f32>,
     /// Anchor text string.
@@ -72,10 +81,19 @@ pub struct SrdEntry {
     pub pos_emb: Vec<f32>,
     /// Positive text string.
     pub pos_text: String,
-    /// Negative embedding vector (triplet mode only).
-    pub neg_emb: Option<Vec<f32>>,
-    /// Negative text string (triplet mode only).
-    pub neg_text: Option<String>,
+    /// Negative embedding vector.
+    pub neg_emb: Vec<f32>,
+    /// Negative text string.
+    pub neg_text: String,
+}
+
+/// A decoded entry from SRD storage.
+#[derive(Clone, Debug)]
+pub enum SrdRecord {
+    /// A pair-mode entry.
+    Pair(SrdPairRecord),
+    /// A triplet-mode entry.
+    Triplet(SrdTripletRecord),
 }
 
 // ---------------------------------------------------------------------------
@@ -88,122 +106,106 @@ pub struct SrdEntry {
 ///
 /// Flags: bit 0 = pos same as anchor, bit 1 = neg same as anchor.
 /// Only unique embeddings and texts are stored.
-pub fn encode_entry(entry: &SrdEntry) -> Vec<u8> {
-    let emb_dim = entry.anchor_emb.len();
-    let emb_bytes = emb_dim * 4;
+pub fn encode_entry(record: &SrdRecord) -> Vec<u8> {
+    match record {
+        SrdRecord::Pair(pair) => {
+            let mut buf = vec![SrdMode::Pair.to_byte()];
+            let emb_dim = pair.anchor_emb.len();
+            let emb_bytes = emb_dim * 4;
 
-    // Compute flags
-    let mut flags: u8 = 0;
-    if entry.same_as_anchor {
-        flags |= FLAG_POS_SAME;
-    }
-    if entry.mode == SrdMode::Triplet
-        && let Some((neg_emb, neg_text)) = entry.neg_emb.as_ref().zip(entry.neg_text.as_ref())
-        && neg_emb == &entry.anchor_emb
-        && neg_text == &entry.anchor_text
-    {
-        flags |= FLAG_NEG_SAME;
-    }
-    if entry.mode == SrdMode::Pair && entry.label == PairLabel::Negative {
-        flags |= FLAG_LABEL_NEGATIVE;
-    }
-
-    // Count unique texts and embeddings
-    let unique_texts = match entry.mode {
-        SrdMode::Pair => {
-            if flags & FLAG_POS_SAME != 0 {
-                1
-            } else {
-                2
+            let mut flags: u8 = 0;
+            if pair.anchor_emb == pair.candidate_emb && pair.anchor_text == pair.candidate_text {
+                flags |= FLAG_POS_SAME;
             }
-        }
-        SrdMode::Triplet => {
-            let mut n = 1; // anchor always
+            if pair.label == PairLabel::Negative {
+                flags |= FLAG_LABEL_NEGATIVE;
+            }
+            buf.push(flags);
+
+            let unique_texts = if flags & FLAG_POS_SAME != 0 { 1 } else { 2 };
+            let text_lens_size = unique_texts * 4;
+            let embs_size = unique_texts * emb_bytes;
+            let texts_size = if flags & FLAG_POS_SAME != 0 {
+                pair.anchor_text.len()
+            } else {
+                pair.anchor_text.len() + pair.candidate_text.len()
+            };
+
+            let mut inner = Vec::with_capacity(text_lens_size + embs_size + texts_size);
+            inner.extend_from_slice(&(pair.anchor_text.len() as u32).to_le_bytes());
             if flags & FLAG_POS_SAME == 0 {
-                n += 1;
+                inner.extend_from_slice(&(pair.candidate_text.len() as u32).to_le_bytes());
+            }
+            write_emb_slice(&mut inner, &pair.anchor_emb);
+            if flags & FLAG_POS_SAME == 0 {
+                write_emb_slice(&mut inner, &pair.candidate_emb);
+            }
+            inner.extend_from_slice(pair.anchor_text.as_bytes());
+            if flags & FLAG_POS_SAME == 0 {
+                inner.extend_from_slice(pair.candidate_text.as_bytes());
+            }
+
+            buf.extend(inner);
+            buf
+        }
+        SrdRecord::Triplet(triplet) => {
+            let mut buf = vec![SrdMode::Triplet.to_byte()];
+            let emb_dim = triplet.anchor_emb.len();
+            let emb_bytes = emb_dim * 4;
+
+            let mut flags: u8 = 0;
+            if triplet.pos_emb == triplet.anchor_emb && triplet.pos_text == triplet.anchor_text {
+                flags |= FLAG_POS_SAME;
+            }
+            if triplet.neg_emb == triplet.anchor_emb && triplet.neg_text == triplet.anchor_text {
+                flags |= FLAG_NEG_SAME;
+            }
+            buf.push(flags);
+
+            let mut unique_texts = 1;
+            if flags & FLAG_POS_SAME == 0 {
+                unique_texts += 1;
             }
             if flags & FLAG_NEG_SAME == 0 {
-                n += 1;
+                unique_texts += 1;
             }
-            n
-        }
-    };
-    let unique_embs = unique_texts; // 1 emb per unique text
-
-    // Compute buffer size
-    let text_lens_size = unique_texts * 4;
-    let embs_size = unique_embs * emb_bytes;
-    let texts_size: usize = match entry.mode {
-        SrdMode::Pair => {
-            if flags & FLAG_POS_SAME != 0 {
-                entry.anchor_text.len()
-            } else {
-                entry.anchor_text.len() + entry.pos_text.len()
-            }
-        }
-        SrdMode::Triplet => {
-            let mut s = entry.anchor_text.len();
+            let text_lens_size = unique_texts * 4;
+            let embs_size = unique_texts * emb_bytes;
+            let mut texts_size = triplet.anchor_text.len();
             if flags & FLAG_POS_SAME == 0 {
-                s += entry.pos_text.len();
-            }
-            if let (Some(t), 0) = (&entry.neg_text, flags & FLAG_NEG_SAME) {
-                s += t.len();
-            }
-            s
-        }
-    };
-
-    let mut buf = Vec::with_capacity(2 + text_lens_size + embs_size + texts_size);
-
-    // Header
-    buf.push(entry.mode.to_byte());
-    buf.push(flags);
-
-    // Text lengths
-    match entry.mode {
-        SrdMode::Pair => {
-            buf.extend_from_slice(&(entry.anchor_text.len() as u32).to_le_bytes());
-            if flags & FLAG_POS_SAME == 0 {
-                buf.extend_from_slice(&(entry.pos_text.len() as u32).to_le_bytes());
-            }
-        }
-        SrdMode::Triplet => {
-            buf.extend_from_slice(&(entry.anchor_text.len() as u32).to_le_bytes());
-            if flags & FLAG_POS_SAME == 0 {
-                buf.extend_from_slice(&(entry.pos_text.len() as u32).to_le_bytes());
+                texts_size += triplet.pos_text.len();
             }
             if flags & FLAG_NEG_SAME == 0 {
-                let n = entry.neg_text.as_ref().map_or(0, |t| t.len());
-                buf.extend_from_slice(&(n as u32).to_le_bytes());
+                texts_size += triplet.neg_text.len();
             }
+
+            let mut inner = Vec::with_capacity(text_lens_size + embs_size + texts_size);
+            inner.extend_from_slice(&(triplet.anchor_text.len() as u32).to_le_bytes());
+            if flags & FLAG_POS_SAME == 0 {
+                inner.extend_from_slice(&(triplet.pos_text.len() as u32).to_le_bytes());
+            }
+            if flags & FLAG_NEG_SAME == 0 {
+                inner.extend_from_slice(&(triplet.neg_text.len() as u32).to_le_bytes());
+            }
+            write_emb_slice(&mut inner, &triplet.anchor_emb);
+            if flags & FLAG_POS_SAME == 0 {
+                write_emb_slice(&mut inner, &triplet.pos_emb);
+            }
+            if flags & FLAG_NEG_SAME == 0 {
+                write_emb_slice(&mut inner, &triplet.neg_emb);
+            }
+            inner.extend_from_slice(triplet.anchor_text.as_bytes());
+            if flags & FLAG_POS_SAME == 0 {
+                inner.extend_from_slice(triplet.pos_text.as_bytes());
+            }
+            if flags & FLAG_NEG_SAME == 0 {
+                inner.extend_from_slice(triplet.neg_text.as_bytes());
+            }
+
+            buf.extend(inner);
+            buf
         }
     }
-
-    // Embeddings
-    write_emb_slice(&mut buf, &entry.anchor_emb);
-    if flags & FLAG_POS_SAME == 0 {
-        write_emb_slice(&mut buf, &entry.pos_emb);
-    }
-    if entry.mode == SrdMode::Triplet
-        && flags & FLAG_NEG_SAME == 0
-        && let Some(neg_emb) = &entry.neg_emb
-    {
-        write_emb_slice(&mut buf, neg_emb);
-    }
-
-    // Texts
-    buf.extend_from_slice(entry.anchor_text.as_bytes());
-    if flags & FLAG_POS_SAME == 0 {
-        buf.extend_from_slice(entry.pos_text.as_bytes());
-    }
-    if entry.mode == SrdMode::Triplet
-        && flags & FLAG_NEG_SAME == 0
-        && let Some(neg_text) = &entry.neg_text
-    {
-        buf.extend_from_slice(neg_text.as_bytes());
-    }
-
-    buf
 }
 
 fn write_emb_slice(buf: &mut Vec<u8>, emb: &[f32]) {
@@ -216,19 +218,21 @@ fn write_emb_slice(buf: &mut Vec<u8>, emb: &[f32]) {
 // Unified decoder
 // ---------------------------------------------------------------------------
 
-/// Decode a raw simd-r-drive entry value into an [`SrdEntry`].
+/// Decode a raw simd-r-drive entry value into an [`SrdRecord`].
 ///
 /// Format: `[mode:1] [flags:1] [text_lens...] [embeddings...] [texts...]`
 /// Reader reconstructs full entry by duplicating anchor where flags indicate sameness.
-pub fn decode_entry(data: &[u8], emb_dim: usize) -> Result<SrdEntry> {
-    if data.len() < 2 {
+pub fn decode_entry(data: &[u8], emb_dim: usize) -> Result<SrdRecord> {
+    if data.is_empty() {
         return Err(SrdError::EntryTooShort);
     }
     let mode = SrdMode::from_byte(data[0])?;
+    if data.len() < 2 {
+        return Err(SrdError::EntryTooShort);
+    }
     let flags = data[1];
     let emb_bytes = emb_dim * 4;
 
-    // Count unique texts/embeddings from flags
     let (unique_texts, pos_same, neg_same) = match mode {
         SrdMode::Pair => {
             let pos_same = flags & FLAG_POS_SAME != 0;
@@ -242,7 +246,6 @@ pub fn decode_entry(data: &[u8], emb_dim: usize) -> Result<SrdEntry> {
         }
     };
 
-    // Read text lengths
     let mut offset = 2;
     let mut text_lens = Vec::with_capacity(unique_texts);
     for _ in 0..unique_texts {
@@ -259,7 +262,6 @@ pub fn decode_entry(data: &[u8], emb_dim: usize) -> Result<SrdEntry> {
         offset += 4;
     }
 
-    // Validate enough data for embeddings + texts
     let embs_size = unique_texts * emb_bytes;
     let texts_size: usize = text_lens.iter().sum();
     let expected = offset + embs_size + texts_size;
@@ -270,14 +272,12 @@ pub fn decode_entry(data: &[u8], emb_dim: usize) -> Result<SrdEntry> {
         });
     }
 
-    // Read embeddings
     let mut embs = Vec::with_capacity(unique_texts);
     for _ in 0..unique_texts {
         embs.push(decode_emb_slice(&data[offset..offset + emb_bytes], emb_dim));
         offset += emb_bytes;
     }
 
-    // Read texts
     let mut texts = Vec::with_capacity(unique_texts);
     for &len in &text_lens {
         let text = std::str::from_utf8(&data[offset..offset + len])?.to_owned();
@@ -285,43 +285,51 @@ pub fn decode_entry(data: &[u8], emb_dim: usize) -> Result<SrdEntry> {
         offset += len;
     }
 
-    // Reconstruct full entry
     let anchor_emb = embs[0].clone();
     let anchor_text = texts[0].clone();
 
-    let (pos_emb, pos_text) = if pos_same {
-        (anchor_emb.clone(), anchor_text.clone())
-    } else {
-        (embs[1].clone(), texts[1].clone())
-    };
-
-    let (neg_emb, neg_text) = match mode {
-        SrdMode::Pair => (None, None),
+    match mode {
+        SrdMode::Pair => {
+            let (candidate_emb, candidate_text) = if pos_same {
+                (anchor_emb.clone(), anchor_text.clone())
+            } else {
+                (embs[1].clone(), texts[1].clone())
+            };
+            let label = if flags & FLAG_LABEL_NEGATIVE != 0 {
+                PairLabel::Negative
+            } else {
+                PairLabel::Positive
+            };
+            Ok(SrdRecord::Pair(SrdPairRecord {
+                anchor_emb,
+                anchor_text,
+                candidate_emb,
+                candidate_text,
+                label,
+            }))
+        }
         SrdMode::Triplet => {
-            if neg_same {
-                (Some(anchor_emb.clone()), Some(anchor_text.clone()))
+            let (pos_emb, pos_text) = if pos_same {
+                (anchor_emb.clone(), anchor_text.clone())
+            } else {
+                (embs[1].clone(), texts[1].clone())
+            };
+            let (neg_emb, neg_text) = if neg_same {
+                (anchor_emb.clone(), anchor_text.clone())
             } else {
                 let idx = 1 + if pos_same { 0 } else { 1 };
-                (Some(embs[idx].clone()), Some(texts[idx].clone()))
-            }
+                (embs[idx].clone(), texts[idx].clone())
+            };
+            Ok(SrdRecord::Triplet(SrdTripletRecord {
+                anchor_emb,
+                anchor_text,
+                pos_emb,
+                pos_text,
+                neg_emb,
+                neg_text,
+            }))
         }
-    };
-
-    Ok(SrdEntry {
-        mode,
-        same_as_anchor: pos_same,
-        label: if mode == SrdMode::Pair && flags & FLAG_LABEL_NEGATIVE != 0 {
-            PairLabel::Negative
-        } else {
-            PairLabel::Positive
-        },
-        anchor_emb,
-        anchor_text,
-        pos_emb,
-        pos_text,
-        neg_emb,
-        neg_text,
-    })
+    }
 }
 
 fn decode_emb_slice(data: &[u8], emb_dim: usize) -> Vec<f32> {
@@ -404,20 +412,14 @@ pub fn write_pair_entries(
     let mut key_bufs: Vec<[u8; 8]> = Vec::with_capacity(entries.len());
     let mut value_bufs: Vec<Vec<u8>> = Vec::with_capacity(entries.len());
     for (i, entry) in entries.iter().enumerate() {
-        let same =
-            entry.anchor_vec == entry.candidate_vec && entry.anchor_text == entry.candidate_text;
         key_bufs.push((start_idx + i as u64).to_le_bytes());
-        value_bufs.push(encode_entry(&SrdEntry {
-            mode: SrdMode::Pair,
-            same_as_anchor: same,
-            label: entry.label.clone(),
+        value_bufs.push(encode_entry(&SrdRecord::Pair(SrdPairRecord {
             anchor_emb: entry.anchor_vec.to_vec(),
             anchor_text: entry.anchor_text.to_string(),
-            pos_emb: entry.candidate_vec.to_vec(),
-            pos_text: entry.candidate_text.to_string(),
-            neg_emb: None,
-            neg_text: None,
-        }));
+            candidate_emb: entry.candidate_vec.to_vec(),
+            candidate_text: entry.candidate_text.to_string(),
+            label: entry.label.clone(),
+        })));
     }
     let entries: Vec<(&[u8], &[u8])> = key_bufs
         .iter()
@@ -463,19 +465,15 @@ pub fn write_triplet_entries(
     let mut key_bufs: Vec<[u8; 8]> = Vec::with_capacity(entries.len());
     let mut value_bufs: Vec<Vec<u8>> = Vec::with_capacity(entries.len());
     for (i, entry) in entries.iter().enumerate() {
-        let same = entry.anchor_vec == entry.pos_vec && entry.anchor_text == entry.pos_text;
         key_bufs.push((start_idx + i as u64).to_le_bytes());
-        value_bufs.push(encode_entry(&SrdEntry {
-            mode: SrdMode::Triplet,
-            same_as_anchor: same,
-            label: PairLabel::Positive,
+        value_bufs.push(encode_entry(&SrdRecord::Triplet(SrdTripletRecord {
             anchor_emb: entry.anchor_vec.to_vec(),
             anchor_text: entry.anchor_text.to_string(),
             pos_emb: entry.pos_vec.to_vec(),
             pos_text: entry.pos_text.to_string(),
-            neg_emb: Some(entry.neg_vec.to_vec()),
-            neg_text: Some(entry.neg_text.to_string()),
-        }));
+            neg_emb: entry.neg_vec.to_vec(),
+            neg_text: entry.neg_text.to_string(),
+        })));
     }
     let entries: Vec<(&[u8], &[u8])> = key_bufs
         .iter()
@@ -497,7 +495,7 @@ pub fn batch_read_entries(
     store: &DataStore,
     indices: &[usize],
     emb_dim: usize,
-) -> Result<Vec<SrdEntry>> {
+) -> Result<Vec<SrdRecord>> {
     let key_bufs: Vec<[u8; 8]> = indices.iter().map(|&i| (i as u64).to_le_bytes()).collect();
     let keys: Vec<&[u8]> = key_bufs.iter().map(|k| k.as_slice()).collect();
     let raw = store.batch_read(&keys)?;
@@ -570,28 +568,24 @@ mod tests {
         let a_text = "anchor text";
         let p_text = "positive text";
 
-        let entry = SrdEntry {
-            mode: SrdMode::Pair,
-            same_as_anchor: false,
-            label: PairLabel::Positive,
+        let record = SrdRecord::Pair(SrdPairRecord {
             anchor_emb: a_emb.clone(),
             anchor_text: a_text.to_string(),
-            pos_emb: p_emb.clone(),
-            pos_text: p_text.to_string(),
-            neg_emb: None,
-            neg_text: None,
-        };
-        let encoded = encode_entry(&entry);
+            candidate_emb: p_emb.clone(),
+            candidate_text: p_text.to_string(),
+            label: PairLabel::Positive,
+        });
+        let encoded = encode_entry(&record);
         let decoded = decode_entry(&encoded, 3).unwrap();
 
-        assert_eq!(decoded.mode, SrdMode::Pair);
-        assert!(!decoded.same_as_anchor);
-        assert_eq!(decoded.anchor_emb, a_emb);
-        assert_eq!(decoded.anchor_text, a_text);
-        assert_eq!(decoded.pos_emb, p_emb);
-        assert_eq!(decoded.pos_text, p_text);
-        assert!(decoded.neg_emb.is_none());
-        assert!(decoded.neg_text.is_none());
+        assert!(matches!(decoded, SrdRecord::Pair(_)));
+        if let SrdRecord::Pair(p) = decoded {
+            assert_eq!(p.anchor_emb, a_emb);
+            assert_eq!(p.anchor_text, a_text);
+            assert_eq!(p.candidate_emb, p_emb);
+            assert_eq!(p.candidate_text, p_text);
+            assert_eq!(p.label, PairLabel::Positive);
+        }
     }
 
     #[test]
@@ -599,26 +593,23 @@ mod tests {
         let a_emb = vec![0.1, 0.2, 0.3];
         let a_text = "shared text";
 
-        let entry = SrdEntry {
-            mode: SrdMode::Pair,
-            same_as_anchor: true,
-            label: PairLabel::Positive,
+        let record = SrdRecord::Pair(SrdPairRecord {
             anchor_emb: a_emb.clone(),
             anchor_text: a_text.to_string(),
-            pos_emb: a_emb.clone(),
-            pos_text: a_text.to_string(),
-            neg_emb: None,
-            neg_text: None,
-        };
-        let encoded = encode_entry(&entry);
+            candidate_emb: a_emb.clone(),
+            candidate_text: a_text.to_string(),
+            label: PairLabel::Positive,
+        });
+        let encoded = encode_entry(&record);
         let decoded = decode_entry(&encoded, 3).unwrap();
 
-        assert_eq!(decoded.mode, SrdMode::Pair);
-        assert!(decoded.same_as_anchor);
-        assert_eq!(decoded.anchor_emb, a_emb);
-        assert_eq!(decoded.anchor_text, a_text);
-        assert_eq!(decoded.pos_emb, a_emb);
-        assert_eq!(decoded.pos_text, a_text);
+        assert!(matches!(decoded, SrdRecord::Pair(_)));
+        if let SrdRecord::Pair(p) = decoded {
+            assert_eq!(p.anchor_emb, a_emb);
+            assert_eq!(p.anchor_text, a_text);
+            assert_eq!(p.candidate_emb, a_emb);
+            assert_eq!(p.candidate_text, a_text);
+        }
     }
 
     #[test]
@@ -626,34 +617,26 @@ mod tests {
         let a_emb = vec![0.1, 0.2, 0.3];
         let a_text = "shared text";
 
-        let full = encode_entry(&SrdEntry {
-            mode: SrdMode::Pair,
-            same_as_anchor: false,
-            label: PairLabel::Positive,
+        let full = encode_entry(&SrdRecord::Pair(SrdPairRecord {
             anchor_emb: a_emb.clone(),
             anchor_text: a_text.to_string(),
-            pos_emb: a_emb.clone(),
-            pos_text: a_text.to_string(),
-            neg_emb: None,
-            neg_text: None,
-        });
-        let compact = encode_entry(&SrdEntry {
-            mode: SrdMode::Pair,
-            same_as_anchor: true,
+            candidate_emb: a_emb.clone(),
+            candidate_text: a_text.to_string(),
             label: PairLabel::Positive,
+        }));
+        let compact = encode_entry(&SrdRecord::Pair(SrdPairRecord {
             anchor_emb: a_emb.clone(),
             anchor_text: a_text.to_string(),
-            pos_emb: a_emb,
-            pos_text: a_text.to_string(),
-            neg_emb: None,
-            neg_text: None,
-        });
-        assert!(
-            compact.len() < full.len(),
-            "compact ({}) should be smaller than full ({})",
-            compact.len(),
-            full.len()
-        );
+            candidate_emb: a_emb,
+            candidate_text: a_text.to_string(),
+            label: PairLabel::Positive,
+        }));
+        // The "full" and "compact" are actually the same since anchor == candidate in both.
+        // Test that encoding works and produces valid bytes.
+        assert!(!compact.is_empty());
+        assert!(!full.is_empty());
+        // Both encode the same data, so sizes should match.
+        assert_eq!(compact.len(), full.len());
     }
 
     #[test]
@@ -665,27 +648,26 @@ mod tests {
         let p_text = "positive";
         let n_text = "negative";
 
-        let entry = SrdEntry {
-            mode: SrdMode::Triplet,
-            same_as_anchor: false,
-            label: PairLabel::Positive,
+        let record = SrdRecord::Triplet(SrdTripletRecord {
             anchor_emb: a_emb.clone(),
             anchor_text: a_text.to_string(),
             pos_emb: p_emb.clone(),
             pos_text: p_text.to_string(),
-            neg_emb: Some(n_emb.clone()),
-            neg_text: Some(n_text.to_string()),
-        };
-        let encoded = encode_entry(&entry);
+            neg_emb: n_emb.clone(),
+            neg_text: n_text.to_string(),
+        });
+        let encoded = encode_entry(&record);
         let decoded = decode_entry(&encoded, 3).unwrap();
 
-        assert_eq!(decoded.mode, SrdMode::Triplet);
-        assert_eq!(decoded.anchor_emb, a_emb);
-        assert_eq!(decoded.anchor_text, a_text);
-        assert_eq!(decoded.pos_emb, p_emb);
-        assert_eq!(decoded.pos_text, p_text);
-        assert_eq!(decoded.neg_emb, Some(n_emb));
-        assert_eq!(decoded.neg_text, Some(n_text.to_owned()));
+        assert!(matches!(decoded, SrdRecord::Triplet(_)));
+        if let SrdRecord::Triplet(t) = decoded {
+            assert_eq!(t.anchor_emb, a_emb);
+            assert_eq!(t.anchor_text, a_text);
+            assert_eq!(t.pos_emb, p_emb);
+            assert_eq!(t.pos_text, p_text);
+            assert_eq!(t.neg_emb, n_emb);
+            assert_eq!(t.neg_text, n_text);
+        }
     }
 
     #[test]
@@ -695,28 +677,26 @@ mod tests {
         let a_text = "anchor";
         let n_text = "negative";
 
-        let entry = SrdEntry {
-            mode: SrdMode::Triplet,
-            same_as_anchor: true,
-            label: PairLabel::Positive,
+        let record = SrdRecord::Triplet(SrdTripletRecord {
             anchor_emb: a_emb.clone(),
             anchor_text: a_text.to_string(),
             pos_emb: a_emb.clone(),
             pos_text: a_text.to_string(),
-            neg_emb: Some(n_emb.clone()),
-            neg_text: Some(n_text.to_string()),
-        };
-        let encoded = encode_entry(&entry);
+            neg_emb: n_emb.clone(),
+            neg_text: n_text.to_string(),
+        });
+        let encoded = encode_entry(&record);
         let decoded = decode_entry(&encoded, 3).unwrap();
 
-        assert_eq!(decoded.mode, SrdMode::Triplet);
-        assert!(decoded.same_as_anchor);
-        assert_eq!(decoded.anchor_emb, a_emb);
-        assert_eq!(decoded.anchor_text, a_text);
-        assert_eq!(decoded.pos_emb, a_emb);
-        assert_eq!(decoded.pos_text, a_text);
-        assert_eq!(decoded.neg_emb, Some(n_emb));
-        assert_eq!(decoded.neg_text, Some(n_text.to_owned()));
+        assert!(matches!(decoded, SrdRecord::Triplet(_)));
+        if let SrdRecord::Triplet(t) = decoded {
+            assert_eq!(t.anchor_emb, a_emb);
+            assert_eq!(t.anchor_text, a_text);
+            assert_eq!(t.pos_emb, a_emb);
+            assert_eq!(t.pos_text, a_text);
+            assert_eq!(t.neg_emb, n_emb);
+            assert_eq!(t.neg_text, n_text);
+        }
     }
 
     #[test]
@@ -724,24 +704,23 @@ mod tests {
         let a_emb = vec![0.1, 0.2, 0.3];
         let a_text = "all same";
 
-        let entry = SrdEntry {
-            mode: SrdMode::Triplet,
-            same_as_anchor: true,
-            label: PairLabel::Positive,
+        let record = SrdRecord::Triplet(SrdTripletRecord {
             anchor_emb: a_emb.clone(),
             anchor_text: a_text.to_string(),
             pos_emb: a_emb.clone(),
             pos_text: a_text.to_string(),
-            neg_emb: Some(a_emb.clone()),
-            neg_text: Some(a_text.to_string()),
-        };
-        let encoded = encode_entry(&entry);
+            neg_emb: a_emb.clone(),
+            neg_text: a_text.to_string(),
+        });
+        let encoded = encode_entry(&record);
         let decoded = decode_entry(&encoded, 3).unwrap();
 
-        assert_eq!(decoded.mode, SrdMode::Triplet);
-        assert_eq!(decoded.anchor_emb, a_emb);
-        assert_eq!(decoded.pos_emb, a_emb);
-        assert_eq!(decoded.neg_emb, Some(a_emb));
+        assert!(matches!(decoded, SrdRecord::Triplet(_)));
+        if let SrdRecord::Triplet(t) = decoded {
+            assert_eq!(t.anchor_emb, a_emb);
+            assert_eq!(t.pos_emb, a_emb);
+            assert_eq!(t.neg_emb, a_emb);
+        }
     }
 
     #[test]
@@ -753,68 +732,63 @@ mod tests {
         let p_text = "positive";
         let n_text = "anchor"; // same as anchor
 
-        let entry = SrdEntry {
-            mode: SrdMode::Triplet,
-            same_as_anchor: false, // pos is different
-            label: PairLabel::Positive,
+        let record = SrdRecord::Triplet(SrdTripletRecord {
             anchor_emb: a_emb.clone(),
             anchor_text: a_text.to_string(),
             pos_emb: p_emb.clone(),
             pos_text: p_text.to_string(),
-            neg_emb: Some(n_emb.clone()),
-            neg_text: Some(n_text.to_string()),
-        };
-        let encoded = encode_entry(&entry);
+            neg_emb: n_emb.clone(),
+            neg_text: n_text.to_string(),
+        });
+        let encoded = encode_entry(&record);
         let decoded = decode_entry(&encoded, 3).unwrap();
 
-        assert_eq!(decoded.mode, SrdMode::Triplet);
-        assert!(!decoded.same_as_anchor);
-        assert_eq!(decoded.anchor_emb, a_emb);
-        assert_eq!(decoded.anchor_text, a_text);
-        assert_eq!(decoded.pos_emb, p_emb);
-        assert_eq!(decoded.pos_text, p_text);
-        assert_eq!(decoded.neg_emb, Some(a_emb)); // neg == anchor
-        assert_eq!(decoded.neg_text, Some(a_text.to_owned())); // neg == anchor
+        assert!(matches!(decoded, SrdRecord::Triplet(_)));
+        if let SrdRecord::Triplet(t) = decoded {
+            assert_eq!(t.anchor_emb, a_emb);
+            assert_eq!(t.anchor_text, a_text);
+            assert_eq!(t.pos_emb, p_emb);
+            assert_eq!(t.pos_text, p_text);
+            assert_eq!(t.neg_emb, a_emb); // neg == anchor
+            assert_eq!(t.neg_text, a_text); // neg == anchor
+        }
     }
 
     #[test]
     fn pair_empty_text() {
-        let entry = SrdEntry {
-            mode: SrdMode::Pair,
-            same_as_anchor: false,
-            label: PairLabel::Positive,
+        let record = SrdRecord::Pair(SrdPairRecord {
             anchor_emb: vec![1.0],
             anchor_text: String::new(),
-            pos_emb: vec![2.0],
-            pos_text: String::new(),
-            neg_emb: None,
-            neg_text: None,
-        };
-        let encoded = encode_entry(&entry);
+            candidate_emb: vec![2.0],
+            candidate_text: String::new(),
+            label: PairLabel::Positive,
+        });
+        let encoded = encode_entry(&record);
         let decoded = decode_entry(&encoded, 1).unwrap();
-        assert_eq!(decoded.mode, SrdMode::Pair);
-        assert_eq!(decoded.anchor_text, "");
-        assert_eq!(decoded.pos_text, "");
+        assert!(matches!(decoded, SrdRecord::Pair(_)));
+        if let SrdRecord::Pair(p) = decoded {
+            assert_eq!(p.anchor_text, "");
+            assert_eq!(p.candidate_text, "");
+        }
     }
 
     #[test]
     fn triplet_unicode_text() {
-        let entry = SrdEntry {
-            mode: SrdMode::Triplet,
-            same_as_anchor: false,
-            label: PairLabel::Positive,
+        let record = SrdRecord::Triplet(SrdTripletRecord {
             anchor_emb: vec![1.0],
             anchor_text: "hello \u{1F600}".to_string(),
             pos_emb: vec![2.0],
             pos_text: "\u{00E9}\u{00E8}\u{00EA}".to_string(),
-            neg_emb: Some(vec![3.0]),
-            neg_text: Some("\u{4E16}\u{754C}".to_string()),
-        };
-        let encoded = encode_entry(&entry);
+            neg_emb: vec![3.0],
+            neg_text: "\u{4E16}\u{754C}".to_string(),
+        });
+        let encoded = encode_entry(&record);
         let decoded = decode_entry(&encoded, 1).unwrap();
-        assert_eq!(decoded.anchor_text, "hello \u{1F600}");
-        assert_eq!(decoded.pos_text, "\u{00E9}\u{00E8}\u{00EA}");
-        assert_eq!(decoded.neg_text.as_deref(), Some("\u{4E16}\u{754C}"));
+        if let SrdRecord::Triplet(t) = decoded {
+            assert_eq!(t.anchor_text, "hello \u{1F600}");
+            assert_eq!(t.pos_text, "\u{00E9}\u{00E8}\u{00EA}");
+            assert_eq!(t.neg_text, "\u{4E16}\u{754C}");
+        }
     }
 
     #[test]
@@ -838,72 +812,58 @@ mod tests {
 
     #[test]
     fn pair_mode_byte_is_zero() {
-        let entry = SrdEntry {
-            mode: SrdMode::Pair,
-            same_as_anchor: false,
-            label: PairLabel::Positive,
+        let record = SrdRecord::Pair(SrdPairRecord {
             anchor_emb: vec![1.0],
             anchor_text: "a".into(),
-            pos_emb: vec![2.0],
-            pos_text: "b".into(),
-            neg_emb: None,
-            neg_text: None,
-        };
-        let encoded = encode_entry(&entry);
+            candidate_emb: vec![2.0],
+            candidate_text: "b".into(),
+            label: PairLabel::Positive,
+        });
+        let encoded = encode_entry(&record);
         assert_eq!(encoded[0], MODE_PAIR);
     }
 
     #[test]
     fn triplet_mode_byte_is_one() {
-        let entry = SrdEntry {
-            mode: SrdMode::Triplet,
-            same_as_anchor: false,
-            label: PairLabel::Positive,
+        let record = SrdRecord::Triplet(SrdTripletRecord {
             anchor_emb: vec![1.0],
             anchor_text: "a".into(),
             pos_emb: vec![2.0],
             pos_text: "b".into(),
-            neg_emb: Some(vec![3.0]),
-            neg_text: Some("c".into()),
-        };
-        let encoded = encode_entry(&entry);
+            neg_emb: vec![3.0],
+            neg_text: "c".into(),
+        });
+        let encoded = encode_entry(&record);
         assert_eq!(encoded[0], MODE_TRIPLET);
     }
 
     #[test]
     fn mode_byte_consistency_pair() {
-        let entry = SrdEntry {
-            mode: SrdMode::Pair,
-            same_as_anchor: false,
-            label: PairLabel::Positive,
+        let record = SrdRecord::Pair(SrdPairRecord {
             anchor_emb: vec![1.0, 2.0],
             anchor_text: "hello".into(),
-            pos_emb: vec![3.0, 4.0],
-            pos_text: "world".into(),
-            neg_emb: None,
-            neg_text: None,
-        };
-        let encoded = encode_entry(&entry);
+            candidate_emb: vec![3.0, 4.0],
+            candidate_text: "world".into(),
+            label: PairLabel::Positive,
+        });
+        let encoded = encode_entry(&record);
         let decoded = decode_entry(&encoded, 2).unwrap();
-        assert_eq!(decoded.mode, SrdMode::Pair);
+        assert!(matches!(decoded, SrdRecord::Pair(_)));
     }
 
     #[test]
     fn mode_byte_consistency_triplet() {
-        let entry = SrdEntry {
-            mode: SrdMode::Triplet,
-            same_as_anchor: false,
-            label: PairLabel::Positive,
+        let record = SrdRecord::Triplet(SrdTripletRecord {
             anchor_emb: vec![1.0],
             anchor_text: "a".into(),
             pos_emb: vec![2.0],
             pos_text: "b".into(),
-            neg_emb: Some(vec![3.0]),
-            neg_text: Some("c".into()),
-        };
-        let encoded = encode_entry(&entry);
+            neg_emb: vec![3.0],
+            neg_text: "c".into(),
+        });
+        let encoded = encode_entry(&record);
         let decoded = decode_entry(&encoded, 1).unwrap();
-        assert_eq!(decoded.mode, SrdMode::Triplet);
+        assert!(matches!(decoded, SrdRecord::Triplet(_)));
     }
 
     // -----------------------------------------------------------------------
@@ -915,21 +875,19 @@ mod tests {
         let dim = 2048;
         let a_emb: Vec<f32> = (0..dim).map(|i| i as f32 * 0.001).collect();
         let p_emb: Vec<f32> = (0..dim).map(|i| i as f32 * -0.001).collect();
-        let entry = SrdEntry {
-            mode: SrdMode::Pair,
-            same_as_anchor: false,
-            label: PairLabel::Positive,
+        let record = SrdRecord::Pair(SrdPairRecord {
             anchor_emb: a_emb.clone(),
             anchor_text: "anchor".into(),
-            pos_emb: p_emb.clone(),
-            pos_text: "positive".into(),
-            neg_emb: None,
-            neg_text: None,
-        };
-        let encoded = encode_entry(&entry);
+            candidate_emb: p_emb.clone(),
+            candidate_text: "positive".into(),
+            label: PairLabel::Positive,
+        });
+        let encoded = encode_entry(&record);
         let decoded = decode_entry(&encoded, dim).unwrap();
-        assert_eq!(decoded.anchor_emb, a_emb);
-        assert_eq!(decoded.pos_emb, p_emb);
+        if let SrdRecord::Pair(p) = decoded {
+            assert_eq!(p.anchor_emb, a_emb);
+            assert_eq!(p.candidate_emb, p_emb);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -938,18 +896,14 @@ mod tests {
 
     #[test]
     fn truncated_text_returns_error() {
-        let entry = SrdEntry {
-            mode: SrdMode::Pair,
-            same_as_anchor: false,
-            label: PairLabel::Positive,
+        let record = SrdRecord::Pair(SrdPairRecord {
             anchor_emb: vec![1.0],
             anchor_text: "hello".into(),
-            pos_emb: vec![2.0],
-            pos_text: "world".into(),
-            neg_emb: None,
-            neg_text: None,
-        };
-        let buf = encode_entry(&entry);
+            candidate_emb: vec![2.0],
+            candidate_text: "world".into(),
+            label: PairLabel::Positive,
+        });
+        let buf = encode_entry(&record);
         let truncated = &buf[..buf.len() - 2];
         assert!(decode_entry(truncated, 1).is_err());
     }
@@ -983,11 +937,14 @@ mod tests {
         assert_eq!(entries.len(), n);
 
         for (i, entry) in entries.iter().enumerate() {
-            assert_eq!(entry.mode, SrdMode::Pair);
-            assert_eq!(entry.anchor_emb, all_a_emb[i]);
-            assert_eq!(entry.anchor_text, all_a_text[i]);
-            assert_eq!(entry.pos_emb, all_p_emb[i]);
-            assert_eq!(entry.pos_text, all_p_text[i]);
+            if let SrdRecord::Pair(p) = entry {
+                assert_eq!(p.anchor_emb, all_a_emb[i]);
+                assert_eq!(p.anchor_text, all_a_text[i]);
+                assert_eq!(p.candidate_emb, all_p_emb[i]);
+                assert_eq!(p.candidate_text, all_p_text[i]);
+            } else {
+                panic!("expected Pair");
+            }
         }
     }
 
@@ -1018,13 +975,16 @@ mod tests {
         assert_eq!(entries.len(), n);
 
         for (i, entry) in entries.iter().enumerate() {
-            assert_eq!(entry.mode, SrdMode::Triplet);
-            assert_eq!(entry.anchor_emb, a_emb[i]);
-            assert_eq!(entry.anchor_text, a_text[i]);
-            assert_eq!(entry.pos_emb, p_emb[i]);
-            assert_eq!(entry.pos_text, p_text[i]);
-            assert_eq!(entry.neg_emb.as_ref().unwrap(), &n_emb[i]);
-            assert_eq!(entry.neg_text.as_deref(), Some(n_text[i].as_str()));
+            if let SrdRecord::Triplet(t) = entry {
+                assert_eq!(t.anchor_emb, a_emb[i]);
+                assert_eq!(t.anchor_text, a_text[i]);
+                assert_eq!(t.pos_emb, p_emb[i]);
+                assert_eq!(t.pos_text, p_text[i]);
+                assert_eq!(t.neg_emb, n_emb[i]);
+                assert_eq!(t.neg_text, n_text[i]);
+            } else {
+                panic!("expected Triplet");
+            }
         }
     }
 
@@ -1045,9 +1005,15 @@ mod tests {
 
         let entries = batch_read_entries(&store, &[0, 5, 9], 1).unwrap();
         assert_eq!(entries.len(), 3);
-        assert_eq!(entries[0].anchor_text, "t0");
-        assert_eq!(entries[1].anchor_text, "t5");
-        assert_eq!(entries[2].anchor_text, "t9");
+        if let SrdRecord::Pair(p) = &entries[0] {
+            assert_eq!(p.anchor_text, "t0");
+        }
+        if let SrdRecord::Pair(p) = &entries[1] {
+            assert_eq!(p.anchor_text, "t5");
+        }
+        if let SrdRecord::Pair(p) = &entries[2] {
+            assert_eq!(p.anchor_text, "t9");
+        }
     }
 
     #[test]
@@ -1071,7 +1037,9 @@ mod tests {
         // Index 99 doesn't exist — should be skipped
         let entries = batch_read_entries(&store, &[0, 99], 1).unwrap();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].anchor_text, "a");
+        if let SrdRecord::Pair(p) = &entries[0] {
+            assert_eq!(p.anchor_text, "a");
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1173,9 +1141,15 @@ mod tests {
         assert_eq!(store.len().unwrap(), 3);
 
         let entries = batch_read_entries(&store, &[0, 1, 2], 1).unwrap();
-        assert_eq!(entries[0].anchor_text, "a");
-        assert_eq!(entries[1].anchor_text, "b");
-        assert_eq!(entries[2].anchor_text, "c");
+        if let SrdRecord::Pair(p) = &entries[0] {
+            assert_eq!(p.anchor_text, "a");
+        }
+        if let SrdRecord::Pair(p) = &entries[1] {
+            assert_eq!(p.anchor_text, "b");
+        }
+        if let SrdRecord::Pair(p) = &entries[2] {
+            assert_eq!(p.anchor_text, "c");
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1194,7 +1168,9 @@ mod tests {
 
         let entries = batch_read_entries(&store, &[5], 2).unwrap();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].anchor_text, "first");
+        if let SrdRecord::Pair(p) = &entries[0] {
+            assert_eq!(p.anchor_text, "first");
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1206,7 +1182,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let store = DataStore::open(&dir.path().join("test.srd")).unwrap();
 
-        // Batch A: entry 0 same_as_anchor=true, entry 1 different
+        // Batch A: entry 0 same as anchor, entry 1 different
         let a_vecs = vec![vec![1.0, 2.0], vec![3.0, 4.0]];
         let p_vecs = vec![vec![1.0, 2.0], vec![30.0, 40.0]]; // different emb for diff entry
         let a_texts = vec!["same", "diff_a"];
@@ -1214,7 +1190,7 @@ mod tests {
         let pair_entries = make_pair_entries(&a_vecs, &a_texts, &p_vecs, &p_texts);
         write_pair_entries(&store, 0, pair_entries.as_slice()).unwrap();
 
-        // Batch B: entry 2 same_as_anchor=false, entry 3 same_as_anchor=true
+        // Batch B: entry 2 same, entry 3 same
         let b_vecs = vec![vec![5.0, 6.0], vec![7.0, 8.0]];
         let b_texts = vec!["batch_b_0", "batch_b_1"];
         let pair_entries = make_pair_entries(&b_vecs, &b_texts, &b_vecs, &b_texts);
@@ -1226,35 +1202,32 @@ mod tests {
         let entries = batch_read_entries(&store, &[0, 1, 2, 3], 2).unwrap();
         assert_eq!(entries.len(), 4);
 
-        // Entry 0: same_as_anchor=true
-        assert!(entries[0].same_as_anchor);
-        assert_eq!(entries[0].anchor_text, "same");
-        assert_eq!(entries[0].pos_text, "same");
-        assert_eq!(entries[0].anchor_emb, entries[0].pos_emb);
+        // Entry 0: same anchor/candidate
+        if let SrdRecord::Pair(p) = &entries[0] {
+            assert_eq!(p.anchor_text, "same");
+            assert_eq!(p.candidate_text, "same");
+            assert_eq!(p.anchor_emb, p.candidate_emb);
+        }
 
-        // Entry 1: different anchor/pos — verify embedding attribution is correct
-        assert!(!entries[1].same_as_anchor);
-        assert_eq!(entries[1].anchor_text, "diff_a");
-        assert_eq!(entries[1].pos_text, "diff_p");
-        assert_eq!(
-            entries[1].anchor_emb,
-            vec![3.0, 4.0],
-            "anchor embedding should match anchor vec"
-        );
-        assert_eq!(
-            entries[1].pos_emb,
-            vec![30.0, 40.0],
-            "positive embedding should match positive vec"
-        );
+        // Entry 1: different anchor/candidate
+        if let SrdRecord::Pair(p) = &entries[1] {
+            assert_eq!(p.anchor_text, "diff_a");
+            assert_eq!(p.candidate_text, "diff_p");
+            assert_eq!(p.anchor_emb, vec![3.0, 4.0]);
+            assert_eq!(p.candidate_emb, vec![30.0, 40.0]);
+        }
 
-        // Entry 2: same anchor/pos (write_pair_entries auto-detects)
-        assert!(entries[2].same_as_anchor);
-        assert_eq!(entries[2].anchor_text, "batch_b_0");
+        // Entry 2: same anchor/candidate
+        if let SrdRecord::Pair(p) = &entries[2] {
+            assert_eq!(p.anchor_text, "batch_b_0");
+            assert_eq!(p.candidate_text, "batch_b_0");
+        }
 
-        // Entry 3: same_as_anchor=true
-        assert!(entries[3].same_as_anchor);
-        assert_eq!(entries[3].anchor_text, "batch_b_1");
-        assert_eq!(entries[3].pos_text, "batch_b_1");
+        // Entry 3: same anchor/candidate
+        if let SrdRecord::Pair(p) = &entries[3] {
+            assert_eq!(p.anchor_text, "batch_b_1");
+            assert_eq!(p.candidate_text, "batch_b_1");
+        }
     }
 
     #[test]
@@ -1299,37 +1272,77 @@ mod tests {
         assert_eq!(entries.len(), 3);
 
         // Entry 0: all different — verify each embedding matches its role
-        assert!(!entries[0].same_as_anchor);
-        assert_eq!(entries[0].anchor_text, "a0");
-        assert_eq!(entries[0].anchor_emb, vec![1.0]);
-        assert_eq!(entries[0].pos_text, "p0");
-        assert_eq!(
-            entries[0].pos_emb,
-            vec![10.0],
-            "pos emb should be distinct from anchor"
-        );
-        assert_eq!(entries[0].neg_text.as_deref(), Some("n0"));
-        assert_eq!(
-            entries[0].neg_emb.as_ref(),
-            Some(&vec![100.0]),
-            "neg emb should be distinct from anchor and pos"
-        );
+        if let SrdRecord::Triplet(t) = &entries[0] {
+            assert_eq!(t.anchor_text, "a0");
+            assert_eq!(t.anchor_emb, vec![1.0]);
+            assert_eq!(t.pos_text, "p0");
+            assert_eq!(t.pos_emb, vec![10.0]);
+            assert_eq!(t.neg_text, "n0");
+            assert_eq!(t.neg_emb, vec![100.0]);
+        }
 
         // Entry 1: pos same as anchor
-        assert!(entries[1].same_as_anchor);
-        assert_eq!(entries[1].anchor_text, "a1");
-        assert_eq!(entries[1].pos_text, "a1");
-        assert_eq!(entries[1].neg_text.as_deref(), Some("n1"));
+        if let SrdRecord::Triplet(t) = &entries[1] {
+            assert_eq!(t.anchor_text, "a1");
+            assert_eq!(t.pos_text, "a1");
+            assert_eq!(t.neg_text, "n1");
+        }
 
         // Entry 2: all same
-        assert!(entries[2].same_as_anchor);
-        assert_eq!(entries[2].anchor_text, "all_same");
-        assert_eq!(entries[2].pos_text, "all_same");
-        assert_eq!(entries[2].neg_text.as_deref(), Some("all_same"));
-        assert_eq!(entries[2].anchor_emb, entries[2].pos_emb);
-        assert_eq!(
-            entries[2].anchor_emb,
-            entries[2].neg_emb.as_ref().unwrap().clone()
-        );
+        if let SrdRecord::Triplet(t) = &entries[2] {
+            assert_eq!(t.anchor_text, "all_same");
+            assert_eq!(t.pos_text, "all_same");
+            assert_eq!(t.neg_text, "all_same");
+            assert_eq!(t.anchor_emb, t.pos_emb);
+            assert_eq!(t.anchor_emb, t.neg_emb);
+        }
+    }
+
+    #[test]
+    fn roundtrip_pair_negative_label() {
+        let a_emb = vec![0.1, 0.2, 0.3];
+        let c_emb = vec![0.4, 0.5, 0.6];
+
+        let record = SrdRecord::Pair(SrdPairRecord {
+            anchor_emb: a_emb.clone(),
+            anchor_text: "anchor".to_string(),
+            candidate_emb: c_emb.clone(),
+            candidate_text: "negative_candidate".to_string(),
+            label: PairLabel::Negative,
+        });
+        let encoded = encode_entry(&record);
+        let decoded = decode_entry(&encoded, 3).unwrap();
+
+        assert!(matches!(decoded, SrdRecord::Pair(_)));
+        if let SrdRecord::Pair(p) = decoded {
+            assert_eq!(p.label, PairLabel::Negative);
+            assert_eq!(p.anchor_emb, a_emb);
+            assert_eq!(p.anchor_text, "anchor");
+            assert_eq!(p.candidate_emb, c_emb);
+            assert_eq!(p.candidate_text, "negative_candidate");
+        }
+    }
+
+    #[test]
+    fn roundtrip_pair_negative_label_same_as_anchor() {
+        let shared_emb = vec![0.1, 0.2, 0.3];
+        let shared_text = "shared";
+
+        let record = SrdRecord::Pair(SrdPairRecord {
+            anchor_emb: shared_emb.clone(),
+            anchor_text: shared_text.to_string(),
+            candidate_emb: shared_emb.clone(),
+            candidate_text: shared_text.to_string(),
+            label: PairLabel::Negative,
+        });
+        let encoded = encode_entry(&record);
+        let decoded = decode_entry(&encoded, 3).unwrap();
+
+        assert!(matches!(decoded, SrdRecord::Pair(_)));
+        if let SrdRecord::Pair(p) = decoded {
+            assert_eq!(p.label, PairLabel::Negative);
+            assert_eq!(p.anchor_emb, shared_emb);
+            assert_eq!(p.anchor_text, shared_text);
+        }
     }
 }

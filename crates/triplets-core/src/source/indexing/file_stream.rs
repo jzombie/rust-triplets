@@ -129,6 +129,7 @@ mod tests {
             taxonomy: Vec::new(),
             sections: Vec::new(),
             meta_prefix: None,
+            label: None,
         }
     }
 
