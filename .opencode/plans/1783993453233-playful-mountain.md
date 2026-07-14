@@ -1,16 +1,175 @@
-# Migration: Datasets Server Parquet Endpoint → Hub API
+# Migration: Complete Datasets Server Removal + Hub API Parquet
 
 ## Context
 
-The Hugging Face Datasets Server `/parquet` endpoint is deprecated. Only the `/parquet` endpoint migrates to the Hub API; `/size` and `/info` remain on `datasets-server.huggingface.co`. The new Hub API returns a hierarchical dictionary of URL strings (not objects), requires no query parameters, and returns no file sizes.
+All interaction with `datasets-server.huggingface.co` must be eliminated. The `/parquet` endpoint migrates to the Hub API. The `/size` and `/info` endpoints are removed entirely (no replacement). ClassLabel resolution degrades gracefully — integer columns pass through as raw numbers.
 
 ---
 
-## Phase 1: Update Parquet Endpoint Constant
+## Phase 1: Remove `/size` Subsystem
 
-**File:** `crates/triplets-hf-source/src/constants.rs` (line 130)
+### 1.1 Constants (`constants.rs`)
 
-Only the parquet endpoint changes. `/size` and `/info` are untouched.
+Delete `HF_SIZE_DEFAULT_ENDPOINT` (line 133).
+
+### 1.2 Config struct (`huggingface_source.rs`)
+
+Remove `size_endpoint` field from `HuggingFaceRowsConfig` (line 831) and its default init (line 886).
+
+### 1.3 SourceState struct
+
+Remove `total_rows: Option<usize>` field from `SourceState` (line 1173).
+
+### 1.4 Production functions to delete
+
+- `fetch_global_row_count` (line 2784, `#[cfg(test)]` wrapper)
+- `fetch_global_row_count_with_runtime` (line 2791)
+- `parse_global_row_count_response` (line 2826)
+- `extract_split_row_count_from_size_response` (line 3050)
+- `known_total_rows()` (line 1336)
+
+### 1.5 Constructor changes (`new()`)
+
+In `HuggingFaceRowSource::new()`, delete lines 1277-1292 that call `fetch_global_row_count_with_runtime`. Set `total_rows: None` unconditionally in the `SourceState` struct literal (line 1316).
+
+### 1.6 Replace `len_hint()` (line 4931)
+
+Delete the entire existing implementation and replace with:
+
+```rust
+fn len_hint(&self) -> Option<usize> {
+    let state = self.state.lock().ok()?;
+    let known = state.materialized_rows;
+    if known > 0 {
+        let mut upper = known;
+        // Derive ongoing expansion from the remote candidate vector lengths
+        if let Some(ref candidates) = state.remote_candidates {
+            if state.next_remote_idx < candidates.len() {
+                let headroom = self.effective_expansion_headroom_rows();
+                upper = known.saturating_add(headroom);
+            }
+        }
+        return Some(upper.max(known));
+    }
+    if state.remote_candidates.as_ref().is_some_and(|c| c.is_empty()) {
+        return Some(0);
+    }
+    Some(1)
+}
+```
+
+This derives expansion boundaries from the remote manifest file list when `state.total_rows` is absent. No `total_rows` references remain.
+
+### 1.7 `trigger_expansion_if_needed()` (line 4986)
+
+Remove `let known_empty = state.total_rows == Some(0);` (line 4991). Since `total_rows` no longer exists, `known_empty` is always `false`.
+
+### 1.8 `refresh()` (line 5085)
+
+Remove `let known_empty = state.total_rows == Some(0);` (line 5093). Since `total_rows` no longer exists, `known_empty` is always `false`.
+
+### 1.9 `lib.rs` exports
+
+Remove `HF_PARQUET_DEFAULT_ENDPOINT` from the public re-export if `size_endpoint` removal makes it unnecessary — but keep it since parquet is still used. No other export changes needed.
+
+### 1.10 Tests to delete
+
+All unit tests referencing size endpoint functions:
+- `fetch_global_row_count_uses_test_endpoint_override` (7919)
+- `fetch_global_row_count_with_runtime_uses_test_endpoint_override` (7941)
+- `fetch_global_row_count_returns_none_when_split_not_present` (8002)
+- `fetch_global_row_count_errors_when_endpoint_unreachable` (8136)
+- `fetch_global_row_count_returns_ok_none_on_501` (10805)
+- `extract_split_row_count_*` tests (7012, 7024, 7469, 8895, 8918, 8923)
+- `parse_global_row_count_response_*` tests (7033, 7859, 10113, 10145, 10160)
+- `known_total_rows_returns_state_value` (11216)
+- `len_hint_*` tests that set `total_rows` (9242, 9265, 9275)
+- `trigger_expansion_if_needed_skips_when_total_rows_is_zero` (11150)
+
+Integration test to delete:
+- `huggingface_live_size_endpoint_reports_dataset_row_count` (1327-1377)
+
+### 1.11 Tests to update
+
+All test helpers that set `total_rows: Some(...)` or `total_rows: None` — remove the field from struct literals. There are ~30 such locations.
+
+Integration tests that set `config.size_endpoint` — remove those assignments.
+
+---
+
+## Phase 2: Remove `/info` Subsystem
+
+### 2.1 Constants (`constants.rs`)
+
+Delete:
+- `HF_INFO_DEFAULT_ENDPOINT` (line 136)
+- `HF_JSON_KEY_DATASET_INFO` (line 71)
+- `HF_JSON_KEY_FEATURES` (line 73)
+- `HF_JSON_KEY_FEATURE_TYPE` (line 75)
+- `HF_JSON_KEY_LABEL_NAMES` (line 77)
+- `HF_CLASSLABEL_TYPE` (line 79)
+
+Update doc comment on `HF_PUBLIC_TEST_DATASET` (lines 138-144) — remove ClassLabel reference.
+
+### 2.2 Config struct (`huggingface_source.rs`)
+
+Remove:
+- `label_maps: HashMap<String, Vec<String>>` field (lines 803-816)
+- `info_endpoint: String` field (lines 832-835)
+- Default init of both in `new()` (lines 881, 887)
+
+### 2.3 Production functions to delete
+
+- `fetch_classlabel_maps` (line 2458, `#[cfg(test)]` wrapper)
+- `fetch_classlabel_maps_with_runtime` (line 2465)
+- `extract_classlabel_maps` (line 2525)
+
+### 2.4 Constructor changes (`new()`)
+
+Delete lines 1244-1250 that call `fetch_classlabel_maps_with_runtime` and assign to `config.label_maps`.
+
+### 2.5 Parquet transcode changes
+
+`value_to_text()` (line 4315): Remove the `label_names` parameter and the integer-to-label resolution block (lines 4327-4333). The function simplifies to always return `Some(n.to_string())` for numbers.
+
+`coalesce_field()` (line 4373): Remove `label_maps` parameter. Call `value_to_text(value, None)`.
+
+`coalesce_list_field()` (line 4399): Remove `label_maps` parameter. Call `value_to_text(value, None)`.
+
+`parse_row()` call sites (lines 4479, 4493, 4504, 4519, 4531): Remove `&self.config.label_maps` arguments.
+
+### 2.6 Imports
+
+Remove imports of deleted constants: `HF_CLASSLABEL_TYPE`, `HF_JSON_KEY_DATASET_INFO`, `HF_JSON_KEY_FEATURES`, `HF_JSON_KEY_FEATURE_TYPE`, `HF_JSON_KEY_LABEL_NAMES` (lines 35, 37-39).
+
+### 2.7 Tests to delete
+
+All unit tests for ClassLabel/info functionality:
+- `extract_classlabel_maps_*` tests (10442, 10460, 10476, 10490, 10506, 10519)
+- `fetch_classlabel_maps_*` tests (10534, 10549, 10566, 10583, 10917)
+- `info_endpoint_called_exactly_once_per_source_construction` (10647)
+- `value_to_text_resolves_integer_to_label_name` (10611)
+- `value_to_text_falls_back_to_raw_integer_when_*` (10628, 10638)
+- Tests referencing `info_endpoint` in cursor/sampler tests (9555, 9629)
+
+Integration test to delete:
+- `huggingface_live_classlabel_resolution_maps_integers_to_label_strings` (1382-1447)
+
+### 2.8 Tests to update
+
+Integration tests that set `config.info_endpoint = TEST_UNREACHABLE_URL` — remove those assignments (lines 2042, 2159, 2209, 2274, 2393, 2450).
+
+Update `test_config()` helper — remove `info_endpoint` and `label_maps` fields.
+
+### 2.9 Documentation
+
+Update `examples/common/hf_sources.txt` — remove ClassLabel documentation comments (lines 12-14, 22-23).
+
+---
+
+## Phase 3: Migrate `/parquet` to Hub API
+
+### 3.1 Constant (`constants.rs`)
 
 ```rust
 // BEFORE:
@@ -20,85 +179,46 @@ pub const HF_PARQUET_DEFAULT_ENDPOINT: &str = "https://datasets-server.huggingfa
 pub const HF_PARQUET_DEFAULT_ENDPOINT: &str = "https://huggingface.co/api/datasets";
 ```
 
-`HF_SIZE_DEFAULT_ENDPOINT` and `HF_INFO_DEFAULT_ENDPOINT` stay as-is on `datasets-server.huggingface.co`.
+### 3.2 URL construction (`list_remote_candidates_from_parquet_manifest_with_runtime`)
 
----
-
-## Phase 2: Rewrite `/parquet` URL Construction
-
-**File:** `crates/triplets-hf-source/src/huggingface_source.rs`, function `list_remote_candidates_from_parquet_manifest_with_runtime` (lines 2567-2599)
-
-The Hub API embeds the dataset name in the URL path. No query parameters — the entire config/split hierarchy is returned and filtered client-side.
+Build `{base}/{dataset}/parquet` with no query params:
 
 ```rust
-fn list_remote_candidates_from_parquet_manifest_with_runtime(
-    http_client: &ClientWithMiddleware,
-    config: &HuggingFaceRowsConfig,
-    runtime: Option<&tokio::runtime::Runtime>,
-) -> Result<ParquetManifestCandidates, SamplerError> {
-    let base = &config.parquet_endpoint;
-    // Hub API: {base}/{dataset}/parquet — dataset in path, no query params
-    let url = format!("{base}/{}/parquet", config.dataset_name);
-    let body = Self::block_on_http_with_runtime(
-        runtime,
-        config,
-        Self::fetch_http_body_text(
-            http_client,
-            &config.source_id,
-            &url,
-            &[],  // No query params — Hub API returns full hierarchy
-            "Hub parquet endpoint",
-        ),
-    )?;
-    Self::parse_parquet_manifest_response(config, &body)
-}
+let base = &config.parquet_endpoint;
+let url = format!("{base}/{}/parquet", config.dataset_name);
+let body = Self::block_on_http_with_runtime(
+    runtime, config,
+    Self::fetch_http_body_text(http_client, &config.source_id, &url, &[], "Hub parquet endpoint"),
+)?;
 ```
 
----
+### 3.3 JSON parsing (`all_candidates_from_parquet_manifest`)
 
-## Phase 3: Rewrite `/parquet` JSON Parsing
-
-**File:** `crates/triplets-hf-source/src/huggingface_source.rs`, function `all_candidates_from_parquet_manifest` (lines 2035-2102)
-
-**Old schema** (flat array of objects):
+New Hub API schema — hierarchical dict of URL strings:
 ```json
-{"parquet_files": [{"url": "https://...", "size": 12345}]}
+{"config_name": {"split_name": ["https://...000.parquet", "https://...001.parquet"]}}
 ```
 
-**New Hub API schema** (hierarchical: config → split → array of URL strings):
-```json
-{
-  "config_name": {
-    "split_name": ["https://host/.../000.parquet", "https://host/.../001.parquet"]
-  }
-}
-```
+Key rules:
+- Top-level keys = config names (not `"parquet_files"`)
+- Second-level keys = split names
+- Terminal values = plain URL strings (not objects)
+- No `"size"` field
+- When `split_name` is empty → iterate ALL splits in the config
+- When `config_name` is empty → iterate ALL configs in root
 
-Key differences:
-- Top-level keys are config names (not `"parquet_files"`)
-- Second-level keys are split names
-- Terminal values are **plain URL strings**, not objects
-- No `"size"` field — sizes are unavailable from the manifest
+Detection: if root JSON object does NOT contain `"parquet_files"` key, treat as Hub API format.
 
-### All-Splits Mode
-
-When `config.split_name` is empty, the old code omitted the split query param so the server returned all splits. Under the Hub API, we must iterate **all keys** in the config object to gather URLs from every split. Similarly, when `config.config_name` is empty, iterate all top-level config keys.
+**Strongly-typed validation**: Every element pulled from the terminal array must be verified via `.as_str()` before allocation. No implicit type coercion or guessing at JSON structure.
 
 ```rust
-fn all_candidates_from_parquet_manifest(
-    config: &HuggingFaceRowsConfig,
-    json: &Value,
-) -> Result<ParquetManifestCandidates, SamplerError> {
-    let accepted = Self::normalized_shard_extensions(config);
-    let mut candidates = Vec::new();
-    let mut candidate_sizes = HashMap::new(); // Empty — Hub API has no sizes
-    let mut matched_manifest_entries = 0usize;
-
-    // ── Helper: collect URL strings from a JSON array ──────────────────
-    let mut collect_urls = |urls: &Value| {
-        if let Some(arr) = urls.as_array() {
-            for url_val in arr {
-                let Some(url) = url_val.as_str() else { continue; };
+// Inside the Hub API branch — collect URLs with explicit type validation
+if config.split_name.is_empty() {
+    for split_val in config_obj.values() {
+        if let Some(arr) = split_val.as_array() {
+            for element in arr {
+                // Block malformed payloads: every element MUST be a string
+                let Some(url) = element.as_str() else { continue; };
                 let ext = Path::new(url)
                     .extension()
                     .and_then(|v| v.to_str())
@@ -110,169 +230,50 @@ fn all_candidates_from_parquet_manifest(
                 candidates.push(format!("{HF_REMOTE_URL_PREFIX}{url}"));
             }
         }
-    };
-
-    // ── Try new Hub API format: config → split → [urls] ───────────────
-    let mut hub_matched = false;
-    if let Some(root_obj) = json.as_object() {
-        // Guard: if root has "parquet_files" key, this is NOT Hub API format.
-        if !root_obj.contains_key(HF_JSON_KEY_PARQUET_FILES) {
-            hub_matched = true;
-            let config_names: Vec<&str> = if config.config_name.is_empty() {
-                // All-splits mode: iterate every config in root
-                root_obj.keys().map(|k| k.as_str()).collect()
-            } else {
-                // Specific config
-                vec![config.config_name.as_str()]
-            };
-
-            for cname in config_names {
-                let Some(config_val) = root_obj.get(cname) else { continue; };
-                let Some(config_obj) = config_val.as_object() else { continue; };
-
-                if config.split_name.is_empty() {
-                    // All-splits mode: iterate every split in config
-                    for split_val in config_obj.values() {
-                        collect_urls(split_val);
-                    }
-                } else {
-                    // Specific split
-                    if let Some(split_val) = config_obj.get(&config.split_name) {
-                        collect_urls(split_val);
-                    }
-                }
+    }
+} else {
+    if let Some(split_val) = config_obj.get(&config.split_name) {
+        if let Some(arr) = split_val.as_array() {
+            for element in arr {
+                let Some(url) = element.as_str() else { continue; };
+                // ... same extension filter and candidate push ...
             }
         }
     }
-
-    // ── Fallback to old datasets-server format ─────────────────────────
-    if !hub_matched {
-        if let Some(entries) = json.get(HF_JSON_KEY_PARQUET_FILES).and_then(Value::as_array) {
-            for entry in entries {
-                let Some(url) = entry.get(HF_JSON_KEY_URL).and_then(Value::as_str) else {
-                    continue;
-                };
-                let ext = Path::new(url)
-                    .extension()
-                    .and_then(|v| v.to_str())
-                    .map(|v| v.to_ascii_lowercase());
-                if !ext.as_deref().is_some_and(|v| accepted.iter().any(|a| a == v)) {
-                    continue;
-                }
-                matched_manifest_entries += 1;
-                let candidate = format!("{HF_REMOTE_URL_PREFIX}{url}");
-                let expected_size = entry.get(HF_JSON_KEY_SIZE).and_then(Value::as_u64);
-
-                let target = Self::candidate_target_path(config, &candidate);
-                if target.exists() && !Self::target_matches_expected_size(&target, expected_size) {
-                    warn!(
-                        "[triplets:hf] incomplete cached shard detected (will redownload): {}",
-                        target.display()
-                    );
-                    if let Err(err) = fs::remove_file(&target)
-                        && err.kind() != std::io::ErrorKind::NotFound
-                    {
-                        return Err(SamplerError::SourceUnavailable {
-                            source_id: config.source_id.clone(),
-                            reason: format!(
-                                "failed removing incomplete shard {}: {err}",
-                                target.display()
-                            ),
-                        });
-                    }
-                }
-                if let Some(size) = expected_size {
-                    candidate_sizes.insert(candidate.clone(), size);
-                }
-                candidates.push(candidate);
-            }
-        }
-    }
-
-    candidates.sort();
-    candidates.dedup();
-    candidate_sizes.retain(|c, _| candidates.binary_search(c).is_ok());
-    Ok((candidates, candidate_sizes, matched_manifest_entries))
 }
 ```
 
+The old-format fallback path retains the existing `entry.get(HF_JSON_KEY_URL).and_then(Value::as_str)` pattern.
+
+### 3.4 Stale cache cleanup
+
+Since the Hub API provides no file sizes, the stale shard detection (`target_matches_expected_size`) is skipped for Hub API responses. The old-format fallback path retains this logic.
+
 ---
 
-## Phase 4: Fix Live E2E Test Panic
+## Phase 4: Fix E2E Test Panic
 
-**File:** `crates/triplets-hf-source/tests/huggingface_integration.rs`, line 1523-1525
+**File:** `tests/huggingface_integration.rs`, line 1523-1525
 
-When the parquet manifest returns 0 entries (e.g. new format not parsed yet), the hf-hub fallback returns bare `rfilename` paths without the `url::` prefix. The test panics on `.expect()`.
-
-Replace:
-```rust
-let shard_url = first_candidate
-    .strip_prefix(triplets_hf_source::HF_REMOTE_URL_PREFIX)
-    .expect("candidate should have url:: prefix")
-    .to_string();
-```
-
-With:
-```rust
-let shard_url = first_candidate
-    .strip_prefix(triplets_hf_source::HF_REMOTE_URL_PREFIX)
-    .unwrap_or(first_candidate)
-    .to_string();
-```
+Replace `.expect("candidate should have url:: prefix")` with `.unwrap_or(first_candidate)` to handle bare hf-hub fallback paths.
 
 ---
 
 ## Phase 5: Update Mock Servers
 
-**File:** `crates/triplets-hf-source/src/test_utils.rs`
+**File:** `test_utils.rs`
 
-### HfMockServer (lines 32-120)
-Update manifest body (line 72) to hierarchical format with URL strings:
+Update `HfMockServer::new()` and `spawn_manifest_and_shard_http()` to produce hierarchical format with URL strings instead of `{"parquet_files": [...]}`.
 
-```rust
-// NEW format: config → split → array of URL strings
-let manifest_body = serde_json::json!({
-    "default": {  // config_name
-        "train": [  // split_name
-            // Each shard is a plain URL string
-            format!("{base_url}/resolve/main/train/{s:03}.ndjson")
-        ]
-    }
-}).to_string();
-```
-
-Note: sizes are no longer in the manifest. The `manifest_counter` and shard payload serving remain unchanged.
-
-### spawn_manifest_and_shard_http (lines 252-297)
-Same update to hierarchical format with plain URL strings.
-
-### Unit tests in huggingface_source.rs
-Update all tests that build `{"parquet_files": [...]}` payloads to use the new hierarchical format with URL string arrays:
-- `all_candidates_from_parquet_manifest_returns_all_with_sizes` (line 6374) — remove size assertions
-- `all_candidates_from_parquet_manifest_includes_cached_and_replaces_stale` (line 6404) — adapt stale cache test for no-size scenario
-- `candidates_from_parquet_manifest_errors_when_removing_incomplete_target_fails` (line 6453)
-- `parse_parquet_manifest_response_returns_candidates` (line 7875)
-- `list_remote_candidates_from_parquet_manifest_uses_test_endpoint_override` (line 7894)
-
-Add new test cases for all-splits and multi-config scenarios:
-- **All-splits empty split_name**: payload with multiple splits under one config, `split_name = ""`, assert URLs from ALL splits are collected
-- **All-splits empty config_name**: payload with multiple configs, `config_name = ""`, assert URLs from ALL configs are collected
-- **Old-format fallback**: payload with `"parquet_files"` key, assert legacy parsing still works
-- **Multi-config with specific split**: payload with two configs, assert only the requested config's split URLs are returned
+Add `config_name` and `split_name` parameters to `HfMockServer::new()` for flexible test scenarios.
 
 ---
 
-## Phase 6: CI — Enable Auto-Skip for Live Tests
+## Phase 6: CI
 
 **File:** `.github/workflows/rust-tests.yml` (line 86)
 
-Uncomment the auto-skip line so PRs from forks (no secrets) don't fail on rate-limited anonymous requests:
-
-```yaml
-TRIPLETS_SKIP_LIVE_TESTS: ${{ secrets.HF_TOKEN == '' && '1' || '' }}
-```
-
-The existing `reqwest_drive::DriveThrottleBackoff` middleware handles 429 retry/backoff for authenticated requests — no manual retry logic.
+Uncomment auto-skip: `TRIPLETS_SKIP_LIVE_TESTS: ${{ secrets.HF_TOKEN == '' && '1' || '' }}`
 
 ---
 
@@ -280,18 +281,18 @@ The existing `reqwest_drive::DriveThrottleBackoff` middleware handles 429 retry/
 
 | File | Change |
 |------|--------|
-| `crates/triplets-hf-source/src/constants.rs` | Update `HF_PARQUET_DEFAULT_ENDPOINT` only |
-| `crates/triplets-hf-source/src/huggingface_source.rs` | Rewrite parquet URL construction (no query params), rewrite JSON parsing (URL strings, hierarchical dict, old-format fallback) |
-| `crates/triplets-hf-source/src/test_utils.rs` | Update mock manifest format to hierarchical URL strings |
-| `crates/triplets-hf-source/tests/huggingface_integration.rs` | Fix E2E test panic on bare candidate paths |
-| `.github/workflows/rust-tests.yml` | Enable auto-skip for live tests without credentials |
-
-**Not modified:** `HF_SIZE_DEFAULT_ENDPOINT`, `HF_INFO_DEFAULT_ENDPOINT`, `fetch_global_row_count_with_runtime`, `fetch_classlabel_maps_with_runtime`, `extract_split_row_count_from_size_response`, `extract_classlabel_maps`.
+| `crates/triplets-hf-source/src/constants.rs` | Delete `/size` and `/info` constants, update `/parquet` endpoint |
+| `crates/triplets-hf-source/src/huggingface_source.rs` | Remove `size_endpoint`, `info_endpoint`, `total_rows`, `label_maps` fields; delete `/size` and `/info` functions; simplify `len_hint`, `trigger_expansion_if_needed`, `refresh`; simplify `value_to_text`; remove label_maps params from `coalesce_field`, `coalesce_list_field`, `parse_row`; rewrite parquet URL construction and JSON parsing |
+| `crates/triplets-hf-source/src/test_utils.rs` | Update mock manifest format |
+| `crates/triplets-hf-source/tests/huggingface_integration.rs` | Delete `/size` and `/info` live tests; fix E2E panic; remove `size_endpoint`/`info_endpoint` assignments |
+| `.github/workflows/rust-tests.yml` | Enable auto-skip |
+| `examples/common/hf_sources.txt` | Remove ClassLabel docs |
 
 ---
 
 ## Verification
 
-1. `cargo test -p triplets-hf-source` — unit tests pass with new mock format
+1. `cargo test -p triplets-hf-source` — unit tests pass
 2. `cargo test -p triplets-hf-source -- --ignored` (with `HF_TOKEN`) — live E2E test passes
 3. `cargo test --workspace --all-features` — no regressions
+4. `cargo clippy --workspace --all-features` — no warnings
