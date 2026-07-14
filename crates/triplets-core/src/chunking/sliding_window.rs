@@ -148,6 +148,7 @@ mod tests {
                 sentences: vec![text.into()],
             }],
             meta_prefix: None,
+            label: None,
         }
     }
 

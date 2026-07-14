@@ -61,6 +61,7 @@ fn swap_record(source: &str, idx: usize) -> DataRecord {
             ),
         ],
         meta_prefix: None,
+        label: None,
     }
 }
 

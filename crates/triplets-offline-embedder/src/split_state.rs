@@ -530,7 +530,7 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    type PairWrite = (u64, Vec<Vec<f32>>, Vec<Vec<f32>>);
+    type PairWrite = (u64, Vec<Vec<f32>>, Vec<Vec<f32>>, Vec<PairLabel>);
     type TripletWrite = (u64, Vec<Vec<f32>>, Vec<Vec<f32>>, Vec<Vec<f32>>);
 
     struct MockStore {
@@ -551,14 +551,20 @@ mod tests {
 
     impl EmbedStore for MockStore {
         fn write_pairs(&self, start_idx: u64, args: &PairWriteArgs<'_>) -> Result<()> {
-            self.pair_writes.lock().unwrap().push((
-                start_idx,
-                args.entries.iter().map(|e| e.anchor_vec.to_vec()).collect(),
-                args.entries
-                    .iter()
-                    .map(|e| e.candidate_vec.to_vec())
-                    .collect(),
-            ));
+            let mut a_vecs = Vec::with_capacity(args.entries.len());
+            let mut c_vecs = Vec::with_capacity(args.entries.len());
+            let mut labels = Vec::with_capacity(args.entries.len());
+
+            for e in args.entries {
+                a_vecs.push(e.anchor_vec.to_vec());
+                c_vecs.push(e.candidate_vec.to_vec());
+                labels.push(e.label.clone());
+            }
+
+            self.pair_writes
+                .lock()
+                .unwrap()
+                .push((start_idx, a_vecs, c_vecs, labels));
             self.len.fetch_add(args.entries.len(), Ordering::Relaxed);
             Ok(())
         }
@@ -2271,9 +2277,10 @@ mod tests {
         let provider = MockProvider;
         flush_pending(&mut state, &provider).unwrap();
 
-        // Verify the MockStore received the write (label is in the PairWriteEntry)
+        // Verify the MockStore received the write with the correct label
         let writes = state.store.pair_writes.lock().unwrap();
         assert_eq!(writes.len(), 1);
         assert_eq!(writes[0].0, 0); // start_idx
+        assert_eq!(writes[0].3, vec![PairLabel::Negative]); // label
     }
 }

@@ -222,6 +222,7 @@ fn select_chunk_random_handles_empty_and_non_empty_sections() {
         taxonomy: vec![],
         sections: vec![],
         meta_prefix: None,
+        label: None,
     };
     assert!(
         inner
@@ -243,6 +244,7 @@ fn select_chunk_random_handles_empty_and_non_empty_sections() {
             sentences: vec!["one two three four five six".into()],
         }],
         meta_prefix: None,
+        label: None,
     };
     let sampled = inner
         .select_chunk(&non_empty_record, &Selector::Random)
@@ -272,6 +274,7 @@ fn record_has_long_section_returns_false_when_window_tokens_are_disabled() {
             sentences: vec!["one two three four five six seven eight".into()],
         }],
         meta_prefix: None,
+        label: None,
     };
 
     assert!(!inner.record_has_long_anchor_or_context_section(&long_record));
@@ -504,6 +507,7 @@ fn sample_record() -> DataRecord {
             },
         ],
         meta_prefix: None,
+        label: None,
     }
 }
 
@@ -540,6 +544,7 @@ fn trader_record(id: &str, date: &str, title: &str, body: &str) -> DataRecord {
             },
         ],
         meta_prefix: None,
+        label: None,
     }
 }
 
@@ -569,6 +574,7 @@ fn text_columns_record(id: &str, common_text: &str) -> DataRecord {
             },
         ],
         meta_prefix: None,
+        label: None,
     }
 }
 
@@ -1156,6 +1162,7 @@ fn qa_pair_record(id: &str, question: &str, answer: &str) -> DataRecord {
             },
         ],
         meta_prefix: None,
+        label: None,
     }
 }
 
@@ -1237,6 +1244,7 @@ fn chunk_view_carries_window_index() {
             sentences: vec![section_text.into()],
         }],
         meta_prefix: None,
+        label: None,
     };
 
     let section = &record.sections[0];
@@ -1292,6 +1300,7 @@ fn chunk_windows_follow_stride_for_large_sections() {
             ],
         }],
         meta_prefix: None,
+        label: None,
     };
 
     let section = &record.sections[0];
@@ -1357,6 +1366,7 @@ fn chunk_windows_materialize_all_configured_overlaps() {
             sentences: vec![section_text.into()],
         }],
         meta_prefix: None,
+        label: None,
     };
 
     let section = &record.sections[0];
@@ -1471,6 +1481,7 @@ fn sampler_uses_custom_chunking_algorithm_when_provided() {
             sentences: vec![section_text.into()],
         }],
         meta_prefix: None,
+        label: None,
     };
 
     let chunks = sampler
@@ -1528,6 +1539,7 @@ fn runtime_batches_do_not_bypass_custom_chunker() {
             sentences: vec!["alpha beta gamma delta".into()],
         }],
         meta_prefix: None,
+        label: None,
     };
 
     sampler
@@ -2085,6 +2097,7 @@ fn non_adjacent_auto_window_pair_proximity_is_not_half() {
             sentences: vec!["one two three four five six seven eight nine ten".into()],
         }],
         meta_prefix: None,
+        label: None,
     };
 
     let mut inner = sampler.inner.lock().unwrap();
@@ -2196,6 +2209,7 @@ fn text_pair_and_triplet_chunks_all_come_from_materialize_pool() {
             sentences: vec![context_text.into()],
         }],
         meta_prefix: None,
+        label: None,
     };
     let records = vec![make_record(&parity_a), make_record(&parity_b)];
 
@@ -2325,6 +2339,7 @@ fn end_to_end_text_weighting_uses_chunk_offsets() {
             sentences: vec!["one two three four".into()],
         }],
         meta_prefix: None,
+        label: None,
     };
     sampler
         .register_source(Box::new(InMemorySource::from_records("unit", vec![record])))
@@ -3289,6 +3304,7 @@ fn cross_batch_text_dedup_survives_window_advance() {
                 sentences: vec![shared_body.into()],
             }],
             meta_prefix: None,
+            label: None,
         })
         .collect();
 
@@ -3497,6 +3513,7 @@ fn cycles_through_section_windows_before_repeating() {
             sentences: vec!["one two three four".into()],
         }],
         meta_prefix: None,
+        label: None,
     };
     let sampler = TripletSampler::new(config, store);
     sampler
@@ -3568,6 +3585,7 @@ fn first_chunk_offset_is_deterministic_and_nonzero_when_hash_demands_it() {
                 sentences: vec!["one two three four five six".into()],
             }],
             meta_prefix: None,
+            label: None,
         };
 
         let sampler = TripletSampler::new(config, store);
@@ -3670,6 +3688,7 @@ fn first_role_section_offset_is_deterministic_and_nonzero_when_hash_demands_it()
                 },
             ],
             meta_prefix: None,
+            label: None,
         };
 
         let sampler = TripletSampler::new(config, store);
@@ -4339,6 +4358,7 @@ fn role_reentry_same_epoch_restarts_from_same_section_offset() {
             },
         ],
         meta_prefix: None,
+        label: None,
     };
 
     let first = inner
@@ -4413,6 +4433,7 @@ fn role_reentry_after_epoch_change_can_restart_from_different_section_offset() {
             },
         ],
         meta_prefix: None,
+        label: None,
     };
 
     let first_epoch0 = inner
@@ -5205,6 +5226,7 @@ fn selector_edge_cases_cover_internal_branches() {
             },
         ],
         meta_prefix: None,
+        label: None,
     };
 
     assert!(
@@ -8774,6 +8796,7 @@ fn oversampling_advances_cursors_on_large_records() {
             sentences: vec!["One Two Three".into()],
         }],
         meta_prefix: None,
+        label: None,
     };
 
     // Records 2, 3, 4: Large Source, Small Content
@@ -8793,6 +8816,7 @@ fn oversampling_advances_cursors_on_large_records() {
                 sentences: vec![char.to_string()],
             }],
             meta_prefix: None,
+            label: None,
         });
     }
 
@@ -9064,6 +9088,7 @@ fn adds_dynamic_chunk_pair_recipe_for_long_section_sources() {
                 },
             ],
             meta_prefix: None,
+            label: None,
         },
         DataRecord {
             id: "r2".into(),
@@ -9087,6 +9112,7 @@ fn adds_dynamic_chunk_pair_recipe_for_long_section_sources() {
                 },
             ],
             meta_prefix: None,
+            label: None,
         },
     ];
 
@@ -9184,6 +9210,7 @@ fn does_not_add_dynamic_chunk_pair_recipe_when_all_sections_fit_window() {
                 },
             ],
             meta_prefix: None,
+            label: None,
         },
         DataRecord {
             id: short2_id,
@@ -9207,6 +9234,7 @@ fn does_not_add_dynamic_chunk_pair_recipe_when_all_sections_fit_window() {
                 },
             ],
             meta_prefix: None,
+            label: None,
         },
     ];
     let sampler = TripletSampler::new(config, store);
@@ -9283,6 +9311,7 @@ fn adds_dynamic_chunk_pair_recipe_even_with_global_config_recipes() {
                 },
             ],
             meta_prefix: None,
+            label: None,
         },
         DataRecord {
             id: "cfg2".into(),
@@ -9306,6 +9335,7 @@ fn adds_dynamic_chunk_pair_recipe_even_with_global_config_recipes() {
                 },
             ],
             meta_prefix: None,
+            label: None,
         },
     ];
 
@@ -9387,6 +9417,7 @@ fn auto_injected_recipe_uses_distinct_context_chunks_for_anchor_and_positive() {
                 sentences: vec!["one two three four".into()],
             }],
             meta_prefix: None,
+            label: None,
         },
         DataRecord {
             id: other_neg_id,
@@ -9402,6 +9433,7 @@ fn auto_injected_recipe_uses_distinct_context_chunks_for_anchor_and_positive() {
                 sentences: vec!["other".into()],
             }],
             meta_prefix: None,
+            label: None,
         },
     ];
 
@@ -9498,6 +9530,7 @@ fn auto_injected_recipe_never_uses_identical_anchor_and_positive_chunks() {
                 sentences: vec!["one two three four".into()],
             }],
             meta_prefix: None,
+            label: None,
         },
         DataRecord {
             id: long2_id,
@@ -9513,6 +9546,7 @@ fn auto_injected_recipe_never_uses_identical_anchor_and_positive_chunks() {
                 sentences: vec!["alpha beta gamma delta".into()],
             }],
             meta_prefix: None,
+            label: None,
         },
     ];
 
@@ -9580,6 +9614,7 @@ fn auto_injected_recipe_uses_window_chunks_for_anchor_and_positive() {
                 sentences: vec!["one two three four five six seven eight nine ten".into()],
             }],
             meta_prefix: None,
+            label: None,
         },
         DataRecord {
             id: "long_w2".into(),
@@ -9595,6 +9630,7 @@ fn auto_injected_recipe_uses_window_chunks_for_anchor_and_positive() {
                 sentences: vec!["alpha beta gamma delta epsilon zeta eta theta iota kappa".into()],
             }],
             meta_prefix: None,
+            label: None,
         },
     ];
 
@@ -9680,6 +9716,7 @@ fn auto_injected_recipe_keeps_all_components_in_requested_split() {
                     sentences: vec![format!("ctx {split_label:?} {idx} one two three four")],
                 }],
                 meta_prefix: None,
+                label: None,
             });
         }
     }
@@ -9759,6 +9796,7 @@ fn same_selector_triplet_returns_none_when_only_one_chunk_exists() {
             sentences: vec!["one two".into()],
         }],
         meta_prefix: None,
+        label: None,
     };
 
     let negative = DataRecord {
@@ -9775,6 +9813,7 @@ fn same_selector_triplet_returns_none_when_only_one_chunk_exists() {
             sentences: vec!["alpha beta".into()],
         }],
         meta_prefix: None,
+        label: None,
     };
 
     inner
@@ -10726,6 +10765,7 @@ fn instruction_propagates_from_recipe_to_sample_triplet() {
             },
         ],
         meta_prefix: None,
+        label: None,
     };
 
     let records = vec![
@@ -10792,6 +10832,7 @@ fn allow_same_anchor_positive_permits_identical_text_triplet() {
             },
         ],
         meta_prefix: None,
+        label: None,
     };
 
     let records = vec![
@@ -11227,6 +11268,7 @@ fn select_chunk_parallel_paragraph_selector_returns_chunk_or_none() {
             sentences: vec!["one two three four five".into()],
         }],
         meta_prefix: None,
+        label: None,
     };
 
     let inner = sampler.inner.lock().unwrap();
@@ -11268,6 +11310,7 @@ fn select_chunk_parallel_random_selector_handles_empty_and_non_empty() {
         taxonomy: vec![],
         sections: vec![],
         meta_prefix: None,
+        label: None,
     };
 
     let record_with_sections = DataRecord {
@@ -11284,6 +11327,7 @@ fn select_chunk_parallel_random_selector_handles_empty_and_non_empty() {
             sentences: vec!["alpha beta gamma delta epsilon".into()],
         }],
         meta_prefix: None,
+        label: None,
     };
 
     let inner = sampler.inner.lock().unwrap();
@@ -11401,6 +11445,7 @@ fn select_role_parallel_returns_none_when_no_matching_role() {
             sentences: vec!["anchor text here".into()],
         }],
         meta_prefix: None,
+        label: None,
     };
 
     let inner = sampler.inner.lock().unwrap();
@@ -11465,6 +11510,7 @@ fn select_role_parallel_returns_none_when_all_pools_are_empty() {
             sentences: vec![],
         }],
         meta_prefix: None,
+        label: None,
     };
 
     let inner = sampler.inner.lock().unwrap();
@@ -11507,6 +11553,7 @@ fn decorate_chunk_parallel_truncation_paths() {
             sentences: vec!["word1 word2".into()],
         }],
         meta_prefix: None,
+        label: None,
     };
 
     // Prefix has 4 tokens, window = 3 → prefix_tokens.len() (4) >= max_window (3).
@@ -11557,6 +11604,7 @@ fn decorate_chunk_parallel_truncation_paths() {
             sentences: vec!["word1 word2 word3 word4 word5 word6 word7 word8".into()],
         }],
         meta_prefix: None,
+        label: None,
     };
 
     // Prefix has 2 tokens, window = 5 → remaining = 3 body tokens from the chunk.
@@ -11613,6 +11661,7 @@ fn decorate_chunk_no_truncation_when_window_is_zero() {
             sentences: vec!["body token one two three".into()],
         }],
         meta_prefix: None,
+        label: None,
     };
 
     // Prefix has 2 tokens; with max_window=0 no truncation occurs.
@@ -11683,6 +11732,7 @@ fn select_anchor_positive_parallel_returns_none_when_retries_exhausted() {
             sentences: vec!["unique text word".into()],
         }],
         meta_prefix: None,
+        label: None,
     };
 
     let inner = sampler.inner.lock().unwrap();
@@ -11878,6 +11928,7 @@ fn record_bm25_text_with_zero_max_tokens_returns_full_text() {
             },
         ],
         meta_prefix: None,
+        label: None,
     };
 
     // With max_tokens = 0 every token is kept.
@@ -11966,6 +12017,7 @@ fn for_split_non_exhausted_error_propagates_immediately() {
         taxonomy: vec![],
         sections: vec![section],
         meta_prefix: None,
+        label: None,
     };
     {
         let mut inner = sampler.inner.lock().unwrap();
@@ -12998,6 +13050,7 @@ fn same_record_negative_selector_picks_from_context() {
             },
         ],
         meta_prefix: None,
+        label: None,
     };
 
     let sampler = TripletSampler::new(config, Arc::clone(&store));
@@ -13137,6 +13190,7 @@ fn same_record_and_wrong_article_recipes_coexist() {
                 },
             ],
             meta_prefix: None,
+            label: None,
         }
     };
 

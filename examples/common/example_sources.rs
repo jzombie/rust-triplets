@@ -239,6 +239,7 @@ fn build_record(source_id: &str, root: &Path, path: &Path) -> Option<DataRecord>
             make_section(SectionRole::Context, Some("body"), &normalized),
         ],
         meta_prefix: None,
+        label: None,
     })
 }
 

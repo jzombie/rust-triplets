@@ -42,6 +42,12 @@ pub struct DataRecord {
     /// Optional metadata prefix policy for KVP sampling (key-value headers injected into text).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meta_prefix: Option<KvpPrefixSampler>,
+    /// Pair label for supervised pair entries (Positive/Negative).
+    ///
+    /// Only meaningful for pair-mode records written by the SRD pipeline.
+    /// `None` for records from other sources or triplet-mode entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<PairLabel>,
 }
 
 impl DataRecord {
@@ -100,6 +106,7 @@ impl DataRecord {
                 sentences: vec![],
             }],
             meta_prefix: None,
+            label: None,
         }
     }
 }
@@ -367,6 +374,7 @@ mod tests {
                 sentences: vec!["body".to_string()],
             }],
             meta_prefix: None,
+            label: None,
         };
 
         assert_eq!(record.source, "source_a");

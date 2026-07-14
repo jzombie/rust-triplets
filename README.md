@@ -613,6 +613,7 @@ impl IndexableSource for MyApiSource {
             // prefixed and plain chunks. See the "Metadata Prefixes and Tag Dropout"
             // section for full usage.
             meta_prefix: None,
+            label: None,
         }))
     }
 }
