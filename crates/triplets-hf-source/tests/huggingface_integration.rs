@@ -1322,76 +1322,6 @@ fn huggingface_reads_live_remote_dataset() {
     );
 }
 
-#[test]
-#[serial_test::serial(all_integration)]
-#[ignore = "network integration test — verifies /info endpoint ClassLabel resolution end-to-end"]
-fn huggingface_live_classlabel_resolution_maps_integers_to_label_strings() {
-    // ── Guard: respect TRIPLETS_SKIP_LIVE_TESTS ────────────────────────────
-    let skip_live = std::env::var(ENV_TRIPLETS_SKIP_LIVE_TESTS)
-        .map(|v| !v.trim().is_empty())
-        .unwrap_or(false);
-    if skip_live {
-        eprintln!(
-            "[skip] TRIPLETS_SKIP_LIVE_TESTS is active — \
-             skipping ClassLabel resolution integration test."
-        );
-        return;
-    }
-
-    // Exercises three live endpoints in sequence:
-    //   1. /info  — called in new() to resolve ClassLabel column names
-    //   2. /parquet — called in refresh() to obtain the shard manifest
-    //   3. HF CDN — actual parquet shard download URL
-    //
-    // TimKoornstra/financial-tweets-sentiment has a `sentiment` column declared
-    // as ClassLabel with names = ["neutral", "bullish", "bearish"].  In the
-    // parquet file the column is stored as integer (0/1/2).
-    //
-    // With successful /info resolution the transcoded records will contain the
-    // label strings.  Without it (endpoint unreachable or format changed) they
-    // will contain raw integer strings.  The final assertion distinguishes the
-    // two cases and fails on any regression in the /info endpoint contract.
-    //
-    // snapshot_dir is a fresh tempdir — no shared cache is used.
-    let temp = tempfile::tempdir().expect("failed creating tempdir");
-
-    let mut config = config_no_auth(
-        "hf_live_classlabel",
-        HF_PUBLIC_TEST_DATASET,
-        "default",
-        "train",
-        temp.path(),
-    );
-    // Using sentiment as the sole text column so every record's text IS the
-    // resolved label.  Without ClassLabel resolution the text would be "0",
-    // "1", or "2" instead of a named label.
-    config.text_columns = vec!["sentiment".to_string()];
-
-    let source = HuggingFaceRowSource::new(config).expect("failed creating source");
-    let seed = seeded_config(43);
-    let snapshot = source
-        .refresh(&seed, None, Some(5))
-        .expect("refresh should download and read live rows");
-
-    assert!(
-        !snapshot.records.is_empty(),
-        "expected records from HF_PUBLIC_TEST_DATASET"
-    );
-
-    const KNOWN_LABELS: &[&str] = &["neutral", "bullish", "bearish"];
-    for record in &snapshot.records {
-        for section in &record.sections {
-            let text = section.text.as_str();
-            assert!(
-                KNOWN_LABELS.contains(&text),
-                "/info ClassLabel resolution failed: expected one of {KNOWN_LABELS:?} \
-                 but got {text:?} — raw integers (\"0\"/\"1\"/\"2\") indicate the /info \
-                 endpoint no longer returns a 'names' array for this ClassLabel column"
-            );
-        }
-    }
-}
-
 // ── Live E2E integration test: candidate discovery + shard download ────────
 //
 // Exercises the full E2E pipeline through the library's public entry points
@@ -1399,14 +1329,12 @@ fn huggingface_live_classlabel_resolution_maps_integers_to_label_strings() {
 // for the first shard matches the size from the parquet manifest.
 //
 // Pipeline exercised:
-//   1. /info  — called inside `new()` to resolve ClassLabel column names
-//   2. /size  — called inside `new()` to obtain global row count
-//   3. /parquet or hf-hub listing — called inside `refresh()` via
-//      `ensure_row_available` → `list_remote_candidates_with_runtime`
-//   4. HEAD  — called inside `download_next_remote_shard` via
+//   1. Hub API tree endpoint — called inside `refresh()` via
+//      `list_remote_candidates_with_runtime` to discover shard URLs
+//   2. HEAD  — called inside `download_and_materialize_shard_with_runtime` via
 //      `fetch_remote_size_with_runtime` (HEAD Content-Length for staleness
-//      detection when the parquet manifest is unavailable)
-//   5. HF CDN — actual parquet shard download
+//      detection)
+//   3. HF CDN — actual parquet shard download
 //
 // Required env vars:
 //   HF_TOKEN                       — optional, for private datasets
@@ -1957,10 +1885,8 @@ fn sampler_next_text_batch_re_expands_after_cache_eviction() {
 
     // ── Source ───────────────────────────────────────────────────────────
     //
-    // The endpoint URLs are set directly on the config before constructing
-    // the source so they are captured once at construction time.  The /size
-    // and /info endpoints are NOT mocked; failing to query them is non-fatal
-    // (warns and returns None).  Point them somewhere harmless.
+    // The endpoint URL is set directly on the config before constructing
+    // the source so it is captured once at construction time.
     let mut config = HuggingFaceRowsConfig::new(
         "hf_re_expand_test",
         "org/dataset",
