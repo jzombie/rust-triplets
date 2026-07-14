@@ -43,7 +43,6 @@ cache-manager = "0.4.1"
 chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.1", features = ["derive"] }
 csv = "1.4.0"
-hf-hub = { version = "0.5.0", default-features = false, features = ["tokio", "rustls-tls"] }
 indexmap = "2.14.0"
 indoc = "2.0.7"
 line-ending = "1.5.1"
@@ -86,7 +85,6 @@ cache-manager = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
 csv = { workspace = true }
-hf-hub = { workspace = true, optional = true }
 indexmap = { workspace = true }
 line-ending = { workspace = true }
 parquet = { workspace = true, optional = true }
