@@ -1,4 +1,5 @@
 use cache_manager::{CacheRoot, EvictPolicy};
+use flate2::read::GzDecoder;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::record::reader::RowIter;
 use rayon::prelude::*;
@@ -444,6 +445,41 @@ fn hf_source_id_slug(dataset: &str, config: &str, split: &str) -> String {
         slug = "hf".to_string();
     }
     slug
+}
+
+/// Extract the inner format extension from a file path, handling compound
+/// extensions like `.jsonl.gz`. Returns the innermost recognized format.
+///
+/// Examples:
+/// - `file.jsonl.gz` → `Some("jsonl")`
+/// - `file.parquet` → `Some("parquet")`
+/// - `file.gz` → `None` (no inner format)
+/// - `file.simdr` → `Some("simdr")`
+fn resolve_inner_extension(path: &Path) -> Option<String> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())?
+        .to_ascii_lowercase();
+
+    // Handle compression extensions
+    if ext == "gz" {
+        let stem_ext = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|stem| Path::new(stem).extension())
+            .and_then(|e| e.to_str())?
+            .to_ascii_lowercase();
+        Some(stem_ext)
+    } else {
+        Some(ext)
+    }
+}
+
+/// Check if a file path has a gzip compression extension.
+fn is_gzip_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("gz"))
 }
 
 /// Build Hugging Face row sources from a parsed source list.
@@ -1427,7 +1463,7 @@ impl HuggingFaceRowSource {
         Ok(())
     }
 
-    fn transcode_parquet_shard_to_row_store(
+    fn transcode_transient_shard_to_store(
         &self,
         shard: &ShardIndex,
     ) -> Result<Option<ShardIndex>, SamplerError> {
@@ -1441,13 +1477,13 @@ impl HuggingFaceRowSource {
             let existing_rows = self.read_store_row_count(&store)?;
             if existing_rows > 0 {
                 // Simdr store is already fully populated.  Clean up the
-                // transient parquet source file if it is still present.
+                // transient source file if it is still present.
                 if shard.path != store_path
                     && shard.path.exists()
                     && let Err(err) = fs::remove_file(&shard.path)
                 {
                     warn!(
-                        "[triplets:hf] failed removing stale parquet after store hit {}: {}",
+                        "[triplets:hf] failed removing stale transient shard after store hit {}: {}",
                         shard.path.display(),
                         err
                     );
@@ -1466,35 +1502,34 @@ impl HuggingFaceRowSource {
 
         let mut served_rows = 0usize;
 
-        for (group_pos, (group_start, group_count)) in
-            shard.parquet_row_groups.iter().copied().enumerate()
-        {
-            let rows = self
-                .parquet_cache
-                .lock()
-                .map_err(|_| SamplerError::SourceUnavailable {
+        if is_gzip_path(&shard.path) {
+            // Transcode .jsonl.gz → .simdr store
+            let file = File::open(&shard.path).map_err(|err| SamplerError::SourceUnavailable {
+                source_id: self.config.source_id.clone(),
+                reason: format!(
+                    "failed opening gz shard for transcode {}: {err}",
+                    shard.path.display()
+                ),
+            })?;
+            let reader = BufReader::new(GzDecoder::new(file));
+            let mut batch: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(1024);
+
+            for (local_idx, line_result) in reader.lines().enumerate() {
+                let line = line_result.map_err(|err| SamplerError::SourceUnavailable {
                     source_id: self.config.source_id.clone(),
-                    reason: "huggingface parquet cache lock poisoned".to_string(),
-                })?
-                .row_group_rows_for(
-                    &self.config.source_id,
-                    &shard.path,
-                    group_pos,
-                    self.config.parquet_row_group_cache_capacity,
-                )?;
-
-            let mut batch: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(group_count);
-
-            for local_in_group in 0..group_count {
-                let local_idx = group_start.saturating_add(local_in_group);
-                if local_idx >= shard.row_count {
-                    break;
+                    reason: format!("failed reading gz shard {}: {err}", shard.path.display()),
+                })?;
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
                 }
-                let Some(row_value) = rows.get(local_in_group) else {
-                    break;
-                };
-                let absolute_idx = shard.global_start.saturating_add(local_idx);
-                let Some(row) = self.parse_row(absolute_idx, row_value)? else {
+
+                // Use served_rows for absolute_idx to maintain bounded, non-overlapping IDs.
+                // local_idx is only used for error reporting in parse_non_parquet_line.
+                let absolute_idx = shard.global_start.saturating_add(served_rows);
+                let line_value = self.parse_non_parquet_line(shard, local_idx, trimmed)?;
+
+                let Some(row) = self.parse_row(absolute_idx, &line_value)? else {
                     continue;
                 };
 
@@ -1502,8 +1537,24 @@ impl HuggingFaceRowSource {
                 let payload = self.encode_row_view(&row)?;
                 batch.push((key, payload));
                 served_rows = served_rows.saturating_add(1);
+
+                // Flush batch periodically
+                if batch.len() >= 1024 {
+                    let refs: Vec<(&[u8], &[u8])> = batch
+                        .iter()
+                        .map(|(key, payload)| (key.as_slice(), payload.as_slice()))
+                        .collect();
+                    store
+                        .batch_write(&refs)
+                        .map_err(|err| SamplerError::SourceUnavailable {
+                            source_id: self.config.source_id.clone(),
+                            reason: format!("row-store batch write failed: {err}"),
+                        })?;
+                    batch.clear();
+                }
             }
 
+            // Flush remaining batch
             if !batch.is_empty() {
                 let refs: Vec<(&[u8], &[u8])> = batch
                     .iter()
@@ -1516,6 +1567,59 @@ impl HuggingFaceRowSource {
                         reason: format!("row-store batch write failed: {err}"),
                     })?;
             }
+        } else {
+            // Existing parquet transcoding logic
+            for (group_pos, (group_start, group_count)) in
+                shard.parquet_row_groups.iter().copied().enumerate()
+            {
+                let rows = self
+                    .parquet_cache
+                    .lock()
+                    .map_err(|_| SamplerError::SourceUnavailable {
+                        source_id: self.config.source_id.clone(),
+                        reason: "huggingface parquet cache lock poisoned".to_string(),
+                    })?
+                    .row_group_rows_for(
+                        &self.config.source_id,
+                        &shard.path,
+                        group_pos,
+                        self.config.parquet_row_group_cache_capacity,
+                    )?;
+
+                let mut batch: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(group_count);
+
+                for local_in_group in 0..group_count {
+                    let local_idx = group_start.saturating_add(local_in_group);
+                    if local_idx >= shard.row_count {
+                        break;
+                    }
+                    let Some(row_value) = rows.get(local_in_group) else {
+                        break;
+                    };
+                    let absolute_idx = shard.global_start.saturating_add(local_idx);
+                    let Some(row) = self.parse_row(absolute_idx, row_value)? else {
+                        continue;
+                    };
+
+                    let key = Self::row_store_row_key(served_rows);
+                    let payload = self.encode_row_view(&row)?;
+                    batch.push((key, payload));
+                    served_rows = served_rows.saturating_add(1);
+                }
+
+                if !batch.is_empty() {
+                    let refs: Vec<(&[u8], &[u8])> = batch
+                        .iter()
+                        .map(|(key, payload)| (key.as_slice(), payload.as_slice()))
+                        .collect();
+                    store
+                        .batch_write(&refs)
+                        .map_err(|err| SamplerError::SourceUnavailable {
+                            source_id: self.config.source_id.clone(),
+                            reason: format!("row-store batch write failed: {err}"),
+                        })?;
+                }
+            }
         }
 
         self.write_store_row_count(&store, served_rows)?;
@@ -1524,7 +1628,7 @@ impl HuggingFaceRowSource {
             fs::remove_file(&shard.path).map_err(|err| SamplerError::SourceUnavailable {
                 source_id: self.config.source_id.clone(),
                 reason: format!(
-                    "failed removing parquet shard after store transcode {}: {err}",
+                    "failed removing transient shard after store transcode {}: {err}",
                     shard.path.display()
                 ),
             })?;
@@ -1850,10 +1954,7 @@ impl HuggingFaceRowSource {
                 let Some(file_path) = entry.get("path").and_then(Value::as_str) else {
                     continue;
                 };
-                let ext = Path::new(file_path)
-                    .extension()
-                    .and_then(|v| v.to_str())
-                    .map(|v| v.to_ascii_lowercase());
+                let ext = resolve_inner_extension(Path::new(file_path));
                 if !ext
                     .as_deref()
                     .is_some_and(|v| accepted.iter().any(|a| a == v))
@@ -2820,6 +2921,10 @@ impl HuggingFaceRowSource {
             .and_then(|v| v.to_str())
             .is_some_and(|ext| ext.eq_ignore_ascii_case("parquet"));
 
+        // .gz files (e.g. .jsonl.gz) are transient download artifacts that will
+        // be transcoded to .simdr stores during the download phase.
+        let is_transient_gz = is_gzip_path(path);
+
         let (rows, parquet_row_groups, checkpoints, maybe_store) = if is_store {
             let store = Self::open_store_via_cache(config, path)?;
             let rows = if let Some(entry) =
@@ -2872,6 +2977,12 @@ impl HuggingFaceRowSource {
         } else if is_transient_parquet {
             let (rows, parquet_row_groups) = Self::parquet_row_group_map(config, path)?;
             (rows, parquet_row_groups, Vec::new(), None)
+        } else if is_transient_gz {
+            // .gz files (e.g. .jsonl.gz) are transient download artifacts.
+            // Return dummy count of 1 to bypass the rows == 0 short-circuit.
+            // The true row_count is determined during the single-pass transcode
+            // in transcode_transient_shard_to_store, avoiding double decompression.
+            (1, Vec::new(), Vec::new(), None)
         } else {
             let file = File::open(path).map_err(|err| SamplerError::SourceUnavailable {
                 source_id: config.source_id.clone(),
@@ -2914,7 +3025,7 @@ impl HuggingFaceRowSource {
                 path: path.to_path_buf(),
                 global_start,
                 row_count: rows,
-                random_access: is_transient_parquet || is_store,
+                random_access: is_transient_parquet || is_transient_gz || is_store,
                 parquet_row_groups,
                 checkpoints,
                 remote_candidate: None,
@@ -3327,7 +3438,7 @@ impl HuggingFaceRowSource {
         }
 
         drop(state);
-        let mut shard = match self.transcode_parquet_shard_to_row_store(&shard)? {
+        let mut shard = match self.transcode_transient_shard_to_store(&shard)? {
             Some(shard) => shard,
             None => return Ok(true),
         };
@@ -3416,7 +3527,7 @@ impl HuggingFaceRowSource {
                 source_id: self.config.source_id.clone(),
                 reason: "huggingface source state lock poisoned".to_string(),
             })?;
-        state.materialized_rows += rows_to_add;
+        state.materialized_rows += shard.row_count;
         shard.remote_candidate = Some(remote_path.clone());
         state.shards.push(shard);
         drop(state);
@@ -3569,6 +3680,18 @@ impl HuggingFaceRowSource {
                 if let Err(err) = fs::remove_file(entry.path()) {
                     warn!(
                         "[triplets:hf] found persisted parquet shard (expected transient only) and failed to remove {}: {}",
+                        entry.path().display(),
+                        err
+                    );
+                }
+                continue;
+            }
+            // .gz files (e.g. .jsonl.gz) are transient download artifacts that must
+            // be transcoded to .simdr stores.  Delete them quietly and skip indexing.
+            if is_gzip_path(entry.path()) {
+                if let Err(err) = fs::remove_file(entry.path()) {
+                    warn!(
+                        "[triplets:hf] found transient .gz shard and failed to remove {}: {}",
                         entry.path().display(),
                         err
                     );
@@ -4006,13 +4129,8 @@ impl HuggingFaceRowSource {
             });
         }
 
-        let is_strict_json_lines = shard
-            .path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .is_some_and(|ext| {
-                ext.eq_ignore_ascii_case("jsonl") || ext.eq_ignore_ascii_case("ndjson")
-            });
+        let is_strict_json_lines = resolve_inner_extension(&shard.path)
+            .is_some_and(|ext| ext == "jsonl" || ext == "ndjson");
 
         match serde_json::from_str::<Value>(trimmed) {
             Ok(value) => {
@@ -7248,11 +7366,11 @@ mod tests {
         assert_eq!(state.materialized_rows, 2);
     }
 
-    // When transcode_parquet_shard_to_row_store takes the early-return path
+    // When transcode_transient_shard_to_store takes the early-return path
     // (simdr store already fully populated), it must still delete the input
-    // parquet file and return a ShardIndex with random_access = true.
+    // transient file and return a ShardIndex with random_access = true.
     #[test]
-    fn transcode_parquet_shard_to_row_store_early_return_cleans_up_parquet() {
+    fn transcode_transient_shard_to_store_early_return_cleans_up_transient() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
         let source = test_source(config.clone());
@@ -7282,7 +7400,7 @@ mod tests {
         };
 
         let result = source
-            .transcode_parquet_shard_to_row_store(&shard)
+            .transcode_transient_shard_to_store(&shard)
             .expect("transcode must succeed");
 
         // Stale parquet must be gone.
@@ -7538,6 +7656,112 @@ mod tests {
             "should return true (candidate consumed)"
         );
         assert!(store_path.exists(), "fresh store should NOT be deleted");
+    }
+
+    #[test]
+    fn download_next_remote_shard_gz_materializes_true_row_count() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config);
+
+        // Create a 5-line .jsonl.gz payload
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use std::io::Write;
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        for i in 1..=5 {
+            writeln!(encoder, r#"{{"id":"r{}","text":"line {}"}}"#, i, i).unwrap();
+        }
+        let gz_payload = encoder.finish().unwrap();
+
+        let server = spawn_one_shot_http(gz_payload.clone());
+        let base_url = server.url().to_string();
+        let candidate = format!("url::{base_url}/datasets/org/ds/resolve/main/train/data.jsonl.gz");
+
+        {
+            let mut state = source.state.lock().unwrap();
+            state.remote_candidates = Some(vec![candidate.clone()]);
+            state
+                .remote_candidate_sizes
+                .insert(candidate, gz_payload.len() as u64);
+            state.next_remote_idx = 0;
+        }
+
+        assert!(source.download_next_remote_shard().unwrap());
+
+        let state = source.state.lock().unwrap();
+        // Materialized rows must be 5 (true count), not 1 (dummy)
+        assert_eq!(state.materialized_rows, 5);
+        assert_eq!(state.shards.len(), 1);
+    }
+
+    #[test]
+    fn download_next_remote_shard_gz_invalid_json_returns_error() {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use std::io::Write;
+
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config);
+
+        // Create a .gz file with invalid JSON
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        writeln!(encoder, "this is not valid json").unwrap();
+        let gz_payload = encoder.finish().unwrap();
+
+        let server = spawn_one_shot_http(gz_payload.clone());
+        let base_url = server.url().to_string();
+        let candidate =
+            format!("url::{base_url}/datasets/org/ds/resolve/main/train/invalid.jsonl.gz");
+
+        {
+            let mut state = source.state.lock().unwrap();
+            state.remote_candidates = Some(vec![candidate.clone()]);
+            state
+                .remote_candidate_sizes
+                .insert(candidate, gz_payload.len() as u64);
+            state.next_remote_idx = 0;
+        }
+
+        let result = source.download_next_remote_shard();
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SamplerError::SourceInconsistent { .. } => {} // Expected for invalid JSON
+            other => panic!("expected SourceInconsistent, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn download_next_remote_shard_gz_corrupt_stream_returns_error() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config);
+
+        // Corrupt gzip data
+        let corrupt_payload = b"this is not valid gzip data".to_vec();
+
+        let server = spawn_one_shot_http(corrupt_payload.clone());
+        let base_url = server.url().to_string();
+        let candidate =
+            format!("url::{base_url}/datasets/org/ds/resolve/main/train/corrupt.jsonl.gz");
+
+        {
+            let mut state = source.state.lock().unwrap();
+            state.remote_candidates = Some(vec![candidate.clone()]);
+            state
+                .remote_candidate_sizes
+                .insert(candidate, corrupt_payload.len() as u64);
+            state.next_remote_idx = 0;
+        }
+
+        let result = source.download_next_remote_shard();
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SamplerError::SourceUnavailable { .. } => {} // Expected for corrupt stream
+            other => panic!("expected SourceUnavailable, got: {other:?}"),
+        }
     }
 
     #[test]
@@ -9755,6 +9979,86 @@ mod tests {
         assert!(!HuggingFaceRowSource::is_store_shard_path(Path::new(
             ".hidden"
         )));
+    }
+
+    #[test]
+    fn resolve_inner_extension_handles_compound_extensions() {
+        // Compound extensions
+        assert_eq!(
+            resolve_inner_extension(Path::new("file.jsonl.gz")),
+            Some("jsonl".to_string())
+        );
+        assert_eq!(
+            resolve_inner_extension(Path::new("file.ndjson.gz")),
+            Some("ndjson".to_string())
+        );
+        assert_eq!(
+            resolve_inner_extension(Path::new("file.txt.gz")),
+            Some("txt".to_string())
+        );
+
+        // Simple extensions
+        assert_eq!(
+            resolve_inner_extension(Path::new("file.parquet")),
+            Some("parquet".to_string())
+        );
+        assert_eq!(
+            resolve_inner_extension(Path::new("file.simdr")),
+            Some("simdr".to_string())
+        );
+        assert_eq!(
+            resolve_inner_extension(Path::new("file.jsonl")),
+            Some("jsonl".to_string())
+        );
+        assert_eq!(
+            resolve_inner_extension(Path::new("file.ndjson")),
+            Some("ndjson".to_string())
+        );
+
+        // No inner format (just .gz)
+        assert_eq!(resolve_inner_extension(Path::new("file.gz")), None);
+
+        // No extension
+        assert_eq!(resolve_inner_extension(Path::new("no-extension")), None);
+
+        // Case insensitive
+        assert_eq!(
+            resolve_inner_extension(Path::new("file.JSONL.GZ")),
+            Some("jsonl".to_string())
+        );
+        assert_eq!(
+            resolve_inner_extension(Path::new("file.PARQUET")),
+            Some("parquet".to_string())
+        );
+
+        // Boundary cases
+        assert_eq!(
+            resolve_inner_extension(Path::new("file.tar.gz")),
+            Some("tar".to_string())
+        );
+        assert_eq!(
+            resolve_inner_extension(Path::new(".hidden.jsonl.gz")),
+            Some("jsonl".to_string())
+        );
+        assert_eq!(
+            resolve_inner_extension(Path::new("file.gz.bak")),
+            Some("bak".to_string())
+        );
+        assert_eq!(resolve_inner_extension(Path::new("")), None);
+    }
+
+    #[test]
+    fn is_gzip_path_detects_gz_extension() {
+        assert!(is_gzip_path(Path::new("file.jsonl.gz")));
+        assert!(is_gzip_path(Path::new("file.GZ")));
+        assert!(is_gzip_path(Path::new("file.Gz")));
+        assert!(is_gzip_path(Path::new("file.tar.gz")));
+        assert!(!is_gzip_path(Path::new("file.parquet")));
+        assert!(!is_gzip_path(Path::new("file.jsonl")));
+        assert!(!is_gzip_path(Path::new("file.simdr")));
+        assert!(!is_gzip_path(Path::new("no-extension")));
+        assert!(!is_gzip_path(Path::new("file.gz.bak")));
+        assert!(!is_gzip_path(Path::new("")));
     }
 
     #[test]
