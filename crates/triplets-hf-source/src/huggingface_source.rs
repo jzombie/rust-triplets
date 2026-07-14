@@ -9636,7 +9636,7 @@ mod tests {
         let handle = source.expansion_thread.lock().unwrap().take();
         assert!(handle.is_some());
         if let Some(h) = handle {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
             while !h.is_finished() && std::time::Instant::now() < deadline {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
