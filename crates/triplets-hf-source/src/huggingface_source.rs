@@ -488,6 +488,17 @@ fn is_transient_text(path: &Path) -> bool {
         .is_some_and(|ext| ext == "jsonl" || ext == "ndjson" || ext == "json" || ext == "txt")
 }
 
+/// Normalize a path for cross-platform string comparison.
+/// Lowercases drive letters, unifies slashes, and strips Windows UNC prefixes.
+fn normalize_path_for_comparison(path: &Path) -> String {
+    let normalized = path.to_string_lossy().to_lowercase().replace('\\', "/");
+    if let Some(stripped) = normalized.strip_prefix("//?/") {
+        stripped.to_string()
+    } else {
+        normalized
+    }
+}
+
 /// Build Hugging Face row sources from a parsed source list.
 pub fn build_hf_sources(roots: &HfListRoots) -> Vec<Box<dyn DataSource + 'static>> {
     // Phase 1: compute auto-slugs for entries that don't have an explicit source_id.
@@ -1498,7 +1509,9 @@ impl HuggingFaceRowSource {
             if existing_rows > 0 {
                 // Simdr store is already fully populated.  Clean up the
                 // transient source file if it is still present.
-                if shard.path != store_path
+                let path_norm = normalize_path_for_comparison(&shard.path);
+                let store_norm = normalize_path_for_comparison(&store_path);
+                if path_norm != store_norm
                     && shard.path.exists()
                     && let Err(err) = fs::remove_file(&shard.path)
                 {
@@ -1648,7 +1661,11 @@ impl HuggingFaceRowSource {
 
         // Only delete transient files inside the managed manifest root,
         // never delete user-provided local files.
-        let in_manifest = shard.path.starts_with(self.manifest_cache_root());
+        let in_manifest = {
+            let path_norm = normalize_path_for_comparison(&shard.path);
+            let root_norm = normalize_path_for_comparison(&self.manifest_cache_root());
+            path_norm.starts_with(&root_norm)
+        };
         if shard.path != store_path && shard.path.exists() && in_manifest {
             fs::remove_file(&shard.path).map_err(|err| SamplerError::SourceUnavailable {
                 source_id: self.config.source_id.clone(),
@@ -3436,7 +3453,9 @@ impl HuggingFaceRowSource {
                 &self.config,
                 &remote_path,
             ));
-            if shard.path != canonical_store {
+            let p1_norm = normalize_path_for_comparison(&shard.path);
+            let p2_norm = normalize_path_for_comparison(&canonical_store);
+            if p1_norm != p2_norm {
                 if let Some(parent) = canonical_store.parent() {
                     fs::create_dir_all(parent).map_err(|err| SamplerError::SourceUnavailable {
                         source_id: self.config.source_id.clone(),
@@ -3653,7 +3672,11 @@ impl HuggingFaceRowSource {
             if !entry.file_type().is_file() {
                 continue;
             }
-            let in_manifest = entry.path().starts_with(&manifest_root);
+            let in_manifest = {
+                let path_norm = normalize_path_for_comparison(entry.path());
+                let root_norm = normalize_path_for_comparison(&manifest_root);
+                path_norm.starts_with(&root_norm)
+            };
             let Some(ext) = entry.path().extension().and_then(|v| v.to_str()) else {
                 continue;
             };
