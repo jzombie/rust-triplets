@@ -5,9 +5,9 @@ use triplets_core::SplitLabel;
 use triplets_core::data::PairLabel;
 
 use crate::traits::{
-    BatchProvider, EmbedStore, Embedder, PairEntry, PairWriteArgs, PairWriteEntry,
-    Result, SamplerBatch, SchedulerConfig, SchedulerError, StepResult, TripletEntry,
-    TripletWriteArgs, TripletWriteEntry,
+    BatchProvider, EmbedStore, Embedder, PairEntry, PairWriteArgs, PairWriteEntry, Result,
+    SamplerBatch, SchedulerConfig, SchedulerError, StepResult, TripletEntry, TripletWriteArgs,
+    TripletWriteEntry,
 };
 
 /// Accumulated pair entry ready for flush.
@@ -129,6 +129,7 @@ impl<S: EmbedStore> SplitState<S> {
         self.segment_base = self.total_written;
     }
 
+    // TODO: Refactor; the "accumulate not used for triplets — step handles them directly" is confusing.
     /// Accumulate embedded texts into the pending state.
     pub fn accumulate(
         &mut self,
@@ -201,7 +202,8 @@ impl<S: EmbedStore> SplitState<S> {
                     let chunk_end = (chunk_start + chunk_size).min(anchor_count);
                     let chunk = &entries[chunk_start..chunk_end];
 
-                    let anchor_refs: Vec<&str> = chunk.iter().map(|e| e.anchor_text.as_str()).collect();
+                    let anchor_refs: Vec<&str> =
+                        chunk.iter().map(|e| e.anchor_text.as_str()).collect();
                     let anchor_vecs = match embedder.embed(&anchor_refs) {
                         Ok(v) => match validate_embed_response(&v, chunk.len(), self.emb_dim) {
                             Ok(()) => v,
@@ -412,31 +414,35 @@ pub fn flush_pending<S: EmbedStore, P: BatchProvider>(
 
     match state.pending {
         PendingState::Pairs(ref pairs) => {
-            let entries: Vec<PairWriteEntry> = pairs.iter().map(|p| PairWriteEntry {
-                anchor_text: p.anchor_text.as_str(),
-                anchor_vec: &p.anchor_vec,
-                candidate_text: p.candidate_text.as_str(),
-                candidate_vec: &p.candidate_vec,
-                label: &p.label,
-            }).collect();
-            state.store.write_pairs(
-                state.total_written,
-                &PairWriteArgs { entries: &entries },
-            )?;
+            let entries: Vec<PairWriteEntry> = pairs
+                .iter()
+                .map(|p| PairWriteEntry {
+                    anchor_text: p.anchor_text.as_str(),
+                    anchor_vec: &p.anchor_vec,
+                    candidate_text: p.candidate_text.as_str(),
+                    candidate_vec: &p.candidate_vec,
+                    label: &p.label,
+                })
+                .collect();
+            state
+                .store
+                .write_pairs(state.total_written, &PairWriteArgs { entries: &entries })?;
         }
         PendingState::Triplets(ref triplets) => {
-            let entries: Vec<TripletWriteEntry> = triplets.iter().map(|t| TripletWriteEntry {
-                anchor_text: t.anchor_text.as_str(),
-                anchor_vec: &t.anchor_vec,
-                pos_text: t.pos_text.as_str(),
-                pos_vec: &t.pos_vec,
-                neg_text: t.neg_text.as_str(),
-                neg_vec: &t.neg_vec,
-            }).collect();
-            state.store.write_triplets(
-                state.total_written,
-                &TripletWriteArgs { entries: &entries },
-            )?;
+            let entries: Vec<TripletWriteEntry> = triplets
+                .iter()
+                .map(|t| TripletWriteEntry {
+                    anchor_text: t.anchor_text.as_str(),
+                    anchor_vec: &t.anchor_vec,
+                    pos_text: t.pos_text.as_str(),
+                    pos_vec: &t.pos_vec,
+                    neg_text: t.neg_text.as_str(),
+                    neg_vec: &t.neg_vec,
+                })
+                .collect();
+            state
+                .store
+                .write_triplets(state.total_written, &TripletWriteArgs { entries: &entries })?;
         }
     }
 
@@ -475,23 +481,24 @@ mod tests {
         fn write_pairs(&self, start_idx: u64, args: &PairWriteArgs<'_>) -> Result<()> {
             self.pair_writes.lock().unwrap().push((
                 start_idx,
-                args.anchor_vecs.to_vec(),
-                args.pos_vecs.to_vec(),
+                args.entries.iter().map(|e| e.anchor_vec.to_vec()).collect(),
+                args.entries
+                    .iter()
+                    .map(|e| e.candidate_vec.to_vec())
+                    .collect(),
             ));
-            self.len
-                .fetch_add(args.anchor_vecs.len(), Ordering::Relaxed);
+            self.len.fetch_add(args.entries.len(), Ordering::Relaxed);
             Ok(())
         }
 
         fn write_triplets(&self, start_idx: u64, args: &TripletWriteArgs<'_>) -> Result<()> {
             self.triplet_writes.lock().unwrap().push((
                 start_idx,
-                args.anchor_vecs.to_vec(),
-                args.pos_vecs.to_vec(),
-                args.neg_vecs.to_vec(),
+                args.entries.iter().map(|e| e.anchor_vec.to_vec()).collect(),
+                args.entries.iter().map(|e| e.pos_vec.to_vec()).collect(),
+                args.entries.iter().map(|e| e.neg_vec.to_vec()).collect(),
             ));
-            self.len
-                .fetch_add(args.anchor_vecs.len(), Ordering::Relaxed);
+            self.len.fetch_add(args.entries.len(), Ordering::Relaxed);
             Ok(())
         }
 
@@ -531,6 +538,68 @@ mod tests {
         }
     }
 
+    // ---- helpers for AoS pending state assertions ----
+    fn pending_pair_anchor_texts(state: &SplitState<MockStore>) -> Vec<String> {
+        match &state.pending {
+            PendingState::Pairs(v) => v.iter().map(|p| p.anchor_text.clone()).collect(),
+            _ => panic!("expected Pair pending state"),
+        }
+    }
+    fn pending_pair_candidate_texts(state: &SplitState<MockStore>) -> Vec<String> {
+        match &state.pending {
+            PendingState::Pairs(v) => v.iter().map(|p| p.candidate_text.clone()).collect(),
+            _ => panic!("expected Pair pending state"),
+        }
+    }
+    fn pending_pair_anchor_vecs(state: &SplitState<MockStore>) -> Vec<Vec<f32>> {
+        match &state.pending {
+            PendingState::Pairs(v) => v.iter().map(|p| p.anchor_vec.clone()).collect(),
+            _ => panic!("expected Pair pending state"),
+        }
+    }
+    fn pending_pair_candidate_vecs(state: &SplitState<MockStore>) -> Vec<Vec<f32>> {
+        match &state.pending {
+            PendingState::Pairs(v) => v.iter().map(|p| p.candidate_vec.clone()).collect(),
+            _ => panic!("expected Pair pending state"),
+        }
+    }
+    fn pending_triplet_anchor_texts(state: &SplitState<MockStore>) -> Vec<String> {
+        match &state.pending {
+            PendingState::Triplets(v) => v.iter().map(|t| t.anchor_text.clone()).collect(),
+            _ => panic!("expected Triplet pending state"),
+        }
+    }
+    fn pending_triplet_pos_texts(state: &SplitState<MockStore>) -> Vec<String> {
+        match &state.pending {
+            PendingState::Triplets(v) => v.iter().map(|t| t.pos_text.clone()).collect(),
+            _ => panic!("expected Triplet pending state"),
+        }
+    }
+    fn pending_triplet_neg_texts(state: &SplitState<MockStore>) -> Vec<String> {
+        match &state.pending {
+            PendingState::Triplets(v) => v.iter().map(|t| t.neg_text.clone()).collect(),
+            _ => panic!("expected Triplet pending state"),
+        }
+    }
+    fn pending_triplet_anchor_vecs(state: &SplitState<MockStore>) -> Vec<Vec<f32>> {
+        match &state.pending {
+            PendingState::Triplets(v) => v.iter().map(|t| t.anchor_vec.clone()).collect(),
+            _ => panic!("expected Triplet pending state"),
+        }
+    }
+    fn pending_triplet_pos_vecs(state: &SplitState<MockStore>) -> Vec<Vec<f32>> {
+        match &state.pending {
+            PendingState::Triplets(v) => v.iter().map(|t| t.pos_vec.clone()).collect(),
+            _ => panic!("expected Triplet pending state"),
+        }
+    }
+    fn pending_triplet_neg_vecs(state: &SplitState<MockStore>) -> Vec<Vec<f32>> {
+        match &state.pending {
+            PendingState::Triplets(v) => v.iter().map(|t| t.neg_vec.clone()).collect(),
+            _ => panic!("expected Triplet pending state"),
+        }
+    }
+
     struct FailingEmbedder;
 
     impl Embedder for FailingEmbedder {
@@ -540,6 +609,10 @@ mod tests {
     }
 
     fn make_state(store: MockStore, mode: EmbedMode, emb_dim: usize) -> SplitState<MockStore> {
+        let pending = match mode {
+            EmbedMode::Pair => PendingState::Pairs(Vec::new()),
+            EmbedMode::Triplet => PendingState::Triplets(Vec::new()),
+        };
         SplitState {
             label: SplitLabel::Train,
             name: "train",
@@ -551,12 +624,7 @@ mod tests {
             total_written: 0,
             step_num: 0,
             batch_num: 0,
-            pending_anchor_vecs: Vec::new(),
-            pending_anchor_texts: Vec::new(),
-            pending_pos_vecs: Vec::new(),
-            pending_pos_texts: Vec::new(),
-            pending_neg_vecs: Vec::new(),
-            pending_neg_texts: Vec::new(),
+            pending,
             exhausted: false,
             dropped_batches: 0,
             total_batches: 0,
@@ -576,7 +644,6 @@ mod tests {
             &["a1".into(), "a2".into()],
             vec![vec![5.0, 6.0], vec![7.0, 8.0]],
             &["p1".into(), "p2".into()],
-            None,
             None,
         );
 
@@ -623,11 +690,18 @@ mod tests {
         let embedder = MockEmbedder::new(2);
         let config = SchedulerConfig::new(2, 2, 2, 100);
 
-        let batch = SamplerBatch {
-            anchor_texts: vec!["a1".into(), "a2".into()],
-            pos_texts: vec!["p1".into(), "p2".into()],
-            neg_texts: None,
-        };
+        let batch = SamplerBatch::Pairs(vec![
+            PairEntry {
+                anchor_text: "a1".into(),
+                candidate_text: "p1".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "a2".into(),
+                candidate_text: "p2".into(),
+                label: PairLabel::Positive,
+            },
+        ]);
 
         let result = state.step(batch, &embedder, &config).unwrap();
         assert_eq!(result.samples_processed, 2);
@@ -645,18 +719,18 @@ mod tests {
         let embedder = MockEmbedder::new(2);
         let config = SchedulerConfig::new(1, 1, 2, 100);
 
-        let batch = SamplerBatch {
-            anchor_texts: vec!["a1".into()],
-            pos_texts: vec!["p1".into()],
-            neg_texts: Some(vec!["n1".into()]),
-        };
+        let batch = SamplerBatch::Triplets(vec![TripletEntry {
+            anchor_text: "a1".into(),
+            pos_text: "p1".into(),
+            neg_text: "n1".into(),
+        }]);
 
         let result = state.step(batch, &embedder, &config).unwrap();
         assert_eq!(result.samples_processed, 1);
         assert_eq!(result.samples_dropped, 0);
 
         assert_eq!(state.pending_len(), 1);
-        assert_eq!(state.pending_neg_vecs.len(), 1);
+        assert_eq!(pending_triplet_neg_vecs(&state).len(), 1);
     }
 
     #[test]
@@ -667,11 +741,11 @@ mod tests {
         let embedder = MockEmbedder::new(2);
         let config = SchedulerConfig::new(1, 1, 2, 100);
 
-        let batch = SamplerBatch {
-            anchor_texts: vec!["a1".into()],
-            pos_texts: vec!["p1".into()],
-            neg_texts: None,
-        };
+        let batch = SamplerBatch::Pairs(vec![PairEntry {
+            anchor_text: "a1".into(),
+            candidate_text: "p1".into(),
+            label: PairLabel::Positive,
+        }]);
 
         let result = state.step(batch, &embedder, &config).unwrap();
         assert!(result.should_flush);
@@ -684,11 +758,18 @@ mod tests {
         let embedder = FailingEmbedder;
         let config = SchedulerConfig::new(2, 2, 2, 100);
 
-        let batch = SamplerBatch {
-            anchor_texts: vec!["a1".into(), "a2".into()],
-            pos_texts: vec!["p1".into(), "p2".into()],
-            neg_texts: None,
-        };
+        let batch = SamplerBatch::Pairs(vec![
+            PairEntry {
+                anchor_text: "a1".into(),
+                candidate_text: "p1".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "a2".into(),
+                candidate_text: "p2".into(),
+                label: PairLabel::Positive,
+            },
+        ]);
 
         let result = state.step(batch, &embedder, &config).unwrap();
         assert_eq!(result.samples_processed, 0);
@@ -705,11 +786,28 @@ mod tests {
         let embedder = MockEmbedder::new(2);
         let config = SchedulerConfig::new(4, 2, 2, 100); // sampler=4, embed=2
 
-        let batch = SamplerBatch {
-            anchor_texts: vec!["a1".into(), "a2".into(), "a3".into(), "a4".into()],
-            pos_texts: vec!["p1".into(), "p2".into(), "p3".into(), "p4".into()],
-            neg_texts: None,
-        };
+        let batch = SamplerBatch::Pairs(vec![
+            PairEntry {
+                anchor_text: "a1".into(),
+                candidate_text: "p1".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "a2".into(),
+                candidate_text: "p2".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "a3".into(),
+                candidate_text: "p3".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "a4".into(),
+                candidate_text: "p4".into(),
+                label: PairLabel::Positive,
+            },
+        ]);
 
         let result = state.step(batch, &embedder, &config).unwrap();
         assert_eq!(result.samples_processed, 4);
@@ -757,11 +855,7 @@ mod tests {
         let embedder = MockEmbedder::new(2);
         let config = SchedulerConfig::new(1, 1, 2, 100);
 
-        let batch = SamplerBatch {
-            anchor_texts: vec![],
-            pos_texts: vec![],
-            neg_texts: None,
-        };
+        let batch = SamplerBatch::Pairs(vec![]);
 
         let result = state.step(batch, &embedder, &config).unwrap();
         assert_eq!(result.samples_processed, 0);
@@ -780,18 +874,21 @@ mod tests {
         let config = SchedulerConfig::new(1, 1, 2, 100);
 
         // anchor_texts == pos_texts → only 1 embed call (anchor), pos reuses
-        let batch = SamplerBatch {
-            anchor_texts: vec!["same".into()],
-            pos_texts: vec!["same".into()],
-            neg_texts: None,
-        };
+        let batch = SamplerBatch::Pairs(vec![PairEntry {
+            anchor_text: "same".into(),
+            candidate_text: "same".into(),
+            label: PairLabel::Positive,
+        }]);
 
         let result = state.step(batch, &embedder, &config).unwrap();
         assert_eq!(result.samples_processed, 1);
         assert_eq!(state.pending_len(), 1);
         // MockEmbedder called once for anchor; pos reuses anchor_vecs
         // So pending_pos_vecs should equal pending_anchor_vecs
-        assert_eq!(state.pending_anchor_vecs, state.pending_pos_vecs);
+        assert_eq!(
+            pending_pair_anchor_vecs(&state),
+            pending_pair_candidate_vecs(&state)
+        );
     }
 
     #[test]
@@ -801,17 +898,20 @@ mod tests {
         let embedder = MockEmbedder::new(2);
         let config = SchedulerConfig::new(1, 1, 2, 100);
 
-        let batch = SamplerBatch {
-            anchor_texts: vec!["a".into()],
-            pos_texts: vec!["p".into()],
-            neg_texts: Some(vec!["a".into()]), // neg == anchor
-        };
+        let batch = SamplerBatch::Triplets(vec![TripletEntry {
+            anchor_text: "a".into(),
+            pos_text: "p".into(),
+            neg_text: "a".into(),
+        }]);
 
         let result = state.step(batch, &embedder, &config).unwrap();
         assert_eq!(result.samples_processed, 1);
-        assert_eq!(state.pending_neg_vecs.len(), 1);
+        assert_eq!(pending_triplet_neg_vecs(&state).len(), 1);
         // neg should reuse anchor vectors
-        assert_eq!(state.pending_neg_vecs, state.pending_anchor_vecs);
+        assert_eq!(
+            pending_triplet_neg_vecs(&state),
+            pending_triplet_anchor_vecs(&state)
+        );
     }
 
     #[test]
@@ -821,16 +921,19 @@ mod tests {
         let embedder = MockEmbedder::new(2);
         let config = SchedulerConfig::new(1, 1, 2, 100);
 
-        let batch = SamplerBatch {
-            anchor_texts: vec!["a".into()],
-            pos_texts: vec!["p".into()],
-            neg_texts: Some(vec!["p".into()]), // neg == pos
-        };
+        let batch = SamplerBatch::Triplets(vec![TripletEntry {
+            anchor_text: "a".into(),
+            pos_text: "p".into(),
+            neg_text: "p".into(),
+        }]);
 
         let result = state.step(batch, &embedder, &config).unwrap();
         assert_eq!(result.samples_processed, 1);
         // neg should reuse pos vectors
-        assert_eq!(state.pending_neg_vecs, state.pending_pos_vecs);
+        assert_eq!(
+            pending_triplet_neg_vecs(&state),
+            pending_triplet_pos_vecs(&state)
+        );
     }
 
     #[test]
@@ -841,11 +944,11 @@ mod tests {
         let config = SchedulerConfig::new(1, 1, 2, 100);
 
         // Make neg different from anchor and pos so it triggers embed call
-        let batch = SamplerBatch {
-            anchor_texts: vec!["a".into()],
-            pos_texts: vec!["p".into()],
-            neg_texts: Some(vec!["n".into()]),
-        };
+        let batch = SamplerBatch::Triplets(vec![TripletEntry {
+            anchor_text: "a".into(),
+            pos_text: "p".into(),
+            neg_text: "n".into(),
+        }]);
 
         // Override embedder to fail on "n" but succeed on "a" and "p"
         struct NegFailingEmbedder;
@@ -868,35 +971,43 @@ mod tests {
 
     #[test]
     fn accumulate_with_negatives() {
+        // accumulate is pair-only now; test that pair accumulate works
         let store = MockStore::new();
-        let mut state = make_state(store, EmbedMode::Triplet, 2);
+        let mut state = make_state(store, EmbedMode::Pair, 2);
 
         state.accumulate(
             vec![vec![1.0, 2.0]],
             &["a".into()],
             vec![vec![3.0, 4.0]],
             &["p".into()],
-            Some(vec![vec![5.0, 6.0]]),
-            Some(&["n".into()]),
+            None,
         );
 
         assert_eq!(state.pending_len(), 1);
-        assert_eq!(state.pending_neg_vecs.len(), 1);
-        assert_eq!(state.pending_neg_texts, vec!["n"]);
     }
 
     #[test]
     fn flush_pending_triplet_mode() {
         let store = MockStore::new();
         let mut state = make_state(store, EmbedMode::Triplet, 2);
-        state.accumulate(
-            vec![vec![1.0, 2.0], vec![3.0, 4.0]],
-            &["a1".into(), "a2".into()],
-            vec![vec![5.0, 6.0], vec![7.0, 8.0]],
-            &["p1".into(), "p2".into()],
-            Some(vec![vec![9.0, 10.0], vec![11.0, 12.0]]),
-            Some(&["n1".into(), "n2".into()]),
-        );
+        state.pending = PendingState::Triplets(vec![
+            PendingTriplet {
+                anchor_text: "a1".into(),
+                anchor_vec: vec![1.0, 2.0],
+                pos_text: "p1".into(),
+                pos_vec: vec![5.0, 6.0],
+                neg_text: "n1".into(),
+                neg_vec: vec![9.0, 10.0],
+            },
+            PendingTriplet {
+                anchor_text: "a2".into(),
+                anchor_vec: vec![3.0, 4.0],
+                pos_text: "p2".into(),
+                pos_vec: vec![7.0, 8.0],
+                neg_text: "n2".into(),
+                neg_vec: vec![11.0, 12.0],
+            },
+        ]);
 
         let provider = MockProvider;
         flush_pending(&mut state, &provider).unwrap();
@@ -932,7 +1043,6 @@ mod tests {
             &["a".into()],
             vec![vec![3.0, 4.0]],
             &["p".into()],
-            None,
             None,
         );
 
@@ -1008,25 +1118,38 @@ mod tests {
         let embedder = AlignmentEmbedder::new(4);
         let config = SchedulerConfig::new(6, 2, 4, 100);
 
-        let batch = SamplerBatch {
-            anchor_texts: vec![
-                "a1".into(),
-                "a2".into(),
-                "a3".into(),
-                "a4".into(),
-                "a5".into(),
-                "a6".into(),
-            ],
-            pos_texts: vec![
-                "p1".into(),
-                "p2".into(),
-                "p3".into(),
-                "p4".into(),
-                "p5".into(),
-                "p6".into(),
-            ],
-            neg_texts: None,
-        };
+        let batch = SamplerBatch::Pairs(vec![
+            PairEntry {
+                anchor_text: "a1".into(),
+                candidate_text: "p1".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "a2".into(),
+                candidate_text: "p2".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "a3".into(),
+                candidate_text: "p3".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "a4".into(),
+                candidate_text: "p4".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "a5".into(),
+                candidate_text: "p5".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "a6".into(),
+                candidate_text: "p6".into(),
+                label: PairLabel::Positive,
+            },
+        ]);
 
         let result = state.step(batch, &embedder, &config).unwrap();
         assert_eq!(result.samples_processed, 6);
@@ -1035,10 +1158,10 @@ mod tests {
         assert_eq!(state.step_num, 3);
 
         // CRITICAL: verify alignment — each pending text must match its vector
-        assert_eq!(state.pending_anchor_texts.len(), 6);
-        assert_eq!(state.pending_anchor_vecs.len(), 6);
-        assert_eq!(state.pending_pos_texts.len(), 6);
-        assert_eq!(state.pending_pos_vecs.len(), 6);
+        assert_eq!(pending_pair_anchor_texts(&state).len(), 6);
+        assert_eq!(pending_pair_anchor_vecs(&state).len(), 6);
+        assert_eq!(pending_pair_candidate_texts(&state).len(), 6);
+        assert_eq!(pending_pair_candidate_vecs(&state).len(), 6);
 
         for i in 0..6 {
             let anchor_text = format!("a{}", i + 1);
@@ -1049,27 +1172,33 @@ mod tests {
             let chunk_local_pos = (i % 2) as f32;
 
             assert_eq!(
-                state.pending_anchor_texts[i], anchor_text,
+                pending_pair_anchor_texts(&state)[i],
+                anchor_text,
                 "anchor text mismatch at index {i}"
             );
             assert_eq!(
-                state.pending_anchor_vecs[i][0], expected_anchor_id,
+                pending_pair_anchor_vecs(&state)[i][0],
+                expected_anchor_id,
                 "anchor vector text_id mismatch at index {i}"
             );
             assert_eq!(
-                state.pending_anchor_vecs[i][1], chunk_local_pos,
+                pending_pair_anchor_vecs(&state)[i][1],
+                chunk_local_pos,
                 "anchor vector position mismatch at index {i}"
             );
             assert_eq!(
-                state.pending_pos_texts[i], pos_text,
+                pending_pair_candidate_texts(&state)[i],
+                pos_text,
                 "pos text mismatch at index {i}"
             );
             assert_eq!(
-                state.pending_pos_vecs[i][0], expected_pos_id,
+                pending_pair_candidate_vecs(&state)[i][0],
+                expected_pos_id,
                 "pos vector text_id mismatch at index {i}"
             );
             assert_eq!(
-                state.pending_pos_vecs[i][1], chunk_local_pos,
+                pending_pair_candidate_vecs(&state)[i][1],
+                chunk_local_pos,
                 "pos vector position mismatch at index {i}"
             );
         }
@@ -1084,35 +1213,26 @@ mod tests {
         let embedder = AlignmentEmbedder::new(4);
         let config = SchedulerConfig::new(5, 2, 4, 100);
 
-        let batch = SamplerBatch {
-            anchor_texts: vec![
-                "a1".into(),
-                "a2".into(),
-                "a3".into(),
-                "a4".into(),
-                "a5".into(),
-            ],
-            pos_texts: vec![
-                "p1".into(),
-                "p2".into(),
-                "p3".into(),
-                "p4".into(),
-                "p5".into(),
-            ],
-            neg_texts: Some(vec![
-                "n1".into(),
-                "n2".into(),
-                "n3".into(),
-                "n4".into(),
-                "n5".into(),
-            ]),
-        };
+        let batch = SamplerBatch::Triplets(vec![
+            TripletEntry { anchor_text: "a1".into(), pos_text: "p1".into(), neg_text: "n1".into() },
+            TripletEntry { anchor_text: "a2".into(), pos_text: "p2".into(), neg_text: "n2".into() },
+            TripletEntry { anchor_text: "a3".into(), pos_text: "p3".into(), neg_text: "n3".into() },
+            TripletEntry { anchor_text: "a4".into(), pos_text: "p4".into(), neg_text: "n4".into() },
+            TripletEntry { anchor_text: "a5".into(), pos_text: "p5".into(), neg_text: "n5".into() },
+        ]);
 
         let result = state.step(batch, &embedder, &config).unwrap();
         assert_eq!(result.samples_processed, 5);
         assert_eq!(state.pending_len(), 5);
 
-        // Verify all 5 entries aligned across all 3 text/vector buffers
+        // Verify texts and vectors are correctly aligned (exact text-identity match)
+        let at = pending_triplet_anchor_texts(&state);
+        let pt = pending_triplet_pos_texts(&state);
+        let nt = pending_triplet_neg_texts(&state);
+        let av = pending_triplet_anchor_vecs(&state);
+        let pv = pending_triplet_pos_vecs(&state);
+        let nv = pending_triplet_neg_vecs(&state);
+
         for i in 0..5 {
             let anchor_text = format!("a{}", i + 1);
             let pos_text = format!("p{}", i + 1);
@@ -1120,44 +1240,13 @@ mod tests {
             let expected_anchor_id: f32 = anchor_text.chars().map(|c| c as u32 as f32).sum();
             let expected_pos_id: f32 = pos_text.chars().map(|c| c as u32 as f32).sum();
             let expected_neg_id: f32 = neg_text.chars().map(|c| c as u32 as f32).sum();
-            let chunk_local_pos = (i % 2) as f32;
 
-            assert_eq!(
-                state.pending_anchor_texts[i], anchor_text,
-                "anchor text mismatch at {i}"
-            );
-            assert_eq!(
-                state.pending_anchor_vecs[i][0], expected_anchor_id,
-                "anchor vec text_id mismatch at {i}"
-            );
-            assert_eq!(
-                state.pending_anchor_vecs[i][1], chunk_local_pos,
-                "anchor vec position mismatch at {i}"
-            );
-            assert_eq!(
-                state.pending_pos_texts[i], pos_text,
-                "pos text mismatch at {i}"
-            );
-            assert_eq!(
-                state.pending_pos_vecs[i][0], expected_pos_id,
-                "pos vec text_id mismatch at {i}"
-            );
-            assert_eq!(
-                state.pending_pos_vecs[i][1], chunk_local_pos,
-                "pos vec position mismatch at {i}"
-            );
-            assert_eq!(
-                state.pending_neg_texts[i], neg_text,
-                "neg text mismatch at {i}"
-            );
-            assert_eq!(
-                state.pending_neg_vecs[i][0], expected_neg_id,
-                "neg vec text_id mismatch at {i}"
-            );
-            assert_eq!(
-                state.pending_neg_vecs[i][1], chunk_local_pos,
-                "neg vec position mismatch at {i}"
-            );
+            assert_eq!(at[i], anchor_text, "anchor text mismatch at {i}");
+            assert_eq!(av[i][0], expected_anchor_id, "anchor vec text_id mismatch at {i}");
+            assert_eq!(pt[i], pos_text, "pos text mismatch at {i}");
+            assert_eq!(pv[i][0], expected_pos_id, "pos vec text_id mismatch at {i}");
+            assert_eq!(nt[i], neg_text, "neg text mismatch at {i}");
+            assert_eq!(nv[i][0], expected_neg_id, "neg vec text_id mismatch at {i}");
         }
     }
 
@@ -1170,11 +1259,23 @@ mod tests {
         let embedder = AlignmentEmbedder::new(4);
         let config = SchedulerConfig::new(3, 10, 4, 100);
 
-        let batch = SamplerBatch {
-            anchor_texts: vec!["x1".into(), "x2".into(), "x3".into()],
-            pos_texts: vec!["y1".into(), "y2".into(), "y3".into()],
-            neg_texts: None,
-        };
+        let batch = SamplerBatch::Pairs(vec![
+            PairEntry {
+                anchor_text: "x1".into(),
+                candidate_text: "y1".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "x2".into(),
+                candidate_text: "y2".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "x3".into(),
+                candidate_text: "y3".into(),
+                label: PairLabel::Positive,
+            },
+        ]);
 
         let result = state.step(batch, &embedder, &config).unwrap();
         assert_eq!(result.samples_processed, 3);
@@ -1183,9 +1284,12 @@ mod tests {
         for i in 0..3 {
             let text = format!("x{}", i + 1);
             let expected_id: f32 = text.chars().map(|c| c as u32 as f32).sum();
-            assert_eq!(state.pending_anchor_texts[i], text);
-            assert_eq!(state.pending_anchor_vecs[i][0], expected_id);
-            assert_eq!(state.pending_pos_texts[i], format!("y{}", i + 1));
+            assert_eq!(pending_pair_anchor_texts(&state)[i], text);
+            assert_eq!(pending_pair_anchor_vecs(&state)[i][0], expected_id);
+            assert_eq!(
+                pending_pair_candidate_texts(&state)[i],
+                format!("y{}", i + 1)
+            );
         }
     }
 
@@ -1197,22 +1301,36 @@ mod tests {
         let embedder = AlignmentEmbedder::new(4);
         let config = SchedulerConfig::new(4, 4, 4, 100);
 
-        let batch = SamplerBatch {
-            anchor_texts: vec!["a".into(), "b".into(), "c".into(), "d".into()],
-            pos_texts: vec!["e".into(), "f".into(), "g".into(), "h".into()],
-            neg_texts: None,
-        };
+        let batch = SamplerBatch::Pairs(vec![
+            PairEntry {
+                anchor_text: "a".into(),
+                candidate_text: "e".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "b".into(),
+                candidate_text: "f".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "c".into(),
+                candidate_text: "g".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "d".into(),
+                candidate_text: "h".into(),
+                label: PairLabel::Positive,
+            },
+        ]);
 
         let result = state.step(batch, &embedder, &config).unwrap();
         assert_eq!(result.samples_processed, 4);
         assert_eq!(state.step_num, 1); // single chunk
 
-        for (i, (at, pt)) in state
-            .pending_anchor_texts
-            .iter()
-            .zip(state.pending_pos_texts.iter())
-            .enumerate()
-        {
+        let at_vec = pending_pair_anchor_texts(&state);
+        let pt_vec = pending_pair_candidate_texts(&state);
+        for (i, (at, pt)) in at_vec.iter().zip(pt_vec.iter()).enumerate() {
             let expected_id = (b'a' + i as u8) as char;
             assert_eq!(at.as_str(), expected_id.to_string().as_str());
             assert_eq!(pt.as_str(), ((b'e' + i as u8) as char).to_string().as_str());
@@ -1229,11 +1347,16 @@ mod tests {
         let config = SchedulerConfig::new(7, 3, 4, 100);
 
         let texts: Vec<String> = (0..7).map(|i| format!("t{i}")).collect();
-        let batch = SamplerBatch {
-            anchor_texts: texts.clone(),
-            pos_texts: texts.clone(), // same as anchor → tests the pos==anchor reuse path
-            neg_texts: None,
-        };
+        let batch = SamplerBatch::Pairs(
+            texts
+                .iter()
+                .map(|t| PairEntry {
+                    anchor_text: t.clone(),
+                    candidate_text: t.clone(),
+                    label: PairLabel::Positive,
+                })
+                .collect(),
+        );
 
         let result = state.step(batch, &embedder, &config).unwrap();
         assert_eq!(result.samples_processed, 7);
@@ -1244,14 +1367,20 @@ mod tests {
         for i in 0..7 {
             let text = format!("t{i}");
             let expected_id: f32 = text.chars().map(|c| c as u32 as f32).sum();
-            assert_eq!(state.pending_anchor_texts[i], text, "text mismatch at {i}");
             assert_eq!(
-                state.pending_anchor_vecs[i][0], expected_id,
+                pending_pair_anchor_texts(&state)[i],
+                text,
+                "text mismatch at {i}"
+            );
+            assert_eq!(
+                pending_pair_anchor_vecs(&state)[i][0],
+                expected_id,
                 "vector text_id mismatch at {i}"
             );
             // pos == anchor, so pos vectors should equal anchor vectors
             assert_eq!(
-                state.pending_anchor_vecs[i], state.pending_pos_vecs[i],
+                pending_pair_anchor_vecs(&state)[i],
+                pending_pair_candidate_vecs(&state)[i],
                 "pos/anchor vec mismatch at {i}"
             );
         }
@@ -1267,36 +1396,56 @@ mod tests {
         let config = SchedulerConfig::new(3, 2, 4, 100);
 
         // Step 1: 3 texts → 2 chunks (2+1)
-        let batch1 = SamplerBatch {
-            anchor_texts: vec!["step1_a".into(), "step1_b".into(), "step1_c".into()],
-            pos_texts: vec!["step1_p1".into(), "step1_p2".into(), "step1_p3".into()],
-            neg_texts: None,
-        };
+        let batch1 = SamplerBatch::Pairs(vec![
+            PairEntry {
+                anchor_text: "step1_a".into(),
+                candidate_text: "step1_p1".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "step1_b".into(),
+                candidate_text: "step1_p2".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "step1_c".into(),
+                candidate_text: "step1_p3".into(),
+                label: PairLabel::Positive,
+            },
+        ]);
         state.step(batch1, &embedder, &config).unwrap();
         assert_eq!(state.pending_len(), 3);
 
         // Step 2: 2 texts → 1 chunk
-        let batch2 = SamplerBatch {
-            anchor_texts: vec!["step2_a".into(), "step2_b".into()],
-            pos_texts: vec!["step2_p1".into(), "step2_p2".into()],
-            neg_texts: None,
-        };
+        let batch2 = SamplerBatch::Pairs(vec![
+            PairEntry {
+                anchor_text: "step2_a".into(),
+                candidate_text: "step2_p1".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "step2_b".into(),
+                candidate_text: "step2_p2".into(),
+                label: PairLabel::Positive,
+            },
+        ]);
         state.step(batch2, &embedder, &config).unwrap();
         assert_eq!(state.pending_len(), 5);
 
         // Verify first 3 entries are from step1, last 2 from step2
-        assert_eq!(state.pending_anchor_texts[0], "step1_a");
-        assert_eq!(state.pending_anchor_texts[1], "step1_b");
-        assert_eq!(state.pending_anchor_texts[2], "step1_c");
-        assert_eq!(state.pending_anchor_texts[3], "step2_a");
-        assert_eq!(state.pending_anchor_texts[4], "step2_b");
+        assert_eq!(pending_pair_anchor_texts(&state)[0], "step1_a");
+        assert_eq!(pending_pair_anchor_texts(&state)[1], "step1_b");
+        assert_eq!(pending_pair_anchor_texts(&state)[2], "step1_c");
+        assert_eq!(pending_pair_anchor_texts(&state)[3], "step2_a");
+        assert_eq!(pending_pair_anchor_texts(&state)[4], "step2_b");
 
         // Verify vectors match their texts
         for i in 0..5 {
-            let text = &state.pending_anchor_texts[i];
+            let text = &pending_pair_anchor_texts(&state)[i];
             let expected_id: f32 = text.chars().map(|c| c as u32 as f32).sum();
             assert_eq!(
-                state.pending_anchor_vecs[i][0], expected_id,
+                pending_pair_anchor_vecs(&state)[i][0],
+                expected_id,
                 "vector mismatch at index {i} for text '{text}'"
             );
         }
@@ -1311,43 +1460,46 @@ mod tests {
         let embedder = AlignmentEmbedder::new(4);
         let config = SchedulerConfig::new(4, 2, 4, 100);
 
-        let batch = SamplerBatch {
-            anchor_texts: vec![
-                "a_odd".into(),
-                "a_even".into(),
-                "a_third".into(),
-                "a_fourth".into(),
-            ],
-            pos_texts: vec![
-                "p_odd".into(),
-                "p_even".into(),
-                "p_third".into(),
-                "p_fourth".into(),
-            ],
-            neg_texts: Some(vec![
-                "n_odd".into(),
-                "n_even".into(),
-                "n_third".into(),
-                "n_fourth".into(),
-            ]),
-        };
+        let batch = SamplerBatch::Triplets(vec![
+            TripletEntry {
+                anchor_text: "a_odd".into(),
+                pos_text: "p_odd".into(),
+                neg_text: "n_odd".into(),
+            },
+            TripletEntry {
+                anchor_text: "a_even".into(),
+                pos_text: "p_even".into(),
+                neg_text: "n_even".into(),
+            },
+            TripletEntry {
+                anchor_text: "a_third".into(),
+                pos_text: "p_third".into(),
+                neg_text: "n_third".into(),
+            },
+            TripletEntry {
+                anchor_text: "a_fourth".into(),
+                pos_text: "p_fourth".into(),
+                neg_text: "n_fourth".into(),
+            },
+        ]);
 
         state.step(batch, &embedder, &config).unwrap();
 
         // At index 0: anchor="a_odd", pos="p_odd", neg="n_odd"
-        assert_eq!(state.pending_anchor_texts[0], "a_odd");
-        assert_eq!(state.pending_pos_texts[0], "p_odd");
-        assert_eq!(state.pending_neg_texts[0], "n_odd");
+        assert_eq!(pending_triplet_anchor_texts(&state)[0], "a_odd");
+        assert_eq!(pending_triplet_pos_texts(&state)[0], "p_odd");
+        assert_eq!(pending_triplet_neg_texts(&state)[0], "n_odd");
 
         // At index 2 (chunk boundary): anchor="a_third", pos="p_third", neg="n_third"
-        assert_eq!(state.pending_anchor_texts[2], "a_third");
-        assert_eq!(state.pending_pos_texts[2], "p_third");
-        assert_eq!(state.pending_neg_texts[2], "n_third");
+        assert_eq!(pending_triplet_anchor_texts(&state)[2], "a_third");
+        assert_eq!(pending_triplet_pos_texts(&state)[2], "p_third");
+        assert_eq!(pending_triplet_neg_texts(&state)[2], "n_third");
 
         // Verify neg vectors are NOT swapped at boundary
         let expected_neg2_id: f32 = "n_third".chars().map(|c| c as u32 as f32).sum();
         assert_eq!(
-            state.pending_neg_vecs[2][0], expected_neg2_id,
+            pending_triplet_neg_vecs(&state)[2][0],
+            expected_neg2_id,
             "negative vector swapped at chunk boundary!"
         );
     }
@@ -1383,23 +1535,33 @@ mod tests {
         let embedder = ZeroEmbedder;
         let config = SchedulerConfig::new(5, 2, 4, 100);
 
-        let batch = SamplerBatch {
-            anchor_texts: vec![
-                "z1".into(),
-                "z2".into(),
-                "z3".into(),
-                "z4".into(),
-                "z5".into(),
-            ],
-            pos_texts: vec![
-                "q1".into(),
-                "q2".into(),
-                "q3".into(),
-                "q4".into(),
-                "q5".into(),
-            ],
-            neg_texts: None,
-        };
+        let batch = SamplerBatch::Pairs(vec![
+            PairEntry {
+                anchor_text: "z1".into(),
+                candidate_text: "q1".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "z2".into(),
+                candidate_text: "q2".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "z3".into(),
+                candidate_text: "q3".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "z4".into(),
+                candidate_text: "q4".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "z5".into(),
+                candidate_text: "q5".into(),
+                label: PairLabel::Positive,
+            },
+        ]);
 
         let result = state.step(batch, &embedder, &config).unwrap();
         assert_eq!(result.samples_processed, 5);
@@ -1407,10 +1569,13 @@ mod tests {
 
         // Texts must be aligned even if vectors are all zero
         for i in 0..5 {
-            assert_eq!(state.pending_anchor_texts[i], format!("z{}", i + 1));
-            assert_eq!(state.pending_pos_texts[i], format!("q{}", i + 1));
-            assert_eq!(state.pending_anchor_vecs[i], vec![0.0; 4]);
-            assert_eq!(state.pending_pos_vecs[i], vec![0.0; 4]);
+            assert_eq!(pending_pair_anchor_texts(&state)[i], format!("z{}", i + 1));
+            assert_eq!(
+                pending_pair_candidate_texts(&state)[i],
+                format!("q{}", i + 1)
+            );
+            assert_eq!(pending_pair_anchor_vecs(&state)[i], vec![0.0; 4]);
+            assert_eq!(pending_pair_candidate_vecs(&state)[i], vec![0.0; 4]);
         }
     }
 
@@ -1423,11 +1588,23 @@ mod tests {
         let embedder = InfEmbedder;
         let config = SchedulerConfig::new(3, 2, 4, 100);
 
-        let batch = SamplerBatch {
-            anchor_texts: vec!["a1".into(), "a2".into(), "a3".into()],
-            pos_texts: vec!["p1".into(), "p2".into(), "p3".into()],
-            neg_texts: None,
-        };
+        let batch = SamplerBatch::Pairs(vec![
+            PairEntry {
+                anchor_text: "a1".into(),
+                candidate_text: "p1".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "a2".into(),
+                candidate_text: "p2".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "a3".into(),
+                candidate_text: "p3".into(),
+                label: PairLabel::Positive,
+            },
+        ]);
 
         let result = state.step(batch, &embedder, &config).unwrap();
         assert_eq!(result.samples_processed, 0);
@@ -1461,11 +1638,28 @@ mod tests {
         let embedder = NanEmbedder;
         let config = SchedulerConfig::new(4, 2, 4, 100);
 
-        let batch = SamplerBatch {
-            anchor_texts: vec!["a1".into(), "a2".into(), "a3".into(), "a4".into()],
-            pos_texts: vec!["p1".into(), "p2".into(), "p3".into(), "p4".into()],
-            neg_texts: None,
-        };
+        let batch = SamplerBatch::Pairs(vec![
+            PairEntry {
+                anchor_text: "a1".into(),
+                candidate_text: "p1".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "a2".into(),
+                candidate_text: "p2".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "a3".into(),
+                candidate_text: "p3".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "a4".into(),
+                candidate_text: "p4".into(),
+                label: PairLabel::Positive,
+            },
+        ]);
 
         let result = state.step(batch, &embedder, &config).unwrap();
         // First chunk [a1,a2] → a1 has NaN → entire chunk dropped
@@ -1483,11 +1677,7 @@ mod tests {
         let embedder = AlignmentEmbedder::new(4);
         let config = SchedulerConfig::new(0, 2, 4, 100);
 
-        let batch = SamplerBatch {
-            anchor_texts: vec![],
-            pos_texts: vec![],
-            neg_texts: None,
-        };
+        let batch = SamplerBatch::Pairs(vec![]);
 
         let result = state.step(batch, &embedder, &config).unwrap();
         assert_eq!(result.samples_processed, 0);
@@ -1503,20 +1693,20 @@ mod tests {
         let embedder = AlignmentEmbedder::new(4);
         let config = SchedulerConfig::new(1, 1, 4, 100);
 
-        let batch = SamplerBatch {
-            anchor_texts: vec!["solo".into()],
-            pos_texts: vec!["partner".into()],
-            neg_texts: None,
-        };
+        let batch = SamplerBatch::Pairs(vec![PairEntry {
+            anchor_text: "solo".into(),
+            candidate_text: "partner".into(),
+            label: PairLabel::Positive,
+        }]);
 
         let result = state.step(batch, &embedder, &config).unwrap();
         assert_eq!(result.samples_processed, 1);
         assert_eq!(state.pending_len(), 1);
 
         let expected_id: f32 = "solo".chars().map(|c| c as u32 as f32).sum();
-        assert_eq!(state.pending_anchor_texts[0], "solo");
-        assert_eq!(state.pending_anchor_vecs[0][0], expected_id);
-        assert_eq!(state.pending_pos_texts[0], "partner");
+        assert_eq!(pending_pair_anchor_texts(&state)[0], "solo");
+        assert_eq!(pending_pair_anchor_vecs(&state)[0][0], expected_id);
+        assert_eq!(pending_pair_candidate_texts(&state)[0], "partner");
     }
 
     #[test]
@@ -1527,33 +1717,46 @@ mod tests {
         let embedder = InfEmbedder; // returns inf → all chunks rejected
         let config = SchedulerConfig::new(6, 2, 4, 100);
 
-        let batch = SamplerBatch {
-            anchor_texts: vec![
-                "a1".into(),
-                "a2".into(),
-                "a3".into(),
-                "a4".into(),
-                "a5".into(),
-                "a6".into(),
-            ],
-            pos_texts: vec![
-                "p1".into(),
-                "p2".into(),
-                "p3".into(),
-                "p4".into(),
-                "p5".into(),
-                "p6".into(),
-            ],
-            neg_texts: None,
-        };
+        let batch = SamplerBatch::Pairs(vec![
+            PairEntry {
+                anchor_text: "a1".into(),
+                candidate_text: "p1".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "a2".into(),
+                candidate_text: "p2".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "a3".into(),
+                candidate_text: "p3".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "a4".into(),
+                candidate_text: "p4".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "a5".into(),
+                candidate_text: "p5".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "a6".into(),
+                candidate_text: "p6".into(),
+                label: PairLabel::Positive,
+            },
+        ]);
 
         let result = state.step(batch, &embedder, &config).unwrap();
         assert_eq!(result.samples_processed, 0);
         assert_eq!(result.samples_dropped, 6);
         assert_eq!(state.dropped_batches, 3); // 6/2 = 3 chunks
         assert!(state.is_pending_empty());
-        assert_eq!(state.pending_anchor_texts.len(), 0);
-        assert_eq!(state.pending_anchor_vecs.len(), 0);
+        assert_eq!(pending_pair_anchor_texts(&state).len(), 0);
+        assert_eq!(pending_pair_anchor_vecs(&state).len(), 0);
     }
 
     #[test]
@@ -1582,11 +1785,28 @@ mod tests {
         };
         let config = SchedulerConfig::new(4, 2, 4, 100);
 
-        let batch = SamplerBatch {
-            anchor_texts: vec!["a1".into(), "a2".into(), "a3".into(), "a4".into()],
-            pos_texts: vec!["p1".into(), "p2".into(), "p3".into(), "p4".into()],
-            neg_texts: None,
-        };
+        let batch = SamplerBatch::Pairs(vec![
+            PairEntry {
+                anchor_text: "a1".into(),
+                candidate_text: "p1".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "a2".into(),
+                candidate_text: "p2".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "a3".into(),
+                candidate_text: "p3".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "a4".into(),
+                candidate_text: "p4".into(),
+                label: PairLabel::Positive,
+            },
+        ]);
 
         let result = state.step(batch, &embedder, &config).unwrap();
         // Chunk 0 [a1,a2] failed → dropped
@@ -1595,8 +1815,8 @@ mod tests {
         assert_eq!(result.samples_dropped, 2);
         assert_eq!(state.pending_len(), 2);
         // Only chunk 1's data should be in pending
-        assert_eq!(state.pending_anchor_texts[0], "a3");
-        assert_eq!(state.pending_anchor_texts[1], "a4");
+        assert_eq!(pending_pair_anchor_texts(&state)[0], "a3");
+        assert_eq!(pending_pair_anchor_texts(&state)[1], "a4");
     }
 
     #[test]
@@ -1617,21 +1837,28 @@ mod tests {
         // All batches fail. Circuit breaker fires when total_batches >= 10 AND drop_rate > 5%.
         // With 100% failure: fires at batch index 9 (the 10th batch, total_batches=10).
         for i in 0..12 {
-            let batch = SamplerBatch {
-                anchor_texts: vec![
-                    format!("a{i}"),
-                    format!("b{i}"),
-                    format!("c{i}"),
-                    format!("d{i}"),
-                ],
-                pos_texts: vec![
-                    format!("p{i}"),
-                    format!("q{i}"),
-                    format!("r{i}"),
-                    format!("s{i}"),
-                ],
-                neg_texts: None,
-            };
+            let batch = SamplerBatch::Pairs(vec![
+                PairEntry {
+                    anchor_text: format!("a{i}"),
+                    candidate_text: format!("p{i}"),
+                    label: PairLabel::Positive,
+                },
+                PairEntry {
+                    anchor_text: format!("b{i}"),
+                    candidate_text: format!("q{i}"),
+                    label: PairLabel::Positive,
+                },
+                PairEntry {
+                    anchor_text: format!("c{i}"),
+                    candidate_text: format!("r{i}"),
+                    label: PairLabel::Positive,
+                },
+                PairEntry {
+                    anchor_text: format!("d{i}"),
+                    candidate_text: format!("s{i}"),
+                    label: PairLabel::Positive,
+                },
+            ]);
             let result = state.step(batch, &embedder, &config);
             if i < 9 {
                 // Batches 0-8: total_batches < 10 → no circuit breaker
@@ -1678,21 +1905,28 @@ mod tests {
 
         // 30 batches. Call 40 fails (batch 20 anchor). By then total_batches=20, rate=5% (not > 5%).
         for i in 0..30 {
-            let batch = SamplerBatch {
-                anchor_texts: vec![
-                    format!("a{i}"),
-                    format!("b{i}"),
-                    format!("c{i}"),
-                    format!("d{i}"),
-                ],
-                pos_texts: vec![
-                    format!("p{i}"),
-                    format!("q{i}"),
-                    format!("r{i}"),
-                    format!("s{i}"),
-                ],
-                neg_texts: None,
-            };
+            let batch = SamplerBatch::Pairs(vec![
+                PairEntry {
+                    anchor_text: format!("a{i}"),
+                    candidate_text: format!("p{i}"),
+                    label: PairLabel::Positive,
+                },
+                PairEntry {
+                    anchor_text: format!("b{i}"),
+                    candidate_text: format!("q{i}"),
+                    label: PairLabel::Positive,
+                },
+                PairEntry {
+                    anchor_text: format!("c{i}"),
+                    candidate_text: format!("r{i}"),
+                    label: PairLabel::Positive,
+                },
+                PairEntry {
+                    anchor_text: format!("d{i}"),
+                    candidate_text: format!("s{i}"),
+                    label: PairLabel::Positive,
+                },
+            ]);
             let result = state.step(batch, &embedder, &config);
             result.unwrap_or_else(|e| panic!("batch {i} should not trigger circuit breaker: {e}"));
         }

@@ -112,6 +112,10 @@ pub struct TripletWriteArgs<'a> {
 // Traits
 // ---------------------------------------------------------------------------
 
+pub trait EmbedStore: Send + Sync {
+    /// Write pair entries starting at `start_idx`.
+    fn write_pairs(&self, start_idx: u64, args: &PairWriteArgs<'_>) -> Result<()>;
+
     /// Write triplet entries (anchor + positive + negative) starting at `start_idx`.
     fn write_triplets(&self, start_idx: u64, args: &TripletWriteArgs<'_>) -> Result<()>;
 

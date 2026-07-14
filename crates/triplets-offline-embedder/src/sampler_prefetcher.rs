@@ -234,7 +234,10 @@ mod tests {
                 instruction: None,
             },
         ];
-        let (anchors, positions, negatives) = filter_triplet_batch(&triplets);
+        let entries = filter_triplet_batch(&triplets);
+        let anchors: Vec<String> = entries.iter().map(|e| e.anchor_text.clone()).collect();
+        let positions: Vec<String> = entries.iter().map(|e| e.pos_text.clone()).collect();
+        let negatives: Vec<String> = entries.iter().map(|e| e.neg_text.clone()).collect();
         assert_eq!(anchors, vec!["a"]);
         assert_eq!(positions, vec!["p"]);
         assert_eq!(negatives, vec!["n"]);
@@ -247,7 +250,13 @@ mod tests {
         let prefetcher = SamplerPrefetcher::new(provider, SplitLabel::Train, 4);
 
         let result = prefetcher.next().unwrap();
-        assert_eq!(result.anchor_texts, vec!["a"]);
+        match result {
+            SamplerBatch::Pairs(pairs) => {
+                let anchor_texts: Vec<&str> = pairs.iter().map(|e| e.anchor_text.as_str()).collect();
+                assert_eq!(anchor_texts, vec!["a"]);
+            }
+            _ => panic!("expected Pairs batch"),
+        }
 
         let err = prefetcher.next().unwrap_err();
         assert!(err.to_string().contains("exhausted"));
@@ -342,7 +351,10 @@ mod tests {
             weight: 1.0,
             instruction: None,
         }];
-        let (anchors, positions, negatives) = filter_triplet_batch(&triplets);
+        let entries = filter_triplet_batch(&triplets);
+        let anchors: Vec<String> = entries.iter().map(|e| e.anchor_text.clone()).collect();
+        let positions: Vec<String> = entries.iter().map(|e| e.pos_text.clone()).collect();
+        let negatives: Vec<String> = entries.iter().map(|e| e.neg_text.clone()).collect();
         assert!(anchors.is_empty());
         assert!(positions.is_empty());
         assert!(negatives.is_empty());
@@ -358,7 +370,10 @@ mod tests {
             weight: 1.0,
             instruction: None,
         }];
-        let (anchors, positions, negatives) = filter_triplet_batch(&triplets);
+        let entries = filter_triplet_batch(&triplets);
+        let anchors: Vec<String> = entries.iter().map(|e| e.anchor_text.clone()).collect();
+        let positions: Vec<String> = entries.iter().map(|e| e.pos_text.clone()).collect();
+        let negatives: Vec<String> = entries.iter().map(|e| e.neg_text.clone()).collect();
         assert!(anchors.is_empty());
         assert!(positions.is_empty());
         assert!(negatives.is_empty());
@@ -374,7 +389,10 @@ mod tests {
             weight: 1.0,
             instruction: None,
         }];
-        let (anchors, positions, negatives) = filter_triplet_batch(&triplets);
+        let entries = filter_triplet_batch(&triplets);
+        let anchors: Vec<String> = entries.iter().map(|e| e.anchor_text.clone()).collect();
+        let positions: Vec<String> = entries.iter().map(|e| e.pos_text.clone()).collect();
+        let negatives: Vec<String> = entries.iter().map(|e| e.neg_text.clone()).collect();
         assert!(anchors.is_empty());
         assert!(positions.is_empty());
         assert!(negatives.is_empty());
@@ -400,7 +418,10 @@ mod tests {
                 instruction: None,
             },
         ];
-        let (anchors, positions, negatives) = filter_triplet_batch(&triplets);
+        let entries = filter_triplet_batch(&triplets);
+        let anchors: Vec<String> = entries.iter().map(|e| e.anchor_text.clone()).collect();
+        let positions: Vec<String> = entries.iter().map(|e| e.pos_text.clone()).collect();
+        let negatives: Vec<String> = entries.iter().map(|e| e.neg_text.clone()).collect();
         assert_eq!(anchors, vec!["a1", "a2"]);
         assert_eq!(positions, vec!["p1", "p2"]);
         assert_eq!(negatives, vec!["n1", "n2"]);
@@ -409,7 +430,10 @@ mod tests {
     #[test]
     fn filter_triplet_batch_empty_input() {
         let triplets: Vec<SampleTriplet> = vec![];
-        let (anchors, positions, negatives) = filter_triplet_batch(&triplets);
+        let entries = filter_triplet_batch(&triplets);
+        let anchors: Vec<String> = entries.iter().map(|e| e.anchor_text.clone()).collect();
+        let positions: Vec<String> = entries.iter().map(|e| e.pos_text.clone()).collect();
+        let negatives: Vec<String> = entries.iter().map(|e| e.neg_text.clone()).collect();
         assert!(anchors.is_empty());
         assert!(positions.is_empty());
         assert!(negatives.is_empty());

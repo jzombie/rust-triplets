@@ -340,7 +340,8 @@ mod tests {
     use super::*;
     use crate::sampler_prefetcher::SamplerPrefetcher;
     use crate::split_state::EmbedMode;
-    use crate::traits::{PairWriteArgs, SamplerBatch, SchedulerError, TripletWriteArgs};
+    use crate::traits::{PairEntry, PairWriteArgs, SamplerBatch, SchedulerError, TripletWriteArgs};
+    use triplets_core::data::PairLabel;
     use std::sync::Arc;
 
     // -- Mock types --
@@ -392,11 +393,11 @@ mod tests {
             if remaining == 0 {
                 return Ok(None);
             }
-            Ok(Some(SamplerBatch {
-                anchor_texts: vec!["hello".into()],
-                pos_texts: vec!["world".into()],
-                neg_texts: None,
-            }))
+            Ok(Some(SamplerBatch::Pairs(vec![PairEntry {
+                anchor_text: "hello".into(),
+                candidate_text: "world".into(),
+                label: PairLabel::Positive,
+            }])))
         }
         fn save_state(&self) -> Result<()> {
             self.save_count.fetch_add(1, Ordering::Relaxed);
@@ -586,11 +587,7 @@ mod tests {
 
     impl BatchProvider for EmptyBatchProvider {
         fn next_batch(&self, _split: SplitLabel) -> Result<Option<SamplerBatch>> {
-            Ok(Some(SamplerBatch {
-                anchor_texts: vec![],
-                pos_texts: vec![],
-                neg_texts: None,
-            }))
+            Ok(Some(SamplerBatch::Pairs(vec![])))
         }
         fn save_state(&self) -> Result<()> {
             Ok(())
@@ -676,11 +673,11 @@ mod tests {
 
     impl BatchProvider for InfiniteProvider {
         fn next_batch(&self, _split: SplitLabel) -> Result<Option<SamplerBatch>> {
-            Ok(Some(SamplerBatch {
-                anchor_texts: vec!["data".into()],
-                pos_texts: vec!["positive".into()],
-                neg_texts: None,
-            }))
+            Ok(Some(SamplerBatch::Pairs(vec![PairEntry {
+                anchor_text: "data".into(),
+                candidate_text: "positive".into(),
+                label: PairLabel::Positive,
+            }])))
         }
         fn save_state(&self) -> Result<()> {
             Ok(())

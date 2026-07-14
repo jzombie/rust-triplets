@@ -117,6 +117,7 @@ pub fn init_split_states_with_batch(
 mod tests {
     use super::*;
     use tempfile::TempDir;
+    use triplets_core::data::PairLabel;
 
     #[test]
     fn srd_store_adapter_write_and_len() {
