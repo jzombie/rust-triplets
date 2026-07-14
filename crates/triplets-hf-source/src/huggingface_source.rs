@@ -1,7 +1,4 @@
 use cache_manager::{CacheRoot, EvictPolicy};
-use hf_hub::Repo;
-use hf_hub::RepoType;
-use hf_hub::api::tokio::ApiBuilder;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::record::reader::RowIter;
 use rayon::prelude::*;
@@ -32,18 +29,13 @@ use tracing::{debug, info, warn};
 use walkdir::WalkDir;
 
 use crate::constants::{
-    ENV_TRIPLETS_HF_TOKEN, ENV_TRIPLETS_HF_WHOAMI_ENDPOINT, HF_ALL_SPLITS_DIR, HF_CLASSLABEL_TYPE,
+    ENV_TRIPLETS_HF_TOKEN, ENV_TRIPLETS_HF_WHOAMI_ENDPOINT, HF_ALL_SPLITS_DIR,
     HF_DATASETS_BASE_URL, HF_GROUP, HF_HTTP_CONNECT_TIMEOUT_SECS, HF_HTTP_REQUEST_TIMEOUT_SECS,
-    HF_INFO_DEFAULT_ENDPOINT, HF_JSON_KEY_CONFIG, HF_JSON_KEY_CONFIG_NAME, HF_JSON_KEY_CONFIGS,
-    HF_JSON_KEY_DATASET, HF_JSON_KEY_DATASET_INFO, HF_JSON_KEY_FEATURE_TYPE, HF_JSON_KEY_FEATURES,
-    HF_JSON_KEY_LABEL_NAMES, HF_JSON_KEY_NUM_ROWS, HF_JSON_KEY_PARQUET_FILES, HF_JSON_KEY_SIZE,
-    HF_JSON_KEY_SPLIT, HF_JSON_KEY_SPLIT_NAME, HF_JSON_KEY_SPLITS, HF_JSON_KEY_URL,
     HF_LOCAL_DISK_CAP_BYTES, HF_PARQUET_DEFAULT_ENDPOINT, HF_PARQUET_MANIFEST_DIR,
     HF_REFRESH_BATCH_MULTIPLIER, HF_REMOTE_BOOTSTRAP_SHARDS,
-    HF_REMOTE_EXPANSION_HEADROOM_MULTIPLIER, HF_REMOTE_URL_PREFIX,
-    HF_RESOLVE_UNKNOWN_FALLBACK_PATH, HF_RESOLVE_URL_SEPARATOR, HF_SHARD_CANDIDATE_SEED_TAG,
-    HF_SHARD_STORE_EXTENSION, HF_SHARD_STORE_META_ROWS_KEY, HF_SHARD_STORE_ROW_PREFIX,
-    HF_SHARD_STORE_SOURCE_SIZE_KEY, HF_SHARED_RUNTIME_WORKER_THREADS, HF_SIZE_DEFAULT_ENDPOINT,
+    HF_REMOTE_EXPANSION_HEADROOM_MULTIPLIER, HF_REMOTE_URL_PREFIX, HF_RESOLVE_URL_SEPARATOR,
+    HF_SHARD_CANDIDATE_SEED_TAG, HF_SHARD_STORE_EXTENSION, HF_SHARD_STORE_META_ROWS_KEY,
+    HF_SHARD_STORE_ROW_PREFIX, HF_SHARD_STORE_SOURCE_SIZE_KEY, HF_SHARED_RUNTIME_WORKER_THREADS,
     HF_WHOAMI_DEFAULT_ENDPOINT,
 };
 #[cfg(not(debug_assertions))]
@@ -800,24 +792,10 @@ pub struct HuggingFaceRowsConfig {
     /// every record emitted by this source.  Set this on sources that provide
     /// higher- or lower-quality data than the default.
     pub trust_override: Option<f32>,
-    /// Optional integer-to-label maps for ClassLabel (or other integer) columns.
-    ///
-    /// Keyed by column name; value is an ordered list of label strings.  When a
-    /// column value is an integer `n` and a map entry exists for that column,
-    /// `label_maps[col][n]` is used as the text instead of the raw integer string.
-    ///
-    /// This field is auto-populated by [`HuggingFaceRowSource::new`] via a
-    /// single call to the datasets-server `/info` endpoint.  Resolved label
-    /// strings are written into the `.simdr` row store **at parquet-transcode
-    /// time** and are not re-evaluated on subsequent reads.  Pre-existing
-    /// stores that were transcoded before label resolution was introduced will
-    /// continue to contain raw integer strings until their shard is evicted
-    /// and re-transcoded.
-    pub label_maps: HashMap<String, Vec<String>>,
     /// Optional Hugging Face API token for authenticating private dataset access.
     ///
     /// When set, sent as `Authorization: Bearer <token>` on datasets-server API
-    /// requests and forwarded to `hf-hub` for shard downloads.  Populated
+    /// requests for shard downloads.  Populated
     /// automatically from the `HF_TOKEN` environment variable at construction
     /// time; callers may also set this field directly.
     pub hf_token: Option<String>,
@@ -825,14 +803,6 @@ pub struct HuggingFaceRowsConfig {
     /// Populated at construction time from `TRIPLETS_HF_PARQUET_ENDPOINT` env var
     /// or `HF_PARQUET_DEFAULT_ENDPOINT`.
     pub parquet_endpoint: String,
-    /// Resolved datasets-server size endpoint URL.
-    /// Populated at construction time from `TRIPLETS_HF_SIZE_ENDPOINT` env var
-    /// or `HF_SIZE_DEFAULT_ENDPOINT`.
-    pub size_endpoint: String,
-    /// Resolved datasets-server info endpoint URL.
-    /// Populated at construction time from `TRIPLETS_HF_INFO_ENDPOINT` env var
-    /// or `HF_INFO_DEFAULT_ENDPOINT`.
-    pub info_endpoint: String,
     /// In-memory cache of opened `DataStore` instances, keyed by shard path.
     /// Populated lazily as shards are accessed and cleared when the cache grows
     /// beyond the configured capacity.
@@ -878,13 +848,10 @@ impl HuggingFaceRowsConfig {
             negative_columns: Vec::new(),
             context_columns: Vec::new(),
             trust_override: None,
-            label_maps: HashMap::new(),
             hf_token: std::env::var(ENV_TRIPLETS_HF_TOKEN)
                 .ok()
                 .filter(|t| !t.trim().is_empty()),
             parquet_endpoint: HF_PARQUET_DEFAULT_ENDPOINT.to_string(),
-            size_endpoint: HF_SIZE_DEFAULT_ENDPOINT.to_string(),
-            info_endpoint: HF_INFO_DEFAULT_ENDPOINT.to_string(),
             store_cache: StoreCache::new(),
             http_client: None,
         }
@@ -1170,7 +1137,6 @@ impl Clone for HuggingFaceRowSource {
 #[derive(Debug)]
 struct SourceState {
     materialized_rows: usize,
-    total_rows: Option<usize>,
     shards: Vec<ShardIndex>,
     /// Sorted, immutable list of all remote candidate identifiers.  Never
     /// shuffled in-place — ordering is expressed via `remote_candidate_order`.
@@ -1241,14 +1207,6 @@ impl HuggingFaceRowSource {
             Self::validate_token_with_runtime(&http_client, &config, &http_runtime)?;
         }
 
-        // Auto-resolve ClassLabel columns from the datasets-server /info endpoint.
-        // If the fetch fails the label_maps stay empty and raw integers are used.
-        config.label_maps = Self::fetch_classlabel_maps_with_runtime(
-            &http_client,
-            &config,
-            Some(http_runtime.as_ref()),
-        );
-
         fs::create_dir_all(&config.snapshot_dir).map_err(|err| {
             SamplerError::SourceUnavailable {
                 source_id: config.source_id.clone(),
@@ -1274,29 +1232,6 @@ impl HuggingFaceRowSource {
         }
 
         let materialized_rows = discovered;
-        let total_rows = match Self::fetch_global_row_count_with_runtime(
-            &http_client,
-            &config,
-            Some(http_runtime.as_ref()),
-        ) {
-            Ok(value) => value,
-            Err(err) => {
-                warn!(
-                    "[triplets:hf] {} global row count unavailable (datasets viewer may be \
-                     disabled for this dataset); shard download is unaffected but expansion \
-                     paging will be driven by local shard discovery only: {}",
-                    config.source_id, err
-                );
-                None
-            }
-        };
-
-        if let Some(global_total) = total_rows {
-            info!(
-                "[triplets:hf] {} global split row count reported: {} (known_local_rows={})",
-                config.source_id, global_total, materialized_rows
-            );
-        }
 
         info!(
             "[triplets:hf] {} source ready in {:.2}s (rows={}, shards={})",
@@ -1313,7 +1248,6 @@ impl HuggingFaceRowSource {
             sampler_config: Arc::new(Mutex::new(None)),
             state: Arc::new(Mutex::new(SourceState {
                 materialized_rows,
-                total_rows,
                 shards,
                 remote_candidates: None,
                 remote_candidate_sizes: HashMap::new(),
@@ -1325,16 +1259,6 @@ impl HuggingFaceRowSource {
             eligible_index: Arc::new(Mutex::new(EligibleIndexCache::default())),
             expansion_thread: Arc::new(Mutex::new(None)),
         })
-    }
-
-    /// Total row count for the dataset split as reported by the datasets-server
-    /// `/size` endpoint, populated once during [`HuggingFaceRowSource::new`].
-    ///
-    /// Returns `None` if the endpoint was unreachable, returned a non-200
-    /// response, or changed its response format.  The source continues to
-    /// operate normally in that case (graceful degradation).
-    pub fn known_total_rows(&self) -> Option<usize> {
-        self.state.lock().ok()?.total_rows
     }
 
     fn is_store_shard_path(path: &Path) -> bool {
@@ -1887,135 +1811,6 @@ impl HuggingFaceRowSource {
             .collect::<Vec<_>>()
     }
 
-    fn collect_candidates_from_siblings(
-        config: &HuggingFaceRowsConfig,
-        siblings: &[String],
-        accepted: &[String],
-        respect_split: bool,
-    ) -> (Vec<String>, bool, bool) {
-        let mut saw_parquet = false;
-        let mut candidates = Vec::new();
-        // Tracks whether the split filter + extension check matched at least one remote
-        // file, before the on-disk existence check is applied.  Drives two decisions in
-        // `resolve_remote_candidates_from_siblings`:
-        //
-        //  • false → no accepted file in the sibling list matched this split at all.
-        //            Trigger the all-splits fallback scan (the split name may simply
-        //            not appear in any sibling path, so relaxing the filter is correct).
-        //
-        //  • true  → at least one accepted file matched the split, but it is already
-        //            cached on disk, so candidates is empty.  Do NOT trigger the
-        //            fallback — queuing other splits' uncached files would be wrong.
-        let mut split_matched_any_accepted = false;
-        for remote_path in siblings {
-            if respect_split && !config.split_name.is_empty() {
-                let split_tag = format!("{}/", config.split_name);
-                let split_token = format!("-{}-", config.split_name);
-                let split_prefix = format!("{}-", config.split_name);
-                // Flat-table layout: some repositories store each table as a
-                // single file whose stem IS the logical split name rather than
-                // using a `split/shard-NNNNN.parquet` directory hierarchy.
-                // e.g. `data/stock_news.parquet` with split `stock_news`.
-                // The stem must match exactly so that `training` is not selected
-                // when the requested split is `train`.
-                let stem_match = Path::new(remote_path)
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .is_some_and(|s| s == config.split_name.as_str());
-                if !remote_path.contains(&split_tag)
-                    && !remote_path.contains(&split_token)
-                    && !Path::new(remote_path)
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .is_some_and(|name| name.starts_with(&split_prefix))
-                    && !stem_match
-                {
-                    continue;
-                }
-            }
-
-            let ext = Path::new(remote_path)
-                .extension()
-                .and_then(|v| v.to_str())
-                .map(|v| v.to_ascii_lowercase());
-            if ext.as_deref() == Some("parquet") {
-                saw_parquet = true;
-            }
-            if ext
-                .as_deref()
-                .is_some_and(|ext| accepted.iter().any(|allowed| allowed == ext))
-            {
-                // Mark that the split filter matched at least one accepted file
-                // before checking whether it is already on disk.
-                split_matched_any_accepted = true;
-                let target = Self::candidate_target_path(config, remote_path);
-                let store_target = Self::shard_store_path_for(&target);
-                if target.exists() || store_target.exists() {
-                    continue;
-                }
-                candidates.push(remote_path.clone());
-            }
-        }
-        (candidates, saw_parquet, split_matched_any_accepted)
-    }
-
-    fn resolve_remote_candidates_from_siblings(
-        config: &HuggingFaceRowsConfig,
-        siblings: &[String],
-        accepted: &[String],
-    ) -> Result<(Vec<String>, HashMap<String, u64>), SamplerError> {
-        let (mut candidates, mut saw_parquet, split_matched_any_accepted) =
-            Self::collect_candidates_from_siblings(config, siblings, accepted, true);
-        // Only fall back to the extension-only scan when the split filter genuinely
-        // matched no accepted remote files.  Do NOT fall back when all split-matching
-        // files are already on disk — that would cause all other undownloaded splits'
-        // files to be queued on resume (e.g. after stock_news.simdr is already cached,
-        // a fallback would start downloading stock_prices.parquet, etc.).
-        if candidates.is_empty() && !config.split_name.is_empty() && !split_matched_any_accepted {
-            let (fallback_candidates, fallback_saw_parquet, _) =
-                Self::collect_candidates_from_siblings(config, siblings, accepted, false);
-            if !fallback_candidates.is_empty() {
-                warn!(
-                    "[triplets:hf] split filter '{}' matched no remote files; falling back to extension-only remote candidate scan",
-                    config.split_name
-                );
-                candidates = fallback_candidates;
-                saw_parquet = fallback_saw_parquet;
-            }
-        }
-
-        candidates.sort();
-        candidates.dedup();
-        info!(
-            "[triplets:hf] remote candidates matching {:?}: {}",
-            config.shard_extensions,
-            candidates.len()
-        );
-        if candidates.is_empty() {
-            // When the split filter matched accepted files that are all already on disk
-            // (`split_matched_any_accepted`), return empty gracefully — the source is
-            // fully cached with no further downloads needed.  The "parquet-only" error
-            // only applies when the sibling list has parquet files but no accepted split
-            // match was ever found (e.g. `shard_extensions` is missing "parquet").
-            if saw_parquet && !split_matched_any_accepted {
-                return Err(SamplerError::SourceUnavailable {
-                    source_id: config.source_id.clone(),
-                    reason: format!(
-                        "dataset '{}' appears to be parquet-only, but shard_extensions does not include parquet ({:?}).",
-                        config.dataset_name, config.shard_extensions
-                    ),
-                });
-            }
-            warn!(
-                "[triplets:hf] no remote candidates found for dataset='{}' split='{}' extensions={:?}; source will be treated as exhausted",
-                config.dataset_name, config.split_name, config.shard_extensions
-            );
-            return Ok((Vec::new(), HashMap::new()));
-        }
-
-        Ok((candidates, HashMap::new()))
-    }
-
     /// Return ALL shards from the parquet manifest regardless of what is already cached
     /// on disk.  Shard download order and local cache are orthogonal concerns:
     ///
@@ -2030,6 +1825,13 @@ impl HuggingFaceRowSource {
     /// Note: row-level selection within `refresh` is *not* deterministic across cache
     /// wipes.  Only the shard download sequence is stable end-to-end.
     ///
+    /// Parse the Hub API tree endpoint response into shard candidates.
+    ///
+    /// The tree endpoint returns a JSON array of file objects:
+    /// ```json
+    /// [{"type":"file","path":"data/train-00000-of-00001.parquet","size":2648082,...}]
+    /// ```
+    ///
     /// The only cleanup performed here is deleting stale/incomplete transient parquet
     /// downloads (wrong on-disk size) so they are re-fetched on the next download cycle.
     fn all_candidates_from_parquet_manifest(
@@ -2041,34 +1843,27 @@ impl HuggingFaceRowSource {
         let mut candidates = Vec::new();
         let mut candidate_sizes = HashMap::new();
         let mut matched_manifest_entries = 0usize;
-        if let Some(entries) = json
-            .get(HF_JSON_KEY_PARQUET_FILES)
-            .and_then(Value::as_array)
-        {
-            for entry in entries {
-                let Some(url) = entry.get(HF_JSON_KEY_URL).and_then(Value::as_str) else {
+
+        // ── Hub API tree format: array of {"path": "...", "size": N} objects ────
+        if let Some(arr) = json.as_array() {
+            for entry in arr {
+                let Some(file_path) = entry.get("path").and_then(Value::as_str) else {
                     continue;
                 };
-
-                let ext = Path::new(url)
+                let ext = Path::new(file_path)
                     .extension()
-                    .and_then(|value| value.to_str())
-                    .map(|value| value.to_ascii_lowercase());
+                    .and_then(|v| v.to_str())
+                    .map(|v| v.to_ascii_lowercase());
                 if !ext
                     .as_deref()
-                    .is_some_and(|value| accepted.iter().any(|allowed| allowed == value))
+                    .is_some_and(|v| accepted.iter().any(|a| a == v))
                 {
                     continue;
                 }
-
                 matched_manifest_entries += 1;
-                let candidate = format!("{HF_REMOTE_URL_PREFIX}{url}");
-                let expected_size = entry.get(HF_JSON_KEY_SIZE).and_then(Value::as_u64);
+                let candidate = format!("{HF_REMOTE_URL_PREFIX}{file_path}");
+                let expected_size = entry.get("size").and_then(Value::as_u64);
 
-                // Remove stale/incomplete transient parquet downloads so they get
-                // re-fetched.  Fully-materialised `.simdr` stores are intentionally
-                // kept — `download_next_remote_shard` will detect them and skip the
-                // download without re-fetching.
                 let target = Self::candidate_target_path(config, &candidate);
                 if target.exists() && !Self::target_matches_expected_size(&target, expected_size) {
                     warn!(
@@ -2087,11 +1882,16 @@ impl HuggingFaceRowSource {
                         });
                     }
                 }
-
                 if let Some(size) = expected_size {
                     candidate_sizes.insert(candidate.clone(), size);
                 }
                 candidates.push(candidate);
+            }
+            if matched_manifest_entries > 0 {
+                candidates.sort();
+                candidates.dedup();
+                candidate_sizes.retain(|candidate, _| candidates.binary_search(candidate).is_ok());
+                return Ok((candidates, candidate_sizes, matched_manifest_entries));
             }
         }
 
@@ -2110,9 +1910,10 @@ impl HuggingFaceRowSource {
         Self::list_remote_candidates_with_runtime(http_client, config, None)
     }
 
-    /// Resolve and filter remote shard candidates from the datasets-server parquet
-    /// manifest, falling back to hf-hub repository listing when the parquet endpoint
-    /// is unavailable or returns no entries for the dataset/config.
+    /// Resolve and filter remote shard candidates from the Hub API tree endpoint.
+    ///
+    /// Returns an error when the parquet manifest is unavailable or has no entries
+    /// for the requested dataset/config/split.
     pub fn list_remote_candidates_with_runtime(
         http_client: &ClientWithMiddleware,
         config: &HuggingFaceRowsConfig,
@@ -2127,12 +1928,6 @@ impl HuggingFaceRowSource {
             Ok((candidates, candidate_sizes, matched_manifest_entries))
                 if *matched_manifest_entries > 0 =>
             {
-                // Parquet manifest exists for this dataset.  Return the full candidate
-                // list — including already-cached shards — so the seed-derived order is
-                // always built from the complete HF manifest, independent of what has
-                // been downloaded.  Never fall through to the hf-hub siblings listing,
-                // which returns every language config in the repository, not just the
-                // one requested.
                 info!(
                     "[triplets:hf] remote parquet manifest: {} shard(s) for dataset='{}' \
                          config='{}' split='{}'",
@@ -2141,64 +1936,23 @@ impl HuggingFaceRowSource {
                     config.config_name,
                     config.split_name
                 );
-                return Ok((candidates.clone(), candidate_sizes.clone()));
+                Ok((candidates.clone(), candidate_sizes.clone()))
             }
-            Ok(_) => {
-                // matched_manifest_entries == 0: parquet manifest does not cover this
-                // dataset/config.  Fall through to the hf-hub siblings listing.
-                info!(
-                    "[triplets:hf] datasets-server parquet manifest has no entries for \
-                     dataset='{}' config='{}' split='{}'; falling back to hf-hub \
-                     repository listing",
+            Ok(_) => Err(SamplerError::SourceUnavailable {
+                source_id: config.source_id.clone(),
+                reason: format!(
+                    "parquet manifest has no entries for dataset='{}' config='{}' split='{}'",
                     config.dataset_name, config.config_name, config.split_name
-                );
-            }
-            Err(err) => {
-                // Parquet manifest endpoint unavailable (e.g. datasets viewer disabled).
-                // Fall through to hf-hub repository listing which works independently.
-                info!(
-                    "[triplets:hf] datasets-server parquet manifest unavailable for \
-                     dataset='{}' (datasets viewer may be disabled); falling back to \
-                     hf-hub repository listing: {}",
-                    config.dataset_name, err
-                );
-            }
+                ),
+            }),
+            Err(err) => Err(SamplerError::SourceUnavailable {
+                source_id: config.source_id.clone(),
+                reason: format!(
+                    "parquet manifest unavailable for dataset='{}': {err}",
+                    config.dataset_name,
+                ),
+            }),
         }
-
-        info!(
-            "[triplets:hf] reading remote file list for dataset {}",
-            config.dataset_name
-        );
-        let info = Self::block_on_http_with_runtime(runtime, config, async {
-            let api = ApiBuilder::new()
-                .with_progress(true)
-                .with_token(config.hf_token.clone())
-                .build()
-                .map_err(|err| SamplerError::SourceUnavailable {
-                    source_id: config.source_id.clone(),
-                    reason: format!("failed building hf-hub client: {err}"),
-                })?;
-
-            let repo = Repo::new(config.dataset_name.clone(), RepoType::Dataset);
-            let repo_api = api.repo(repo);
-            repo_api
-                .info()
-                .await
-                .map_err(|err| SamplerError::SourceUnavailable {
-                    source_id: config.source_id.clone(),
-                    reason: format!("failed reading hf-hub repository info: {err}"),
-                })
-        })?;
-
-        let accepted = Self::normalized_shard_extensions(config);
-
-        let siblings = info
-            .siblings
-            .into_iter()
-            .map(|entry| entry.rfilename)
-            .collect::<Vec<_>>();
-
-        Self::resolve_remote_candidates_from_siblings(config, &siblings, &accepted)
     }
 
     /// Build a seed-derived permutation of indices 0..candidates.len().
@@ -2444,117 +2198,6 @@ impl HuggingFaceRowSource {
             })
     }
 
-    /// Fetch ClassLabel name mappings from the datasets-server `/info` endpoint.
-    ///
-    /// Returns a map of column name → ordered label names for every feature whose
-    /// `_type` is `"ClassLabel"`.  Called once per [`HuggingFaceRowSource::new`]
-    /// call; the result is stored in [`HuggingFaceRowsConfig::label_maps`] and
-    /// consulted at parquet-shard transcode time only.
-    ///
-    /// All failure paths (unreachable endpoint, HTTP error, unreadable body,
-    /// invalid JSON) emit a `warn!` log and return an empty map.  The caller
-    /// continues normally with raw integer strings as a fallback.
-    #[cfg(test)]
-    fn fetch_classlabel_maps(
-        http_client: &ClientWithMiddleware,
-        config: &HuggingFaceRowsConfig,
-    ) -> HashMap<String, Vec<String>> {
-        Self::fetch_classlabel_maps_with_runtime(http_client, config, None)
-    }
-
-    fn fetch_classlabel_maps_with_runtime(
-        http_client: &ClientWithMiddleware,
-        config: &HuggingFaceRowsConfig,
-        runtime: Option<&tokio::runtime::Runtime>,
-    ) -> HashMap<String, Vec<String>> {
-        let endpoint = &config.info_endpoint;
-        let body = match Self::block_on_http_with_runtime(
-            runtime,
-            config,
-            Self::fetch_http_body_text(
-                http_client,
-                &config.source_id,
-                endpoint,
-                &[
-                    (HF_JSON_KEY_DATASET, &config.dataset_name),
-                    (HF_JSON_KEY_CONFIG, &config.config_name),
-                ],
-                "datasets-server info endpoint",
-            ),
-        ) {
-            Ok(body) => body,
-            Err(err) => {
-                let why = match &err {
-                    SamplerError::SourceUnavailable { reason, .. } => reason.as_str(),
-                    _ => "unknown error",
-                };
-                warn!(
-                    "[triplets:hf] {}: ClassLabel columns will use raw integers ",
-                    config.source_id
-                );
-                warn!("  (couldn't fetch label names: {})", why);
-                warn!("  Parquet data loading is unaffected.");
-                return HashMap::new();
-            }
-        };
-        let json: Value = match serde_json::from_str(&body) {
-            Ok(v) => v,
-            Err(err) => {
-                warn!(
-                    "[triplets:hf] {} failed parsing dataset info response: {}",
-                    config.source_id, err
-                );
-                return HashMap::new();
-            }
-        };
-        let maps = Self::extract_classlabel_maps(&json);
-        if !maps.is_empty() {
-            info!(
-                "[triplets:hf] {} resolved ClassLabel mappings for columns: {:?}",
-                config.source_id,
-                maps.keys().collect::<Vec<_>>()
-            );
-        }
-        maps
-    }
-
-    /// Extract ClassLabel mappings from a parsed `/info` response payload.
-    ///
-    /// Exposed as a separate function so it can be unit-tested without a live
-    /// network.
-    fn extract_classlabel_maps(info: &Value) -> HashMap<String, Vec<String>> {
-        let mut maps = HashMap::new();
-        let Some(features) = info
-            .get(HF_JSON_KEY_DATASET_INFO)
-            .and_then(|di| di.get(HF_JSON_KEY_FEATURES))
-            .and_then(|f| f.as_object())
-        else {
-            return maps;
-        };
-        for (col, field) in features {
-            if field.get(HF_JSON_KEY_FEATURE_TYPE).and_then(Value::as_str)
-                != Some(HF_CLASSLABEL_TYPE)
-            {
-                continue;
-            }
-            let Some(names_arr) = field
-                .get(HF_JSON_KEY_LABEL_NAMES)
-                .and_then(|n| n.as_array())
-            else {
-                continue;
-            };
-            let label_names: Vec<String> = names_arr
-                .iter()
-                .filter_map(|v| v.as_str())
-                .map(str::to_string)
-                .collect();
-            if !label_names.is_empty() {
-                maps.insert(col.clone(), label_names);
-            }
-        }
-        maps
-    }
-
     /// Query datasets-server parquet manifest and derive shard candidates.
     #[cfg(test)]
     pub(crate) fn list_remote_candidates_from_parquet_manifest(
@@ -2569,29 +2212,33 @@ impl HuggingFaceRowSource {
         config: &HuggingFaceRowsConfig,
         runtime: Option<&tokio::runtime::Runtime>,
     ) -> Result<ParquetManifestCandidates, SamplerError> {
-        let endpoint = &config.parquet_endpoint;
+        let base = &config.parquet_endpoint;
+        // Hub API: {base}/{dataset}/tree/main/{config}?recursive=true — lists
+        // files under the config subdirectory, recursing into subdirectories.
+        // Scoped to config_name so we don't pull files from other language
+        // configs (e.g. wikimedia/wikipedia/20231101.en should not list .fr).
+        let tree_path = if config.config_name.is_empty() || config.config_name == "default" {
+            format!("{base}/{}/tree/main?recursive=true", config.dataset_name)
+        } else {
+            format!(
+                "{base}/{}/tree/main/{}?recursive=true",
+                config.dataset_name, config.config_name
+            )
+        };
+        let url = tree_path;
         info!(
-            "[triplets:hf] reading datasets-server parquet manifest for dataset {}",
+            "[triplets:hf] reading Hub API tree for dataset {}",
             config.dataset_name
         );
-        let mut query = vec![
-            (HF_JSON_KEY_DATASET, config.dataset_name.as_str()),
-            (HF_JSON_KEY_CONFIG, config.config_name.as_str()),
-        ];
-        // When split is empty (all-splits mode) omit the split query param so the
-        // datasets-server returns shards for every split in the config.
-        if !config.split_name.is_empty() {
-            query.push((HF_JSON_KEY_SPLIT, config.split_name.as_str()));
-        }
         let body = Self::block_on_http_with_runtime(
             runtime,
             config,
             Self::fetch_http_body_text(
                 http_client,
                 &config.source_id,
-                endpoint,
-                &query,
-                "datasets-server parquet endpoint",
+                &url,
+                &[],
+                "Hub tree endpoint",
             ),
         )?;
 
@@ -2605,42 +2252,56 @@ impl HuggingFaceRowSource {
         let json: Value =
             serde_json::from_str(body).map_err(|err| SamplerError::SourceUnavailable {
                 source_id: config.source_id.clone(),
-                reason: format!("failed parsing datasets-server parquet response: {err}"),
+                reason: format!("failed parsing Hub API parquet response: {err}"),
             })?;
 
         Self::all_candidates_from_parquet_manifest(config, &json)
     }
 
     /// Map a candidate identifier to the local snapshot target path.
+    ///
+    /// Full CDN URLs (e.g. `https://huggingface.co/datasets/.../resolve/main/data/train.parquet`)
+    /// are parsed to extract the relative path after `/resolve/`.  Bare relative
+    /// paths (e.g. from the Hub API tree endpoint) are used directly as the suffix.
     fn candidate_target_path(config: &HuggingFaceRowsConfig, candidate: &str) -> PathBuf {
         if let Some(url) = candidate.strip_prefix(HF_REMOTE_URL_PREFIX) {
-            let suffix = url
+            // Full CDN URL: extract path after /resolve/
+            if let Some(suffix) = url
                 .split(HF_RESOLVE_URL_SEPARATOR)
                 .nth(1)
                 .map(|value| value.trim_start_matches('/'))
                 .filter(|value| !value.is_empty())
-                .unwrap_or(HF_RESOLVE_UNKNOWN_FALLBACK_PATH);
+            {
+                return config
+                    .snapshot_dir
+                    .join(HF_PARQUET_MANIFEST_DIR)
+                    .join(suffix);
+            }
+            // Bare relative path from tree endpoint (e.g. "train/000.parquet")
             return config
                 .snapshot_dir
                 .join(HF_PARQUET_MANIFEST_DIR)
-                .join(suffix);
+                .join(url.trim_start_matches('/'));
         }
         config.snapshot_dir.join(candidate)
     }
 
     /// Validate target file size against expected bytes when available.
+    ///
+    /// When `expected_bytes` is `Some(N)` with N > 0, the local file must have
+    /// exactly N bytes.  When `expected_bytes` is `None`, the file must exist
+    /// and be non-zero bytes (rejects 0-byte corruption from failed downloads
+    /// or chunked transfer encoding without Content-Length).
     fn target_matches_expected_size(path: &Path, expected_bytes: Option<u64>) -> bool {
-        if !path.exists() {
+        let Ok(metadata) = fs::metadata(path) else {
             return false;
+        };
+        let local_size = metadata.len();
+        match expected_bytes {
+            Some(expected) if expected > 0 => local_size == expected,
+            None => local_size > 0,
+            _ => true,
         }
-        if let Some(expected) = expected_bytes
-            && expected > 0
-        {
-            return fs::metadata(path)
-                .map(|meta| meta.len() == expected)
-                .unwrap_or(false);
-        }
-        true
     }
 
     /// Return on-disk size for a shard path, or 0 if metadata lookup fails.
@@ -2651,17 +2312,22 @@ impl HuggingFaceRowSource {
     /// Build the full HTTP(S) remote URL for a candidate identifier.
     ///
     /// Candidates from the parquet manifest carry the `url::` prefix followed
-    /// by a full URL.  Candidates from the hf-hub sibling fallback are bare
-    /// repository-relative paths that need the HF CDN prefix.
+    /// by a full URL or a repository-relative path.  This function always
+    /// returns a valid absolute URL: if the value after stripping the prefix
+    /// is already `http://` or `https://`, it is returned directly; otherwise
+    /// it is resolved against the HuggingFace CDN.
     pub fn remote_url_for_candidate(config: &HuggingFaceRowsConfig, candidate: &str) -> String {
-        if let Some(url) = candidate.strip_prefix(HF_REMOTE_URL_PREFIX) {
-            url.to_string()
+        let remainder = candidate
+            .strip_prefix(HF_REMOTE_URL_PREFIX)
+            .unwrap_or(candidate);
+        if remainder.starts_with("http://") || remainder.starts_with("https://") {
+            remainder.to_string()
         } else {
             format!(
                 "{}/{}/resolve/main/{}",
                 HF_DATASETS_BASE_URL,
                 config.dataset_name,
-                candidate.trim_start_matches('/')
+                remainder.trim_start_matches('/')
             )
         }
     }
@@ -2777,68 +2443,6 @@ impl HuggingFaceRowSource {
             .filter(|shard| shard.path.starts_with(&manifest_root))
             .map(|shard| Self::shard_size_bytes(&shard.path))
             .sum::<u64>()
-    }
-
-    /// Fetch exact split row count metadata from datasets-server size endpoint.
-    #[cfg(test)]
-    fn fetch_global_row_count(
-        http_client: &ClientWithMiddleware,
-        config: &HuggingFaceRowsConfig,
-    ) -> Result<Option<usize>, SamplerError> {
-        Self::fetch_global_row_count_with_runtime(http_client, config, None)
-    }
-
-    fn fetch_global_row_count_with_runtime(
-        http_client: &ClientWithMiddleware,
-        config: &HuggingFaceRowsConfig,
-        runtime: Option<&tokio::runtime::Runtime>,
-    ) -> Result<Option<usize>, SamplerError> {
-        let endpoint = &config.size_endpoint;
-        info!(
-            "[triplets:hf] requesting global row count dataset='{}' config='{}' split='{}'",
-            config.dataset_name, config.config_name, config.split_name
-        );
-
-        let mut query = vec![
-            (HF_JSON_KEY_DATASET, config.dataset_name.as_str()),
-            (HF_JSON_KEY_CONFIG, config.config_name.as_str()),
-        ];
-        // When split is empty (all-splits mode) omit the split query param so the
-        // server returns the total row count for the whole config.
-        if !config.split_name.is_empty() {
-            query.push((HF_JSON_KEY_SPLIT, config.split_name.as_str()));
-        }
-        let body = Self::block_on_http_with_runtime(
-            runtime,
-            config,
-            Self::fetch_http_body_text(
-                http_client,
-                &config.source_id,
-                endpoint,
-                &query,
-                "datasets-server size endpoint",
-            ),
-        )?;
-
-        Self::parse_global_row_count_response(config, &body)
-    }
-
-    fn parse_global_row_count_response(
-        config: &HuggingFaceRowsConfig,
-        body: &str,
-    ) -> Result<Option<usize>, SamplerError> {
-        let json: Value =
-            serde_json::from_str(body).map_err(|err| SamplerError::SourceUnavailable {
-                source_id: config.source_id.clone(),
-                reason: format!("failed parsing datasets-server size response: {err}"),
-            })?;
-
-        let count = Self::extract_split_row_count_from_size_response(
-            &json,
-            &config.config_name,
-            &config.split_name,
-        );
-        Ok(count)
     }
 
     fn is_parquet_path(path: &Path) -> bool {
@@ -3046,85 +2650,6 @@ impl HuggingFaceRowSource {
         Ok(())
     }
 
-    /// Extract split row count from datasets-server size payload variants.
-    fn extract_split_row_count_from_size_response(
-        json: &Value,
-        config_name: &str,
-        split_name: &str,
-    ) -> Option<usize> {
-        let to_usize = |value: &Value| value.as_u64().and_then(|raw| usize::try_from(raw).ok());
-
-        let size = json.get(HF_JSON_KEY_SIZE)?;
-
-        if let Some(splits) = size.get(HF_JSON_KEY_SPLITS).and_then(Value::as_array) {
-            for entry in splits {
-                let entry_config = entry
-                    .get(HF_JSON_KEY_CONFIG)
-                    .or_else(|| entry.get(HF_JSON_KEY_CONFIG_NAME))
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                let entry_split = entry
-                    .get(HF_JSON_KEY_SPLIT)
-                    .or_else(|| entry.get(HF_JSON_KEY_SPLIT_NAME))
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                if entry_config == config_name
-                    && entry_split == split_name
-                    && let Some(rows) = entry.get(HF_JSON_KEY_NUM_ROWS).and_then(to_usize)
-                {
-                    return Some(rows);
-                }
-            }
-        }
-
-        if let Some(configs) = size.get(HF_JSON_KEY_CONFIGS).and_then(Value::as_array) {
-            for config_entry in configs {
-                let entry_config = config_entry
-                    .get(HF_JSON_KEY_CONFIG)
-                    .or_else(|| config_entry.get(HF_JSON_KEY_CONFIG_NAME))
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                if entry_config != config_name {
-                    continue;
-                }
-
-                if let Some(splits) = config_entry
-                    .get(HF_JSON_KEY_SPLITS)
-                    .and_then(Value::as_array)
-                {
-                    for split_entry in splits {
-                        let entry_split = split_entry
-                            .get(HF_JSON_KEY_SPLIT)
-                            .or_else(|| split_entry.get(HF_JSON_KEY_SPLIT_NAME))
-                            .and_then(Value::as_str)
-                            .unwrap_or_default();
-                        if entry_split == split_name
-                            && let Some(rows) =
-                                split_entry.get(HF_JSON_KEY_NUM_ROWS).and_then(to_usize)
-                        {
-                            return Some(rows);
-                        }
-                    }
-                }
-
-                if split_name.is_empty()
-                    && let Some(rows) = config_entry.get(HF_JSON_KEY_NUM_ROWS).and_then(to_usize)
-                {
-                    return Some(rows);
-                }
-            }
-        }
-
-        if split_name.is_empty() {
-            return size
-                .get(HF_JSON_KEY_DATASET)
-                .and_then(|dataset| dataset.get(HF_JSON_KEY_NUM_ROWS))
-                .and_then(to_usize);
-        }
-
-        None
-    }
-
     /// Build the stable human-readable label used in every shard-related log line.
     ///
     /// Format: `<file> (shard <M>/<total>)` where `M` is the 1-based index of this
@@ -3146,7 +2671,7 @@ impl HuggingFaceRowSource {
         format!("{file} (shard {}/{candidate_total})", candidate_idx + 1)
     }
 
-    /// Download a shard (URL or hf-hub path) and materialize it under snapshot dir.
+    /// Download a shard URL and materialize it under snapshot dir.
     #[cfg(test)]
     fn download_and_materialize_shard(
         http_client: &ClientWithMiddleware,
@@ -3173,80 +2698,83 @@ impl HuggingFaceRowSource {
         shard_label: &str,
         runtime: Option<&tokio::runtime::Runtime>,
     ) -> Result<PathBuf, SamplerError> {
-        if let Some(remote_url) = remote_path.strip_prefix(HF_REMOTE_URL_PREFIX) {
-            let target = Self::candidate_target_path(config, remote_path);
-            let store_target = Self::shard_store_path_for(&target);
-            if store_target.exists() {
-                return Ok(store_target);
-            }
-            let parquet_candidate = Self::is_parquet_path(&target);
-            if parquet_candidate {
-                if target.exists() {
-                    let _ = fs::remove_file(&target);
-                }
-                let temp_target =
-                    Self::allocate_temp_download_path(config, remote_path, "parquet")?;
-                Self::download_remote_url_to_target_with_runtime(
-                    http_client,
-                    config,
-                    remote_url,
-                    &temp_target,
-                    expected_bytes,
-                    shard_label,
-                    runtime,
-                )?;
-                return Ok(temp_target);
-            }
-            if target.exists() {
-                if Self::target_matches_expected_size(&target, expected_bytes) {
-                    return Ok(target);
-                }
-                warn!(
-                    "[triplets:hf] replacing incomplete shard before retry: {}",
-                    target.display()
-                );
-                fs::remove_file(&target).map_err(|err| SamplerError::SourceUnavailable {
+        // ── Path traversal guard ──────────────────────────────────────────────
+        // Check the relative path that will determine the on-disk target location.
+        // For full URLs (http/https), extract just the path portion after the host.
+        // For bare relative paths, check the entire string.
+        let clean_path = remote_path
+            .strip_prefix(HF_REMOTE_URL_PREFIX)
+            .unwrap_or(remote_path);
+        let relative_for_guard = if let Some(after_proto) = clean_path
+            .strip_prefix("https://")
+            .or_else(|| clean_path.strip_prefix("http://"))
+        {
+            // "host/datasets/org/ds/resolve/main/data/train.parquet"
+            // → "datasets/org/ds/resolve/main/data/train.parquet"
+            after_proto
+                .find('/')
+                .map(|i| &after_proto[i..])
+                .unwrap_or("/")
+        } else {
+            clean_path
+        };
+        for component in Path::new(relative_for_guard).components() {
+            if matches!(
+                component,
+                std::path::Component::ParentDir | std::path::Component::Prefix(_)
+            ) {
+                return Err(SamplerError::SourceUnavailable {
                     source_id: config.source_id.clone(),
                     reason: format!(
-                        "failed removing incomplete shard {}: {err}",
-                        target.display()
+                        "remote path contains traversal or absolute component, rejecting: {clean_path}"
                     ),
-                })?;
+                });
             }
-
-            Self::download_remote_url_to_target_with_runtime(
-                http_client,
-                config,
-                remote_url,
-                &target,
-                expected_bytes,
-                shard_label,
-                runtime,
-            )?;
-            return Ok(target);
         }
 
-        if Path::new(remote_path)
-            .extension()
-            .and_then(|value| value.to_str())
-            .is_some_and(|value| value.eq_ignore_ascii_case("parquet"))
-        {
-            let target = Self::candidate_target_path(config, remote_path);
-            let store_target = Self::shard_store_path_for(&target);
-            if store_target.exists() {
-                return Ok(store_target);
+        // ── Resolve full CDN URL ──────────────────────────────────────────────
+        let resolved_url = Self::remote_url_for_candidate(config, remote_path);
+
+        let target = Self::candidate_target_path(config, remote_path);
+        let store_target = Self::shard_store_path_for(&target);
+        if store_target.exists() {
+            return Ok(store_target);
+        }
+
+        // ── Cache validation with HEAD fallback ───────────────────────────────
+        if target.exists() {
+            let effective_size = match expected_bytes {
+                Some(bytes) => Some(bytes),
+                None => runtime.and_then(|rt| {
+                    Self::fetch_remote_size_with_runtime(http_client, config, &resolved_url, rt)
+                        .ok()
+                        .flatten()
+                }),
+            };
+            if Self::target_matches_expected_size(&target, effective_size) {
+                return Ok(target);
             }
-            let remote_url = format!(
-                "{}/{}/resolve/main/{}",
-                HF_DATASETS_BASE_URL,
-                config.dataset_name,
-                remote_path.trim_start_matches('/')
+            warn!(
+                "[triplets:hf] replacing stale or incomplete shard before retry: {}",
+                target.display()
             );
+            fs::remove_file(&target).map_err(|err| SamplerError::SourceUnavailable {
+                source_id: config.source_id.clone(),
+                reason: format!(
+                    "failed removing incomplete shard {}: {err}",
+                    target.display()
+                ),
+            })?;
+        }
+
+        // ── Download ──────────────────────────────────────────────────────────
+        let parquet_candidate = Self::is_parquet_path(&target);
+        if parquet_candidate {
             let temp_target = Self::allocate_temp_download_path(config, remote_path, "parquet")?;
             Self::download_remote_url_to_target_with_runtime(
                 http_client,
                 config,
-                &remote_url,
+                &resolved_url,
                 &temp_target,
                 expected_bytes,
                 shard_label,
@@ -3255,72 +2783,15 @@ impl HuggingFaceRowSource {
             return Ok(temp_target);
         }
 
-        let mut local_cached = Self::block_on_http_with_runtime(runtime, config, async {
-            let api = ApiBuilder::new()
-                .with_progress(true)
-                .with_token(config.hf_token.clone())
-                .build()
-                .map_err(|err| SamplerError::SourceUnavailable {
-                    source_id: config.source_id.clone(),
-                    reason: format!("failed building hf-hub client: {err}"),
-                })?;
-
-            let repo = Repo::new(config.dataset_name.clone(), RepoType::Dataset);
-            let repo_api = api.repo(repo);
-            repo_api
-                .get(remote_path)
-                .await
-                .map_err(|err| SamplerError::SourceUnavailable {
-                    source_id: config.source_id.clone(),
-                    reason: format!("failed downloading '{}' from hf-hub: {err}", remote_path),
-                })
-        })?;
-        if !local_cached.exists() {
-            for _ in 0..5 {
-                local_cached = Self::block_on_http_with_runtime(runtime, config, async {
-                    let api = ApiBuilder::new()
-                        .with_progress(true)
-                        .with_token(config.hf_token.clone())
-                        .build()
-                        .map_err(|err| SamplerError::SourceUnavailable {
-                            source_id: config.source_id.clone(),
-                            reason: format!("failed building hf-hub client: {err}"),
-                        })?;
-                    let repo = Repo::new(config.dataset_name.clone(), RepoType::Dataset);
-                    let repo_api = api.repo(repo);
-                    repo_api.download(remote_path).await.map_err(|err| {
-                        SamplerError::SourceUnavailable {
-                            source_id: config.source_id.clone(),
-                            reason: format!(
-                                "hf-hub returned missing cache path for '{}', and forced download failed: {err}",
-                                remote_path
-                            ),
-                        }
-                    })
-                })?;
-                if local_cached.exists() {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(400));
-            }
-        }
-        if !local_cached.exists() {
-            return Err(SamplerError::SourceUnavailable {
-                source_id: config.source_id.clone(),
-                reason: format!(
-                    "hf-hub returned non-existent cache file for '{}' at {}",
-                    remote_path,
-                    local_cached.display()
-                ),
-            });
-        }
-
-        let target = Self::candidate_target_path(config, remote_path);
-        let store_target = Self::shard_store_path_for(&target);
-        if store_target.exists() {
-            return Ok(store_target);
-        }
-        Self::materialize_local_file(config, &local_cached, &target)?;
+        Self::download_remote_url_to_target_with_runtime(
+            http_client,
+            config,
+            &resolved_url,
+            &target,
+            expected_bytes,
+            shard_label,
+            runtime,
+        )?;
         Ok(target)
     }
 
@@ -3692,8 +3163,7 @@ impl HuggingFaceRowSource {
                 // store carries a different stored value, the upstream shard was replaced
                 // (newer version).  Delete the stale store so it gets redownloaded.
                 //
-                // When the manifest does not provide a size (hf-hub sibling fallback),
-                // a lightweight HTTP HEAD request is used to retrieve the current file
+                // When the manifest does not provide a size, a lightweight HTTP HEAD
                 // size from `Content-Length` so that staleness detection still works
                 // without depending on the datasets-server API.
                 let store_path = Self::candidate_store_path(&self.config, &remote_path);
@@ -3923,8 +3393,7 @@ impl HuggingFaceRowSource {
 
         // Persist the source shard's expected size from the remote manifest so
         // that future cycles can detect when the upstream shard was replaced.
-        // When the manifest doesn't provide a size (hf-hub fallback), use the
-        // actual downloaded file size as a best-effort record.
+        // When the manifest doesn't provide a size, use the actual downloaded
         let source_size = expected_bytes.unwrap_or_else(|| {
             fs::metadata(&local_path)
                 .map(|meta| meta.len())
@@ -4004,6 +3473,7 @@ impl HuggingFaceRowSource {
     }
 
     /// Copy cached/downloaded source file into snapshot tree.
+    #[cfg(test)]
     fn materialize_local_file(
         config: &HuggingFaceRowsConfig,
         source_path: &Path,
@@ -4312,7 +3782,7 @@ impl HuggingFaceRowSource {
     /// ClassLabel-style integer columns.  When the value is an integer `n` and
     /// `label_names[n]` exists, that label string is returned instead of the
     /// raw numeric string.
-    fn value_to_text(value: &Value, label_names: Option<&[String]>) -> Option<String> {
+    fn value_to_text(value: &Value) -> Option<String> {
         match value {
             Value::Null => None,
             Value::String(s) => {
@@ -4323,19 +3793,10 @@ impl HuggingFaceRowSource {
                 }
             }
             Value::Bool(b) => Some(b.to_string()),
-            Value::Number(n) => {
-                if let Some(labels) = label_names
-                    && let Some(idx) = n.as_u64().map(|u| u as usize)
-                    && let Some(label) = labels.get(idx)
-                    && !label.trim().is_empty()
-                {
-                    return Some(label.clone());
-                }
-                Some(n.to_string())
-            }
+            Value::Number(n) => Some(n.to_string()),
             Value::Array(arr) => {
                 for element in arr {
-                    if let Some(text) = Self::value_to_text(element, label_names) {
+                    if let Some(text) = Self::value_to_text(element) {
                         return Some(text);
                     }
                 }
@@ -4370,12 +3831,10 @@ impl HuggingFaceRowSource {
     fn coalesce_field(
         candidates: &[String],
         row_obj: &serde_json::Map<String, Value>,
-        label_maps: &HashMap<String, Vec<String>>,
     ) -> Option<RowTextField> {
         for name in candidates {
-            let label_names = label_maps.get(name).map(|v| v.as_slice());
             if let Some(ref value) = Self::resolve_json_path(row_obj, name)
-                && let Some(text) = Self::value_to_text(value, label_names)
+                && let Some(text) = Self::value_to_text(value)
             {
                 return Some(RowTextField {
                     name: name.clone(),
@@ -4393,19 +3852,14 @@ impl HuggingFaceRowSource {
     /// as `coalesce_field`).  For lists, each non-empty element becomes a
     /// separate field.  Empty/blank elements are skipped.  Returns `None`
     /// when no non-empty elements are found.
-    fn coalesce_list_field(
-        name: &str,
-        value: &Value,
-        label_maps: &HashMap<String, Vec<String>>,
-    ) -> Option<Vec<RowTextField>> {
-        let label_names = label_maps.get(name).map(|v| v.as_slice());
+    fn coalesce_list_field(name: &str, value: &Value) -> Option<Vec<RowTextField>> {
         match value {
             Value::Array(arr) => {
                 let fields: Vec<RowTextField> = arr
                     .iter()
                     .enumerate()
                     .filter_map(|(i, element)| {
-                        Self::value_to_text(element, label_names).map(|text| RowTextField {
+                        Self::value_to_text(element).map(|text| RowTextField {
                             name: format!("{name}[{i}]"),
                             text,
                         })
@@ -4417,7 +3871,7 @@ impl HuggingFaceRowSource {
                     Some(fields)
                 }
             }
-            other => Self::value_to_text(other, label_names).map(|text| {
+            other => Self::value_to_text(other).map(|text| {
                 vec![RowTextField {
                     name: name.to_string(),
                     text,
@@ -4454,7 +3908,7 @@ impl HuggingFaceRowSource {
             .id_column
             .as_ref()
             .and_then(|col| Self::resolve_json_path(row_obj, col))
-            .and_then(|v| Self::value_to_text(&v, None))
+            .and_then(|v| Self::value_to_text(&v))
             .unwrap_or_else(|| {
                 format!(
                     "{}:{}:{}",
@@ -4473,11 +3927,7 @@ impl HuggingFaceRowSource {
             // whose value is present and non-empty.  Skip the row when the
             // list is non-empty but no candidate yields content.
             if !self.config.anchor_columns.is_empty() {
-                match Self::coalesce_field(
-                    &self.config.anchor_columns,
-                    row_obj,
-                    &self.config.label_maps,
-                ) {
+                match Self::coalesce_field(&self.config.anchor_columns, row_obj) {
                     Some(field) => text_fields.push(field),
                     None => return Ok(None),
                 }
@@ -4487,11 +3937,7 @@ impl HuggingFaceRowSource {
             // whose value is present and non-empty.  Skip the row when the
             // list is non-empty but no candidate yields content.
             if !self.config.positive_columns.is_empty() {
-                match Self::coalesce_field(
-                    &self.config.positive_columns,
-                    row_obj,
-                    &self.config.label_maps,
-                ) {
+                match Self::coalesce_field(&self.config.positive_columns, row_obj) {
                     Some(field) => text_fields.push(field),
                     None => return Ok(None),
                 }
@@ -4501,8 +3947,7 @@ impl HuggingFaceRowSource {
                 let Some(value) = Self::resolve_json_path(row_obj, name) else {
                     return Ok(None);
                 };
-                let label_names = self.config.label_maps.get(name).map(|v| v.as_slice());
-                let Some(text) = Self::value_to_text(&value, label_names) else {
+                let Some(text) = Self::value_to_text(&value) else {
                     return Ok(None);
                 };
                 text_fields.push(RowTextField {
@@ -4516,8 +3961,7 @@ impl HuggingFaceRowSource {
                 let Some(value) = Self::resolve_json_path(row_obj, name) else {
                     return Ok(None);
                 };
-                let Some(fields) = Self::coalesce_list_field(name, &value, &self.config.label_maps)
-                else {
+                let Some(fields) = Self::coalesce_list_field(name, &value) else {
                     return Ok(None);
                 };
                 text_fields.extend(fields);
@@ -4527,9 +3971,7 @@ impl HuggingFaceRowSource {
             // first whose value is present and non-empty.  The row is skipped
             // when no candidate yields content (handled by the is_empty guard
             // below).
-            if let Some(field) =
-                Self::coalesce_field(&self.config.text_columns, row_obj, &self.config.label_maps)
-            {
+            if let Some(field) = Self::coalesce_field(&self.config.text_columns, row_obj) {
                 text_fields.push(field);
             }
         }
@@ -4577,7 +4019,7 @@ impl HuggingFaceRowSource {
                 let payload = value.get("row").unwrap_or(&value);
                 if payload.is_object() {
                     Ok(value)
-                } else if let Some(text) = Self::value_to_text(payload, None) {
+                } else if let Some(text) = Self::value_to_text(payload) {
                     Ok(json!({ "text": text }))
                 } else {
                     Err(SamplerError::SourceInconsistent {
@@ -4933,41 +4375,21 @@ impl HuggingFaceRowSource {
         let known = state.materialized_rows;
         if known > 0 {
             let mut upper = known;
-            if state
-                .total_rows
-                .is_some_and(|total_rows| total_rows > known)
+            if let Some(ref candidates) = state.remote_candidates
+                && state.next_remote_idx < candidates.len()
             {
                 let headroom = self.effective_expansion_headroom_rows();
-                // Keep fast expansion during warmup, then continue with a small
-                // ongoing tail so remote shard diversity still grows over time
-                // without forcing large lazy-index spikes every refresh.
-                let expansion_rows = if known < headroom {
-                    headroom
-                } else {
-                    // 12.5% trickle beyond warmup (at least one row) keeps
-                    // sampling from new remote shards alive.
-                    (headroom / 8).max(1)
-                };
-                upper = known.saturating_add(expansion_rows);
-                if let Some(total_rows) = state.total_rows {
-                    upper = upper.min(total_rows);
-                }
+                upper = known.saturating_add(headroom);
             }
             return Some(upper.max(known));
         }
-
-        if state.total_rows.is_some_and(|total_rows| total_rows == 0) {
-            return Some(0);
-        }
-
         if state
             .remote_candidates
             .as_ref()
-            .is_some_and(|candidates| candidates.is_empty())
+            .is_some_and(|c| c.is_empty())
         {
             return Some(0);
         }
-
         Some(1)
     }
 }
@@ -4988,12 +4410,11 @@ impl HuggingFaceRowSource {
             .state
             .lock()
             .map(|state| {
-                let known_empty = state.total_rows == Some(0);
                 let all_consumed = state
                     .remote_candidates
                     .as_ref()
                     .is_some_and(|c| state.next_remote_idx >= c.len());
-                !known_empty && !all_consumed
+                !all_consumed
             })
             .unwrap_or(false);
 
@@ -5082,7 +4503,7 @@ impl DataSource for HuggingFaceRowSource {
         // This way every remote shard is eventually consumed without ever
         // blocking on the hot read path.
         let total = {
-            let (materialized, known_empty) = {
+            let materialized = {
                 let state = self
                     .state
                     .lock()
@@ -5090,10 +4511,9 @@ impl DataSource for HuggingFaceRowSource {
                         source_id: self.config.source_id.clone(),
                         reason: "huggingface source state lock poisoned".to_string(),
                     })?;
-                let known_empty = state.total_rows == Some(0);
-                (state.materialized_rows, known_empty)
+                state.materialized_rows
             };
-            if materialized == 0 && !known_empty {
+            if materialized == 0 {
                 // Bootstrap: discover candidates and download the first shard so
                 // the read loop below has rows to work with.  ensure_row_available
                 // handles candidate discovery and the initial shard download.
@@ -5309,7 +4729,7 @@ mod tests {
     use serde_json::json;
     use serial_test::serial;
     use std::env;
-    use std::io::Write;
+    use std::io::{Read, Write};
     use tempfile::tempdir;
     use triplets_core::splits::{PersistedSamplerState, SamplerStateStore};
     use triplets_core::utils::platform_newline;
@@ -5332,8 +4752,6 @@ mod tests {
         // Point endpoints to connection-refused so tests never wait on
         // real HF servers.  Tests that exercise HTTP against mock servers
         // override these in their own body.
-        config.info_endpoint = TEST_UNREACHABLE_URL.to_string();
-        config.size_endpoint = TEST_UNREACHABLE_URL.to_string();
         config.parquet_endpoint = TEST_UNREACHABLE_URL.to_string();
         config
     }
@@ -5361,7 +4779,6 @@ mod tests {
             sampler_config: Arc::new(Mutex::new(None)),
             state: Arc::new(Mutex::new(SourceState {
                 materialized_rows: 0,
-                total_rows: None,
                 shards: Vec::new(),
                 // Use Some(vec![]) rather than None so that trigger_expansion_if_needed
                 // treats this source as "no remote candidates" and never spawns a
@@ -5661,7 +5078,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path().to_path_buf());
         config.dataset_name = "invalid///dataset".to_string();
-        config.parquet_endpoint = format!("{TEST_UNREACHABLE_URL}/parquet");
+        config.parquet_endpoint = TEST_UNREACHABLE_URL.to_string();
 
         let client = test_http_client();
         let result = HuggingFaceRowSource::list_remote_candidates(&client, &config);
@@ -5722,38 +5139,6 @@ mod tests {
                 }
                 _ => panic!("expected SamplerError::SourceUnavailable"),
             }
-        });
-    }
-
-    #[test]
-    #[serial(global_state)]
-    fn new_validates_hf_token_when_set() {
-        // When hf_token is Some and the mock whoami returns 200, new() succeeds.
-        // The info and size endpoints are served by one-shot 501 mocks so they
-        // degrade gracefully (viewer-disabled path) without any real network
-        // calls or relying on connection-refused behaviour which is unreliable
-        // across platforms (e.g. privileged port 1 on macOS GitHub Actions
-        // does not guarantee an immediate ECONNREFUSED and can instead block
-        // for the full 15 s connect timeout, causing spurious test failures).
-        let temp = tempdir().unwrap();
-        let mut config = test_config(temp.path().to_path_buf());
-        config.hf_token = Some("test-token-for-new".to_string());
-        let viewer_disabled = br#"{"error":"Not supported: dataset viewer is disabled."}"#.to_vec();
-        let whoami_server = spawn_one_shot_http(b"{}".to_vec());
-        let whoami_url = whoami_server.url().to_string();
-        // /info is called before /size inside new(); each needs its own one-shot server.
-        let info_server = TestHttpServer::new(501, viewer_disabled.clone());
-        let info_url = info_server.url().to_string();
-        let size_server = TestHttpServer::new(501, viewer_disabled);
-        let size_url = size_server.url().to_string();
-        config.info_endpoint = info_url;
-        config.size_endpoint = size_url;
-        with_env_vars(&[(ENV_TRIPLETS_HF_WHOAMI_ENDPOINT, &whoami_url)], || {
-            let result = HuggingFaceRowSource::new(config.clone());
-            assert!(
-                result.is_ok(),
-                "new() should succeed when mock whoami returns 200"
-            );
         });
     }
 
@@ -6089,34 +5474,6 @@ mod tests {
     }
 
     #[test]
-    fn shard_store_helpers_and_known_total_rows_are_stable() {
-        let dir = tempdir().unwrap();
-        let config = test_config(dir.path().to_path_buf());
-        let source = test_source(config.clone());
-
-        assert_eq!(source.known_total_rows(), None);
-        {
-            let mut state = source.state.lock().unwrap();
-            state.total_rows = Some(11);
-        }
-        assert_eq!(source.known_total_rows(), Some(11));
-
-        let parquet_path = dir.path().join("part-001.parquet");
-        let store_path = HuggingFaceRowSource::shard_store_path_for(&parquet_path);
-        assert!(HuggingFaceRowSource::is_store_shard_path(&store_path));
-        assert!(!HuggingFaceRowSource::is_store_shard_path(&parquet_path));
-        assert_eq!(store_path, dir.path().join("part-001.simdr"));
-
-        let candidate = "url::https://host/datasets/org/ds/resolve/main/train/part-001.parquet";
-        let candidate_store = HuggingFaceRowSource::candidate_store_path(&config, candidate);
-        assert!(candidate_store.ends_with(Path::new("train/part-001.simdr")));
-
-        let row_key = HuggingFaceRowSource::row_store_row_key(42);
-        assert!(row_key.starts_with(HF_SHARD_STORE_ROW_PREFIX));
-        assert_eq!(row_key.len(), HF_SHARD_STORE_ROW_PREFIX.len() + 8);
-    }
-
-    #[test]
     fn read_store_row_count_validates_payload_size_and_roundtrips_written_value() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
@@ -6265,138 +5622,22 @@ mod tests {
     }
 
     #[test]
-    fn collect_candidates_from_siblings_filters_split_and_tracks_parquet() {
-        let dir = tempdir().unwrap();
-        let config = test_config(dir.path().to_path_buf());
-        let accepted = HuggingFaceRowSource::normalized_shard_extensions(&config);
-        let siblings = vec![
-            "train/a.ndjson".to_string(),
-            "dev/b.ndjson".to_string(),
-            "train-c.parquet".to_string(),
-            "train-z.txt".to_string(),
-        ];
-
-        let (candidates, saw_parquet, _) = HuggingFaceRowSource::collect_candidates_from_siblings(
-            &config, &siblings, &accepted, true,
-        );
-
-        assert!(saw_parquet);
-        assert_eq!(
-            candidates,
-            vec!["train/a.ndjson".to_string(), "train-c.parquet".to_string()]
-        );
-    }
-
-    #[test]
-    fn collect_candidates_from_siblings_skips_existing_targets() {
-        let dir = tempdir().unwrap();
-        let config = test_config(dir.path().to_path_buf());
-        let accepted = HuggingFaceRowSource::normalized_shard_extensions(&config);
-        let existing = "train/already.ndjson".to_string();
-        let existing_target = HuggingFaceRowSource::candidate_target_path(&config, &existing);
-        fs::create_dir_all(existing_target.parent().unwrap()).unwrap();
-        fs::write(&existing_target, b"x\n").unwrap();
-
-        let siblings = vec![existing, "train/new.ndjson".to_string()];
-        let (candidates, _, _) = HuggingFaceRowSource::collect_candidates_from_siblings(
-            &config, &siblings, &accepted, true,
-        );
-        assert_eq!(candidates, vec!["train/new.ndjson".to_string()]);
-    }
-
-    #[test]
-    fn collect_candidates_from_siblings_matches_flat_stem_split() {
-        // Flat repo layout: every table is a single file whose stem IS the split name.
-        // e.g. `hf://org/dataset/default/stock_news` should match only
-        // `data/stock_news.parquet` and leave `data/stock_prices.parquet` out.
-        let dir = tempdir().unwrap();
-        let mut config =
-            HuggingFaceRowsConfig::new("s", "org/ds", "default", "stock_news", dir.path());
-        config.cache_capacity = 4;
-        let accepted = HuggingFaceRowSource::normalized_shard_extensions(&config);
-        let siblings = vec![
-            "data/stock_news.parquet".to_string(),
-            "data/stock_prices.parquet".to_string(),
-            "data/daily_treasury_yield.parquet".to_string(),
-        ];
-
-        let (candidates, saw_parquet, _) = HuggingFaceRowSource::collect_candidates_from_siblings(
-            &config, &siblings, &accepted, true,
-        );
-
-        assert!(saw_parquet);
-        assert_eq!(candidates, vec!["data/stock_news.parquet".to_string()]);
-    }
-
-    #[test]
-    fn collect_candidates_from_siblings_stem_match_does_not_widen_normal_splits() {
-        // With a conventional split name like "train", only paths that contain
-        // "train/" or "-train-" or whose filename begins with "train-" should match —
-        // NOT a file whose stem merely starts with "train" (e.g. `training.parquet`).
-        let dir = tempdir().unwrap();
-        let config = test_config(dir.path().to_path_buf()); // split = "train"
-        let accepted = HuggingFaceRowSource::normalized_shard_extensions(&config);
-        let siblings = vec![
-            "train/shard-00000.parquet".to_string(), // ✓ directory prefix
-            "train-00001-of-00002.parquet".to_string(), // ✓ split token
-            "train-00002-of-00002.parquet".to_string(), // ✓ split prefix
-            "training.parquet".to_string(),          // ✗ stem is not exactly "train"
-            "validation/shard-00000.parquet".to_string(), // ✗ different split
-        ];
-
-        let (candidates, _, _) = HuggingFaceRowSource::collect_candidates_from_siblings(
-            &config, &siblings, &accepted, true,
-        );
-
-        assert!(
-            candidates.contains(&"train/shard-00000.parquet".to_string()),
-            "directory-prefix match must be included"
-        );
-        assert!(
-            candidates.contains(&"train-00001-of-00002.parquet".to_string()),
-            "split-token match must be included"
-        );
-        assert!(
-            candidates.contains(&"train-00002-of-00002.parquet".to_string()),
-            "split-prefix match must be included"
-        );
-        assert!(
-            !candidates.contains(&"training.parquet".to_string()),
-            "stem 'training' must NOT match split 'train'"
-        );
-        assert!(
-            !candidates.contains(&"validation/shard-00000.parquet".to_string()),
-            "different-split file must not be included"
-        );
-    }
-
-    #[test]
     fn all_candidates_from_parquet_manifest_returns_all_with_sizes() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
-        let payload = json!({
-            "parquet_files": [
-                {"url": "https://host/x/train/000.parquet", "size": 11},
-                {"url": "https://host/x/train/001.ndjson", "size": 13},
-                {"url": "https://host/x/train/002.txt", "size": 5},
-                {"foo": "missing-url"}
-            ]
-        });
+        // Hub API tree endpoint format: array of {"path": "...", "size": N} objects
+        let payload = json!([
+            {"type": "file", "path": "train/000.parquet", "size": 100},
+            {"type": "file", "path": "train/001.ndjson", "size": 200},
+            {"type": "file", "path": "train/002.txt", "size": 50}
+        ]);
 
         let (candidates, sizes, matched) =
             HuggingFaceRowSource::all_candidates_from_parquet_manifest(&config, &payload).unwrap();
         assert_eq!(candidates.len(), 2);
-        assert!(
-            candidates
-                .iter()
-                .any(|c| c.ends_with("https://host/x/train/000.parquet"))
-        );
-        assert!(
-            candidates
-                .iter()
-                .any(|c| c.ends_with("https://host/x/train/001.ndjson"))
-        );
-        assert_eq!(sizes.len(), 2);
+        assert!(candidates.iter().any(|c| c.ends_with("train/000.parquet")));
+        assert!(candidates.iter().any(|c| c.ends_with("train/001.ndjson")));
+        assert_eq!(sizes.len(), 2, "tree format provides sizes");
         assert_eq!(matched, 2);
     }
 
@@ -6412,26 +5653,22 @@ mod tests {
         let config = test_config(dir.path().to_path_buf());
 
         // A parquet file with the correct declared size — considered fully cached.
-        let complete_url = "https://host/datasets/org/ds/resolve/main/train/000.parquet";
-        let complete_candidate = format!("{HF_REMOTE_URL_PREFIX}{complete_url}");
+        let complete_candidate = format!("{HF_REMOTE_URL_PREFIX}train/000.parquet");
         let complete_target =
             HuggingFaceRowSource::candidate_target_path(&config, &complete_candidate);
         fs::create_dir_all(complete_target.parent().unwrap()).unwrap();
         fs::write(&complete_target, vec![1u8; 7]).unwrap();
 
         // A parquet file with the WRONG size — stale/incomplete, must be deleted.
-        let stale_url = "https://host/datasets/org/ds/resolve/main/train/001.parquet";
-        let stale_candidate = format!("{HF_REMOTE_URL_PREFIX}{stale_url}");
+        let stale_candidate = format!("{HF_REMOTE_URL_PREFIX}train/001.parquet");
         let stale_target = HuggingFaceRowSource::candidate_target_path(&config, &stale_candidate);
         fs::create_dir_all(stale_target.parent().unwrap()).unwrap();
         fs::write(&stale_target, vec![2u8; 3]).unwrap();
 
-        let payload = json!({
-            "parquet_files": [
-                {"url": complete_url, "size": 7},
-                {"url": stale_url, "size": 9}
-            ]
-        });
+        let payload = json!([
+            {"type": "file", "path": "train/000.parquet", "size": 7},
+            {"type": "file", "path": "train/001.parquet", "size": 9}
+        ]);
 
         let (candidates, sizes, matched) =
             HuggingFaceRowSource::all_candidates_from_parquet_manifest(&config, &payload).unwrap();
@@ -6461,16 +5698,13 @@ mod tests {
         );
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
-        let url = "https://host/datasets/org/ds/resolve/main/train/blocked.parquet";
-        let candidate = format!("{HF_REMOTE_URL_PREFIX}{url}");
+        let candidate = format!("{HF_REMOTE_URL_PREFIX}train/blocked.parquet");
         let target = HuggingFaceRowSource::candidate_target_path(&config, &candidate);
         fs::create_dir_all(&target).unwrap();
 
-        let payload = json!({
-            "parquet_files": [
-                {"url": url, "size": 1}
-            ]
-        });
+        let payload = json!([
+            {"type": "file", "path": "train/blocked.parquet", "size": 1}
+        ]);
 
         let err = HuggingFaceRowSource::all_candidates_from_parquet_manifest(&config, &payload);
         assert!(err.is_err());
@@ -6503,7 +5737,6 @@ mod tests {
 
         let state = SourceState {
             materialized_rows: 2,
-            total_rows: None,
             shards: vec![
                 ShardIndex {
                     path: manifest_file,
@@ -6658,12 +5891,13 @@ mod tests {
     }
 
     #[test]
-    fn candidate_target_path_uses_fallback_suffix_without_resolve_segment() {
+    fn candidate_target_path_uses_bare_path_when_no_resolve_segment() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
-        let candidate = "url::https://example.com/raw/file.parquet";
+        // Bare relative path from tree endpoint (no /resolve/ segment)
+        let candidate = "url::train/000.parquet";
         let target = HuggingFaceRowSource::candidate_target_path(&config, candidate);
-        assert!(target.ends_with("_parquet_manifest/parquet/unknown.parquet"));
+        assert!(target.ends_with("_parquet_manifest/train/000.parquet"));
     }
 
     #[test]
@@ -6721,7 +5955,6 @@ mod tests {
         {
             let mut state = source.state.lock().unwrap();
             state.materialized_rows = 1;
-            state.total_rows = Some(1);
             state.shards.clear();
         }
 
@@ -6741,7 +5974,6 @@ mod tests {
         {
             let mut state = source.state.lock().unwrap();
             state.materialized_rows = 1;
-            state.total_rows = Some(1);
             state.shards = vec![ShardIndex {
                 path,
                 global_start: 0,
@@ -6772,7 +6004,6 @@ mod tests {
         {
             let mut state = source.state.lock().unwrap();
             state.materialized_rows = 3;
-            state.total_rows = Some(3);
             state.shards = vec![ShardIndex {
                 path,
                 global_start: 0,
@@ -6800,7 +6031,6 @@ mod tests {
         let source = test_source(config);
         let mut state = SourceState {
             materialized_rows: 0,
-            total_rows: None,
             shards: Vec::new(),
             remote_candidates: None,
             remote_candidate_sizes: HashMap::new(),
@@ -6823,7 +6053,6 @@ mod tests {
         fs::write(&shard_path, vec![1u8; 32]).unwrap();
         let mut state2 = SourceState {
             materialized_rows: 1,
-            total_rows: None,
             shards: vec![ShardIndex {
                 path: shard_path,
                 global_start: 0,
@@ -6861,7 +6090,6 @@ mod tests {
 
         let mut state = SourceState {
             materialized_rows: 2,
-            total_rows: None,
             shards: vec![
                 ShardIndex {
                     path: first.clone(),
@@ -6911,7 +6139,6 @@ mod tests {
 
         let mut state = SourceState {
             materialized_rows: 1,
-            total_rows: None,
             shards: vec![ShardIndex {
                 path: protected.clone(),
                 global_start: 0,
@@ -6949,7 +6176,6 @@ mod tests {
             sampler_config: Arc::new(Mutex::new(None)),
             state: Arc::new(Mutex::new(SourceState {
                 materialized_rows: 0,
-                total_rows: None,
                 shards: Vec::new(),
                 remote_candidates: None,
                 remote_candidate_sizes: HashMap::new(),
@@ -6992,65 +6218,6 @@ mod tests {
         let mut sorted_alt = alt.clone();
         sorted_alt.sort();
         assert_eq!(sorted_left, sorted_alt);
-    }
-
-    #[test]
-    fn extract_split_row_count_handles_configs_and_dataset_fallbacks() {
-        let by_config_splits = json!({
-            "size": {
-                "configs": [
-                    {
-                        "config_name": "default",
-                        "splits": [
-                            {"name": "train", "num_rows": 21},
-                            {"name": "validation", "num_rows": 4}
-                        ]
-                    }
-                ]
-            }
-        });
-        let rows = HuggingFaceRowSource::extract_split_row_count_from_size_response(
-            &by_config_splits,
-            "default",
-            "train",
-        );
-        assert_eq!(rows, Some(21));
-
-        let dataset_only = json!({
-            "size": {
-                "dataset": {"num_rows": 99}
-            }
-        });
-        let rows = HuggingFaceRowSource::extract_split_row_count_from_size_response(
-            &dataset_only,
-            "default",
-            "",
-        );
-        assert_eq!(rows, Some(99));
-    }
-
-    #[test]
-    fn parse_global_row_count_response_uses_config_total_when_split_empty() {
-        let dir = tempdir().unwrap();
-        let config = test_config(dir.path().to_path_buf());
-        let body = serde_json::to_string(&json!({
-            "size": {
-                "configs": [
-                    {"config": "default", "num_rows": 17}
-                ]
-            }
-        }))
-        .unwrap();
-
-        let parsed = HuggingFaceRowSource::parse_global_row_count_response(
-            &HuggingFaceRowsConfig {
-                split_name: "".to_string(),
-                ..config
-            },
-            &body,
-        )
-        .unwrap();
-        assert_eq!(parsed, Some(17));
     }
 
     #[test]
@@ -7104,24 +6271,6 @@ mod tests {
             err,
             SamplerError::SourceUnavailable { ref reason, .. } if reason.contains("failed copying synced file")
         ));
-    }
-
-    #[test]
-    fn download_and_materialize_shard_hf_hub_branch_returns_error_for_invalid_repo() {
-        let dir = tempdir().unwrap();
-        let mut config = test_config(dir.path().to_path_buf());
-        config.dataset_name = "invalid///dataset".to_string();
-
-        let client = test_http_client();
-        let err = HuggingFaceRowSource::download_and_materialize_shard(
-            &client,
-            &config,
-            "train/part-000.parquet",
-            None,
-            "shard 1/1",
-        )
-        .unwrap_err();
-        assert!(matches!(err, SamplerError::SourceUnavailable { .. }));
     }
 
     #[test]
@@ -7399,7 +6548,6 @@ mod tests {
         {
             let mut state = source.state.lock().unwrap();
             state.materialized_rows = 1;
-            state.total_rows = Some(1);
             state.shards = vec![ShardIndex {
                 path: dir.path().join("missing.parquet"),
                 global_start: 0,
@@ -7439,7 +6587,6 @@ mod tests {
         {
             let mut state = source.state.lock().unwrap();
             state.materialized_rows = 10_000;
-            state.total_rows = Some(10_000);
             state.shards = vec![shard];
         }
 
@@ -7461,15 +6608,6 @@ mod tests {
         let mut candidates = vec!["one".to_string()];
         HuggingFaceRowSource::shuffle_candidates_deterministically(&config, &mut candidates, 1);
         assert_eq!(candidates, vec!["one".to_string()]);
-    }
-
-    #[test]
-    fn extract_split_row_count_returns_none_when_missing_entries() {
-        let payload = json!({"size": {"configs": [{"config": "other", "splits": []}]}});
-        let rows = HuggingFaceRowSource::extract_split_row_count_from_size_response(
-            &payload, "default", "train",
-        );
-        assert!(rows.is_none());
     }
 
     #[test]
@@ -7572,7 +6710,6 @@ mod tests {
         {
             let mut state = source.state.lock().unwrap();
             state.materialized_rows = 2;
-            state.total_rows = Some(2);
             state.shards = vec![shard];
         }
 
@@ -7588,7 +6725,6 @@ mod tests {
         {
             let mut state = source.state.lock().unwrap();
             state.materialized_rows = 0;
-            state.total_rows = Some(0);
             state.remote_candidates = Some(Vec::new());
         }
 
@@ -7671,7 +6807,6 @@ mod tests {
         {
             let mut state = source.state.lock().unwrap();
             state.materialized_rows = 2;
-            state.total_rows = Some(2);
             state.shards = vec![shard];
         }
 
@@ -7722,9 +6857,16 @@ mod tests {
         {
             let mut state = source.state.lock().unwrap();
             state.materialized_rows = 5;
-            state.total_rows = Some(100);
+            // Set up remote candidates so headroom is applied
+            state.remote_candidates = Some(vec![
+                "url::http://a/0.parquet".to_string(),
+                "url::http://a/1.parquet".to_string(),
+            ]);
+            state.next_remote_idx = 0;
         }
 
+        // headroom = ingestion_max_records * multiplier = 10 * 3 = 30
+        // known (5) < headroom, expansion = 30; upper = 5 + 30 = 35
         assert_eq!(source.reported_record_count().unwrap(), 35);
 
         let sampler = SamplerConfig {
@@ -7733,6 +6875,7 @@ mod tests {
         };
         source.configure_sampler(&sampler);
 
+        // headroom = 2 * 3 = 6; known (5) < headroom, expansion = 6; upper = 5 + 6 = 11
         assert_eq!(source.reported_record_count().unwrap(), 11);
     }
 
@@ -7750,120 +6893,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_remote_candidates_from_siblings_falls_back_when_split_filter_misses() {
-        // Suppress the expected WARN "split filter 'train' matched no remote files; falling
-        // back to extension-only remote candidate scan" that fires when no sibling paths
-        // contain the split tag.  The fallback is what this test asserts on.
-        let _quiet = tracing::subscriber::set_default(
-            tracing_subscriber::fmt()
-                .with_max_level(tracing::Level::ERROR)
-                .finish(),
-        );
-        let dir = tempdir().unwrap();
-        let mut config = test_config(dir.path().to_path_buf());
-        config.split_name = "train".to_string();
-        let accepted = HuggingFaceRowSource::normalized_shard_extensions(&config);
-        let siblings = vec![
-            "validation/file-a.ndjson".to_string(),
-            "test/file-b.ndjson".to_string(),
-        ];
-
-        let (candidates, sizes) = HuggingFaceRowSource::resolve_remote_candidates_from_siblings(
-            &config, &siblings, &accepted,
-        )
-        .unwrap();
-
-        assert!(sizes.is_empty());
-        assert_eq!(candidates.len(), 2);
-    }
-
-    #[test]
-    fn resolve_remote_candidates_from_siblings_does_not_fall_back_when_split_files_already_cached()
-    {
-        // Regression test for the resume bug: when `hf://org/ds/default/stock_news` has
-        // already downloaded `data/stock_news.parquet` (converting it to a `.simdr` store),
-        // a subsequent `list_remote_candidates` call must return an empty list — NOT fall
-        // back to an extension-only scan that would queue unrelated splits' parquets.
-        let dir = tempdir().unwrap();
-        let mut config =
-            HuggingFaceRowsConfig::new("s", "org/ds", "default", "stock_news", dir.path());
-        config.cache_capacity = 4;
-        let accepted = HuggingFaceRowSource::normalized_shard_extensions(&config);
-
-        // Simulate the stock_news shard already downloaded and converted to .simdr.
-        let sibling = "data/stock_news.parquet".to_string();
-        let target = HuggingFaceRowSource::candidate_target_path(&config, &sibling);
-        let store_target = HuggingFaceRowSource::shard_store_path_for(&target);
-        fs::create_dir_all(store_target.parent().unwrap()).unwrap();
-        fs::write(&store_target, b"placeholder").unwrap();
-
-        let siblings = vec![
-            sibling,
-            "data/stock_prices.parquet".to_string(),
-            "data/daily_treasury_yield.parquet".to_string(),
-        ];
-
-        let (candidates, sizes) = HuggingFaceRowSource::resolve_remote_candidates_from_siblings(
-            &config, &siblings, &accepted,
-        )
-        .unwrap();
-
-        // The split-matched file is already on disk, so no new downloads are needed.
-        // The fallback must NOT fire and pollute the candidate list with other splits.
-        assert!(
-            candidates.is_empty(),
-            "expected no new candidates when split-target is already cached; got: {candidates:?}"
-        );
-        assert!(sizes.is_empty());
-    }
-
-    #[test]
-    fn resolve_remote_candidates_from_siblings_errors_for_parquet_only_when_not_accepted() {
-        let dir = tempdir().unwrap();
-        let mut config = test_config(dir.path().to_path_buf());
-        config.shard_extensions = vec!["ndjson".to_string()];
-        let accepted = HuggingFaceRowSource::normalized_shard_extensions(&config);
-        let siblings = vec!["train/only.parquet".to_string()];
-
-        let result = HuggingFaceRowSource::resolve_remote_candidates_from_siblings(
-            &config, &siblings, &accepted,
-        );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn resolve_remote_candidates_from_siblings_returns_empty_when_no_matches_and_no_parquet() {
-        // Suppress the expected WARN "no remote candidates found for dataset='org/dataset'"
-        // emitted when the sibling list contains no files matching the accepted extensions
-        // and no parquet files.  That warn is correct production behaviour; the empty
-        // return value is what this test asserts on.
-        let _quiet = tracing::subscriber::set_default(
-            tracing_subscriber::fmt()
-                .with_max_level(tracing::Level::ERROR)
-                .finish(),
-        );
-        let dir = tempdir().unwrap();
-        let config = test_config(dir.path().to_path_buf());
-        let accepted = HuggingFaceRowSource::normalized_shard_extensions(&config);
-        let siblings = vec!["train/notes.txt".to_string()];
-
-        let (candidates, sizes) = HuggingFaceRowSource::resolve_remote_candidates_from_siblings(
-            &config, &siblings, &accepted,
-        )
-        .unwrap();
-        assert!(candidates.is_empty());
-        assert!(sizes.is_empty());
-    }
-
-    #[test]
-    fn parse_global_row_count_response_errors_on_invalid_json() {
-        let dir = tempdir().unwrap();
-        let config = test_config(dir.path().to_path_buf());
-        let parsed = HuggingFaceRowSource::parse_global_row_count_response(&config, "{bad-json");
-        assert!(parsed.is_err());
-    }
-
-    #[test]
     fn parse_parquet_manifest_response_errors_on_invalid_json() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
@@ -7875,17 +6904,15 @@ mod tests {
     fn parse_parquet_manifest_response_returns_candidates() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
-        let body = serde_json::to_string(&json!({
-            "parquet_files": [
-                {"url": "https://host/datasets/x/resolve/main/train/0.parquet", "size": 5}
-            ]
-        }))
+        let body = serde_json::to_string(&json!([
+            {"type": "file", "path": "https://host/datasets/x/resolve/main/train/0.parquet", "size": 100}
+        ]))
         .unwrap();
 
         let (candidates, sizes, matched) =
             HuggingFaceRowSource::parse_parquet_manifest_response(&config, &body).unwrap();
         assert_eq!(candidates.len(), 1);
-        assert_eq!(sizes.len(), 1);
+        assert!(!sizes.is_empty());
         assert_eq!(matched, 1);
     }
 
@@ -7894,11 +6921,9 @@ mod tests {
     fn list_remote_candidates_from_parquet_manifest_uses_test_endpoint_override() {
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path().to_path_buf());
-        let body = serde_json::to_vec(&json!({
-            "parquet_files": [
-                {"url": "https://host/datasets/x/resolve/main/train/0.parquet", "size": 5}
-            ]
-        }))
+        let body = serde_json::to_vec(&json!([
+            {"type": "file", "path": "https://host/datasets/x/resolve/main/train/0.parquet", "size": 100}
+        ]))
         .unwrap();
         let server = spawn_one_shot_http(body);
         let base_url = server.url().to_string();
@@ -7910,58 +6935,8 @@ mod tests {
                 .unwrap();
 
         assert_eq!(candidates.len(), 1);
-        assert_eq!(sizes.len(), 1);
+        assert!(!sizes.is_empty());
         assert_eq!(matched, 1);
-    }
-
-    #[test]
-    #[serial(global_state)]
-    fn fetch_global_row_count_uses_test_endpoint_override() {
-        let dir = tempdir().unwrap();
-        let mut config = test_config(dir.path().to_path_buf());
-        let body = serde_json::to_vec(&json!({
-            "size": {
-                "splits": [
-                    {"config": "default", "split": "train", "num_rows": 12}
-                ]
-            }
-        }))
-        .unwrap();
-        let server = spawn_one_shot_http(body);
-        let base_url = server.url().to_string();
-
-        config.size_endpoint = base_url.clone();
-        let client = test_http_client();
-        let rows = HuggingFaceRowSource::fetch_global_row_count(&client, &config).unwrap();
-        assert_eq!(rows, Some(12));
-    }
-
-    #[test]
-    #[serial(global_state)]
-    fn fetch_global_row_count_with_runtime_uses_test_endpoint_override() {
-        let dir = tempdir().unwrap();
-        let mut config = test_config(dir.path().to_path_buf());
-        let runtime = HuggingFaceRowSource::build_http_runtime(&config).unwrap();
-        let body = serde_json::to_vec(&json!({
-            "size": {
-                "splits": [
-                    {"config": "default", "split": "train", "num_rows": 34}
-                ]
-            }
-        }))
-        .unwrap();
-        let server = spawn_one_shot_http(body);
-        let base_url = server.url().to_string();
-
-        config.size_endpoint = base_url;
-        let client = test_http_client();
-        let rows = HuggingFaceRowSource::fetch_global_row_count_with_runtime(
-            &client,
-            &config,
-            Some(&runtime),
-        )
-        .unwrap();
-        assert_eq!(rows, Some(34));
     }
 
     #[test]
@@ -7974,61 +6949,16 @@ mod tests {
         let c =
             HuggingFaceRowsConfig::new("ep_test", "org/dataset", "default", "train", dir.path());
         assert_eq!(c.parquet_endpoint, HF_PARQUET_DEFAULT_ENDPOINT);
-        assert_eq!(c.size_endpoint, HF_SIZE_DEFAULT_ENDPOINT);
-        assert_eq!(c.info_endpoint, HF_INFO_DEFAULT_ENDPOINT);
-    }
-
-    #[test]
-    fn resolve_remote_candidates_respects_split_prefix_in_filename() {
-        let dir = tempdir().unwrap();
-        let mut config = test_config(dir.path().to_path_buf());
-        config.split_name = "train".to_string();
-        let accepted = HuggingFaceRowSource::normalized_shard_extensions(&config);
-        let siblings = vec![
-            "train-part-000.ndjson".to_string(),
-            "validation-part-000.ndjson".to_string(),
-        ];
-
-        let (candidates, _) = HuggingFaceRowSource::resolve_remote_candidates_from_siblings(
-            &config, &siblings, &accepted,
-        )
-        .unwrap();
-
-        assert_eq!(candidates, vec!["train-part-000.ndjson".to_string()]);
     }
 
     #[test]
     #[serial(global_state)]
-    fn fetch_global_row_count_returns_none_when_split_not_present() {
+    fn list_remote_candidates_returns_manifest_candidates() {
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path().to_path_buf());
-        let body = serde_json::to_vec(&json!({
-            "size": {
-                "splits": [
-                    {"config": "default", "split": "validation", "num_rows": 12}
-                ]
-            }
-        }))
-        .unwrap();
-        let server = spawn_one_shot_http(body);
-        let base_url = server.url().to_string();
-
-        config.size_endpoint = base_url;
-        let client = test_http_client();
-        let rows = HuggingFaceRowSource::fetch_global_row_count(&client, &config).unwrap();
-        assert_eq!(rows, None);
-    }
-
-    #[test]
-    #[serial(global_state)]
-    fn list_remote_candidates_returns_manifest_candidates_before_repo_fallback() {
-        let dir = tempdir().unwrap();
-        let mut config = test_config(dir.path().to_path_buf());
-        let body = serde_json::to_vec(&json!({
-            "parquet_files": [
-                {"url": "https://host/datasets/x/resolve/main/train/1.ndjson", "size": 9}
-            ]
-        }))
+        let body = serde_json::to_vec(&json!([
+            {"type": "file", "path": "https://host/datasets/x/resolve/main/train/1.ndjson", "size": 100}
+        ]))
         .unwrap();
         let server = spawn_one_shot_http(body);
         let base_url = server.url().to_string();
@@ -8039,8 +6969,109 @@ mod tests {
             HuggingFaceRowSource::list_remote_candidates(&client, &config).unwrap();
 
         assert_eq!(candidates.len(), 1);
-        assert_eq!(sizes.len(), 1);
+        assert!(!sizes.is_empty());
         assert!(candidates[0].ends_with("/1.ndjson"));
+    }
+
+    #[test]
+    fn list_remote_candidates_scopes_tree_to_config_name() {
+        // Verify that the tree endpoint URL is scoped to the config_name
+        // subdirectory so we don't pull files from other configs
+        // (e.g. wikimedia/wikipedia/20231101.en should not list .fr files).
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.config_name = "20231101.en".to_string();
+
+        // Spawn a mock server that records the request path.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base_url = format!("http://{addr}");
+        let recorded_path: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let recorded_path_clone = Arc::clone(&recorded_path);
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .map(|s| s.to_string());
+                *recorded_path_clone.lock().unwrap() = path;
+                let body = br#"[]"#;
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(headers.as_bytes());
+                let _ = stream.write_all(body);
+            }
+        });
+
+        config.parquet_endpoint = base_url;
+        let client = test_http_client();
+        let _ =
+            HuggingFaceRowSource::list_remote_candidates_from_parquet_manifest(&client, &config);
+        handle.join().unwrap();
+
+        let path = recorded_path.lock().unwrap();
+        let path = path.as_deref().expect("no request recorded");
+        assert!(
+            path.contains("/tree/main/20231101.en"),
+            "tree endpoint URL must be scoped to config_name; got: {path}"
+        );
+        assert!(
+            !path.contains("/tree/main?"),
+            "tree endpoint must NOT use root path when config_name is set; got: {path}"
+        );
+    }
+
+    #[test]
+    fn list_remote_candidates_uses_root_tree_for_default_config() {
+        // When config_name is "default", the tree endpoint should hit the repo root.
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.config_name = "default".to_string();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base_url = format!("http://{addr}");
+        let recorded_path: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let recorded_path_clone = Arc::clone(&recorded_path);
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .map(|s| s.to_string());
+                *recorded_path_clone.lock().unwrap() = path;
+                let body = br#"[]"#;
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(headers.as_bytes());
+                let _ = stream.write_all(body);
+            }
+        });
+
+        config.parquet_endpoint = base_url;
+        let client = test_http_client();
+        let _ =
+            HuggingFaceRowSource::list_remote_candidates_from_parquet_manifest(&client, &config);
+        handle.join().unwrap();
+
+        let path = recorded_path.lock().unwrap();
+        let path = path.as_deref().expect("no request recorded");
+        assert!(
+            path.contains("/tree/main?recursive=true"),
+            "default config must hit repo root; got: {path}"
+        );
     }
 
     #[test]
@@ -8049,11 +7080,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path().to_path_buf());
         let runtime = HuggingFaceRowSource::build_http_runtime(&config).unwrap();
-        let body = serde_json::to_vec(&json!({
-            "parquet_files": [
-                {"url": "https://host/datasets/x/resolve/main/train/2.ndjson", "size": 7}
-            ]
-        }))
+        let body = serde_json::to_vec(&json!([
+            {"type": "file", "path": "https://host/datasets/x/resolve/main/train/2.ndjson", "size": 100}
+        ]))
         .unwrap();
         let server = spawn_one_shot_http(body);
         let base_url = server.url().to_string();
@@ -8068,21 +7097,16 @@ mod tests {
         .unwrap();
 
         assert_eq!(candidates.len(), 1);
-        assert_eq!(sizes.len(), 1);
+        assert!(!sizes.is_empty());
         assert!(candidates[0].ends_with("/2.ndjson"));
     }
 
     #[test]
     #[serial(global_state)]
     fn list_remote_candidates_does_not_fall_back_when_all_manifest_shards_cached() {
-        // Regression test: list_remote_candidates must NOT fall through to the hf-hub
-        // siblings listing when a parquet manifest exists, regardless of whether all
+        // Regression test: list_remote_candidates must return the full manifest
+        // candidate list when a parquet manifest exists, regardless of whether all
         // shards are already cached on disk.
-        //
-        // The hf-hub siblings listing returns every language config in the repository,
-        // not just the one requested (e.g. wikimedia/wikipedia/20231101.en → also
-        // .fr, .de, …).  The guard is `matched_manifest_entries > 0`, which is
-        // independent of cache state.
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path().to_path_buf());
 
@@ -8094,11 +7118,9 @@ mod tests {
         fs::create_dir_all(store_target.parent().unwrap()).unwrap();
         fs::write(&store_target, b"cached").unwrap();
 
-        let body = serde_json::to_vec(&json!({
-            "parquet_files": [
-                {"url": shard_url, "size": 6}
-            ]
-        }))
+        let body = serde_json::to_vec(&json!([
+            {"type": "file", "path": shard_url, "size": 100}
+        ]))
         .unwrap();
         let server = spawn_one_shot_http(body);
         let base_url = server.url().to_string();
@@ -8114,7 +7136,7 @@ mod tests {
             1,
             "fully-cached shard must still appear in candidates (cache ≠ order)"
         );
-        assert_eq!(sizes.len(), 1);
+        assert!(!sizes.is_empty());
         assert!(candidates[0].ends_with(shard_url));
     }
 
@@ -8129,50 +7151,6 @@ mod tests {
         let result =
             HuggingFaceRowSource::list_remote_candidates_from_parquet_manifest(&client, &config);
         assert!(result.is_err());
-    }
-
-    #[test]
-    #[serial(global_state)]
-    fn fetch_global_row_count_errors_when_endpoint_unreachable() {
-        let dir = tempdir().unwrap();
-        let mut config = test_config(dir.path().to_path_buf());
-        config.size_endpoint = TEST_UNREACHABLE_URL.to_string();
-
-        let client = test_http_client();
-        let result = HuggingFaceRowSource::fetch_global_row_count(&client, &config);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    #[serial(global_state)]
-    fn fetch_classlabel_maps_with_runtime_resolves_columns_from_info_response() {
-        let dir = tempdir().unwrap();
-        let mut config = test_config(dir.path().to_path_buf());
-        let runtime = HuggingFaceRowSource::build_http_runtime(&config).unwrap();
-        let body = serde_json::to_vec(&json!({
-            "dataset_info": {
-                "features": {
-                    "sentiment": {
-                        "_type": "ClassLabel",
-                        "names": ["neutral", "bullish", "bearish"]
-                    }
-                }
-            }
-        }))
-        .unwrap();
-        let server = spawn_one_shot_http(body);
-        let base_url = server.url().to_string();
-
-        config.info_endpoint = base_url;
-        let client = test_http_client();
-        let maps = HuggingFaceRowSource::fetch_classlabel_maps_with_runtime(
-            &client,
-            &config,
-            Some(&runtime),
-        );
-
-        assert_eq!(maps.len(), 1);
-        assert_eq!(maps["sentiment"], vec!["neutral", "bullish", "bearish"]);
     }
 
     #[test]
@@ -8573,6 +7551,16 @@ mod tests {
             format!("{HF_DATASETS_BASE_URL}/org/ds/resolve/main/train/part-000.parquet")
         );
 
+        // url:: prefix with relative path (Hub API format): CDN prefix is constructed.
+        let hub_relative = "url::data/train-00000-of-00001.parquet";
+        let result = HuggingFaceRowSource::remote_url_for_candidate(&config, hub_relative);
+        assert_eq!(
+            result,
+            format!(
+                "{HF_DATASETS_BASE_URL}/org/dataset/resolve/main/data/train-00000-of-00001.parquet"
+            )
+        );
+
         // Bare path (hf-hub sibling fallback): CDN prefix is prepended.
         let bare_path = "data/train-00000-of-00001.parquet";
         let result = HuggingFaceRowSource::remote_url_for_candidate(&config, bare_path);
@@ -8882,51 +7870,6 @@ mod tests {
     }
 
     #[test]
-    fn extract_split_row_count_reads_split_entries() {
-        let payload = json!({
-            "size": {
-                "splits": [
-                    {"config": "default", "split": "train", "num_rows": 123u64},
-                    {"config": "default", "split": "validation", "num_rows": 45u64}
-                ]
-            }
-        });
-
-        let count = HuggingFaceRowSource::extract_split_row_count_from_size_response(
-            &payload,
-            "default",
-            "validation",
-        );
-        assert_eq!(count, Some(45));
-    }
-
-    #[test]
-    fn extract_split_row_count_reads_config_fallback_and_dataset_total() {
-        let payload = json!({
-            "size": {
-                "configs": [
-                    {
-                        "config": "default",
-                        "splits": [{"name": "test", "num_rows": 77u64}],
-                        "num_rows": 200u64
-                    }
-                ],
-                "dataset": {"num_rows": 999u64}
-            }
-        });
-
-        let split_count = HuggingFaceRowSource::extract_split_row_count_from_size_response(
-            &payload, "default", "test",
-        );
-        assert_eq!(split_count, Some(77));
-
-        let empty_split_count = HuggingFaceRowSource::extract_split_row_count_from_size_response(
-            &payload, "default", "",
-        );
-        assert_eq!(empty_split_count, Some(200));
-    }
-
-    #[test]
     fn shard_candidate_seed_is_seeded_and_source_scoped() {
         let dir = tempdir().unwrap();
         let mut a = test_config(dir.path().join("a"));
@@ -9079,28 +8022,22 @@ mod tests {
 
     #[test]
     fn value_to_text_handles_scalar_and_structured_values() {
+        assert_eq!(HuggingFaceRowSource::value_to_text(&json!(null)), None);
+        assert_eq!(HuggingFaceRowSource::value_to_text(&json!("   ")), None);
         assert_eq!(
-            HuggingFaceRowSource::value_to_text(&json!(null), None),
-            None
-        );
-        assert_eq!(
-            HuggingFaceRowSource::value_to_text(&json!("   "), None),
-            None
-        );
-        assert_eq!(
-            HuggingFaceRowSource::value_to_text(&json!("hello"), None),
+            HuggingFaceRowSource::value_to_text(&json!("hello")),
             Some("hello".into())
         );
         assert_eq!(
-            HuggingFaceRowSource::value_to_text(&json!(true), None),
+            HuggingFaceRowSource::value_to_text(&json!(true)),
             Some("true".into())
         );
         assert_eq!(
-            HuggingFaceRowSource::value_to_text(&json!(3.5), None),
+            HuggingFaceRowSource::value_to_text(&json!(3.5)),
             Some("3.5".into())
         );
         assert_eq!(
-            HuggingFaceRowSource::value_to_text(&json!([1, 2]), None),
+            HuggingFaceRowSource::value_to_text(&json!([1, 2])),
             Some("1".into())
         );
     }
@@ -9225,7 +8162,6 @@ mod tests {
 
         let mut state = SourceState {
             materialized_rows: 0,
-            total_rows: None,
             shards: std::mem::take(&mut shards),
             remote_candidates: None,
             remote_candidate_sizes: HashMap::new(),
@@ -9247,18 +8183,24 @@ mod tests {
         {
             let mut state = source.state.lock().unwrap();
             state.materialized_rows = 5;
-            state.total_rows = Some(100);
+            // Set up remote candidates so headroom is applied
+            state.remote_candidates = Some(vec![
+                "url::http://a/0.parquet".to_string(),
+                "url::http://a/1.parquet".to_string(),
+            ]);
+            state.next_remote_idx = 0;
         }
         // headroom = ingestion_max_records * multiplier = 10 * 3 = 30; since known (5)
-        // < headroom, expansion = 30; upper = min(5+30, 100) = 35
+        // < headroom, expansion = 30; upper = 5 + 30 = 35
         assert_eq!(source.len_hint(), Some(35));
 
         {
             let mut state = source.state.lock().unwrap();
             state.materialized_rows = 0;
-            state.total_rows = Some(0);
+            state.remote_candidates = Some(vec!["url::http://a/0.parquet".to_string()]);
+            state.next_remote_idx = 0;
         }
-        assert_eq!(source.len_hint(), Some(0));
+        assert_eq!(source.len_hint(), Some(1));
     }
 
     #[test]
@@ -9282,12 +8224,16 @@ mod tests {
         {
             let mut state = source.state.lock().unwrap();
             state.materialized_rows = 8;
-            state.total_rows = Some(10_000);
+            // Set up remote candidates so headroom is applied
+            state.remote_candidates = Some(vec![
+                "url::http://a/0.parquet".to_string(),
+                "url::http://a/1.parquet".to_string(),
+            ]);
+            state.next_remote_idx = 0;
         }
 
-        // After warmup, expansion continues in trickle mode (12.5% of
-        // headroom, minimum 1) so remote shard diversity can keep growing.
-        assert_eq!(source.len_hint(), Some(9));
+        // headroom = cache_capacity * multiplier = 4 * 2 = 8; upper = 8 + 8 = 16
+        assert_eq!(source.len_hint(), Some(16));
     }
 
     #[test]
@@ -9318,7 +8264,6 @@ mod tests {
             let mut state = source.state.lock().unwrap();
             state.shards = vec![baseline.clone(), appended.clone()];
             state.materialized_rows = 2;
-            state.total_rows = Some(2);
         }
 
         {
@@ -9405,7 +8350,6 @@ mod tests {
 
         let mut state = SourceState {
             materialized_rows: 16,
-            total_rows: None,
             shards: vec![
                 ShardIndex {
                     path: evict_path.clone(),
@@ -9455,7 +8399,6 @@ mod tests {
 
         let mut state = SourceState {
             materialized_rows: 8,
-            total_rows: None,
             shards: vec![ShardIndex {
                 path: protected.clone(),
                 global_start: 0,
@@ -9523,7 +8466,6 @@ mod tests {
         {
             let mut state = source.state.lock().unwrap();
             state.materialized_rows = shard.row_count;
-            state.total_rows = Some(shard.row_count);
             state.shards = vec![shard];
         }
 
@@ -9552,8 +8494,6 @@ mod tests {
         config.checkpoint_stride = 1;
         config.cache_capacity = 10;
         config.remote_expansion_headroom_multiplier = 1;
-        config.info_endpoint = TEST_UNREACHABLE_URL.to_string();
-        config.size_endpoint = TEST_UNREACHABLE_URL.to_string();
         config.parquet_endpoint = TEST_UNREACHABLE_URL.to_string();
 
         let source = HuggingFaceRowSource::new(config).unwrap();
@@ -9565,7 +8505,6 @@ mod tests {
         {
             let mut state = source.state.lock().unwrap();
             state.materialized_rows = shard_idx.row_count;
-            state.total_rows = Some(shard_idx.row_count);
             state.shards = vec![shard_idx];
         }
 
@@ -9626,8 +8565,6 @@ mod tests {
             fs::write(&shard, &shard_body).unwrap();
             let mut cfg = HuggingFaceRowsConfig::new("t", "o/d", "d", "train", tmp.path());
             cfg.hf_token = None;
-            cfg.info_endpoint = TEST_UNREACHABLE_URL.to_string();
-            cfg.size_endpoint = TEST_UNREACHABLE_URL.to_string();
             cfg.parquet_endpoint = TEST_UNREACHABLE_URL.to_string();
             let source = HuggingFaceRowSource::new(cfg).unwrap();
             let idx = HuggingFaceRowSource::index_single_shard_for_test(
@@ -9635,7 +8572,6 @@ mod tests {
             {
                 let mut st = source.state.lock().unwrap();
                 st.materialized_rows = idx.row_count;
-                st.total_rows = Some(idx.row_count);
                 st.shards = vec![idx];
                 let cand: Vec<String> = (0..5).map(|i|
                     format!("url::http://h/d/resolve/main/train/p-{i:04}.ndjson")
@@ -9694,7 +8630,6 @@ mod tests {
         {
             let mut state = source.state.lock().unwrap();
             state.materialized_rows = 4;
-            state.total_rows = Some(4);
         }
         assert_eq!(source.reported_record_count().unwrap(), 4);
     }
@@ -9914,7 +8849,7 @@ mod tests {
 
         // Reset to None so ensure_row_available triggers the manifest-fetch path.
         source.state.lock().unwrap().remote_candidates = None;
-        source.config.parquet_endpoint = format!("{base_url}/parquet");
+        source.config.parquet_endpoint = base_url.to_string();
 
         assert!(source.ensure_row_available(0).unwrap());
 
@@ -9957,9 +8892,9 @@ mod tests {
         }
 
         // Serve a manifest that lists the same (already-cached) shard.
-        let manifest_body = serde_json::to_vec(&json!({
-            "parquet_files": [{"url": shard_raw_url, "size": 5}]
-        }))
+        let manifest_body = serde_json::to_vec(&json!([
+            {"type": "file", "path": shard_raw_url, "size": 100}
+        ]))
         .unwrap();
         let server = spawn_one_shot_http(manifest_body);
         let base_url = server.url().to_string();
@@ -9994,7 +8929,6 @@ mod tests {
         {
             let mut state = source.state.lock().unwrap();
             state.materialized_rows = 2;
-            state.total_rows = Some(2);
         }
 
         let row0 = RowView {
@@ -10040,7 +8974,6 @@ mod tests {
         {
             let mut state = source.state.lock().unwrap();
             state.materialized_rows = 1;
-            state.total_rows = Some(1);
             state.shards = vec![shard];
         }
 
@@ -10067,7 +9000,6 @@ mod tests {
         {
             let mut state = source.state.lock().unwrap();
             state.materialized_rows = 0;
-            state.total_rows = Some(0);
         }
         let empty = source.refresh(None, Some(5)).unwrap();
         assert!(empty.records.is_empty());
@@ -10089,7 +9021,6 @@ mod tests {
         {
             let mut state = source2.state.lock().unwrap();
             state.materialized_rows = 2;
-            state.total_rows = Some(2);
             state.shards = vec![shard];
         }
         let cursor = SourceCursor {
@@ -10107,58 +9038,6 @@ mod tests {
         config.checkpoint_stride = 0;
         let result = HuggingFaceRowSource::new(config);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn parse_global_row_count_response_returns_none_when_split_missing() {
-        let dir = tempdir().unwrap();
-        let config = test_config(dir.path().to_path_buf());
-        let body = r#"{
-            "size": {
-                "splits": [
-                    {"config":"main","split":"test","num_rows":7}
-                ]
-            }
-        }"#;
-
-        let parsed = HuggingFaceRowSource::parse_global_row_count_response(&config, body).unwrap();
-        assert_eq!(parsed, None);
-    }
-
-    #[test]
-    fn extract_split_row_count_uses_config_num_rows_when_split_empty() {
-        let payload = serde_json::json!({
-            "size": {
-                "configs": [
-                    {
-                        "config": "main",
-                        "num_rows": 123,
-                        "splits": [
-                            {"split": "train", "num_rows": 999}
-                        ]
-                    }
-                ]
-            }
-        });
-
-        let rows =
-            HuggingFaceRowSource::extract_split_row_count_from_size_response(&payload, "main", "");
-        assert_eq!(rows, Some(123));
-    }
-
-    #[test]
-    fn extract_split_row_count_uses_dataset_num_rows_when_split_empty() {
-        let payload = serde_json::json!({
-            "size": {
-                "dataset": {
-                    "num_rows": 77
-                }
-            }
-        });
-
-        let rows =
-            HuggingFaceRowSource::extract_split_row_count_from_size_response(&payload, "main", "");
-        assert_eq!(rows, Some(77));
     }
 
     #[test]
@@ -10189,7 +9068,6 @@ mod tests {
         for source in [&source_a, &source_b, &source_c] {
             let mut state = source.state.lock().unwrap();
             state.materialized_rows = 12;
-            state.total_rows = Some(12);
             state.shards = vec![shard.clone()];
         }
 
@@ -10438,316 +9316,7 @@ mod tests {
 
     // ── extract_classlabel_maps ───────────────────────────────────────────────
 
-    #[test]
-    fn extract_classlabel_maps_returns_label_names_for_classlabel_columns() {
-        let info = json!({
-            "dataset_info": {
-                "features": {
-                    "text": {"dtype": "string", "_type": "Value"},
-                    "sentiment": {
-                        "_type": "ClassLabel",
-                        "names": ["neutral", "bullish", "bearish"]
-                    }
-                }
-            }
-        });
-        let maps = HuggingFaceRowSource::extract_classlabel_maps(&info);
-        assert_eq!(maps.len(), 1);
-        assert_eq!(maps["sentiment"], vec!["neutral", "bullish", "bearish"]);
-    }
-
-    #[test]
-    fn extract_classlabel_maps_handles_multiple_classlabel_columns() {
-        let info = json!({
-            "dataset_info": {
-                "features": {
-                    "label_a": {"_type": "ClassLabel", "names": ["no", "yes"]},
-                    "label_b": {"_type": "ClassLabel", "names": ["low", "mid", "high"]}
-                }
-            }
-        });
-        let maps = HuggingFaceRowSource::extract_classlabel_maps(&info);
-        assert_eq!(maps.len(), 2);
-        assert_eq!(maps["label_a"], vec!["no", "yes"]);
-        assert_eq!(maps["label_b"], vec!["low", "mid", "high"]);
-    }
-
-    #[test]
-    fn extract_classlabel_maps_ignores_non_classlabel_features() {
-        let info = json!({
-            "dataset_info": {
-                "features": {
-                    "text":  {"dtype": "string", "_type": "Value"},
-                    "score": {"dtype": "float32", "_type": "Value"}
-                }
-            }
-        });
-        let maps = HuggingFaceRowSource::extract_classlabel_maps(&info);
-        assert!(maps.is_empty());
-    }
-
-    #[test]
-    fn extract_classlabel_maps_skips_empty_names_array() {
-        let info = json!({
-            "dataset_info": {
-                "features": {
-                    "empty_labels": {"_type": "ClassLabel", "names": []}
-                }
-            }
-        });
-        let maps = HuggingFaceRowSource::extract_classlabel_maps(&info);
-        assert!(
-            maps.is_empty(),
-            "columns with empty names arrays must not be included"
-        );
-    }
-
-    #[test]
-    fn extract_classlabel_maps_returns_empty_for_missing_dataset_info() {
-        // Top-level key missing entirely.
-        let maps = HuggingFaceRowSource::extract_classlabel_maps(&json!({}));
-        assert!(maps.is_empty());
-
-        // `dataset_info` present but no `features`.
-        let maps2 = HuggingFaceRowSource::extract_classlabel_maps(
-            &json!({"dataset_info": {"description": "x"}}),
-        );
-        assert!(maps2.is_empty());
-    }
-
-    #[test]
-    fn extract_classlabel_maps_returns_empty_for_non_object_features() {
-        // `features` is an array instead of an object — must not panic.
-        let info = json!({
-            "dataset_info": {
-                "features": ["sentiment", "text"]
-            }
-        });
-        let maps = HuggingFaceRowSource::extract_classlabel_maps(&info);
-        assert!(maps.is_empty());
-    }
-
-    // ── fetch_classlabel_maps ─────────────────────────────────────────────────
-
-    #[test]
-    #[serial(global_state)]
-    fn fetch_classlabel_maps_returns_empty_when_endpoint_unreachable() {
-        let dir = tempdir().unwrap();
-        let mut config = test_config(dir.path().to_path_buf());
-        config.info_endpoint = TEST_UNREACHABLE_URL.to_string();
-        // Port 1 is always unreachable; ureq returns an Err which must be handled.
-        let client = test_http_client();
-        let maps = HuggingFaceRowSource::fetch_classlabel_maps(&client, &config);
-        assert!(
-            maps.is_empty(),
-            "unreachable endpoint must yield empty map, got: {maps:?}"
-        );
-    }
-
-    #[test]
-    #[serial(global_state)]
-    fn fetch_classlabel_maps_returns_empty_on_non_200_response() {
-        let dir = tempdir().unwrap();
-        let mut config = test_config(dir.path().to_path_buf());
-        let server = TestHttpServer::new(404, b"not found".to_vec());
-        let base_url = server.url().to_string();
-
-        config.info_endpoint = base_url;
-        let client = test_http_client();
-        let maps = HuggingFaceRowSource::fetch_classlabel_maps(&client, &config);
-        assert!(
-            maps.is_empty(),
-            "HTTP 404 response must yield empty map, got: {maps:?}"
-        );
-    }
-
-    #[test]
-    #[serial(global_state)]
-    fn fetch_classlabel_maps_returns_empty_on_malformed_json() {
-        let dir = tempdir().unwrap();
-        let mut config = test_config(dir.path().to_path_buf());
-        let server = spawn_one_shot_http(b"this is not json".to_vec());
-        let base_url = server.url().to_string();
-
-        config.info_endpoint = base_url;
-        let client = test_http_client();
-        let maps = HuggingFaceRowSource::fetch_classlabel_maps(&client, &config);
-        assert!(
-            maps.is_empty(),
-            "malformed JSON must yield empty map, got: {maps:?}"
-        );
-    }
-
-    #[test]
-    #[serial(global_state)]
-    fn fetch_classlabel_maps_resolves_classlabel_columns_from_info_response() {
-        let dir = tempdir().unwrap();
-        let mut config = test_config(dir.path().to_path_buf());
-        let body = serde_json::to_vec(&json!({
-            "dataset_info": {
-                "features": {
-                    "text": {"dtype": "string", "_type": "Value"},
-                    "sentiment": {
-                        "_type": "ClassLabel",
-                        "names": ["neutral", "bullish", "bearish"]
-                    }
-                }
-            }
-        }))
-        .unwrap();
-        let server = spawn_one_shot_http(body);
-        let base_url = server.url().to_string();
-
-        config.info_endpoint = base_url;
-        let client = test_http_client();
-        let maps = HuggingFaceRowSource::fetch_classlabel_maps(&client, &config);
-        assert_eq!(maps.len(), 1);
-        assert_eq!(maps["sentiment"], vec!["neutral", "bullish", "bearish"]);
-    }
-
-    // ── value_to_text with label resolution ──────────────────────────────────
-
-    #[test]
-    fn value_to_text_resolves_integer_to_label_name() {
-        let labels = vec![
-            "negative".to_string(),
-            "neutral".to_string(),
-            "positive".to_string(),
-        ];
-        assert_eq!(
-            HuggingFaceRowSource::value_to_text(&json!(0), Some(&labels)),
-            Some("negative".into())
-        );
-        assert_eq!(
-            HuggingFaceRowSource::value_to_text(&json!(2), Some(&labels)),
-            Some("positive".into())
-        );
-    }
-
-    #[test]
-    fn value_to_text_falls_back_to_raw_integer_when_index_out_of_range() {
-        let labels = vec!["a".to_string(), "b".to_string()];
-        // Index 5 is beyond the label list — must return the integer as a string.
-        assert_eq!(
-            HuggingFaceRowSource::value_to_text(&json!(5), Some(&labels)),
-            Some("5".into())
-        );
-    }
-
-    #[test]
-    fn value_to_text_falls_back_to_raw_integer_when_no_label_names_provided() {
-        assert_eq!(
-            HuggingFaceRowSource::value_to_text(&json!(1), None),
-            Some("1".into())
-        );
-    }
-
-    #[test]
-    #[serial(global_state)]
-    fn info_endpoint_called_exactly_once_per_source_construction() {
-        // Verify that /info is called exactly once during new() and never during
-        // refresh().  Two separate strategies are used to avoid fragile TCP
-        // connection counting:
-        //
-        //   Phase 1 — new(): one-shot /info server returning a real ClassLabel
-        //             mapping.  After new(), source.config_name.label_maps must reflect
-        //             the mock response (proves /info was called) and joining the
-        //             server thread proves it was called exactly once.
-        //
-        //   Phase 2 — refresh(): fresh one-shot server for /info.  After 3x
-        //             refresh() calls, is_finished() must be false, proving /info
-        //             was never contacted during refresh().
-        let dir = tempdir().unwrap();
-        let mut config = test_config(dir.path().to_path_buf());
-        config.anchor_columns = vec!["title".into()];
-        config.positive_columns = vec!["body".into()];
-        config.checkpoint_stride = 1;
-
-        let shard_path = dir.path().join("shard.ndjson");
-        fs::write(
-            &shard_path,
-            b"{\"title\":\"t1\",\"body\":\"b1\"}\n{\"title\":\"t2\",\"body\":\"b2\"}\n",
-        )
-        .unwrap();
-
-        // Phase 1: /info during new().  Return a non-trivial ClassLabel response so
-        // source.config_name.label_maps is populated and the assertion can verify the call.
-        let info_payload_1 = serde_json::json!({
-            "dataset_info": {
-                "features": {
-                    "sentiment": {
-                        "_type": "ClassLabel",
-                        "names": ["negative", "neutral", "positive"]
-                    }
-                }
-            }
-        })
-        .to_string()
-        .into_bytes();
-        let size_payload = serde_json::json!({"size": {"splits": []}})
-            .to_string()
-            .into_bytes();
-
-        let info_server_1 = spawn_one_shot_http(info_payload_1);
-        let info_url_1 = info_server_1.url().to_string();
-        let size_server = spawn_one_shot_http(size_payload);
-        let size_url = size_server.url().to_string();
-
-        let config_for_index = config.clone();
-        config.info_endpoint = info_url_1;
-        config.size_endpoint = size_url;
-        let mut source = HuggingFaceRowSource::new(config).unwrap();
-
-        // Verify /info was actually called: label_maps must match the mock response.
-        assert_eq!(
-            source.config.label_maps.get("sentiment"),
-            Some(&vec![
-                "negative".to_string(),
-                "neutral".to_string(),
-                "positive".to_string()
-            ]),
-            "fetch_classlabel_maps must have been called during new() \
-             and populated label_maps from the mock /info response"
-        );
-
-        // Phase 2: inject local shard state.
-        // Set remote_candidates = Some(vec![]) so trigger_expansion_if_needed
-        // treats this source as having no remote shards — no background network
-        // thread is spawned from refresh().
-        let shard =
-            HuggingFaceRowSource::index_single_shard_for_test(&config_for_index, &shard_path, 0)
-                .unwrap()
-                .0
-                .unwrap();
-        {
-            let mut state = source.state.lock().unwrap();
-            state.shards = vec![shard.clone()];
-            state.materialized_rows = shard.row_count;
-            state.total_rows = Some(shard.row_count);
-            state.remote_candidates = Some(vec![]);
-        }
-
-        // Create a fresh one-shot server for the refresh phase.  If any refresh()
-        // call hits /info the server will serve the request and its thread will
-        // exit — is_finished() would then be true.  We assert it stays false.
-        let info_payload_2 = serde_json::json!({"dataset_info": {"features": {}}})
-            .to_string()
-            .into_bytes();
-        let info_server_2 = spawn_one_shot_http(info_payload_2);
-        let info_url_2 = info_server_2.url().to_string();
-
-        source.config.info_endpoint = info_url_2;
-        for _ in 0..3 {
-            let _ = source.refresh(None, Some(1));
-        }
-
-        assert!(
-            info_server_2.accept_count() == 0,
-            "fetch_classlabel_maps must NOT be called during refresh() — \
-             /info server was unexpectedly hit (accept_count={})",
-            info_server_2.accept_count()
-        );
-    }
+    // ── value_to_text ──────────────────────────────────────────────────────────
 
     #[test]
     #[serial(global_state)]
@@ -10769,7 +9338,7 @@ mod tests {
             spawn_manifest_and_shard_http(4, shard_payload);
 
         // First call: remote_candidates is None → fetches manifest (counter→1) → downloads shard.
-        source.config.parquet_endpoint = format!("{base_url}/parquet");
+        source.config.parquet_endpoint = base_url.to_string();
         let first_available = source.ensure_row_available(0).unwrap();
         assert!(first_available);
         assert_eq!(
@@ -10799,35 +9368,6 @@ mod tests {
     //   * /parquet → list_remote_candidates_from_parquet_manifest returns Err,
     //                which causes list_remote_candidates_with_runtime to fall
     //                through to the hf-hub repository listing path.
-
-    #[test]
-    #[serial(global_state)]
-    fn fetch_global_row_count_returns_ok_none_on_501() {
-        // A 501 from /size means "viewer disabled"; the error is intentionally
-        // swallowed at the call-site and Ok(None) is what the caller receives from
-        // fetch_global_row_count itself (the Err propagates up, but the
-        // new() constructor converts it to None with a warn!).  Verify that
-        // fetch_global_row_count propagates the Err (so the caller can log it)
-        // rather than panicking or returning a spurious row count.
-        let dir = tempdir().unwrap();
-        let mut config = test_config(dir.path().to_path_buf());
-        let body =
-            br#"{"error":"Not supported: dataset viewer is disabled in org/dataset configuration."}"#
-                .to_vec();
-        let server = TestHttpServer::new(501, body);
-        let base_url = server.url().to_string();
-
-        config.size_endpoint = base_url;
-        let client = test_http_client();
-        let result = HuggingFaceRowSource::fetch_global_row_count(&client, &config);
-
-        // The 501 surfaces as an Err so the caller (new()) can emit a warning;
-        // it must not be silently swallowed as Ok(Some(0)) or similar.
-        assert!(
-            result.is_err(),
-            "expected Err from 501 /size response, got {result:?}"
-        );
-    }
 
     #[test]
     #[serial(global_state)]
@@ -10895,7 +9435,7 @@ mod tests {
         // first download does not satisfy idx < materialized_rows.
         // Append /parquet so spawn_manifest_and_shard_http can route the
         // manifest re-fetch to the manifest body (see first_line.contains("/parquet")).
-        source.config.parquet_endpoint = format!("{base_url}/parquet");
+        source.config.parquet_endpoint = base_url.to_string();
         assert!(
             source.ensure_row_available(1).unwrap(),
             "ensure_row_available must return Ok(true)"
@@ -10914,34 +9454,9 @@ mod tests {
 
     #[test]
     #[serial(global_state)]
-    fn fetch_classlabel_maps_returns_empty_on_501() {
-        // A 501 from /info means "viewer disabled"; ClassLabel resolution must
-        // gracefully degrade to an empty map so raw integers are used instead.
-        let dir = tempdir().unwrap();
-        let mut config = test_config(dir.path().to_path_buf());
-        let body =
-            br#"{"error":"Not supported: dataset viewer is disabled in org/dataset configuration."}"#
-                .to_vec();
-        let server = TestHttpServer::new(501, body);
-        let base_url = server.url().to_string();
-
-        config.info_endpoint = base_url;
-        let client = test_http_client();
-        let maps = HuggingFaceRowSource::fetch_classlabel_maps(&client, &config);
-
-        assert!(
-            maps.is_empty(),
-            "expected empty ClassLabel map on 501 /info response, got {maps:?}"
-        );
-    }
-
-    #[test]
-    #[serial(global_state)]
     fn list_remote_candidates_from_parquet_manifest_errors_on_501() {
         // A 501 from /parquet causes the manifest path to return Err, which
-        // triggers the fallback to hf-hub repository listing inside
-        // list_remote_candidates_with_runtime.  Verify the error is returned
-        // (not swallowed as an empty manifest) so the caller can branch on it.
+        // propagates to the caller (no fallback path).
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path().to_path_buf());
         let body =
@@ -10957,7 +9472,7 @@ mod tests {
 
         assert!(
             result.is_err(),
-            "expected Err from 501 /parquet response so caller falls back to hf-hub listing, got {result:?}"
+            "expected Err from 501 /parquet response, got {result:?}"
         );
     }
 
@@ -11110,7 +9625,6 @@ mod tests {
         {
             let mut state = source.state.lock().unwrap();
             state.materialized_rows = 5;
-            state.total_rows = Some(100);
             state.remote_candidates = Some(vec![
                 "url::http://127.0.0.1:1/ds/resolve/main/train/000.ndjson".to_string(),
             ]);
@@ -11122,7 +9636,7 @@ mod tests {
         let handle = source.expansion_thread.lock().unwrap().take();
         assert!(handle.is_some());
         if let Some(h) = handle {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
             while !h.is_finished() && std::time::Instant::now() < deadline {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
@@ -11138,7 +9652,6 @@ mod tests {
         {
             let mut state = source.state.lock().unwrap();
             state.materialized_rows = 100;
-            state.total_rows = Some(100);
             state.remote_candidates = Some(vec!["done".to_string()]);
             state.next_remote_idx = 1;
         }
@@ -11154,7 +9667,6 @@ mod tests {
         {
             let mut state = source.state.lock().unwrap();
             state.materialized_rows = 0;
-            state.total_rows = Some(0);
         }
         source.trigger_expansion_if_needed();
         assert!(source.expansion_thread.lock().unwrap().is_none());
@@ -11168,7 +9680,6 @@ mod tests {
         {
             let mut state = source.state.lock().unwrap();
             state.materialized_rows = 5;
-            state.total_rows = Some(100);
             state.remote_candidates = Some(vec![
                 "url::http://127.0.0.1:1/ds/resolve/main/train/000.ndjson".to_string(),
             ]);
@@ -11210,19 +9721,6 @@ mod tests {
         assert!(result.is_err());
         let err = result.map(|_| ()).unwrap_err();
         assert!(format!("{err:?}").contains("explicit field mapping"));
-    }
-
-    #[test]
-    fn known_total_rows_returns_state_value() {
-        let dir = tempdir().unwrap();
-        let config = test_config(dir.path().to_path_buf());
-        let source = test_source(config);
-        assert_eq!(source.known_total_rows(), None);
-        {
-            let mut state = source.state.lock().unwrap();
-            state.total_rows = Some(500);
-        }
-        assert_eq!(source.known_total_rows(), Some(500));
     }
 
     #[test]
@@ -11291,7 +9789,6 @@ mod tests {
     fn recompute_shard_offsets_sums_row_counts() {
         let mut state = SourceState {
             materialized_rows: 0,
-            total_rows: None,
             shards: vec![
                 ShardIndex {
                     path: PathBuf::from("a.simdr"),
@@ -11333,7 +9830,6 @@ mod tests {
         let missing = dir.path().join("missing.simdr");
         let mut state = SourceState {
             materialized_rows: 100,
-            total_rows: Some(100),
             shards: vec![
                 ShardIndex {
                     path: existing.clone(),
@@ -11375,7 +9871,6 @@ mod tests {
         fs::write(&sp, b"data").unwrap();
         let mut state = SourceState {
             materialized_rows: 50,
-            total_rows: None,
             shards: vec![ShardIndex {
                 path: sp.clone(),
                 global_start: 0,
@@ -11541,7 +10036,6 @@ mod tests {
         {
             let mut state = source.state.lock().unwrap();
             state.materialized_rows = 10;
-            state.total_rows = Some(10);
             state.remote_candidates = None;
         }
         assert_eq!(source.reported_record_count().unwrap(), 10);
@@ -11627,46 +10121,18 @@ mod tests {
     #[test]
     fn value_to_text_array_first_element() {
         assert_eq!(
-            HuggingFaceRowSource::value_to_text(&json!(["single"]), None),
+            HuggingFaceRowSource::value_to_text(&json!(["single"])),
             Some("single".into())
         );
         assert_eq!(
-            HuggingFaceRowSource::value_to_text(&json!(["a", "b", "c"]), None),
+            HuggingFaceRowSource::value_to_text(&json!(["a", "b", "c"])),
             Some("a".into())
         );
-        assert_eq!(HuggingFaceRowSource::value_to_text(&json!([]), None), None);
+        assert_eq!(HuggingFaceRowSource::value_to_text(&json!([])), None);
         assert_eq!(
-            HuggingFaceRowSource::value_to_text(&json!([null, "valid"]), None),
+            HuggingFaceRowSource::value_to_text(&json!([null, "valid"])),
             Some("valid".into())
         );
-    }
-
-    #[test]
-    fn coalesce_list_field_expands_array() {
-        let dir = tempdir().unwrap();
-        let config = test_config(dir.path().to_path_buf());
-        let value = json!(["neg1", "neg2", "neg3"]);
-        let fields =
-            HuggingFaceRowSource::coalesce_list_field("neg", &value, &config.label_maps).unwrap();
-        assert_eq!(fields.len(), 3);
-        assert_eq!(fields[0].name, "neg[0]");
-        assert_eq!(fields[0].text, "neg1");
-        assert_eq!(fields[1].name, "neg[1]");
-        assert_eq!(fields[1].text, "neg2");
-        assert_eq!(fields[2].name, "neg[2]");
-        assert_eq!(fields[2].text, "neg3");
-    }
-
-    #[test]
-    fn coalesce_list_field_scalar_returns_single() {
-        let dir = tempdir().unwrap();
-        let config = test_config(dir.path().to_path_buf());
-        let value = json!("single_value");
-        let fields =
-            HuggingFaceRowSource::coalesce_list_field("col", &value, &config.label_maps).unwrap();
-        assert_eq!(fields.len(), 1);
-        assert_eq!(fields[0].name, "col");
-        assert_eq!(fields[0].text, "single_value");
     }
 
     #[test]

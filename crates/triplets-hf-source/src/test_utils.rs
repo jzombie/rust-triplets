@@ -18,10 +18,11 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 // HfMockServer — full-featured mock HF datasets-server
 // ---------------------------------------------------------------------------
 
-/// A mock HF datasets-server that returns parquet manifests and shard payloads.
+/// A mock HF Hub API server that returns parquet manifests and shard payloads.
 ///
 /// The server:
-/// - Responds to `/parquet` paths with a manifest listing `n_shards` shards.
+/// - Responds to any path with a manifest listing `n_shards` shards in the
+///   hierarchical Hub API format: `{"config": {"split": ["url1", "url2"]}}`.
 /// - Responds to `/resolve/main/train/{idx:03}.ndjson` with that shard's NDJSON.
 /// - Counts each manifest fetch in [`manifest_fetch_count`](Self::manifest_fetch_count).
 /// - Shuts down gracefully on drop or via [`shut_down`](Self::shut_down).
@@ -59,17 +60,18 @@ impl HfMockServer {
             })
             .collect();
 
-        // Build the manifest JSON.
-        // URLs must have a recognised extension AND contain `/resolve/`.
+        // Build the manifest JSON in Hub API tree endpoint format.
+        // The tree endpoint returns an array of {"path": "...", "size": N} objects.
+        // Use full URLs so downloads are served by this mock server.
         let manifest_entries: Vec<String> = (0..n_shards)
             .map(|s| {
                 format!(
-                    r#"{{"url":"{base_url}/resolve/main/train/{s:03}.ndjson","size":{}}}"#,
+                    r#"{{"type":"file","path":"{base_url}/datasets/org/dataset/resolve/main/train/{s:03}.ndjson","size":{}}}"#,
                     shard_payloads[s].len()
                 )
             })
             .collect();
-        let manifest_body = format!(r#"{{"parquet_files":[{}]}}"#, manifest_entries.join(","));
+        let manifest_body = format!("[{}]", manifest_entries.join(","));
 
         let handle = std::thread::spawn(move || {
             loop {
@@ -82,7 +84,7 @@ impl HfMockServer {
                     let request = String::from_utf8_lossy(&buf);
                     let first_line = request.lines().next().unwrap_or_default();
 
-                    let body: Vec<u8> = if first_line.contains("/parquet") {
+                    let body: Vec<u8> = if first_line.contains("/tree") {
                         mc.fetch_add(1, Ordering::SeqCst);
                         manifest_body.as_bytes().to_vec()
                     } else {
@@ -243,10 +245,11 @@ pub fn spawn_one_shot_http(payload: Vec<u8>) -> TestHttpServer {
 // spawn_manifest_and_shard_http — convenience for HF manifest + shard server
 // ---------------------------------------------------------------------------
 
-/// Spawn a thread that acts as a minimal HF datasets-server.
+/// Spawn a thread that acts as a minimal HF Hub API server.
 ///
 /// Accepts up to `max_accepts` connections, returning the parquet manifest
-/// on `/parquet` paths and `shard_payload` on everything else.
+/// in hierarchical Hub API format on any path, and `shard_payload` on
+/// `/resolve/` paths.
 ///
 /// Returns `(base_url, manifest_counter, join_handle)`.
 pub fn spawn_manifest_and_shard_http(
@@ -258,14 +261,16 @@ pub fn spawn_manifest_and_shard_http(
     let base_url = format!("http://{addr}");
     let manifest_counter = Arc::new(AtomicUsize::new(0));
     let manifest_counter_arc = Arc::clone(&manifest_counter);
-    let manifest_body = serde_json::json!({
-        "parquet_files": [
-            {
-                "url": format!("{base_url}/resolve/main/train/bootstrap.ndjson"),
-                "size": shard_payload.len()
-            }
-        ]
-    })
+    // Hub API tree endpoint format: array of {"path": "...", "size": N} objects
+    // The path must be a full URL pointing back to the mock server so that
+    // remote_url_for_candidate returns the mock URL (not the real HF CDN).
+    let manifest_body = serde_json::json!([
+        {
+            "type": "file",
+            "path": format!("{base_url}/datasets/org/dataset/resolve/main/train/bootstrap.ndjson"),
+            "size": shard_payload.len()
+        }
+    ])
     .to_string();
     let handle = std::thread::spawn(move || {
         for _ in 0..max_accepts {
@@ -275,7 +280,7 @@ pub fn spawn_manifest_and_shard_http(
                     let read = stream.read(&mut request_buf).unwrap_or(0);
                     let request = String::from_utf8_lossy(&request_buf[..read]);
                     let first_line = request.lines().next().unwrap_or_default();
-                    let body = if first_line.contains("/parquet") {
+                    let body = if first_line.contains("/tree") {
                         manifest_counter_arc.fetch_add(1, Ordering::SeqCst);
                         manifest_body.as_bytes().to_vec()
                     } else {
