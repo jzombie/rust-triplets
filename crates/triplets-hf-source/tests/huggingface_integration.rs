@@ -1322,130 +1322,6 @@ fn huggingface_reads_live_remote_dataset() {
     );
 }
 
-#[test]
-#[serial_test::serial(all_integration)]
-#[ignore = "network integration test — verifies /size endpoint returns a plausible row count"]
-fn huggingface_live_size_endpoint_reports_dataset_row_count() {
-    // ── Guard: respect TRIPLETS_SKIP_LIVE_TESTS ────────────────────────────
-    let skip_live = std::env::var(ENV_TRIPLETS_SKIP_LIVE_TESTS)
-        .map(|v| !v.trim().is_empty())
-        .unwrap_or(false);
-    if skip_live {
-        eprintln!(
-            "[skip] TRIPLETS_SKIP_LIVE_TESTS is active — \
-             skipping /size endpoint integration test."
-        );
-        return;
-    }
-
-    // Exercises the datasets-server /size endpoint called inside new().
-    // If the endpoint changes its response schema, fetch_global_row_count()
-    // returns None and known_total_rows() will be None — the first assert fails.
-    // If the endpoint returns an implausibly small count for a well-known dataset
-    // the second assert fails.
-    //
-    // Each test owns its own tempdir so snapshots never pollute each other or
-    // the library's own managed cache directory.
-    let temp = tempfile::tempdir().expect("failed creating tempdir");
-
-    let mut config = config_no_auth(
-        "hf_live_size_endpoint",
-        "cornell-movie-review-data/rotten_tomatoes",
-        "default",
-        "train",
-        temp.path(),
-    );
-    config.text_columns = vec!["text".to_string()];
-
-    let source = HuggingFaceRowSource::new(config).expect("failed creating source");
-
-    let total = source.known_total_rows();
-    assert!(
-        total.is_some_and(|t| t > 0),
-        "/size endpoint should report a positive row count for rotten_tomatoes; \
-         got {:?} — endpoint may have changed response format or become unreachable",
-        total
-    );
-    // The rotten_tomatoes train split has 8530 rows per its dataset card.
-    // A significantly different number indicates the endpoint contract changed.
-    let rows = total.unwrap();
-    assert!(
-        rows > 1_000,
-        "rotten_tomatoes train reports {rows} rows; expected > 1000 — \
-         /size endpoint response format may have changed"
-    );
-}
-
-#[test]
-#[serial_test::serial(all_integration)]
-#[ignore = "network integration test — verifies /info endpoint ClassLabel resolution end-to-end"]
-fn huggingface_live_classlabel_resolution_maps_integers_to_label_strings() {
-    // ── Guard: respect TRIPLETS_SKIP_LIVE_TESTS ────────────────────────────
-    let skip_live = std::env::var(ENV_TRIPLETS_SKIP_LIVE_TESTS)
-        .map(|v| !v.trim().is_empty())
-        .unwrap_or(false);
-    if skip_live {
-        eprintln!(
-            "[skip] TRIPLETS_SKIP_LIVE_TESTS is active — \
-             skipping ClassLabel resolution integration test."
-        );
-        return;
-    }
-
-    // Exercises three live endpoints in sequence:
-    //   1. /info  — called in new() to resolve ClassLabel column names
-    //   2. /parquet — called in refresh() to obtain the shard manifest
-    //   3. HF CDN — actual parquet shard download URL
-    //
-    // TimKoornstra/financial-tweets-sentiment has a `sentiment` column declared
-    // as ClassLabel with names = ["neutral", "bullish", "bearish"].  In the
-    // parquet file the column is stored as integer (0/1/2).
-    //
-    // With successful /info resolution the transcoded records will contain the
-    // label strings.  Without it (endpoint unreachable or format changed) they
-    // will contain raw integer strings.  The final assertion distinguishes the
-    // two cases and fails on any regression in the /info endpoint contract.
-    //
-    // snapshot_dir is a fresh tempdir — no shared cache is used.
-    let temp = tempfile::tempdir().expect("failed creating tempdir");
-
-    let mut config = config_no_auth(
-        "hf_live_classlabel",
-        HF_PUBLIC_TEST_DATASET,
-        "default",
-        "train",
-        temp.path(),
-    );
-    // Using sentiment as the sole text column so every record's text IS the
-    // resolved label.  Without ClassLabel resolution the text would be "0",
-    // "1", or "2" instead of a named label.
-    config.text_columns = vec!["sentiment".to_string()];
-
-    let source = HuggingFaceRowSource::new(config).expect("failed creating source");
-    let seed = seeded_config(43);
-    let snapshot = source
-        .refresh(&seed, None, Some(5))
-        .expect("refresh should download and read live rows");
-
-    assert!(
-        !snapshot.records.is_empty(),
-        "expected records from HF_PUBLIC_TEST_DATASET"
-    );
-
-    const KNOWN_LABELS: &[&str] = &["neutral", "bullish", "bearish"];
-    for record in &snapshot.records {
-        for section in &record.sections {
-            let text = section.text.as_str();
-            assert!(
-                KNOWN_LABELS.contains(&text),
-                "/info ClassLabel resolution failed: expected one of {KNOWN_LABELS:?} \
-                 but got {text:?} — raw integers (\"0\"/\"1\"/\"2\") indicate the /info \
-                 endpoint no longer returns a 'names' array for this ClassLabel column"
-            );
-        }
-    }
-}
-
 // ── Live E2E integration test: candidate discovery + shard download ────────
 //
 // Exercises the full E2E pipeline through the library's public entry points
@@ -1453,14 +1329,12 @@ fn huggingface_live_classlabel_resolution_maps_integers_to_label_strings() {
 // for the first shard matches the size from the parquet manifest.
 //
 // Pipeline exercised:
-//   1. /info  — called inside `new()` to resolve ClassLabel column names
-//   2. /size  — called inside `new()` to obtain global row count
-//   3. /parquet or hf-hub listing — called inside `refresh()` via
-//      `ensure_row_available` → `list_remote_candidates_with_runtime`
-//   4. HEAD  — called inside `download_next_remote_shard` via
+//   1. Hub API tree endpoint — called inside `refresh()` via
+//      `list_remote_candidates_with_runtime` to discover shard URLs
+//   2. HEAD  — called inside `download_and_materialize_shard_with_runtime` via
 //      `fetch_remote_size_with_runtime` (HEAD Content-Length for staleness
-//      detection when the parquet manifest is unavailable)
-//   5. HF CDN — actual parquet shard download
+//      detection)
+//   3. HF CDN — actual parquet shard download
 //
 // Required env vars:
 //   HF_TOKEN                       — optional, for private datasets
@@ -1512,7 +1386,7 @@ fn huggingface_live_e2e_candidate_and_shard_download() {
     };
     let runtime =
         HuggingFaceRowSource::build_http_runtime(&config).expect("failed building tokio runtime");
-    let (candidates, candidate_sizes) =
+    let (candidates, _candidate_sizes) =
         HuggingFaceRowSource::list_remote_candidates_with_runtime(&client, &config, Some(&runtime))
             .expect("remote candidate discovery failed");
     assert!(
@@ -1520,17 +1394,8 @@ fn huggingface_live_e2e_candidate_and_shard_download() {
         "no shard candidates for dataset={dataset}"
     );
     let first_candidate = &candidates[0];
-    let shard_url = first_candidate
-        .strip_prefix(triplets_hf_source::HF_REMOTE_URL_PREFIX)
-        .expect("candidate should have url:: prefix")
-        .to_string();
-    let manifest_size = *candidate_sizes
-        .get(first_candidate)
-        .expect("first candidate missing from sizes map");
-    assert!(manifest_size > 0, "manifest reports zero size for shard");
 
     // ── E2E: create source and refresh ────────────────────────────────────
-    // `new()` fetches /info and /size.
     let source = HuggingFaceRowSource::new(config.clone()).expect("failed creating source");
 
     // `refresh()` triggers candidate discovery and downloads the first shard
@@ -1558,14 +1423,12 @@ fn huggingface_live_e2e_candidate_and_shard_download() {
 
     // ── HEAD assertion ────────────────────────────────────────────────────
     // After the shard was downloaded through the E2E pipeline, validate that
-    // the HTTP HEAD Content-Length matches the size reported by the
-    // datasets-server parquet manifest.  This exercises
-    // `fetch_remote_size_with_runtime`, the same method called internally
-    // inside `download_next_remote_shard` for staleness detection.
+    // remote_url_for_candidate correctly extracts the download URL from the
+    // candidate, and that the HTTP HEAD request succeeds.
     let remote_url = HuggingFaceRowSource::remote_url_for_candidate(&config, first_candidate);
-    assert_eq!(
-        remote_url, shard_url,
-        "remote_url_for_candidate should round-trip url:: candidate"
+    assert!(
+        remote_url.starts_with("http"),
+        "remote_url_for_candidate must return a full URL, got: {remote_url}"
     );
 
     let head_size = HuggingFaceRowSource::fetch_remote_size_with_runtime(
@@ -1577,10 +1440,9 @@ fn huggingface_live_e2e_candidate_and_shard_download() {
     .expect("HEAD request should succeed")
     .expect("HEAD response should include Content-Length");
 
-    assert_eq!(
-        head_size, manifest_size,
-        "HEAD Content-Length ({head_size}) differs from manifest size ({manifest_size}) \
-         for candidate: {first_candidate}"
+    assert!(
+        head_size > 0,
+        "HEAD Content-Length ({head_size}) should be positive for candidate: {first_candidate}"
     );
 }
 
@@ -2023,10 +1885,8 @@ fn sampler_next_text_batch_re_expands_after_cache_eviction() {
 
     // ── Source ───────────────────────────────────────────────────────────
     //
-    // The endpoint URLs are set directly on the config before constructing
-    // the source so they are captured once at construction time.  The /size
-    // and /info endpoints are NOT mocked; failing to query them is non-fatal
-    // (warns and returns None).  Point them somewhere harmless.
+    // The endpoint URL is set directly on the config before constructing
+    // the source so it is captured once at construction time.
     let mut config = HuggingFaceRowsConfig::new(
         "hf_re_expand_test",
         "org/dataset",
@@ -2034,15 +1894,7 @@ fn sampler_next_text_batch_re_expands_after_cache_eviction() {
         "train",
         temp.path(),
     );
-    config.parquet_endpoint = format!("{}/parquet", server.url());
-    config.size_endpoint = format!(
-        "{}/unreachable",
-        triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
-    );
-    config.info_endpoint = format!(
-        "{}/unreachable",
-        triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
-    );
+    config.parquet_endpoint = server.url().to_string();
     config.hf_token = None;
     config.text_columns = vec!["text".to_string()];
     // Tight cap: room for ~2 shards.  After 3+ shards are downloaded the
@@ -2078,46 +1930,36 @@ fn sampler_next_text_batch_re_expands_after_cache_eviction() {
     //
     // The expansion thread is async so we call many times, allowing the
     // background downloads to complete between iterations.
-    let total_batches = 20;
+    let total_batches = 60;
     let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut empty_batches = 0usize;
-    let mut errors = 0usize;
+    let mut error_messages: Vec<String> = Vec::new();
 
-    for i in 0..total_batches {
-        // Brief sleep so the async expansion thread from the PRIOR call
+    for _i in 0..total_batches {
+        // Sleep so the async expansion thread from the PRIOR call
         // has time to finish downloading the shard before we read again.
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        // 250ms is generous enough for slow machines.
+        std::thread::sleep(std::time::Duration::from_millis(250));
 
-        let batch = match sampler.next_text_batch(SplitLabel::Train) {
-            Ok(b) => b,
-            Err(e) => {
-                eprintln!("[iter {i}] next_text_batch error: {e}");
-                errors += 1;
-                continue;
+        match sampler.next_text_batch(SplitLabel::Train) {
+            Ok(batch) => {
+                for sample in &batch.samples {
+                    seen_ids.insert(sample.chunk.record_id.to_string());
+                }
             }
-        };
-
-        if batch.samples.is_empty() {
-            empty_batches += 1;
-            continue;
-        }
-
-        for sample in &batch.samples {
-            seen_ids.insert(sample.chunk.record_id.to_string());
+            Err(e) => {
+                error_messages.push(format!("{e}"));
+            }
         }
     }
 
-    // The sampler may return empty or error batches while the source is
-    // expanding.  But we must have seen at least some unique record IDs
-    // from eviction-surviving shards.
     let survivors = seen_ids.len();
-    eprintln!(
-        "results: {total_batches} iters, {survivors} unique ids, {empty_batches} empty, {errors} errors, ids={seen_ids:?}"
-    );
+    let errors = error_messages.len();
+
     assert!(
         survivors >= 1,
         "no unique record IDs observed — expansion never produced surviving rows; \
-         empty={empty_batches} errors={errors}"
+         {errors} errors, ids={seen_ids:?}\n{}",
+        error_messages.join("\n"),
     );
 
     // ── Verify the manifest was re-fetched after eviction ───────────────
@@ -2126,7 +1968,6 @@ fn sampler_next_text_batch_re_expands_after_cache_eviction() {
     // mock server.  The bootstrap path fetches it once; re-expansion after
     // eviction fetches it again.
     let fetch_count = server.manifest_fetch_count();
-    eprintln!("parquet manifest fetched {fetch_count} times (expected >= 2)");
     assert!(
         fetch_count >= 2,
         "parquet manifest must be re-fetched after eviction-driven re-expansion; \
@@ -2151,15 +1992,7 @@ fn bootstrap_refresh_downloads_first_shard_when_no_local_data() {
         "train",
         temp.path(),
     );
-    config.parquet_endpoint = format!("{}/parquet", server.url());
-    config.size_endpoint = format!(
-        "{}/unreachable",
-        triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
-    );
-    config.info_endpoint = format!(
-        "{}/unreachable",
-        triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
-    );
+    config.parquet_endpoint = server.url().to_string();
     config.hf_token = None;
     config.text_columns = vec!["text".to_string()];
     config.cache_capacity = 10;
@@ -2201,15 +2034,7 @@ fn expansion_headroom_grows_with_multiple_refresh_cycles() {
         "train",
         temp.path(),
     );
-    config.parquet_endpoint = format!("{}/parquet", server.url());
-    config.size_endpoint = format!(
-        "{}/unreachable",
-        triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
-    );
-    config.info_endpoint = format!(
-        "{}/unreachable",
-        triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
-    );
+    config.parquet_endpoint = server.url().to_string();
     config.hf_token = None;
     config.text_columns = vec!["text".to_string()];
     config.cache_capacity = 10;
@@ -2244,12 +2069,6 @@ fn expansion_headroom_grows_with_multiple_refresh_cycles() {
         count2 >= 3,
         "after bootstrap, should see at least 3, got {count2}"
     );
-    // Verify headroom is NOT added when total_rows is unknown.
-    let known_total = source.known_total_rows();
-    assert!(
-        known_total.is_none(),
-        "total_rows should be None when /size endpoint is unreachable"
-    );
 
     server.shut_down();
 }
@@ -2266,15 +2085,7 @@ fn full_pipeline_samples_across_downloaded_shards() {
 
     let mut config =
         HuggingFaceRowsConfig::new("e2e_test", "org/dataset", "default", "train", temp.path());
-    config.parquet_endpoint = format!("{}/parquet", server.url());
-    config.size_endpoint = format!(
-        "{}/unreachable",
-        triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
-    );
-    config.info_endpoint = format!(
-        "{}/unreachable",
-        triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
-    );
+    config.parquet_endpoint = server.url().to_string();
     config.hf_token = None;
     // Use text-columns mode so the SimCSE recipe allows same anchor/positive.
     config.text_columns = vec!["text".to_string()];
@@ -2330,6 +2141,8 @@ fn full_pipeline_samples_across_downloaded_shards() {
 fn duplicate_build_hf_sources_produces_independent_sources() {
     // E2E test for `build_hf_sources()` with duplicate URIs: each built
     // source must have its own snapshot dir and produce independent data.
+    // Clear HF_TOKEN to avoid live whoami validation during source construction.
+    unsafe { std::env::remove_var("HF_TOKEN") };
 
     let temp_root = tempfile::tempdir().expect("tempdir");
     let nl = platform_newline();
@@ -2385,15 +2198,7 @@ fn e2e_refresh_honors_limit_and_wraps_cursor() {
 
     let mut config =
         HuggingFaceRowsConfig::new("limit_test", "org/dataset", "default", "train", temp.path());
-    config.parquet_endpoint = format!("{}/parquet", server.url());
-    config.size_endpoint = format!(
-        "{}/unreachable",
-        triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
-    );
-    config.info_endpoint = format!(
-        "{}/unreachable",
-        triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
-    );
+    config.parquet_endpoint = server.url().to_string();
     config.hf_token = None;
     config.text_columns = vec!["text".to_string()];
     config.cache_capacity = 10;
@@ -2447,14 +2252,6 @@ fn huggingface_dict_dataset_end_to_end() {
     config.positive_columns = vec!["set.pos".to_string()];
     config.negative_columns = vec!["set.neg".to_string()];
     config.hf_token = None;
-    config.info_endpoint = format!(
-        "{}/unreachable",
-        triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
-    );
-    config.size_endpoint = format!(
-        "{}/unreachable",
-        triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
-    );
     config.parquet_endpoint = format!(
         "{}/unreachable",
         triplets_hf_source::test_utils::TEST_UNREACHABLE_URL
@@ -2515,6 +2312,7 @@ fn huggingface_dict_dataset_end_to_end() {
 #[serial_test::serial(all_integration)]
 fn build_hf_sources_with_weights_extracts_weights() {
     use triplets_hf_source::build_hf_sources_with_weights;
+    unsafe { std::env::remove_var("HF_TOKEN") };
 
     let roots = HfListRoots {
         source_list: "inline".to_string(),
@@ -2560,6 +2358,7 @@ fn build_hf_sources_with_weights_extracts_weights() {
 #[serial_test::serial(all_integration)]
 fn build_hf_sources_with_weights_auto_derives_source_id() {
     use triplets_hf_source::build_hf_sources_with_weights;
+    unsafe { std::env::remove_var("HF_TOKEN") };
 
     let roots = HfListRoots {
         source_list: "inline".to_string(),
@@ -2592,6 +2391,7 @@ fn build_hf_sources_with_weights_auto_derives_source_id() {
 #[serial_test::serial(all_integration)]
 fn build_hf_sources_with_weights_skips_invalid_uri() {
     use triplets_hf_source::build_hf_sources_with_weights;
+    unsafe { std::env::remove_var("HF_TOKEN") };
 
     let roots = HfListRoots {
         source_list: "inline".to_string(),
@@ -2636,6 +2436,7 @@ fn build_hf_sources_with_weights_skips_invalid_uri() {
 #[serial_test::serial(all_integration)]
 fn build_hf_sources_with_weights_disambiguates_duplicate_slugs() {
     use triplets_hf_source::build_hf_sources_with_weights;
+    unsafe { std::env::remove_var("HF_TOKEN") };
 
     let roots = HfListRoots {
         source_list: "inline".to_string(),

@@ -18,7 +18,6 @@ keywords = [
 [dependencies]
 cache-manager = { workspace = true }
 chrono = { workspace = true }
-hf-hub = { workspace = true }
 parquet = { workspace = true }
 rayon = { workspace = true }
 reqwest = { workspace = true }
