@@ -69,7 +69,9 @@ jobs:
         steps:
             - uses: actions/checkout@v6
 
-            - uses: dtolnay/rust-toolchain@stable
+            - uses: dtolnay/rust-toolchain@master
+              with:
+                  toolchain: nightly-2026-07-10
 
             # Workaround for macOS error when using `hashFiles`:
             # "Error: The template is not valid....Fail to hash files under directory"
@@ -157,7 +159,9 @@ jobs:
         steps:
             - uses: actions/checkout@v6
 
-            - uses: dtolnay/rust-toolchain@stable
+            - uses: dtolnay/rust-toolchain@master
+              with:
+                  toolchain: nightly-2026-07-10
 
             - name: Install rustfmt/clippy
               run: rustup component add rustfmt clippy
