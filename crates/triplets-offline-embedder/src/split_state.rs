@@ -1214,11 +1214,31 @@ mod tests {
         let config = SchedulerConfig::new(5, 2, 4, 100);
 
         let batch = SamplerBatch::Triplets(vec![
-            TripletEntry { anchor_text: "a1".into(), pos_text: "p1".into(), neg_text: "n1".into() },
-            TripletEntry { anchor_text: "a2".into(), pos_text: "p2".into(), neg_text: "n2".into() },
-            TripletEntry { anchor_text: "a3".into(), pos_text: "p3".into(), neg_text: "n3".into() },
-            TripletEntry { anchor_text: "a4".into(), pos_text: "p4".into(), neg_text: "n4".into() },
-            TripletEntry { anchor_text: "a5".into(), pos_text: "p5".into(), neg_text: "n5".into() },
+            TripletEntry {
+                anchor_text: "a1".into(),
+                pos_text: "p1".into(),
+                neg_text: "n1".into(),
+            },
+            TripletEntry {
+                anchor_text: "a2".into(),
+                pos_text: "p2".into(),
+                neg_text: "n2".into(),
+            },
+            TripletEntry {
+                anchor_text: "a3".into(),
+                pos_text: "p3".into(),
+                neg_text: "n3".into(),
+            },
+            TripletEntry {
+                anchor_text: "a4".into(),
+                pos_text: "p4".into(),
+                neg_text: "n4".into(),
+            },
+            TripletEntry {
+                anchor_text: "a5".into(),
+                pos_text: "p5".into(),
+                neg_text: "n5".into(),
+            },
         ]);
 
         let result = state.step(batch, &embedder, &config).unwrap();
@@ -1242,7 +1262,10 @@ mod tests {
             let expected_neg_id: f32 = neg_text.chars().map(|c| c as u32 as f32).sum();
 
             assert_eq!(at[i], anchor_text, "anchor text mismatch at {i}");
-            assert_eq!(av[i][0], expected_anchor_id, "anchor vec text_id mismatch at {i}");
+            assert_eq!(
+                av[i][0], expected_anchor_id,
+                "anchor vec text_id mismatch at {i}"
+            );
             assert_eq!(pt[i], pos_text, "pos text mismatch at {i}");
             assert_eq!(pv[i][0], expected_pos_id, "pos vec text_id mismatch at {i}");
             assert_eq!(nt[i], neg_text, "neg text mismatch at {i}");

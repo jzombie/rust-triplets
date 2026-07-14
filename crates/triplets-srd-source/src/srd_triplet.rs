@@ -404,7 +404,8 @@ pub fn write_pair_entries(
     let mut key_bufs: Vec<[u8; 8]> = Vec::with_capacity(entries.len());
     let mut value_bufs: Vec<Vec<u8>> = Vec::with_capacity(entries.len());
     for (i, entry) in entries.iter().enumerate() {
-        let same = entry.anchor_vec == entry.candidate_vec && entry.anchor_text == entry.candidate_text;
+        let same =
+            entry.anchor_vec == entry.candidate_vec && entry.anchor_text == entry.candidate_text;
         key_bufs.push((start_idx + i as u64).to_le_bytes());
         value_bufs.push(encode_entry(&SrdEntry {
             mode: SrdMode::Pair,
@@ -511,49 +512,51 @@ pub fn batch_read_entries(
 mod tests {
     use super::*;
 
-/// Helper to create an SrdPairWriteEntry slice for tests.
-fn make_pair_entries<'a>(
-    a_vecs: &'a [Vec<f32>],
-    a_texts: &'a [&'a str],
-    p_vecs: &'a [Vec<f32>],
-    p_texts: &'a [&'a str],
-) -> Vec<SrdPairWriteEntry<'a>> {
-    a_vecs.iter()
-        .zip(a_texts.iter())
-        .zip(p_vecs.iter().zip(p_texts.iter()))
-        .map(|((av, at), (pv, pt))| SrdPairWriteEntry {
-            anchor_vec: av,
-            anchor_text: at,
-            candidate_vec: pv,
-            candidate_text: pt,
-            label: &PairLabel::Positive,
-        })
-        .collect()
-}
+    /// Helper to create an SrdPairWriteEntry slice for tests.
+    fn make_pair_entries<'a>(
+        a_vecs: &'a [Vec<f32>],
+        a_texts: &'a [&'a str],
+        p_vecs: &'a [Vec<f32>],
+        p_texts: &'a [&'a str],
+    ) -> Vec<SrdPairWriteEntry<'a>> {
+        a_vecs
+            .iter()
+            .zip(a_texts.iter())
+            .zip(p_vecs.iter().zip(p_texts.iter()))
+            .map(|((av, at), (pv, pt))| SrdPairWriteEntry {
+                anchor_vec: av,
+                anchor_text: at,
+                candidate_vec: pv,
+                candidate_text: pt,
+                label: &PairLabel::Positive,
+            })
+            .collect()
+    }
 
-/// Helper to create an SrdTripletWriteEntry slice for tests.
-fn make_triplet_entries<'a>(
-    a_vecs: &'a [Vec<f32>],
-    a_texts: &'a [&'a str],
-    p_vecs: &'a [Vec<f32>],
-    p_texts: &'a [&'a str],
-    n_vecs: &'a [Vec<f32>],
-    n_texts: &'a [&'a str],
-) -> Vec<SrdTripletWriteEntry<'a>> {
-    a_vecs.iter()
-        .zip(a_texts.iter())
-        .zip(p_vecs.iter().zip(p_texts.iter()))
-        .zip(n_vecs.iter().zip(n_texts.iter()))
-        .map(|(((av, at), (pv, pt)), (nv, nt))| SrdTripletWriteEntry {
-            anchor_vec: av,
-            anchor_text: at,
-            pos_vec: pv,
-            pos_text: pt,
-            neg_vec: nv,
-            neg_text: nt,
-        })
-        .collect()
-}
+    /// Helper to create an SrdTripletWriteEntry slice for tests.
+    fn make_triplet_entries<'a>(
+        a_vecs: &'a [Vec<f32>],
+        a_texts: &'a [&'a str],
+        p_vecs: &'a [Vec<f32>],
+        p_texts: &'a [&'a str],
+        n_vecs: &'a [Vec<f32>],
+        n_texts: &'a [&'a str],
+    ) -> Vec<SrdTripletWriteEntry<'a>> {
+        a_vecs
+            .iter()
+            .zip(a_texts.iter())
+            .zip(p_vecs.iter().zip(p_texts.iter()))
+            .zip(n_vecs.iter().zip(n_texts.iter()))
+            .map(|(((av, at), (pv, pt)), (nv, nt))| SrdTripletWriteEntry {
+                anchor_vec: av,
+                anchor_text: at,
+                pos_vec: pv,
+                pos_text: pt,
+                neg_vec: nv,
+                neg_text: nt,
+            })
+            .collect()
+    }
     use tempfile::TempDir;
 
     // -----------------------------------------------------------------------
@@ -971,7 +974,8 @@ fn make_triplet_entries<'a>(
         let a_refs: Vec<&str> = all_a_text.iter().map(|s| s.as_str()).collect();
         let p_refs: Vec<&str> = all_p_text.iter().map(|s| s.as_str()).collect();
 
-        let pair_entries = make_pair_entries(&all_a_emb, &a_refs, &all_p_emb, &p_refs); write_pair_entries(&store, 0, pair_entries.as_slice()).unwrap();
+        let pair_entries = make_pair_entries(&all_a_emb, &a_refs, &all_p_emb, &p_refs);
+        write_pair_entries(&store, 0, pair_entries.as_slice()).unwrap();
         assert_eq!(store.len().unwrap(), n);
 
         let indices: Vec<usize> = (0..n).collect();
@@ -1005,7 +1009,8 @@ fn make_triplet_entries<'a>(
         let p_refs: Vec<&str> = p_text.iter().map(|s| s.as_str()).collect();
         let n_refs: Vec<&str> = n_text.iter().map(|s| s.as_str()).collect();
 
-        let trip_entries = make_triplet_entries(&a_emb, &a_refs, &p_emb, &p_refs, &n_emb, &n_refs); write_triplet_entries(&store, 0, trip_entries.as_slice()).unwrap();
+        let trip_entries = make_triplet_entries(&a_emb, &a_refs, &p_emb, &p_refs, &n_emb, &n_refs);
+        write_triplet_entries(&store, 0, trip_entries.as_slice()).unwrap();
         assert_eq!(store.len().unwrap(), n);
 
         let indices: Vec<usize> = (0..n).collect();
@@ -1035,7 +1040,8 @@ fn make_triplet_entries<'a>(
         let vecs: Vec<Vec<f32>> = (0..10).map(|i| vec![i as f32]).collect();
         let texts: Vec<String> = (0..10).map(|i| format!("t{i}")).collect();
         let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
-        let pair_entries = make_pair_entries(&vecs, &refs, &vecs, &refs); write_pair_entries(&store, 0, pair_entries.as_slice()).unwrap();
+        let pair_entries = make_pair_entries(&vecs, &refs, &vecs, &refs);
+        write_pair_entries(&store, 0, pair_entries.as_slice()).unwrap();
 
         let entries = batch_read_entries(&store, &[0, 5, 9], 1).unwrap();
         assert_eq!(entries.len(), 3);
@@ -1059,7 +1065,8 @@ fn make_triplet_entries<'a>(
 
         let vecs = vec![vec![1.0], vec![2.0]];
         let texts = vec!["a", "b"];
-        let pair_entries = make_pair_entries(&vecs, &texts, &vecs, &texts); write_pair_entries(&store, 0, pair_entries.as_slice()).unwrap();
+        let pair_entries = make_pair_entries(&vecs, &texts, &vecs, &texts);
+        write_pair_entries(&store, 0, pair_entries.as_slice()).unwrap();
 
         // Index 99 doesn't exist — should be skipped
         let entries = batch_read_entries(&store, &[0, 99], 1).unwrap();
@@ -1075,42 +1082,75 @@ fn make_triplet_entries<'a>(
     fn validate_write_batch_ok() {
         let vecs = vec![vec![1.0, 2.0], vec![3.0, 4.0]];
         let texts = vec!["hello", "world"];
-        assert!(validate_write_batch(vecs.iter().zip(texts.iter()).map(|(v,t)| (v.as_slice(), *t))).is_ok());
+        assert!(
+            validate_write_batch(
+                vecs.iter()
+                    .zip(texts.iter())
+                    .map(|(v, t)| (v.as_slice(), *t))
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn validate_write_batch_empty() {
         let vecs: Vec<Vec<f32>> = vec![];
         let texts: Vec<&str> = vec![];
-        assert!(validate_write_batch(vecs.iter().zip(texts.iter()).map(|(v,t)| (v.as_slice(), *t))).is_ok());
+        assert!(
+            validate_write_batch(
+                vecs.iter()
+                    .zip(texts.iter())
+                    .map(|(v, t)| (v.as_slice(), *t))
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn validate_write_batch_non_finite() {
         let vecs = vec![vec![1.0, f32::NAN]];
         let texts = vec!["hello"];
-        assert!(validate_write_batch(vecs.iter().zip(texts.iter()).map(|(v,t)| (v.as_slice(), *t))).is_err());
+        assert!(
+            validate_write_batch(
+                vecs.iter()
+                    .zip(texts.iter())
+                    .map(|(v, t)| (v.as_slice(), *t))
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn validate_write_batch_inconsistent_dim() {
         let vecs = vec![vec![1.0, 2.0], vec![3.0]];
         let texts = vec!["hello", "world"];
-        assert!(validate_write_batch(vecs.iter().zip(texts.iter()).map(|(v,t)| (v.as_slice(), *t))).is_err());
+        assert!(
+            validate_write_batch(
+                vecs.iter()
+                    .zip(texts.iter())
+                    .map(|(v, t)| (v.as_slice(), *t))
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn validate_write_batch_zero_dim() {
         let vecs = vec![vec![]];
         let texts = vec!["hello"];
-        assert!(validate_write_batch(vecs.iter().zip(texts.iter()).map(|(v,t)| (v.as_slice(), *t))).is_err());
+        assert!(
+            validate_write_batch(
+                vecs.iter()
+                    .zip(texts.iter())
+                    .map(|(v, t)| (v.as_slice(), *t))
+            )
+            .is_err()
+        );
     }
 
     // -----------------------------------------------------------------------
     // write_pair_entries / write_triplet_entries validation
     // -----------------------------------------------------------------------
-
-
 
     #[test]
     fn write_pair_entries_correct_start_idx() {
@@ -1120,12 +1160,14 @@ fn make_triplet_entries<'a>(
         // Write first batch at idx 0
         let vecs1 = vec![vec![1.0], vec![2.0]];
         let texts1 = vec!["a", "b"];
-        let pair_entries = make_pair_entries(&vecs1, &texts1, &vecs1, &texts1); write_pair_entries(&store, 0, pair_entries.as_slice()).unwrap();
+        let pair_entries = make_pair_entries(&vecs1, &texts1, &vecs1, &texts1);
+        write_pair_entries(&store, 0, pair_entries.as_slice()).unwrap();
 
         // Write second batch at idx 2
         let vecs2 = vec![vec![3.0]];
         let texts2 = vec!["c"];
-        let pair_entries = make_pair_entries(&vecs2, &texts2, &vecs2, &texts2); write_pair_entries(&store, 2, pair_entries.as_slice()).unwrap();
+        let pair_entries = make_pair_entries(&vecs2, &texts2, &vecs2, &texts2);
+        write_pair_entries(&store, 2, pair_entries.as_slice()).unwrap();
 
         assert_eq!(store.len().unwrap(), 3);
 
@@ -1146,7 +1188,8 @@ fn make_triplet_entries<'a>(
 
         let vecs = vec![vec![1.0, 2.0]];
         let texts = vec!["first"];
-        let pair_entries = make_pair_entries(&vecs, &texts, &vecs, &texts); write_pair_entries(&store, 5, pair_entries.as_slice()).unwrap();
+        let pair_entries = make_pair_entries(&vecs, &texts, &vecs, &texts);
+        write_pair_entries(&store, 5, pair_entries.as_slice()).unwrap();
 
         let entries = batch_read_entries(&store, &[5], 2).unwrap();
         assert_eq!(entries.len(), 1);
@@ -1167,12 +1210,14 @@ fn make_triplet_entries<'a>(
         let p_vecs = vec![vec![1.0, 2.0], vec![30.0, 40.0]]; // different emb for diff entry
         let a_texts = vec!["same", "diff_a"];
         let p_texts = vec!["same", "diff_p"];
-        let pair_entries = make_pair_entries(&a_vecs, &a_texts, &p_vecs, &p_texts); write_pair_entries(&store, 0, pair_entries.as_slice()).unwrap();
+        let pair_entries = make_pair_entries(&a_vecs, &a_texts, &p_vecs, &p_texts);
+        write_pair_entries(&store, 0, pair_entries.as_slice()).unwrap();
 
         // Batch B: entry 2 same_as_anchor=false, entry 3 same_as_anchor=true
         let b_vecs = vec![vec![5.0, 6.0], vec![7.0, 8.0]];
         let b_texts = vec!["batch_b_0", "batch_b_1"];
-        let pair_entries = make_pair_entries(&b_vecs, &b_texts, &b_vecs, &b_texts); write_pair_entries(&store, 2, pair_entries.as_slice()).unwrap();
+        let pair_entries = make_pair_entries(&b_vecs, &b_texts, &b_vecs, &b_texts);
+        write_pair_entries(&store, 2, pair_entries.as_slice()).unwrap();
 
         assert_eq!(store.len().unwrap(), 4);
 
@@ -1225,7 +1270,11 @@ fn make_triplet_entries<'a>(
         let a_p_texts = vec!["p0", "a1"]; // entry 1 pos same as anchor
         let a_n_texts = vec!["n0", "n1"];
         write_triplet_entries(
-            &store, 0, &make_triplet_entries(&a_a_vecs, &a_a_texts, &a_p_vecs, &a_p_texts, &a_n_vecs, &a_n_texts),
+            &store,
+            0,
+            &make_triplet_entries(
+                &a_a_vecs, &a_a_texts, &a_p_vecs, &a_p_texts, &a_n_vecs, &a_n_texts,
+            ),
         )
         .unwrap();
 
@@ -1235,7 +1284,11 @@ fn make_triplet_entries<'a>(
         let b_p_texts = vec!["all_same"];
         let b_n_texts = vec!["all_same"];
         write_triplet_entries(
-            &store, 2, &make_triplet_entries(&b_a_vecs, &b_a_texts, &b_a_vecs, &b_p_texts, &b_a_vecs, &b_n_texts),
+            &store,
+            2,
+            &make_triplet_entries(
+                &b_a_vecs, &b_a_texts, &b_a_vecs, &b_p_texts, &b_a_vecs, &b_n_texts,
+            ),
         )
         .unwrap();
 

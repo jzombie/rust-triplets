@@ -617,12 +617,7 @@ fn adapter_roundtrip_through_split_state() {
             .collect();
         states[0]
             .store
-            .write_pairs(
-                0,
-                &PairWriteArgs {
-                    entries: &entries,
-                },
-            )
+            .write_pairs(0, &PairWriteArgs { entries: &entries })
             .unwrap();
         assert_eq!(states[0].store.len().unwrap(), 4);
     }

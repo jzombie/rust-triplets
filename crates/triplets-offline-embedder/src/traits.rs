@@ -1,7 +1,7 @@
 use std::fmt;
 
-use triplets_core::data::PairLabel;
 use triplets_core::SplitLabel;
+use triplets_core::data::PairLabel;
 
 use triplets_srd_source::srd_triplet::{SrdPairWriteEntry, SrdTripletWriteEntry};
 

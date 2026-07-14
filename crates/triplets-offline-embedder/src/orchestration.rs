@@ -2,8 +2,8 @@
 //! [`SplitScheduler`], and [`SplitState`] operations.
 
 use crate::split_scheduler::SplitScheduler;
-use crate::split_state::{PendingState, SplitState};
 use crate::split_state::flush_pending;
+use crate::split_state::{PendingState, SplitState};
 use crate::traits::{BatchProvider, EmbedStore, Result};
 
 /// Marks `state` as exhausted, flushes its pending buffer, and unlocks the

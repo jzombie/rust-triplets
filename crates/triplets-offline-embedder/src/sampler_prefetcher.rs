@@ -70,7 +70,10 @@ impl<P: BatchProvider + 'static> SamplerPrefetcher<P> {
 
                     match provider_clone.next_batch(split) {
                         Ok(Some(batch)) => {
-                            if match &batch { SamplerBatch::Pairs(v) => v.is_empty(), SamplerBatch::Triplets(v) => v.is_empty() } {
+                            if match &batch {
+                                SamplerBatch::Pairs(v) => v.is_empty(),
+                                SamplerBatch::Triplets(v) => v.is_empty(),
+                            } {
                                 let _ = tx.send(Err(SchedulerError::Msg("exhausted".into())));
                                 break;
                             }
@@ -209,7 +212,10 @@ mod tests {
             },
         ];
         let pair_entries = filter_pair_batch(&pairs);
-        let (anchors, positions): (Vec<_>, Vec<_>) = pair_entries.into_iter().map(|e| (e.anchor_text, e.candidate_text)).unzip();
+        let (anchors, positions): (Vec<_>, Vec<_>) = pair_entries
+            .into_iter()
+            .map(|e| (e.anchor_text, e.candidate_text))
+            .unzip();
         assert_eq!(anchors, vec!["hello"]);
         assert_eq!(positions, vec!["world"]);
     }
@@ -245,14 +251,25 @@ mod tests {
 
     #[test]
     fn prefetcher_returns_batches_then_exhausted() {
-        let batch = SamplerBatch::Pairs(vec!["a".into()].into_iter().zip(vec!["p".into()].into_iter()).map(|(a, c)| PairEntry { anchor_text: a, candidate_text: c, label: PairLabel::Positive }).collect());
+        let batch = SamplerBatch::Pairs(
+            vec!["a".into()]
+                .into_iter()
+                .zip(vec!["p".into()].into_iter())
+                .map(|(a, c)| PairEntry {
+                    anchor_text: a,
+                    candidate_text: c,
+                    label: PairLabel::Positive,
+                })
+                .collect(),
+        );
         let provider = Arc::new(MockProvider::new(vec![batch]));
         let prefetcher = SamplerPrefetcher::new(provider, SplitLabel::Train, 4);
 
         let result = prefetcher.next().unwrap();
         match result {
             SamplerBatch::Pairs(pairs) => {
-                let anchor_texts: Vec<&str> = pairs.iter().map(|e| e.anchor_text.as_str()).collect();
+                let anchor_texts: Vec<&str> =
+                    pairs.iter().map(|e| e.anchor_text.as_str()).collect();
                 assert_eq!(anchor_texts, vec!["a"]);
             }
             _ => panic!("expected Pairs batch"),
@@ -278,7 +295,10 @@ mod tests {
             reason: None,
         }];
         let pair_entries = filter_pair_batch(&pairs);
-        let (anchors, positions): (Vec<_>, Vec<_>) = pair_entries.into_iter().map(|e| (e.anchor_text, e.candidate_text)).unzip();
+        let (anchors, positions): (Vec<_>, Vec<_>) = pair_entries
+            .into_iter()
+            .map(|e| (e.anchor_text, e.candidate_text))
+            .unzip();
         assert!(anchors.is_empty());
         assert!(positions.is_empty());
     }
@@ -295,7 +315,10 @@ mod tests {
             reason: None,
         }];
         let pair_entries = filter_pair_batch(&pairs);
-        let (anchors, positions): (Vec<_>, Vec<_>) = pair_entries.into_iter().map(|e| (e.anchor_text, e.candidate_text)).unzip();
+        let (anchors, positions): (Vec<_>, Vec<_>) = pair_entries
+            .into_iter()
+            .map(|e| (e.anchor_text, e.candidate_text))
+            .unzip();
         assert!(anchors.is_empty());
         assert!(positions.is_empty());
     }
@@ -323,7 +346,10 @@ mod tests {
             },
         ];
         let pair_entries = filter_pair_batch(&pairs);
-        let (anchors, positions): (Vec<_>, Vec<_>) = pair_entries.into_iter().map(|e| (e.anchor_text, e.candidate_text)).unzip();
+        let (anchors, positions): (Vec<_>, Vec<_>) = pair_entries
+            .into_iter()
+            .map(|e| (e.anchor_text, e.candidate_text))
+            .unzip();
         assert_eq!(anchors, vec!["a1", "a2"]);
         assert_eq!(positions, vec!["p1", "p2"]);
     }
@@ -332,7 +358,10 @@ mod tests {
     fn filter_pair_batch_empty_input() {
         let pairs: Vec<SamplePair> = vec![];
         let pair_entries = filter_pair_batch(&pairs);
-        let (anchors, positions): (Vec<_>, Vec<_>) = pair_entries.into_iter().map(|e| (e.anchor_text, e.candidate_text)).unzip();
+        let (anchors, positions): (Vec<_>, Vec<_>) = pair_entries
+            .into_iter()
+            .map(|e| (e.anchor_text, e.candidate_text))
+            .unzip();
         assert!(anchors.is_empty());
         assert!(positions.is_empty());
     }
@@ -444,7 +473,17 @@ mod tests {
         use std::time::Duration;
 
         // Provider that returns 3 batches then exhausted.
-        let batch = SamplerBatch::Pairs(vec!["a".into()].into_iter().zip(vec!["p".into()].into_iter()).map(|(a, c)| PairEntry { anchor_text: a, candidate_text: c, label: PairLabel::Positive }).collect());
+        let batch = SamplerBatch::Pairs(
+            vec!["a".into()]
+                .into_iter()
+                .zip(vec!["p".into()].into_iter())
+                .map(|(a, c)| PairEntry {
+                    anchor_text: a,
+                    candidate_text: c,
+                    label: PairLabel::Positive,
+                })
+                .collect(),
+        );
         let provider = Arc::new(MockProvider::new(vec![batch.clone(), batch.clone(), batch]));
         let prefetcher = SamplerPrefetcher::new(provider, SplitLabel::Train, 4);
 

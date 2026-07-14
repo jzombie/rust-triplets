@@ -245,7 +245,10 @@ where
             }
         };
 
-        if match &batch { SamplerBatch::Pairs(v) => v.is_empty(), SamplerBatch::Triplets(v) => v.is_empty() } {
+        if match &batch {
+            SamplerBatch::Pairs(v) => v.is_empty(),
+            SamplerBatch::Triplets(v) => v.is_empty(),
+        } {
             handler.handle_event(&LoopEvent::Exhausted { name: s.name });
             handle_split_exhausted(s, provider, &mut scheduler)?;
             continue;
@@ -341,8 +344,8 @@ mod tests {
     use crate::sampler_prefetcher::SamplerPrefetcher;
     use crate::split_state::EmbedMode;
     use crate::traits::{PairEntry, PairWriteArgs, SamplerBatch, SchedulerError, TripletWriteArgs};
-    use triplets_core::data::PairLabel;
     use std::sync::Arc;
+    use triplets_core::data::PairLabel;
 
     // -- Mock types --
 

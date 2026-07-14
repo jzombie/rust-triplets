@@ -184,51 +184,53 @@ impl DataSource for SrdSource {
 mod tests {
     use super::*;
 
-use crate::srd_triplet::{SrdPairWriteEntry, SrdTripletWriteEntry};
+    use crate::srd_triplet::{SrdPairWriteEntry, SrdTripletWriteEntry};
 
-/// Helper to create an SrdPairWriteEntry slice for tests.
-fn make_pair_entries<'a>(
-    a_vecs: &'a [Vec<f32>],
-    a_texts: &'a [&'a str],
-    p_vecs: &'a [Vec<f32>],
-    p_texts: &'a [&'a str],
-) -> Vec<SrdPairWriteEntry<'a>> {
-    a_vecs.iter()
-        .zip(a_texts.iter())
-        .zip(p_vecs.iter().zip(p_texts.iter()))
-        .map(|((av, at), (pv, pt))| SrdPairWriteEntry {
-            anchor_vec: av,
-            anchor_text: at,
-            candidate_vec: pv,
-            candidate_text: pt,
-            label: &PairLabel::Positive,
-        })
-        .collect()
-}
+    /// Helper to create an SrdPairWriteEntry slice for tests.
+    fn make_pair_entries<'a>(
+        a_vecs: &'a [Vec<f32>],
+        a_texts: &'a [&'a str],
+        p_vecs: &'a [Vec<f32>],
+        p_texts: &'a [&'a str],
+    ) -> Vec<SrdPairWriteEntry<'a>> {
+        a_vecs
+            .iter()
+            .zip(a_texts.iter())
+            .zip(p_vecs.iter().zip(p_texts.iter()))
+            .map(|((av, at), (pv, pt))| SrdPairWriteEntry {
+                anchor_vec: av,
+                anchor_text: at,
+                candidate_vec: pv,
+                candidate_text: pt,
+                label: &PairLabel::Positive,
+            })
+            .collect()
+    }
 
-/// Helper to create an SrdTripletWriteEntry slice for tests.
-fn make_triplet_entries<'a>(
-    a_vecs: &'a [Vec<f32>],
-    a_texts: &'a [&'a str],
-    p_vecs: &'a [Vec<f32>],
-    p_texts: &'a [&'a str],
-    n_vecs: &'a [Vec<f32>],
-    n_texts: &'a [&'a str],
-) -> Vec<SrdTripletWriteEntry<'a>> {
-    a_vecs.iter()
-        .zip(a_texts.iter())
-        .zip(p_vecs.iter().zip(p_texts.iter()))
-        .zip(n_vecs.iter().zip(n_texts.iter()))
-        .map(|(((av, at), (pv, pt)), (nv, nt))| SrdTripletWriteEntry {
-            anchor_vec: av,
-            anchor_text: at,
-            pos_vec: pv,
-            pos_text: pt,
-            neg_vec: nv,
-            neg_text: nt,
-        })
-        .collect()
-}
+    /// Helper to create an SrdTripletWriteEntry slice for tests.
+    fn make_triplet_entries<'a>(
+        a_vecs: &'a [Vec<f32>],
+        a_texts: &'a [&'a str],
+        p_vecs: &'a [Vec<f32>],
+        p_texts: &'a [&'a str],
+        n_vecs: &'a [Vec<f32>],
+        n_texts: &'a [&'a str],
+    ) -> Vec<SrdTripletWriteEntry<'a>> {
+        a_vecs
+            .iter()
+            .zip(a_texts.iter())
+            .zip(p_vecs.iter().zip(p_texts.iter()))
+            .zip(n_vecs.iter().zip(n_texts.iter()))
+            .map(|(((av, at), (pv, pt)), (nv, nt))| SrdTripletWriteEntry {
+                anchor_vec: av,
+                anchor_text: at,
+                pos_vec: pv,
+                pos_text: pt,
+                neg_vec: nv,
+                neg_text: nt,
+            })
+            .collect()
+    }
     use tempfile::TempDir;
 
     const TEST_EMB_DIM: usize = 768;
@@ -240,7 +242,7 @@ fn make_triplet_entries<'a>(
         let pos_texts: Vec<String> = (0..n).map(|i| format!("positive_{i}")).collect();
         let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
         let pos_refs: Vec<&str> = pos_texts.iter().map(|s| s.as_str()).collect();
-                let pair_entries = make_pair_entries(&vecs, &refs, &vecs, &pos_refs);
+        let pair_entries = make_pair_entries(&vecs, &refs, &vecs, &pos_refs);
         srd_triplet::write_pair_entries(&store, 0, pair_entries.as_slice()).unwrap();
     }
 
