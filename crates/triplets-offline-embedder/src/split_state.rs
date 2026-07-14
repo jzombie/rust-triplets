@@ -54,6 +54,20 @@ impl PendingState {
             PendingState::Triplets(_) => PendingState::Triplets(Vec::new()),
         };
     }
+    pub fn push_pair(&mut self, entry: PendingPair) {
+        if let PendingState::Pairs(v) = self {
+            v.push(entry);
+        } else {
+            unreachable!("push_pair called on Triplets state");
+        }
+    }
+    pub fn push_triplet(&mut self, entry: PendingTriplet) {
+        if let PendingState::Triplets(v) = self {
+            v.push(entry);
+        } else {
+            unreachable!("push_triplet called on Pairs state");
+        }
+    }
 }
 
 /// Output mode for the embedding store.
@@ -129,36 +143,6 @@ impl<S: EmbedStore> SplitState<S> {
         self.segment_base = self.total_written;
     }
 
-    // TODO: Refactor; the "accumulate not used for triplets — step handles them directly" is confusing.
-    /// Accumulate embedded texts into the pending state.
-    pub fn accumulate(
-        &mut self,
-        anchor_vecs: Vec<Vec<f32>>,
-        anchor_texts: &[String],
-        candidate_vecs: Vec<Vec<f32>>,
-        candidate_texts: &[String],
-        labels: Option<&[PairLabel]>,
-    ) {
-        // Only valid for Pair mode
-        match &mut self.pending {
-            PendingState::Pairs(v) => {
-                for i in 0..anchor_texts.len() {
-                    let label = labels.map_or(PairLabel::Positive, |l| l[i].clone());
-                    v.push(PendingPair {
-                        anchor_text: anchor_texts[i].clone(),
-                        anchor_vec: anchor_vecs[i].clone(),
-                        candidate_text: candidate_texts[i].clone(),
-                        candidate_vec: candidate_vecs[i].clone(),
-                        label,
-                    });
-                }
-            }
-            PendingState::Triplets(_) => {
-                // accumulate not used for triplets — step handles them directly
-            }
-        }
-    }
-
     /// Clear all pending buffers.
     pub fn clear_pending(&mut self) {
         self.pending.clear();
@@ -198,9 +182,14 @@ impl<S: EmbedStore> SplitState<S> {
 
         match batch {
             SamplerBatch::Pairs(entries) => {
-                for chunk_start in (0..anchor_count).step_by(chunk_size) {
-                    let chunk_end = (chunk_start + chunk_size).min(anchor_count);
-                    let chunk = &entries[chunk_start..chunk_end];
+                let mut all_anchor_vecs = Vec::with_capacity(entries.len());
+                let mut all_candidate_vecs: Vec<Option<Vec<f32>>> = Vec::with_capacity(entries.len());
+                let mut keep = vec![false; entries.len()];
+                let mut chunk_start = 0;
+
+                // Phase 1: Borrow and Embed (entries untouched)
+                for chunk in entries.chunks(chunk_size) {
+                    let chunk_end = chunk_start + chunk.len();
 
                     let anchor_refs: Vec<&str> =
                         chunk.iter().map(|e| e.anchor_text.as_str()).collect();
@@ -213,6 +202,7 @@ impl<S: EmbedStore> SplitState<S> {
                                 self.total_batches += 1;
                                 self.dropped_samples += chunk.len() as u64;
                                 total_dropped += chunk.len() as u64;
+                                chunk_start = chunk_end;
                                 continue;
                             }
                         },
@@ -222,6 +212,7 @@ impl<S: EmbedStore> SplitState<S> {
                             self.total_batches += 1;
                             self.dropped_samples += chunk.len() as u64;
                             total_dropped += chunk.len() as u64;
+                            chunk_start = chunk_end;
                             continue;
                         }
                     };
@@ -242,13 +233,27 @@ impl<S: EmbedStore> SplitState<S> {
                         Vec::new()
                     } else {
                         match embedder.embed(&unique_refs) {
-                            Ok(v) => v,
+                            Ok(v) => {
+                                match validate_embed_response(&v, unique_refs.len(), self.emb_dim) {
+                                    Ok(()) => v,
+                                    Err(_e) => {
+                                        self.step_num += 1;
+                                        self.dropped_batches += 1;
+                                        self.total_batches += 1;
+                                        self.dropped_samples += chunk.len() as u64;
+                                        total_dropped += chunk.len() as u64;
+                                        chunk_start = chunk_end;
+                                        continue;
+                                    }
+                                }
+                            }
                             Err(_e) => {
                                 self.step_num += 1;
                                 self.dropped_batches += 1;
                                 self.total_batches += 1;
                                 self.dropped_samples += chunk.len() as u64;
                                 total_dropped += chunk.len() as u64;
+                                chunk_start = chunk_end;
                                 continue;
                             }
                         }
@@ -258,30 +263,54 @@ impl<S: EmbedStore> SplitState<S> {
                     self.total_batches += 1;
                     total_processed += chunk.len() as u64;
 
-                    match &mut self.pending {
-                        PendingState::Pairs(v) => {
-                            for (i, entry) in chunk.iter().enumerate() {
-                                let candidate_vec = match candidate_indices[i] {
-                                    Some(idx) => candidate_embs[idx].clone(),
-                                    None => anchor_vecs[i].clone(),
-                                };
-                                v.push(PendingPair {
-                                    anchor_text: entry.anchor_text.clone(),
-                                    anchor_vec: anchor_vecs[i].clone(),
-                                    candidate_text: entry.candidate_text.clone(),
-                                    candidate_vec,
-                                    label: entry.label.clone(),
-                                });
-                            }
-                        }
-                        PendingState::Triplets(_) => { /* unreachable for pairs */ }
+                    // Resolve candidate options (push None for identical, Some for unique)
+                    for i in 0..chunk.len() {
+                        let candidate_vec_opt = match candidate_indices[i] {
+                            Some(idx) => Some(candidate_embs[idx].clone()),
+                            None => None, // Defer anchor clone to Phase 2
+                        };
+                        all_candidate_vecs.push(candidate_vec_opt);
                     }
+
+                    // Consume anchor_vecs exactly once
+                    all_anchor_vecs.extend(anchor_vecs);
+
+                    for idx in chunk_start..chunk_end {
+                        keep[idx] = true;
+                    }
+                    chunk_start = chunk_end;
+                }
+
+                // Phase 2: Consume and Assemble (zero-copy string moves)
+                let mut vec_iter = all_anchor_vecs.into_iter().zip(all_candidate_vecs.into_iter());
+
+                for (i, entry) in entries.into_iter().enumerate() {
+                    if !keep[i] {
+                        continue;
+                    }
+
+                    let (a_vec, c_vec_opt) = vec_iter.next().expect("sync error in Phase 2");
+                    let final_c_vec = c_vec_opt.unwrap_or_else(|| a_vec.clone());
+
+                    self.pending.push_pair(PendingPair {
+                        anchor_text: entry.anchor_text,       // MOVED
+                        anchor_vec: a_vec,                    // MOVED
+                        candidate_text: entry.candidate_text,  // MOVED
+                        candidate_vec: final_c_vec,            // MOVED
+                        label: entry.label,
+                    });
                 }
             }
             SamplerBatch::Triplets(entries) => {
-                for chunk_start in (0..anchor_count).step_by(chunk_size) {
-                    let chunk_end = (chunk_start + chunk_size).min(anchor_count);
-                    let chunk = &entries[chunk_start..chunk_end];
+                let mut all_anchor_vecs = Vec::with_capacity(entries.len());
+                let mut all_pos_vecs = Vec::with_capacity(entries.len());
+                let mut all_neg_vecs = Vec::with_capacity(entries.len());
+                let mut keep = vec![false; entries.len()];
+                let mut chunk_start = 0;
+
+                // Phase 1: Borrow and Embed (entries untouched)
+                for chunk in entries.chunks(chunk_size) {
+                    let chunk_end = chunk_start + chunk.len();
 
                     // Collect unique texts across all 3 roles with index maps
                     let mut unique_texts = Vec::new();
@@ -311,13 +340,25 @@ impl<S: EmbedStore> SplitState<S> {
                     }
 
                     let embedded = match embedder.embed(&unique_texts) {
-                        Ok(v) => v,
+                        Ok(v) => match validate_embed_response(&v, unique_texts.len(), self.emb_dim) {
+                            Ok(()) => v,
+                            Err(_e) => {
+                                self.step_num += 1;
+                                self.dropped_batches += 1;
+                                self.total_batches += 1;
+                                self.dropped_samples += chunk.len() as u64;
+                                total_dropped += chunk.len() as u64;
+                                chunk_start = chunk_end;
+                                continue;
+                            }
+                        },
                         Err(_e) => {
                             self.step_num += 1;
                             self.dropped_batches += 1;
                             self.total_batches += 1;
                             self.dropped_samples += chunk.len() as u64;
                             total_dropped += chunk.len() as u64;
+                            chunk_start = chunk_end;
                             continue;
                         }
                     };
@@ -326,21 +367,38 @@ impl<S: EmbedStore> SplitState<S> {
                     self.total_batches += 1;
                     total_processed += chunk.len() as u64;
 
-                    match &mut self.pending {
-                        PendingState::Triplets(v) => {
-                            for i in 0..chunk.len() {
-                                v.push(PendingTriplet {
-                                    anchor_text: chunk[i].anchor_text.clone(),
-                                    anchor_vec: embedded[anchor_map[i]].clone(),
-                                    pos_text: chunk[i].pos_text.clone(),
-                                    pos_vec: embedded[pos_map[i]].clone(),
-                                    neg_text: chunk[i].neg_text.clone(),
-                                    neg_vec: embedded[neg_map[i]].clone(),
-                                });
-                            }
-                        }
-                        PendingState::Pairs(_) => { /* unreachable for triplets */ }
+                    for local_i in 0..chunk.len() {
+                        all_anchor_vecs.push(embedded[anchor_map[local_i]].clone());
+                        all_pos_vecs.push(embedded[pos_map[local_i]].clone());
+                        all_neg_vecs.push(embedded[neg_map[local_i]].clone());
                     }
+
+                    for idx in chunk_start..chunk_end {
+                        keep[idx] = true;
+                    }
+                    chunk_start = chunk_end;
+                }
+
+                // Phase 2: Consume and Assemble (zero-copy string moves)
+                let mut vec_iter = all_anchor_vecs.into_iter()
+                    .zip(all_pos_vecs.into_iter())
+                    .zip(all_neg_vecs.into_iter());
+
+                for (i, entry) in entries.into_iter().enumerate() {
+                    if !keep[i] {
+                        continue;
+                    }
+
+                    let ((a_vec, p_vec), n_vec) = vec_iter.next().expect("sync error in Phase 2");
+
+                    self.pending.push_triplet(PendingTriplet {
+                        anchor_text: entry.anchor_text,  // MOVED
+                        anchor_vec: a_vec,               // MOVED
+                        pos_text: entry.pos_text,        // MOVED
+                        pos_vec: p_vec,                  // MOVED
+                        neg_text: entry.neg_text,        // MOVED
+                        neg_vec: n_vec,                  // MOVED
+                    });
                 }
             }
         }
@@ -639,13 +697,20 @@ mod tests {
         let store = MockStore::new();
         let mut state = make_state(store, EmbedMode::Pair, 2);
 
-        state.accumulate(
-            vec![vec![1.0, 2.0], vec![3.0, 4.0]],
-            &["a1".into(), "a2".into()],
-            vec![vec![5.0, 6.0], vec![7.0, 8.0]],
-            &["p1".into(), "p2".into()],
-            None,
-        );
+        state.pending.push_pair(PendingPair {
+            anchor_text: "a1".into(),
+            anchor_vec: vec![1.0, 2.0],
+            candidate_text: "p1".into(),
+            candidate_vec: vec![5.0, 6.0],
+            label: PairLabel::Positive,
+        });
+        state.pending.push_pair(PendingPair {
+            anchor_text: "a2".into(),
+            anchor_vec: vec![3.0, 4.0],
+            candidate_text: "p2".into(),
+            candidate_vec: vec![7.0, 8.0],
+            label: PairLabel::Positive,
+        });
 
         assert_eq!(state.pending_len(), 2);
         assert_eq!(state.in_flight(), 2);
@@ -971,17 +1036,17 @@ mod tests {
 
     #[test]
     fn accumulate_with_negatives() {
-        // accumulate is pair-only now; test that pair accumulate works
+        // Test that push_pair works with PairLabel::Negative
         let store = MockStore::new();
         let mut state = make_state(store, EmbedMode::Pair, 2);
 
-        state.accumulate(
-            vec![vec![1.0, 2.0]],
-            &["a".into()],
-            vec![vec![3.0, 4.0]],
-            &["p".into()],
-            None,
-        );
+        state.pending.push_pair(PendingPair {
+            anchor_text: "a".into(),
+            anchor_vec: vec![1.0, 2.0],
+            candidate_text: "p".into(),
+            candidate_vec: vec![3.0, 4.0],
+            label: PairLabel::Negative,
+        });
 
         assert_eq!(state.pending_len(), 1);
     }
@@ -1038,13 +1103,13 @@ mod tests {
     fn flush_pending_save_state_error_propagates() {
         let store = MockStore::new();
         let mut state = make_state(store, EmbedMode::Pair, 2);
-        state.accumulate(
-            vec![vec![1.0, 2.0]],
-            &["a".into()],
-            vec![vec![3.0, 4.0]],
-            &["p".into()],
-            None,
-        );
+        state.pending.push_pair(PendingPair {
+            anchor_text: "a".into(),
+            anchor_vec: vec![1.0, 2.0],
+            candidate_text: "p".into(),
+            candidate_vec: vec![3.0, 4.0],
+            label: PairLabel::Positive,
+        });
 
         let provider = FailingProvider;
         let err = flush_pending(&mut state, &provider).unwrap_err();
@@ -1955,5 +2020,246 @@ mod tests {
         }
         assert_eq!(state.total_batches, 30);
         assert_eq!(state.dropped_batches, 1);
+    }
+
+    // ===================================================================
+    // NEW TESTS — two-phase execution, push safety, label preservation
+    // ===================================================================
+
+    #[test]
+    fn step_pair_candidate_dedup_defers_clone() {
+        // When candidate_text == anchor_text, the candidate vector should equal
+        // the anchor vector (clone happens in Phase 2, not Phase 1)
+        let store = MockStore::new();
+        let mut state = make_state(store, EmbedMode::Pair, 2);
+        let embedder = MockEmbedder::new(2);
+        let config = SchedulerConfig::new(1, 1, 2, 100);
+
+        let batch = SamplerBatch::Pairs(vec![PairEntry {
+            anchor_text: "same".into(),
+            candidate_text: "same".into(),
+            label: PairLabel::Positive,
+        }]);
+
+        let result = state.step(batch, &embedder, &config).unwrap();
+        assert_eq!(result.samples_processed, 1);
+        assert_eq!(state.pending_len(), 1);
+        // Candidate vec should equal anchor vec (dedup defers clone to Phase 2)
+        assert_eq!(
+            pending_pair_anchor_vecs(&state),
+            pending_pair_candidate_vecs(&state)
+        );
+        // Texts should be moved, not cloned
+        assert_eq!(pending_pair_anchor_texts(&state), vec!["same"]);
+        assert_eq!(pending_pair_candidate_texts(&state), vec!["same"]);
+    }
+
+    #[test]
+    fn step_pair_partial_chunk_failure_alignment() {
+        // Chunk 1 of 3 fails → chunks 0 and 2 must be correctly aligned
+        struct FailMiddleChunkEmbedder {
+            call_count: std::sync::atomic::AtomicUsize,
+        }
+        impl Embedder for FailMiddleChunkEmbedder {
+            fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+                let call = self.call_count.fetch_add(1, Ordering::Relaxed);
+                if call == 2 {
+                    // Third embed call = chunk 1 anchor → fail
+                    Err(SchedulerError::Msg("transient failure".into()))
+                } else {
+                    Ok(texts.iter().map(|_| vec![1.0; 4]).collect())
+                }
+            }
+        }
+
+        let store = MockStore::new();
+        let mut state = make_state(store, EmbedMode::Pair, 4);
+        let embedder = FailMiddleChunkEmbedder {
+            call_count: std::sync::atomic::AtomicUsize::new(0),
+        };
+        // 6 entries, embed_batch=2 → 3 chunks: [0,1], [2,3], [4,5]
+        // Chunk 1 (entries 2,3) anchor embed fails
+        let config = SchedulerConfig::new(6, 2, 4, 100);
+
+        let batch = SamplerBatch::Pairs(vec![
+            PairEntry {
+                anchor_text: "a0".into(),
+                candidate_text: "p0".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "a1".into(),
+                candidate_text: "p1".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "a2".into(),
+                candidate_text: "p2".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "a3".into(),
+                candidate_text: "p3".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "a4".into(),
+                candidate_text: "p4".into(),
+                label: PairLabel::Positive,
+            },
+            PairEntry {
+                anchor_text: "a5".into(),
+                candidate_text: "p5".into(),
+                label: PairLabel::Positive,
+            },
+        ]);
+
+        let result = state.step(batch, &embedder, &config).unwrap();
+        assert_eq!(result.samples_processed, 4); // chunks 0 and 2 succeeded
+        assert_eq!(result.samples_dropped, 2); // chunk 1 failed
+        assert_eq!(state.pending_len(), 4);
+
+        // Verify alignment: chunk 0 entries first, then chunk 2 entries
+        assert_eq!(pending_pair_anchor_texts(&state)[0], "a0");
+        assert_eq!(pending_pair_anchor_texts(&state)[1], "a1");
+        assert_eq!(pending_pair_anchor_texts(&state)[2], "a4");
+        assert_eq!(pending_pair_anchor_texts(&state)[3], "a5");
+    }
+
+    #[test]
+    fn step_triplet_partial_chunk_failure_alignment() {
+        // Chunk 1 of 3 fails → chunks 0 and 2 must be correctly aligned
+        struct FailMiddleChunkEmbedder {
+            call_count: std::sync::atomic::AtomicUsize,
+        }
+        impl Embedder for FailMiddleChunkEmbedder {
+            fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+                let call = self.call_count.fetch_add(1, Ordering::Relaxed);
+                if call == 1 {
+                    // Second embed call = chunk 1 → fail
+                    Err(SchedulerError::Msg("transient failure".into()))
+                } else {
+                    Ok(texts.iter().map(|_| vec![1.0; 4]).collect())
+                }
+            }
+        }
+
+        let store = MockStore::new();
+        let mut state = make_state(store, EmbedMode::Triplet, 4);
+        let embedder = FailMiddleChunkEmbedder {
+            call_count: std::sync::atomic::AtomicUsize::new(0),
+        };
+        // 6 entries, embed_batch=2 → 3 chunks: [0,1], [2,3], [4,5]
+        let config = SchedulerConfig::new(6, 2, 4, 100);
+
+        let batch = SamplerBatch::Triplets(vec![
+            TripletEntry {
+                anchor_text: "a0".into(),
+                pos_text: "p0".into(),
+                neg_text: "n0".into(),
+            },
+            TripletEntry {
+                anchor_text: "a1".into(),
+                pos_text: "p1".into(),
+                neg_text: "n1".into(),
+            },
+            TripletEntry {
+                anchor_text: "a2".into(),
+                pos_text: "p2".into(),
+                neg_text: "n2".into(),
+            },
+            TripletEntry {
+                anchor_text: "a3".into(),
+                pos_text: "p3".into(),
+                neg_text: "n3".into(),
+            },
+            TripletEntry {
+                anchor_text: "a4".into(),
+                pos_text: "p4".into(),
+                neg_text: "n4".into(),
+            },
+            TripletEntry {
+                anchor_text: "a5".into(),
+                pos_text: "p5".into(),
+                neg_text: "n5".into(),
+            },
+        ]);
+
+        let result = state.step(batch, &embedder, &config).unwrap();
+        assert_eq!(result.samples_processed, 4);
+        assert_eq!(result.samples_dropped, 2);
+        assert_eq!(state.pending_len(), 4);
+
+        // Verify alignment: chunk 0 entries first, then chunk 2 entries
+        assert_eq!(pending_triplet_anchor_texts(&state)[0], "a0");
+        assert_eq!(pending_triplet_pos_texts(&state)[0], "p0");
+        assert_eq!(pending_triplet_neg_texts(&state)[0], "n0");
+        assert_eq!(pending_triplet_anchor_texts(&state)[2], "a4");
+        assert_eq!(pending_triplet_pos_texts(&state)[2], "p4");
+        assert_eq!(pending_triplet_neg_texts(&state)[2], "n4");
+    }
+
+    #[test]
+    #[should_panic(expected = "push_pair called on Triplets state")]
+    fn push_pair_on_triplet_state_panics() {
+        let store = MockStore::new();
+        let mut state = make_state(store, EmbedMode::Triplet, 2);
+        state.pending.push_pair(PendingPair {
+            anchor_text: "a".into(),
+            anchor_vec: vec![1.0, 2.0],
+            candidate_text: "p".into(),
+            candidate_vec: vec![3.0, 4.0],
+            label: PairLabel::Positive,
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "push_triplet called on Pairs state")]
+    fn push_triplet_on_pair_state_panics() {
+        let store = MockStore::new();
+        let mut state = make_state(store, EmbedMode::Pair, 2);
+        state.pending.push_triplet(PendingTriplet {
+            anchor_text: "a".into(),
+            anchor_vec: vec![1.0, 2.0],
+            pos_text: "p".into(),
+            pos_vec: vec![3.0, 4.0],
+            neg_text: "n".into(),
+            neg_vec: vec![5.0, 6.0],
+        });
+    }
+
+    #[test]
+    fn pair_label_preserved_through_pipeline() {
+        let store = MockStore::new();
+        let mut state = make_state(store, EmbedMode::Pair, 2);
+        let embedder = MockEmbedder::new(2);
+        let config = SchedulerConfig::new(1, 1, 2, 100);
+
+        let batch = SamplerBatch::Pairs(vec![PairEntry {
+            anchor_text: "a".into(),
+            candidate_text: "p".into(),
+            label: PairLabel::Negative,
+        }]);
+
+        let result = state.step(batch, &embedder, &config).unwrap();
+        assert_eq!(result.samples_processed, 1);
+
+        // Verify label is preserved in pending state
+        match &state.pending {
+            PendingState::Pairs(v) => {
+                assert_eq!(v.len(), 1);
+                assert!(matches!(v[0].label, PairLabel::Negative));
+            }
+            _ => panic!("expected Pair pending state"),
+        }
+
+        // Flush and verify label reaches the store
+        let provider = MockProvider;
+        flush_pending(&mut state, &provider).unwrap();
+
+        // Verify the MockStore received the write (label is in the PairWriteEntry)
+        let writes = state.store.pair_writes.lock().unwrap();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].0, 0); // start_idx
     }
 }
