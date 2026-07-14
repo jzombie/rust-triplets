@@ -13047,7 +13047,12 @@ fn same_record_negative_selector_picks_from_context() {
 }
 
 /// Verify that `SameRecord` and `WrongArticle` recipes coexist in the same
-/// sampler — triplets produced by each recipe respect their respective strategy.
+/// sampler — a single batch contains triplets from both strategies, each
+/// respecting its respective contract.
+///
+/// Models the real HuggingFace layout: records have multiple Context sections
+/// (positive in paragraph 1, negative in paragraph 2) so that SameRecord's
+/// negative text differs from its positive text (avoiding the dedup guard).
 #[test]
 fn same_record_and_wrong_article_recipes_coexist() {
     let split = SplitRatios {
@@ -13057,25 +13062,25 @@ fn same_record_and_wrong_article_recipes_coexist() {
     };
     let config = SamplerConfig {
         seed: 55,
-        batch_size: 8,
+        batch_size: 4,
         chunking: ChunkingStrategy::default(),
         recipes: vec![
             TripletRecipe {
-                name: "same_record_recipe".into(),
+                name: "wrong_article_recipe".into(),
                 anchor: Selector::Role(SectionRole::Anchor),
-                positive_selector: Selector::Role(SectionRole::Anchor),
+                positive_selector: Selector::Paragraph(1),
                 negative_selector: Selector::Role(SectionRole::Context),
-                negative_strategy: NegativeStrategy::SameRecord,
+                negative_strategy: NegativeStrategy::WrongArticle,
                 weight: 1.0,
                 instruction: None,
                 allow_same_anchor_positive: false,
             },
             TripletRecipe {
-                name: "wrong_article_recipe".into(),
+                name: "same_record_recipe".into(),
                 anchor: Selector::Role(SectionRole::Anchor),
-                positive_selector: Selector::Role(SectionRole::Anchor),
-                negative_selector: Selector::Role(SectionRole::Context),
-                negative_strategy: NegativeStrategy::WrongArticle,
+                positive_selector: Selector::Paragraph(1),
+                negative_selector: Selector::Paragraph(2),
+                negative_strategy: NegativeStrategy::SameRecord,
                 weight: 1.0,
                 instruction: None,
                 allow_same_anchor_positive: false,
@@ -13086,11 +13091,23 @@ fn same_record_and_wrong_article_recipes_coexist() {
         ..SamplerConfig::default()
     };
     let store = Arc::new(DeterministicSplitStore::new(split, 55).unwrap());
+    let find_train_id = |prefix: &str| -> String {
+        (0u32..)
+            .find_map(|i| {
+                let id = format!("{prefix}_{i}");
+                (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+            })
+            .unwrap()
+    };
+    let id_a = find_train_id("mix_a");
+    let id_b = find_train_id("mix_b");
+    let id_c = find_train_id("mix_c");
+    let id_d = find_train_id("mix_d");
 
-    // Build records with distinct Anchor AND Context texts so that:
-    // - the dedup guard doesn't reject triplets (anchor/positive/negative differ),
-    // - we can identify which strategy was used for each triplet.
-    let make_record = |id: &str, anchor_text: &str, ctx: &str| -> DataRecord {
+    // Build records with 3 sections: Anchor, Context (positive), Context (negative).
+    // This mirrors the HF dict-dataset layout where negative_columns are stored
+    // as additional Context sections.
+    let make_record = |id: &str| -> DataRecord {
         let now = Utc::now();
         DataRecord {
             id: id.into(),
@@ -13103,14 +13120,20 @@ fn same_record_and_wrong_article_recipes_coexist() {
                 RecordSection {
                     role: SectionRole::Anchor,
                     heading: Some("Title".into()),
-                    text: anchor_text.into(),
-                    sentences: vec![anchor_text.into()],
+                    text: format!("Anchor text for {id}"),
+                    sentences: vec![format!("Anchor text for {id}")],
                 },
                 RecordSection {
                     role: SectionRole::Context,
-                    heading: Some("Body".into()),
-                    text: ctx.into(),
-                    sentences: vec![ctx.into()],
+                    heading: Some("Positive".into()),
+                    text: format!("positive_{id}"),
+                    sentences: vec![format!("positive_{id}")],
+                },
+                RecordSection {
+                    role: SectionRole::Context,
+                    heading: Some("Negative".into()),
+                    text: format!("negative_{id}"),
+                    sentences: vec![format!("negative_{id}")],
                 },
             ],
             meta_prefix: None,
@@ -13118,26 +13141,10 @@ fn same_record_and_wrong_article_recipes_coexist() {
     };
 
     let records = vec![
-        make_record(
-            "mix_a",
-            "Unique anchor text for record A",
-            "context_a_unique_text",
-        ),
-        make_record(
-            "mix_b",
-            "Unique anchor text for record B",
-            "context_b_unique_text",
-        ),
-        make_record(
-            "mix_c",
-            "Unique anchor text for record C",
-            "context_c_unique_text",
-        ),
-        make_record(
-            "mix_d",
-            "Unique anchor text for record D",
-            "context_d_unique_text",
-        ),
+        make_record(&id_a),
+        make_record(&id_b),
+        make_record(&id_c),
+        make_record(&id_d),
     ];
 
     let sampler = TripletSampler::new(config, Arc::clone(&store));
@@ -13169,14 +13176,19 @@ fn same_record_and_wrong_article_recipes_coexist() {
             // SameRecord: negative must come from the SAME record as the anchor.
             assert_eq!(
                 triplet.negative.record_id, triplet.anchor.record_id,
-                "SameRecord triplet: negative record must match anchor record"
+                "SameRecord: negative record must match anchor record"
+            );
+            // Negative text must differ from positive (different Context section).
+            assert_ne!(
+                triplet.negative.text, triplet.positive.text,
+                "SameRecord: negative text must differ from positive text"
             );
         } else if triplet.recipe.starts_with("wrong_article_recipe") {
             saw_wrong_article = true;
             // WrongArticle: negative must come from a DIFFERENT record.
             assert_ne!(
                 triplet.negative.record_id, triplet.anchor.record_id,
-                "WrongArticle triplet: negative record must differ from anchor record"
+                "WrongArticle: negative record must differ from anchor record"
             );
         }
     }
