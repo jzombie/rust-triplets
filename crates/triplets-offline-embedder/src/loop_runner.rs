@@ -16,7 +16,7 @@ use crate::split_scheduler::{
     is_exhaustion_error, steps_until_next_flush,
 };
 use crate::split_state::SplitState;
-use crate::traits::{BatchProvider, EmbedStore, Embedder, Result, SchedulerConfig};
+use crate::traits::{BatchProvider, EmbedStore, Embedder, Result, SamplerBatch, SchedulerConfig};
 
 // ---------------------------------------------------------------------------
 // Event types
@@ -182,7 +182,7 @@ where
         let labels_vec: Vec<SplitLabel> = states.iter().map(|s| s.label).collect();
         let counts: Vec<u64> = states
             .iter()
-            .map(|s| s.total_written + s.pending_anchor_vecs.len() as u64)
+            .map(|s| s.total_written + s.pending.len() as u64)
             .collect();
         let maxes: Vec<u64> = states.iter().map(|s| s.max).collect();
         let ratios_vec: Vec<f32> = states.iter().map(|s| s.ratio).collect();
@@ -201,7 +201,7 @@ where
                 .expect("split label not found");
             s.on_stint_start();
             debug_assert!(
-                s.pending_anchor_vecs.is_empty(),
+                s.pending.is_empty(),
                 "pending must be empty when starting a new batch for split {}",
                 s.name,
             );
@@ -245,7 +245,10 @@ where
             }
         };
 
-        if batch.anchor_texts.is_empty() {
+        if match &batch {
+            SamplerBatch::Pairs(v) => v.is_empty(),
+            SamplerBatch::Triplets(v) => v.is_empty(),
+        } {
             handler.handle_event(&LoopEvent::Exhausted { name: s.name });
             handle_split_exhausted(s, provider, &mut scheduler)?;
             continue;
@@ -254,7 +257,7 @@ where
         let step_result = s.step(batch, embedder, config)?;
 
         let ctrl_c = stop.load(Ordering::Relaxed);
-        let hit_limit = at_sample_limit(s.max, s.total_written, s.pending_anchor_vecs.len() as u64);
+        let hit_limit = at_sample_limit(s.max, s.total_written, s.pending.len() as u64);
         let should_flush = step_result.should_flush || ctrl_c || hit_limit;
 
         if should_flush {
@@ -286,7 +289,7 @@ where
 
         // Progress metrics.
         let elapsed = s.start.map_or(0.0, |t| t.elapsed().as_secs_f64());
-        let in_flight = s.total_written + s.pending_anchor_vecs.len() as u64;
+        let in_flight = s.total_written + s.pending.len() as u64;
         let new_samples = in_flight.saturating_sub(s.segment_base);
         let samples_per_sec = compute_samples_per_sec(new_samples, elapsed);
         let steps_until_flush = steps_until_next_flush(s.step_num, config.steps_per_batch);
@@ -339,9 +342,10 @@ where
 mod tests {
     use super::*;
     use crate::sampler_prefetcher::SamplerPrefetcher;
-    use crate::split_state::EmbedMode;
-    use crate::traits::{PairWriteArgs, SamplerBatch, SchedulerError, TripletWriteArgs};
+    use crate::split_state::{EmbedMode, PendingState};
+    use crate::traits::{PairEntry, PairWriteArgs, SamplerBatch, SchedulerError, TripletWriteArgs};
     use std::sync::Arc;
+    use triplets_core::data::PairLabel;
 
     // -- Mock types --
 
@@ -392,11 +396,11 @@ mod tests {
             if remaining == 0 {
                 return Ok(None);
             }
-            Ok(Some(SamplerBatch {
-                anchor_texts: vec!["hello".into()],
-                pos_texts: vec!["world".into()],
-                neg_texts: None,
-            }))
+            Ok(Some(SamplerBatch::Pairs(vec![PairEntry {
+                anchor_text: "hello".into(),
+                candidate_text: "world".into(),
+                label: PairLabel::Positive,
+            }])))
         }
         fn save_state(&self) -> Result<()> {
             self.save_count.fetch_add(1, Ordering::Relaxed);
@@ -416,12 +420,7 @@ mod tests {
             total_written: 0,
             step_num: 0,
             batch_num: 0,
-            pending_anchor_vecs: Vec::new(),
-            pending_anchor_texts: Vec::new(),
-            pending_pos_vecs: Vec::new(),
-            pending_pos_texts: Vec::new(),
-            pending_neg_vecs: Vec::new(),
-            pending_neg_texts: Vec::new(),
+            pending: PendingState::Pairs(Vec::new()),
             exhausted: false,
             dropped_batches: 0,
             total_batches: 0,
@@ -591,11 +590,7 @@ mod tests {
 
     impl BatchProvider for EmptyBatchProvider {
         fn next_batch(&self, _split: SplitLabel) -> Result<Option<SamplerBatch>> {
-            Ok(Some(SamplerBatch {
-                anchor_texts: vec![],
-                pos_texts: vec![],
-                neg_texts: None,
-            }))
+            Ok(Some(SamplerBatch::Pairs(vec![])))
         }
         fn save_state(&self) -> Result<()> {
             Ok(())
@@ -681,11 +676,11 @@ mod tests {
 
     impl BatchProvider for InfiniteProvider {
         fn next_batch(&self, _split: SplitLabel) -> Result<Option<SamplerBatch>> {
-            Ok(Some(SamplerBatch {
-                anchor_texts: vec!["data".into()],
-                pos_texts: vec!["positive".into()],
-                neg_texts: None,
-            }))
+            Ok(Some(SamplerBatch::Pairs(vec![PairEntry {
+                anchor_text: "data".into(),
+                candidate_text: "positive".into(),
+                label: PairLabel::Positive,
+            }])))
         }
         fn save_state(&self) -> Result<()> {
             Ok(())

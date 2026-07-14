@@ -29,15 +29,11 @@ impl BatchProvider for SamplerAdapter {
                 if batch.pairs.is_empty() {
                     return Ok(None);
                 }
-                let (anchor_texts, pos_texts) = filter_pair_batch(&batch.pairs);
-                if anchor_texts.is_empty() {
+                let entries = filter_pair_batch(&batch.pairs);
+                if entries.is_empty() {
                     return Ok(None);
                 }
-                Ok(Some(SamplerBatch {
-                    anchor_texts,
-                    pos_texts,
-                    neg_texts: None,
-                }))
+                Ok(Some(SamplerBatch::Pairs(entries)))
             }
             SrdMode::Triplet => {
                 let batch = self
@@ -47,15 +43,11 @@ impl BatchProvider for SamplerAdapter {
                 if batch.triplets.is_empty() {
                     return Ok(None);
                 }
-                let (anchor_texts, pos_texts, neg_texts) = filter_triplet_batch(&batch.triplets);
-                if anchor_texts.is_empty() {
+                let entries = filter_triplet_batch(&batch.triplets);
+                if entries.is_empty() {
                     return Ok(None);
                 }
-                Ok(Some(SamplerBatch {
-                    anchor_texts,
-                    pos_texts,
-                    neg_texts: Some(neg_texts),
-                }))
+                Ok(Some(SamplerBatch::Triplets(entries)))
             }
         }
     }
@@ -218,9 +210,16 @@ mod tests {
         };
         let batch = adapter.next_batch(SplitLabel::Train).unwrap();
         let batch = batch.expect("should have batch");
-        assert_eq!(batch.anchor_texts, vec!["anchor_1", "anchor_2"]);
-        assert_eq!(batch.pos_texts, vec!["pos_1", "pos_2"]);
-        assert!(batch.neg_texts.is_none());
+        match &batch {
+            SamplerBatch::Pairs(entries) => {
+                assert_eq!(entries.len(), 2);
+                assert_eq!(entries[0].anchor_text, "anchor_1");
+                assert_eq!(entries[0].candidate_text, "pos_1");
+                assert_eq!(entries[1].anchor_text, "anchor_2");
+                assert_eq!(entries[1].candidate_text, "pos_2");
+            }
+            _ => panic!("expected pairs"),
+        }
     }
 
     #[test]
@@ -231,9 +230,15 @@ mod tests {
         };
         let batch = adapter.next_batch(SplitLabel::Train).unwrap();
         let batch = batch.expect("should have batch");
-        assert_eq!(batch.anchor_texts, vec!["t_anchor"]);
-        assert_eq!(batch.pos_texts, vec!["t_pos"]);
-        assert_eq!(batch.neg_texts, Some(vec!["t_neg".to_string()]));
+        match &batch {
+            SamplerBatch::Triplets(entries) => {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].anchor_text, "t_anchor");
+                assert_eq!(entries[0].pos_text, "t_pos");
+                assert_eq!(entries[0].neg_text, "t_neg");
+            }
+            _ => panic!("expected triplets"),
+        }
     }
 
     #[test]

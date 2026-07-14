@@ -6,38 +6,36 @@ use triplets_core::SplitLabel;
 use triplets_core::data::{SamplePair, SampleTriplet};
 
 use crate::split_scheduler::is_exhaustion_error;
-use crate::traits::{BatchProvider, Result, SamplerBatch, SchedulerError};
+use crate::traits::{BatchProvider, PairEntry, Result, SamplerBatch, SchedulerError, TripletEntry};
 
 /// Jointly filter a pair batch: skip any pair where EITHER text is empty
 /// so anchor and positive vectors always have the same length.
-pub fn filter_pair_batch(pairs: &[SamplePair]) -> (Vec<String>, Vec<String>) {
+pub fn filter_pair_batch(pairs: &[SamplePair]) -> Vec<PairEntry> {
     pairs
         .iter()
         .filter(|p| !p.anchor.text.is_empty() && !p.positive.text.is_empty())
-        .map(|p| (p.anchor.text.clone(), p.positive.text.clone()))
-        .unzip()
+        .map(|p| PairEntry {
+            anchor_text: p.anchor.text.clone(),
+            candidate_text: p.positive.text.clone(),
+            label: p.label.clone(),
+        })
+        .collect()
 }
 
 /// Jointly filter a triplet batch: skip any triplet where ANY text is empty
 /// so anchor, positive, and negative vectors always have the same length.
-pub fn filter_triplet_batch(triplets: &[SampleTriplet]) -> (Vec<String>, Vec<String>, Vec<String>) {
-    let triples: Vec<_> = triplets
+pub fn filter_triplet_batch(triplets: &[SampleTriplet]) -> Vec<TripletEntry> {
+    triplets
         .iter()
         .filter(|t| {
             !t.anchor.text.is_empty() && !t.positive.text.is_empty() && !t.negative.text.is_empty()
         })
-        .map(|t| {
-            (
-                t.anchor.text.clone(),
-                t.positive.text.clone(),
-                t.negative.text.clone(),
-            )
+        .map(|t| TripletEntry {
+            anchor_text: t.anchor.text.clone(),
+            pos_text: t.positive.text.clone(),
+            neg_text: t.negative.text.clone(),
         })
-        .collect();
-    let anchor = triples.iter().map(|(a, _, _)| a.clone()).collect();
-    let pos = triples.iter().map(|(_, p, _)| p.clone()).collect();
-    let neg = triples.iter().map(|(_, _, n)| n.clone()).collect();
-    (anchor, pos, neg)
+        .collect()
 }
 
 /// Background-thread prefetcher that calls the sampler's pair or triplet API
@@ -71,7 +69,10 @@ impl<P: BatchProvider + 'static> SamplerPrefetcher<P> {
 
                     match provider_clone.next_batch(split) {
                         Ok(Some(batch)) => {
-                            if batch.anchor_texts.is_empty() {
+                            if match &batch {
+                                SamplerBatch::Pairs(v) => v.is_empty(),
+                                SamplerBatch::Triplets(v) => v.is_empty(),
+                            } {
                                 let _ = tx.send(Err(SchedulerError::Msg("exhausted".into())));
                                 break;
                             }
@@ -209,7 +210,11 @@ mod tests {
                 reason: None,
             },
         ];
-        let (anchors, positions) = filter_pair_batch(&pairs);
+        let pair_entries = filter_pair_batch(&pairs);
+        let (anchors, positions): (Vec<_>, Vec<_>) = pair_entries
+            .into_iter()
+            .map(|e| (e.anchor_text, e.candidate_text))
+            .unzip();
         assert_eq!(anchors, vec!["hello"]);
         assert_eq!(positions, vec!["world"]);
     }
@@ -234,7 +239,10 @@ mod tests {
                 instruction: None,
             },
         ];
-        let (anchors, positions, negatives) = filter_triplet_batch(&triplets);
+        let entries = filter_triplet_batch(&triplets);
+        let anchors: Vec<String> = entries.iter().map(|e| e.anchor_text.clone()).collect();
+        let positions: Vec<String> = entries.iter().map(|e| e.pos_text.clone()).collect();
+        let negatives: Vec<String> = entries.iter().map(|e| e.neg_text.clone()).collect();
         assert_eq!(anchors, vec!["a"]);
         assert_eq!(positions, vec!["p"]);
         assert_eq!(negatives, vec!["n"]);
@@ -242,16 +250,29 @@ mod tests {
 
     #[test]
     fn prefetcher_returns_batches_then_exhausted() {
-        let batch = SamplerBatch {
-            anchor_texts: vec!["a".into()],
-            pos_texts: vec!["p".into()],
-            neg_texts: None,
-        };
+        let batch = SamplerBatch::Pairs(
+            ["a".into()]
+                .into_iter()
+                .zip(["p".into()])
+                .map(|(a, c)| PairEntry {
+                    anchor_text: a,
+                    candidate_text: c,
+                    label: PairLabel::Positive,
+                })
+                .collect(),
+        );
         let provider = Arc::new(MockProvider::new(vec![batch]));
         let prefetcher = SamplerPrefetcher::new(provider, SplitLabel::Train, 4);
 
         let result = prefetcher.next().unwrap();
-        assert_eq!(result.anchor_texts, vec!["a"]);
+        match result {
+            SamplerBatch::Pairs(pairs) => {
+                let anchor_texts: Vec<&str> =
+                    pairs.iter().map(|e| e.anchor_text.as_str()).collect();
+                assert_eq!(anchor_texts, vec!["a"]);
+            }
+            _ => panic!("expected Pairs batch"),
+        }
 
         let err = prefetcher.next().unwrap_err();
         assert!(err.to_string().contains("exhausted"));
@@ -272,7 +293,11 @@ mod tests {
             label: PairLabel::Positive,
             reason: None,
         }];
-        let (anchors, positions) = filter_pair_batch(&pairs);
+        let pair_entries = filter_pair_batch(&pairs);
+        let (anchors, positions): (Vec<_>, Vec<_>) = pair_entries
+            .into_iter()
+            .map(|e| (e.anchor_text, e.candidate_text))
+            .unzip();
         assert!(anchors.is_empty());
         assert!(positions.is_empty());
     }
@@ -288,7 +313,11 @@ mod tests {
             label: PairLabel::Positive,
             reason: None,
         }];
-        let (anchors, positions) = filter_pair_batch(&pairs);
+        let pair_entries = filter_pair_batch(&pairs);
+        let (anchors, positions): (Vec<_>, Vec<_>) = pair_entries
+            .into_iter()
+            .map(|e| (e.anchor_text, e.candidate_text))
+            .unzip();
         assert!(anchors.is_empty());
         assert!(positions.is_empty());
     }
@@ -315,7 +344,11 @@ mod tests {
                 reason: None,
             },
         ];
-        let (anchors, positions) = filter_pair_batch(&pairs);
+        let pair_entries = filter_pair_batch(&pairs);
+        let (anchors, positions): (Vec<_>, Vec<_>) = pair_entries
+            .into_iter()
+            .map(|e| (e.anchor_text, e.candidate_text))
+            .unzip();
         assert_eq!(anchors, vec!["a1", "a2"]);
         assert_eq!(positions, vec!["p1", "p2"]);
     }
@@ -323,7 +356,11 @@ mod tests {
     #[test]
     fn filter_pair_batch_empty_input() {
         let pairs: Vec<SamplePair> = vec![];
-        let (anchors, positions) = filter_pair_batch(&pairs);
+        let pair_entries = filter_pair_batch(&pairs);
+        let (anchors, positions): (Vec<_>, Vec<_>) = pair_entries
+            .into_iter()
+            .map(|e| (e.anchor_text, e.candidate_text))
+            .unzip();
         assert!(anchors.is_empty());
         assert!(positions.is_empty());
     }
@@ -342,7 +379,10 @@ mod tests {
             weight: 1.0,
             instruction: None,
         }];
-        let (anchors, positions, negatives) = filter_triplet_batch(&triplets);
+        let entries = filter_triplet_batch(&triplets);
+        let anchors: Vec<String> = entries.iter().map(|e| e.anchor_text.clone()).collect();
+        let positions: Vec<String> = entries.iter().map(|e| e.pos_text.clone()).collect();
+        let negatives: Vec<String> = entries.iter().map(|e| e.neg_text.clone()).collect();
         assert!(anchors.is_empty());
         assert!(positions.is_empty());
         assert!(negatives.is_empty());
@@ -358,7 +398,10 @@ mod tests {
             weight: 1.0,
             instruction: None,
         }];
-        let (anchors, positions, negatives) = filter_triplet_batch(&triplets);
+        let entries = filter_triplet_batch(&triplets);
+        let anchors: Vec<String> = entries.iter().map(|e| e.anchor_text.clone()).collect();
+        let positions: Vec<String> = entries.iter().map(|e| e.pos_text.clone()).collect();
+        let negatives: Vec<String> = entries.iter().map(|e| e.neg_text.clone()).collect();
         assert!(anchors.is_empty());
         assert!(positions.is_empty());
         assert!(negatives.is_empty());
@@ -374,7 +417,10 @@ mod tests {
             weight: 1.0,
             instruction: None,
         }];
-        let (anchors, positions, negatives) = filter_triplet_batch(&triplets);
+        let entries = filter_triplet_batch(&triplets);
+        let anchors: Vec<String> = entries.iter().map(|e| e.anchor_text.clone()).collect();
+        let positions: Vec<String> = entries.iter().map(|e| e.pos_text.clone()).collect();
+        let negatives: Vec<String> = entries.iter().map(|e| e.neg_text.clone()).collect();
         assert!(anchors.is_empty());
         assert!(positions.is_empty());
         assert!(negatives.is_empty());
@@ -400,7 +446,10 @@ mod tests {
                 instruction: None,
             },
         ];
-        let (anchors, positions, negatives) = filter_triplet_batch(&triplets);
+        let entries = filter_triplet_batch(&triplets);
+        let anchors: Vec<String> = entries.iter().map(|e| e.anchor_text.clone()).collect();
+        let positions: Vec<String> = entries.iter().map(|e| e.pos_text.clone()).collect();
+        let negatives: Vec<String> = entries.iter().map(|e| e.neg_text.clone()).collect();
         assert_eq!(anchors, vec!["a1", "a2"]);
         assert_eq!(positions, vec!["p1", "p2"]);
         assert_eq!(negatives, vec!["n1", "n2"]);
@@ -409,7 +458,10 @@ mod tests {
     #[test]
     fn filter_triplet_batch_empty_input() {
         let triplets: Vec<SampleTriplet> = vec![];
-        let (anchors, positions, negatives) = filter_triplet_batch(&triplets);
+        let entries = filter_triplet_batch(&triplets);
+        let anchors: Vec<String> = entries.iter().map(|e| e.anchor_text.clone()).collect();
+        let positions: Vec<String> = entries.iter().map(|e| e.pos_text.clone()).collect();
+        let negatives: Vec<String> = entries.iter().map(|e| e.neg_text.clone()).collect();
         assert!(anchors.is_empty());
         assert!(positions.is_empty());
         assert!(negatives.is_empty());
@@ -420,11 +472,17 @@ mod tests {
         use std::time::Duration;
 
         // Provider that returns 3 batches then exhausted.
-        let batch = SamplerBatch {
-            anchor_texts: vec!["a".into()],
-            pos_texts: vec!["p".into()],
-            neg_texts: None,
-        };
+        let batch = SamplerBatch::Pairs(
+            ["a".into()]
+                .into_iter()
+                .zip(["p".into()])
+                .map(|(a, c)| PairEntry {
+                    anchor_text: a,
+                    candidate_text: c,
+                    label: PairLabel::Positive,
+                })
+                .collect(),
+        );
         let provider = Arc::new(MockProvider::new(vec![batch.clone(), batch.clone(), batch]));
         let prefetcher = SamplerPrefetcher::new(provider, SplitLabel::Train, 4);
 

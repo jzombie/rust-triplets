@@ -1,6 +1,8 @@
 use simd_r_drive::storage_engine::DataStore;
 use simd_r_drive::storage_engine::traits::{DataStoreReader, DataStoreWriter};
 
+use triplets_core::data::PairLabel;
+
 use crate::error::SrdError;
 
 type Result<T> = std::result::Result<T, SrdError>;
@@ -14,6 +16,8 @@ pub const MODE_TRIPLET: u8 = 1;
 pub const FLAG_POS_SAME: u8 = 1 << 0; // positive same as anchor
 /// Negative-embedding flag: bit 1 indicates negative is the same as anchor (triplet only).
 pub const FLAG_NEG_SAME: u8 = 1 << 1; // negative same as anchor (triplet only)
+/// Label-negative flag: bit 2 indicates this pair is negative (pair mode only).
+pub const FLAG_LABEL_NEGATIVE: u8 = 1 << 2;
 
 /// Mode of an simd-r-drive embedding store.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,6 +62,8 @@ pub struct SrdEntry {
     pub mode: SrdMode,
     /// True when the positive embedding is the same pointer as the anchor.
     pub same_as_anchor: bool,
+    /// Label for pair entries (Positive or Negative).
+    pub label: PairLabel,
     /// Anchor embedding vector.
     pub anchor_emb: Vec<f32>,
     /// Anchor text string.
@@ -97,6 +103,9 @@ pub fn encode_entry(entry: &SrdEntry) -> Vec<u8> {
         && neg_text == &entry.anchor_text
     {
         flags |= FLAG_NEG_SAME;
+    }
+    if entry.mode == SrdMode::Pair && entry.label == PairLabel::Negative {
+        flags |= FLAG_LABEL_NEGATIVE;
     }
 
     // Count unique texts and embeddings
@@ -301,6 +310,11 @@ pub fn decode_entry(data: &[u8], emb_dim: usize) -> Result<SrdEntry> {
     Ok(SrdEntry {
         mode,
         same_as_anchor: pos_same,
+        label: if mode == SrdMode::Pair && flags & FLAG_LABEL_NEGATIVE != 0 {
+            PairLabel::Negative
+        } else {
+            PairLabel::Positive
+        },
         anchor_emb,
         anchor_text,
         pos_emb,
@@ -321,22 +335,21 @@ fn decode_emb_slice(data: &[u8], emb_dim: usize) -> Vec<f32> {
 // Batch validation
 // ---------------------------------------------------------------------------
 
-/// Validate that a batch of vectors and texts are consistent before writing.
-pub fn validate_write_batch(vecs: &[Vec<f32>], texts: &[&str]) -> Result<()> {
-    if vecs.len() != texts.len() {
-        return Err(SrdError::BatchLengthMismatch {
-            vec_count: vecs.len(),
-            text_count: texts.len(),
-        });
-    }
-    if vecs.is_empty() {
-        return Ok(());
-    }
-    let dim = vecs[0].len();
+/// Validate a batch of `(&[f32], &str)` pairs are consistent before writing.
+/// Accepts an iterator so it works with any memory layout (SoA or AoS).
+pub fn validate_write_batch<'a, I>(iter: I) -> Result<()>
+where
+    I: Iterator<Item = (&'a [f32], &'a str)> + Clone,
+{
+    let mut peek_iter = iter.clone();
+    let dim = match peek_iter.next() {
+        Some((vec, _)) => vec.len(),
+        None => return Ok(()),
+    };
     if dim == 0 {
         return Err(SrdError::ZeroDimension);
     }
-    for (i, vec) in vecs.iter().enumerate() {
+    for (i, (vec, _text)) in iter.enumerate() {
         if vec.len() != dim {
             return Err(SrdError::InconsistentDimension {
                 index: i,
@@ -358,39 +371,50 @@ pub fn validate_write_batch(vecs: &[Vec<f32>], texts: &[&str]) -> Result<()> {
 // Batch write
 // ---------------------------------------------------------------------------
 
-/// Batch-write pair entries (anchor + positive) into `store` starting at `start_idx`.
+/// A single pair entry for batch writing.
+#[derive(Debug, Clone, Copy)]
+pub struct SrdPairWriteEntry<'a> {
+    /// Anchor embedding vector.
+    pub anchor_vec: &'a [f32],
+    /// Anchor text string.
+    pub anchor_text: &'a str,
+    /// Candidate embedding vector (may be positive or negative).
+    pub candidate_vec: &'a [f32],
+    /// Candidate text string (may be positive or negative).
+    pub candidate_text: &'a str,
+    /// Label for this pair entry.
+    pub label: &'a PairLabel,
+}
+
+/// Batch-write pair entries into `store` starting at `start_idx`.
 ///
-/// Automatically sets `same_as_anchor` when anchor and positive are identical.
+/// Each entry carries its anchor, candidate, and label in a single struct.
+/// Automatically sets `same_as_anchor` when anchor and candidate are identical.
 pub fn write_pair_entries(
     store: &DataStore,
     start_idx: u64,
-    anchor_vecs: &[Vec<f32>],
-    anchor_texts: &[&str],
-    pos_vecs: &[Vec<f32>],
-    pos_texts: &[&str],
+    entries: &[SrdPairWriteEntry],
 ) -> Result<()> {
-    validate_write_batch(anchor_vecs, anchor_texts)?;
-    validate_write_batch(pos_vecs, pos_texts)?;
-    if anchor_vecs.len() != pos_vecs.len() {
-        return Err(SrdError::PairLengthMismatch);
+    if entries.is_empty() {
+        return Ok(());
     }
-    let mut key_bufs: Vec<[u8; 8]> = Vec::with_capacity(anchor_vecs.len());
-    let mut value_bufs: Vec<Vec<u8>> = Vec::with_capacity(anchor_vecs.len());
-    for (i, ((a_vec, a_text), (p_vec, p_text))) in anchor_vecs
-        .iter()
-        .zip(anchor_texts.iter())
-        .zip(pos_vecs.iter().zip(pos_texts.iter()))
-        .enumerate()
-    {
-        let same = a_vec == p_vec && a_text == p_text;
+    validate_write_batch(entries.iter().map(|e| (e.anchor_vec, e.anchor_text)))?;
+    validate_write_batch(entries.iter().map(|e| (e.candidate_vec, e.candidate_text)))?;
+
+    let mut key_bufs: Vec<[u8; 8]> = Vec::with_capacity(entries.len());
+    let mut value_bufs: Vec<Vec<u8>> = Vec::with_capacity(entries.len());
+    for (i, entry) in entries.iter().enumerate() {
+        let same =
+            entry.anchor_vec == entry.candidate_vec && entry.anchor_text == entry.candidate_text;
         key_bufs.push((start_idx + i as u64).to_le_bytes());
         value_bufs.push(encode_entry(&SrdEntry {
             mode: SrdMode::Pair,
             same_as_anchor: same,
-            anchor_emb: a_vec.clone(),
-            anchor_text: a_text.to_string(),
-            pos_emb: p_vec.clone(),
-            pos_text: p_text.to_string(),
+            label: entry.label.clone(),
+            anchor_emb: entry.anchor_vec.to_vec(),
+            anchor_text: entry.anchor_text.to_string(),
+            pos_emb: entry.candidate_vec.to_vec(),
+            pos_text: entry.candidate_text.to_string(),
             neg_emb: None,
             neg_text: None,
         }));
@@ -404,44 +428,53 @@ pub fn write_pair_entries(
     Ok(())
 }
 
-/// Batch-write triplet entries (anchor + positive + negative) into `store` starting at `start_idx`.
-#[allow(clippy::too_many_arguments)]
+/// A single triplet entry for batch writing.
+#[derive(Debug, Clone, Copy)]
+pub struct SrdTripletWriteEntry<'a> {
+    /// Anchor embedding vector.
+    pub anchor_vec: &'a [f32],
+    /// Anchor text string.
+    pub anchor_text: &'a str,
+    /// Positive embedding vector.
+    pub pos_vec: &'a [f32],
+    /// Positive text string.
+    pub pos_text: &'a str,
+    /// Negative embedding vector.
+    pub neg_vec: &'a [f32],
+    /// Negative text string.
+    pub neg_text: &'a str,
+}
+
+/// Batch-write triplet entries into `store` starting at `start_idx`.
+///
+/// Each entry carries anchor, positive, and negative data in a single struct.
 pub fn write_triplet_entries(
     store: &DataStore,
     start_idx: u64,
-    anchor_vecs: &[Vec<f32>],
-    anchor_texts: &[&str],
-    pos_vecs: &[Vec<f32>],
-    pos_texts: &[&str],
-    neg_vecs: &[Vec<f32>],
-    neg_texts: &[&str],
+    entries: &[SrdTripletWriteEntry],
 ) -> Result<()> {
-    validate_write_batch(anchor_vecs, anchor_texts)?;
-    validate_write_batch(pos_vecs, pos_texts)?;
-    validate_write_batch(neg_vecs, neg_texts)?;
-    if anchor_vecs.len() != pos_vecs.len() || pos_vecs.len() != neg_vecs.len() {
-        return Err(SrdError::TripletLengthMismatch);
+    if entries.is_empty() {
+        return Ok(());
     }
-    let mut key_bufs: Vec<[u8; 8]> = Vec::with_capacity(anchor_vecs.len());
-    let mut value_bufs: Vec<Vec<u8>> = Vec::with_capacity(anchor_vecs.len());
-    for (i, (((a_vec, a_text), (p_vec, p_text)), (n_vec, n_text))) in anchor_vecs
-        .iter()
-        .zip(anchor_texts.iter())
-        .zip(pos_vecs.iter().zip(pos_texts.iter()))
-        .zip(neg_vecs.iter().zip(neg_texts.iter()))
-        .enumerate()
-    {
-        let same = a_vec == p_vec && a_text == p_text;
+    validate_write_batch(entries.iter().map(|e| (e.anchor_vec, e.anchor_text)))?;
+    validate_write_batch(entries.iter().map(|e| (e.pos_vec, e.pos_text)))?;
+    validate_write_batch(entries.iter().map(|e| (e.neg_vec, e.neg_text)))?;
+
+    let mut key_bufs: Vec<[u8; 8]> = Vec::with_capacity(entries.len());
+    let mut value_bufs: Vec<Vec<u8>> = Vec::with_capacity(entries.len());
+    for (i, entry) in entries.iter().enumerate() {
+        let same = entry.anchor_vec == entry.pos_vec && entry.anchor_text == entry.pos_text;
         key_bufs.push((start_idx + i as u64).to_le_bytes());
         value_bufs.push(encode_entry(&SrdEntry {
             mode: SrdMode::Triplet,
             same_as_anchor: same,
-            anchor_emb: a_vec.clone(),
-            anchor_text: a_text.to_string(),
-            pos_emb: p_vec.clone(),
-            pos_text: p_text.to_string(),
-            neg_emb: Some(n_vec.clone()),
-            neg_text: Some(n_text.to_string()),
+            label: PairLabel::Positive,
+            anchor_emb: entry.anchor_vec.to_vec(),
+            anchor_text: entry.anchor_text.to_string(),
+            pos_emb: entry.pos_vec.to_vec(),
+            pos_text: entry.pos_text.to_string(),
+            neg_emb: Some(entry.neg_vec.to_vec()),
+            neg_text: Some(entry.neg_text.to_string()),
         }));
     }
     let entries: Vec<(&[u8], &[u8])> = key_bufs
@@ -478,6 +511,52 @@ pub fn batch_read_entries(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Helper to create an SrdPairWriteEntry slice for tests.
+    fn make_pair_entries<'a>(
+        a_vecs: &'a [Vec<f32>],
+        a_texts: &'a [&'a str],
+        p_vecs: &'a [Vec<f32>],
+        p_texts: &'a [&'a str],
+    ) -> Vec<SrdPairWriteEntry<'a>> {
+        a_vecs
+            .iter()
+            .zip(a_texts.iter())
+            .zip(p_vecs.iter().zip(p_texts.iter()))
+            .map(|((av, at), (pv, pt))| SrdPairWriteEntry {
+                anchor_vec: av,
+                anchor_text: at,
+                candidate_vec: pv,
+                candidate_text: pt,
+                label: &PairLabel::Positive,
+            })
+            .collect()
+    }
+
+    /// Helper to create an SrdTripletWriteEntry slice for tests.
+    fn make_triplet_entries<'a>(
+        a_vecs: &'a [Vec<f32>],
+        a_texts: &'a [&'a str],
+        p_vecs: &'a [Vec<f32>],
+        p_texts: &'a [&'a str],
+        n_vecs: &'a [Vec<f32>],
+        n_texts: &'a [&'a str],
+    ) -> Vec<SrdTripletWriteEntry<'a>> {
+        a_vecs
+            .iter()
+            .zip(a_texts.iter())
+            .zip(p_vecs.iter().zip(p_texts.iter()))
+            .zip(n_vecs.iter().zip(n_texts.iter()))
+            .map(|(((av, at), (pv, pt)), (nv, nt))| SrdTripletWriteEntry {
+                anchor_vec: av,
+                anchor_text: at,
+                pos_vec: pv,
+                pos_text: pt,
+                neg_vec: nv,
+                neg_text: nt,
+            })
+            .collect()
+    }
     use tempfile::TempDir;
 
     // -----------------------------------------------------------------------
@@ -494,6 +573,7 @@ mod tests {
         let entry = SrdEntry {
             mode: SrdMode::Pair,
             same_as_anchor: false,
+            label: PairLabel::Positive,
             anchor_emb: a_emb.clone(),
             anchor_text: a_text.to_string(),
             pos_emb: p_emb.clone(),
@@ -522,6 +602,7 @@ mod tests {
         let entry = SrdEntry {
             mode: SrdMode::Pair,
             same_as_anchor: true,
+            label: PairLabel::Positive,
             anchor_emb: a_emb.clone(),
             anchor_text: a_text.to_string(),
             pos_emb: a_emb.clone(),
@@ -548,6 +629,7 @@ mod tests {
         let full = encode_entry(&SrdEntry {
             mode: SrdMode::Pair,
             same_as_anchor: false,
+            label: PairLabel::Positive,
             anchor_emb: a_emb.clone(),
             anchor_text: a_text.to_string(),
             pos_emb: a_emb.clone(),
@@ -558,6 +640,7 @@ mod tests {
         let compact = encode_entry(&SrdEntry {
             mode: SrdMode::Pair,
             same_as_anchor: true,
+            label: PairLabel::Positive,
             anchor_emb: a_emb.clone(),
             anchor_text: a_text.to_string(),
             pos_emb: a_emb,
@@ -585,6 +668,7 @@ mod tests {
         let entry = SrdEntry {
             mode: SrdMode::Triplet,
             same_as_anchor: false,
+            label: PairLabel::Positive,
             anchor_emb: a_emb.clone(),
             anchor_text: a_text.to_string(),
             pos_emb: p_emb.clone(),
@@ -614,6 +698,7 @@ mod tests {
         let entry = SrdEntry {
             mode: SrdMode::Triplet,
             same_as_anchor: true,
+            label: PairLabel::Positive,
             anchor_emb: a_emb.clone(),
             anchor_text: a_text.to_string(),
             pos_emb: a_emb.clone(),
@@ -642,6 +727,7 @@ mod tests {
         let entry = SrdEntry {
             mode: SrdMode::Triplet,
             same_as_anchor: true,
+            label: PairLabel::Positive,
             anchor_emb: a_emb.clone(),
             anchor_text: a_text.to_string(),
             pos_emb: a_emb.clone(),
@@ -670,6 +756,7 @@ mod tests {
         let entry = SrdEntry {
             mode: SrdMode::Triplet,
             same_as_anchor: false, // pos is different
+            label: PairLabel::Positive,
             anchor_emb: a_emb.clone(),
             anchor_text: a_text.to_string(),
             pos_emb: p_emb.clone(),
@@ -695,6 +782,7 @@ mod tests {
         let entry = SrdEntry {
             mode: SrdMode::Pair,
             same_as_anchor: false,
+            label: PairLabel::Positive,
             anchor_emb: vec![1.0],
             anchor_text: String::new(),
             pos_emb: vec![2.0],
@@ -714,6 +802,7 @@ mod tests {
         let entry = SrdEntry {
             mode: SrdMode::Triplet,
             same_as_anchor: false,
+            label: PairLabel::Positive,
             anchor_emb: vec![1.0],
             anchor_text: "hello \u{1F600}".to_string(),
             pos_emb: vec![2.0],
@@ -752,6 +841,7 @@ mod tests {
         let entry = SrdEntry {
             mode: SrdMode::Pair,
             same_as_anchor: false,
+            label: PairLabel::Positive,
             anchor_emb: vec![1.0],
             anchor_text: "a".into(),
             pos_emb: vec![2.0],
@@ -768,6 +858,7 @@ mod tests {
         let entry = SrdEntry {
             mode: SrdMode::Triplet,
             same_as_anchor: false,
+            label: PairLabel::Positive,
             anchor_emb: vec![1.0],
             anchor_text: "a".into(),
             pos_emb: vec![2.0],
@@ -784,6 +875,7 @@ mod tests {
         let entry = SrdEntry {
             mode: SrdMode::Pair,
             same_as_anchor: false,
+            label: PairLabel::Positive,
             anchor_emb: vec![1.0, 2.0],
             anchor_text: "hello".into(),
             pos_emb: vec![3.0, 4.0],
@@ -801,6 +893,7 @@ mod tests {
         let entry = SrdEntry {
             mode: SrdMode::Triplet,
             same_as_anchor: false,
+            label: PairLabel::Positive,
             anchor_emb: vec![1.0],
             anchor_text: "a".into(),
             pos_emb: vec![2.0],
@@ -825,6 +918,7 @@ mod tests {
         let entry = SrdEntry {
             mode: SrdMode::Pair,
             same_as_anchor: false,
+            label: PairLabel::Positive,
             anchor_emb: a_emb.clone(),
             anchor_text: "anchor".into(),
             pos_emb: p_emb.clone(),
@@ -847,6 +941,7 @@ mod tests {
         let entry = SrdEntry {
             mode: SrdMode::Pair,
             same_as_anchor: false,
+            label: PairLabel::Positive,
             anchor_emb: vec![1.0],
             anchor_text: "hello".into(),
             pos_emb: vec![2.0],
@@ -879,7 +974,8 @@ mod tests {
         let a_refs: Vec<&str> = all_a_text.iter().map(|s| s.as_str()).collect();
         let p_refs: Vec<&str> = all_p_text.iter().map(|s| s.as_str()).collect();
 
-        write_pair_entries(&store, 0, &all_a_emb, &a_refs, &all_p_emb, &p_refs).unwrap();
+        let pair_entries = make_pair_entries(&all_a_emb, &a_refs, &all_p_emb, &p_refs);
+        write_pair_entries(&store, 0, pair_entries.as_slice()).unwrap();
         assert_eq!(store.len().unwrap(), n);
 
         let indices: Vec<usize> = (0..n).collect();
@@ -913,8 +1009,8 @@ mod tests {
         let p_refs: Vec<&str> = p_text.iter().map(|s| s.as_str()).collect();
         let n_refs: Vec<&str> = n_text.iter().map(|s| s.as_str()).collect();
 
-        write_triplet_entries(&store, 0, &a_emb, &a_refs, &p_emb, &p_refs, &n_emb, &n_refs)
-            .unwrap();
+        let trip_entries = make_triplet_entries(&a_emb, &a_refs, &p_emb, &p_refs, &n_emb, &n_refs);
+        write_triplet_entries(&store, 0, trip_entries.as_slice()).unwrap();
         assert_eq!(store.len().unwrap(), n);
 
         let indices: Vec<usize> = (0..n).collect();
@@ -944,7 +1040,8 @@ mod tests {
         let vecs: Vec<Vec<f32>> = (0..10).map(|i| vec![i as f32]).collect();
         let texts: Vec<String> = (0..10).map(|i| format!("t{i}")).collect();
         let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
-        write_pair_entries(&store, 0, &vecs, &refs, &vecs, &refs).unwrap();
+        let pair_entries = make_pair_entries(&vecs, &refs, &vecs, &refs);
+        write_pair_entries(&store, 0, pair_entries.as_slice()).unwrap();
 
         let entries = batch_read_entries(&store, &[0, 5, 9], 1).unwrap();
         assert_eq!(entries.len(), 3);
@@ -968,7 +1065,8 @@ mod tests {
 
         let vecs = vec![vec![1.0], vec![2.0]];
         let texts = vec!["a", "b"];
-        write_pair_entries(&store, 0, &vecs, &texts, &vecs, &texts).unwrap();
+        let pair_entries = make_pair_entries(&vecs, &texts, &vecs, &texts);
+        write_pair_entries(&store, 0, pair_entries.as_slice()).unwrap();
 
         // Index 99 doesn't exist — should be skipped
         let entries = batch_read_entries(&store, &[0, 99], 1).unwrap();
@@ -982,78 +1080,78 @@ mod tests {
 
     #[test]
     fn validate_write_batch_ok() {
-        let vecs = vec![vec![1.0, 2.0], vec![3.0, 4.0]];
-        let texts = vec!["hello", "world"];
-        assert!(validate_write_batch(&vecs, &texts).is_ok());
+        let vecs = [[1.0, 2.0], [3.0, 4.0]];
+        let texts = ["hello", "world"];
+        assert!(
+            validate_write_batch(
+                vecs.iter()
+                    .zip(texts.iter())
+                    .map(|(v, t)| (v.as_slice(), *t))
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn validate_write_batch_empty() {
         let vecs: Vec<Vec<f32>> = vec![];
         let texts: Vec<&str> = vec![];
-        assert!(validate_write_batch(&vecs, &texts).is_ok());
-    }
-
-    #[test]
-    fn validate_write_batch_len_mismatch() {
-        let vecs = vec![vec![1.0], vec![2.0]];
-        let texts = vec!["hello"];
-        assert!(validate_write_batch(&vecs, &texts).is_err());
+        assert!(
+            validate_write_batch(
+                vecs.iter()
+                    .zip(texts.iter())
+                    .map(|(v, t)| (v.as_slice(), *t))
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn validate_write_batch_non_finite() {
-        let vecs = vec![vec![1.0, f32::NAN]];
-        let texts = vec!["hello"];
-        assert!(validate_write_batch(&vecs, &texts).is_err());
+        let vecs = [[1.0, f32::NAN]];
+        let texts = ["hello"];
+        assert!(
+            validate_write_batch(
+                vecs.iter()
+                    .zip(texts.iter())
+                    .map(|(v, t)| (v.as_slice(), *t))
+            )
+            .is_err()
+        );
     }
 
     #[test]
+    #[allow(clippy::useless_vec)]
     fn validate_write_batch_inconsistent_dim() {
         let vecs = vec![vec![1.0, 2.0], vec![3.0]];
-        let texts = vec!["hello", "world"];
-        assert!(validate_write_batch(&vecs, &texts).is_err());
+        let texts = ["hello", "world"];
+        assert!(
+            validate_write_batch(
+                vecs.iter()
+                    .zip(texts.iter())
+                    .map(|(v, t)| (v.as_slice(), *t))
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn validate_write_batch_zero_dim() {
-        let vecs = vec![vec![]];
-        let texts = vec!["hello"];
-        assert!(validate_write_batch(&vecs, &texts).is_err());
+        let vecs: Vec<Vec<f32>> = vec![vec![]];
+        let texts = ["hello"];
+        assert!(
+            validate_write_batch(
+                vecs.iter()
+                    .zip(texts.iter())
+                    .map(|(v, t)| (v.as_slice(), *t))
+            )
+            .is_err()
+        );
     }
 
     // -----------------------------------------------------------------------
     // write_pair_entries / write_triplet_entries validation
     // -----------------------------------------------------------------------
-
-    #[test]
-    fn write_pair_entries_rejects_len_mismatch() {
-        let dir = TempDir::new().unwrap();
-        let store = DataStore::open(&dir.path().join("test.srd")).unwrap();
-        let a_vecs = vec![vec![1.0], vec![2.0]];
-        let a_texts = vec!["a"];
-        let p_vecs = vec![vec![3.0]];
-        let p_texts = vec!["p"];
-        assert!(write_pair_entries(&store, 0, &a_vecs, &a_texts, &p_vecs, &p_texts).is_err());
-    }
-
-    #[test]
-    fn write_triplet_entries_rejects_len_mismatch() {
-        let dir = TempDir::new().unwrap();
-        let store = DataStore::open(&dir.path().join("test.srd")).unwrap();
-        let a_vecs = vec![vec![1.0]];
-        let a_texts = vec!["a"];
-        let p_vecs = vec![vec![2.0], vec![3.0]];
-        let p_texts = vec!["p", "q"];
-        let n_vecs = vec![vec![4.0]];
-        let n_texts = vec!["n"];
-        assert!(
-            write_triplet_entries(
-                &store, 0, &a_vecs, &a_texts, &p_vecs, &p_texts, &n_vecs, &n_texts
-            )
-            .is_err()
-        );
-    }
 
     #[test]
     fn write_pair_entries_correct_start_idx() {
@@ -1063,12 +1161,14 @@ mod tests {
         // Write first batch at idx 0
         let vecs1 = vec![vec![1.0], vec![2.0]];
         let texts1 = vec!["a", "b"];
-        write_pair_entries(&store, 0, &vecs1, &texts1, &vecs1, &texts1).unwrap();
+        let pair_entries = make_pair_entries(&vecs1, &texts1, &vecs1, &texts1);
+        write_pair_entries(&store, 0, pair_entries.as_slice()).unwrap();
 
         // Write second batch at idx 2
         let vecs2 = vec![vec![3.0]];
         let texts2 = vec!["c"];
-        write_pair_entries(&store, 2, &vecs2, &texts2, &vecs2, &texts2).unwrap();
+        let pair_entries = make_pair_entries(&vecs2, &texts2, &vecs2, &texts2);
+        write_pair_entries(&store, 2, pair_entries.as_slice()).unwrap();
 
         assert_eq!(store.len().unwrap(), 3);
 
@@ -1089,7 +1189,8 @@ mod tests {
 
         let vecs = vec![vec![1.0, 2.0]];
         let texts = vec!["first"];
-        write_pair_entries(&store, 5, &vecs, &texts, &vecs, &texts).unwrap();
+        let pair_entries = make_pair_entries(&vecs, &texts, &vecs, &texts);
+        write_pair_entries(&store, 5, pair_entries.as_slice()).unwrap();
 
         let entries = batch_read_entries(&store, &[5], 2).unwrap();
         assert_eq!(entries.len(), 1);
@@ -1110,12 +1211,14 @@ mod tests {
         let p_vecs = vec![vec![1.0, 2.0], vec![30.0, 40.0]]; // different emb for diff entry
         let a_texts = vec!["same", "diff_a"];
         let p_texts = vec!["same", "diff_p"];
-        write_pair_entries(&store, 0, &a_vecs, &a_texts, &p_vecs, &p_texts).unwrap();
+        let pair_entries = make_pair_entries(&a_vecs, &a_texts, &p_vecs, &p_texts);
+        write_pair_entries(&store, 0, pair_entries.as_slice()).unwrap();
 
         // Batch B: entry 2 same_as_anchor=false, entry 3 same_as_anchor=true
         let b_vecs = vec![vec![5.0, 6.0], vec![7.0, 8.0]];
         let b_texts = vec!["batch_b_0", "batch_b_1"];
-        write_pair_entries(&store, 2, &b_vecs, &b_texts, &b_vecs, &b_texts).unwrap();
+        let pair_entries = make_pair_entries(&b_vecs, &b_texts, &b_vecs, &b_texts);
+        write_pair_entries(&store, 2, pair_entries.as_slice()).unwrap();
 
         assert_eq!(store.len().unwrap(), 4);
 
@@ -1168,7 +1271,11 @@ mod tests {
         let a_p_texts = vec!["p0", "a1"]; // entry 1 pos same as anchor
         let a_n_texts = vec!["n0", "n1"];
         write_triplet_entries(
-            &store, 0, &a_a_vecs, &a_a_texts, &a_p_vecs, &a_p_texts, &a_n_vecs, &a_n_texts,
+            &store,
+            0,
+            &make_triplet_entries(
+                &a_a_vecs, &a_a_texts, &a_p_vecs, &a_p_texts, &a_n_vecs, &a_n_texts,
+            ),
         )
         .unwrap();
 
@@ -1178,7 +1285,11 @@ mod tests {
         let b_p_texts = vec!["all_same"];
         let b_n_texts = vec!["all_same"];
         write_triplet_entries(
-            &store, 2, &b_a_vecs, &b_a_texts, &b_a_vecs, &b_p_texts, &b_a_vecs, &b_n_texts,
+            &store,
+            2,
+            &make_triplet_entries(
+                &b_a_vecs, &b_a_texts, &b_a_vecs, &b_p_texts, &b_a_vecs, &b_n_texts,
+            ),
         )
         .unwrap();
 
