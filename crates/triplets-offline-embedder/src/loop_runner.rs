@@ -15,7 +15,7 @@ use crate::split_scheduler::{
     at_sample_limit, compute_deficit_str, compute_global_in_flight, compute_samples_per_sec,
     is_exhaustion_error, steps_until_next_flush,
 };
-use crate::split_state::{PendingState, SplitState};
+use crate::split_state::SplitState;
 use crate::traits::{BatchProvider, EmbedStore, Embedder, Result, SamplerBatch, SchedulerConfig};
 
 // ---------------------------------------------------------------------------
@@ -342,7 +342,7 @@ where
 mod tests {
     use super::*;
     use crate::sampler_prefetcher::SamplerPrefetcher;
-    use crate::split_state::EmbedMode;
+    use crate::split_state::{EmbedMode, PendingState};
     use crate::traits::{PairEntry, PairWriteArgs, SamplerBatch, SchedulerError, TripletWriteArgs};
     use std::sync::Arc;
     use triplets_core::data::PairLabel;

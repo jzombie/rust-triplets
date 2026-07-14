@@ -2,8 +2,8 @@
 //! [`SplitScheduler`], and [`SplitState`] operations.
 
 use crate::split_scheduler::SplitScheduler;
+use crate::split_state::SplitState;
 use crate::split_state::flush_pending;
-use crate::split_state::{PendingState, SplitState};
 use crate::traits::{BatchProvider, EmbedStore, Result};
 
 /// Marks `state` as exhausted, flushes its pending buffer, and unlocks the
@@ -58,7 +58,7 @@ pub fn flush_all_pending_states<S: EmbedStore, P: BatchProvider>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::split_state::{EmbedMode, PendingTriplet};
+    use crate::split_state::{EmbedMode, PendingState, PendingTriplet};
     use crate::traits::{PairWriteArgs, SamplerBatch, TripletWriteArgs};
 
     /// Minimal in-memory store for testing.

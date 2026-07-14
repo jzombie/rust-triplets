@@ -3,8 +3,6 @@ use std::fmt;
 use triplets_core::SplitLabel;
 use triplets_core::data::PairLabel;
 
-use triplets_srd_source::srd_triplet::{SrdPairWriteEntry, SrdTripletWriteEntry};
-
 // ---------------------------------------------------------------------------
 // Batch types (AoS — Array of Structs)
 // ---------------------------------------------------------------------------
@@ -12,23 +10,31 @@ use triplets_srd_source::srd_triplet::{SrdPairWriteEntry, SrdTripletWriteEntry};
 /// A single pair entry from the sampler: anchor + candidate + label.
 #[derive(Debug, Clone)]
 pub struct PairEntry {
+    /// The anchor text for this pair.
     pub anchor_text: String,
+    /// The candidate (positive/negative) text for this pair.
     pub candidate_text: String,
+    /// The label indicating whether this is a positive or negative pair.
     pub label: PairLabel,
 }
 
 /// A single triplet entry from the sampler: anchor + positive + negative.
 #[derive(Debug, Clone)]
 pub struct TripletEntry {
+    /// The anchor text for this triplet.
     pub anchor_text: String,
+    /// The positive text for this triplet.
     pub pos_text: String,
+    /// The negative text for this triplet.
     pub neg_text: String,
 }
 
 /// A batch of texts from the sampler, either pairs or triplets.
 #[derive(Debug, Clone)]
 pub enum SamplerBatch {
+    /// A batch of pair entries.
     Pairs(Vec<PairEntry>),
+    /// A batch of triplet entries.
     Triplets(Vec<TripletEntry>),
 }
 
@@ -36,9 +42,12 @@ pub enum SamplerBatch {
 // Error types
 // ---------------------------------------------------------------------------
 
+/// Errors that can occur during the embedding pipeline.
 #[derive(Debug)]
 pub enum SchedulerError {
+    /// An I/O error occurred.
     Io(std::io::Error),
+    /// A semantic error with a message.
     Msg(String),
 }
 
@@ -71,6 +80,7 @@ impl From<&str> for SchedulerError {
     }
 }
 
+/// A specialized `Result` type for the embedding pipeline.
 pub type Result<T> = std::result::Result<T, SchedulerError>;
 
 // ---------------------------------------------------------------------------
@@ -80,31 +90,46 @@ pub type Result<T> = std::result::Result<T, SchedulerError>;
 /// A single pair entry ready for writing to the store.
 #[derive(Debug, Clone)]
 pub struct PairWriteEntry<'a> {
+    /// The anchor text (borrowed).
     pub anchor_text: &'a str,
+    /// The anchor embedding vector (borrowed).
     pub anchor_vec: &'a [f32],
+    /// The candidate text (borrowed).
     pub candidate_text: &'a str,
+    /// The candidate embedding vector (borrowed).
     pub candidate_vec: &'a [f32],
+    /// The pair label (borrowed).
     pub label: &'a PairLabel,
 }
 
+/// Arguments for writing a batch of pair entries.
 #[derive(Debug, Clone)]
 pub struct PairWriteArgs<'a> {
+    /// The pair entries to write.
     pub entries: &'a [PairWriteEntry<'a>],
 }
 
 /// A single triplet entry ready for writing to the store.
 #[derive(Debug, Clone)]
 pub struct TripletWriteEntry<'a> {
+    /// The anchor text (borrowed).
     pub anchor_text: &'a str,
+    /// The anchor embedding vector (borrowed).
     pub anchor_vec: &'a [f32],
+    /// The positive text (borrowed).
     pub pos_text: &'a str,
+    /// The positive embedding vector (borrowed).
     pub pos_vec: &'a [f32],
+    /// The negative text (borrowed).
     pub neg_text: &'a str,
+    /// The negative embedding vector (borrowed).
     pub neg_vec: &'a [f32],
 }
 
+/// Arguments for writing a batch of triplet entries.
 #[derive(Debug, Clone)]
 pub struct TripletWriteArgs<'a> {
+    /// The triplet entries to write.
     pub entries: &'a [TripletWriteEntry<'a>],
 }
 
@@ -112,6 +137,7 @@ pub struct TripletWriteArgs<'a> {
 // Traits
 // ---------------------------------------------------------------------------
 
+/// Trait for embedding stores that persist pair/triplet data.
 pub trait EmbedStore: Send + Sync {
     /// Write pair entries starting at `start_idx`.
     fn write_pairs(&self, start_idx: u64, args: &PairWriteArgs<'_>) -> Result<()>;

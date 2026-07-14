@@ -439,18 +439,10 @@ fn pair_write_and_read_via_srd_source() {
     // --- scope 1: write data, then drop the store handle ---
     {
         let store = DataStore::open(&store_path).unwrap();
-        let anchor_vecs = vec![
-            vec![1.0, 2.0, 3.0],
-            vec![4.0, 5.0, 6.0],
-            vec![7.0, 8.0, 9.0],
-        ];
-        let anchor_texts = vec!["hello", "world", "foo"];
-        let pos_vecs = vec![
-            vec![10.0, 11.0, 12.0],
-            vec![13.0, 14.0, 15.0],
-            vec![16.0, 17.0, 18.0],
-        ];
-        let pos_texts = vec!["hi", "earth", "bar"];
+        let anchor_vecs = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]];
+        let anchor_texts = ["hello", "world", "foo"];
+        let pos_vecs = [[10.0, 11.0, 12.0], [13.0, 14.0, 15.0], [16.0, 17.0, 18.0]];
+        let pos_texts = ["hi", "earth", "bar"];
         let labels = vec![PairLabel::Positive; 3];
         let entries: Vec<srd_triplet::SrdPairWriteEntry> = (0..3)
             .map(|i| srd_triplet::SrdPairWriteEntry {
@@ -500,12 +492,12 @@ fn triplet_write_and_read_via_srd_source() {
 
     {
         let store = DataStore::open(&store_path).unwrap();
-        let anchor_vecs = vec![vec![1.0; 4], vec![2.0; 4]];
-        let anchor_texts = vec!["anchor_a", "anchor_b"];
-        let pos_vecs = vec![vec![3.0; 4], vec![4.0; 4]];
-        let pos_texts = vec!["positive_a", "positive_b"];
-        let neg_vecs = vec![vec![5.0; 4], vec![6.0; 4]];
-        let neg_texts = vec!["negative_a", "negative_b"];
+        let anchor_vecs = [[1.0; 4], [2.0; 4]];
+        let anchor_texts = ["anchor_a", "anchor_b"];
+        let pos_vecs = [[3.0; 4], [4.0; 4]];
+        let pos_texts = ["positive_a", "positive_b"];
+        let neg_vecs = [[5.0; 4], [6.0; 4]];
+        let neg_texts = ["negative_a", "negative_b"];
         let entries: Vec<srd_triplet::SrdTripletWriteEntry> = (0..2)
             .map(|i| srd_triplet::SrdTripletWriteEntry {
                 anchor_vec: &anchor_vecs[i],
@@ -561,8 +553,8 @@ fn resume_after_partial_write() {
     // Write 2 entries.
     {
         let store = DataStore::open(&store_path).unwrap();
-        let vecs = vec![vec![1.0; 3]; 2];
-        let texts = vec!["a", "b"];
+        let vecs = [[1.0; 3]; 2];
+        let texts = ["a", "b"];
         let labels = vec![PairLabel::Positive; 2];
         let entries: Vec<srd_triplet::SrdPairWriteEntry> = (0..2)
             .map(|i| srd_triplet::SrdPairWriteEntry {

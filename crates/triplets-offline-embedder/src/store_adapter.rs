@@ -7,10 +7,7 @@ use triplets_core::SplitLabel;
 use triplets_srd_source::srd_triplet::{self, SrdMode, SrdPairWriteEntry, SrdTripletWriteEntry};
 
 use crate::split_state::{EmbedMode, PendingState, SplitState};
-use crate::traits::{
-    EmbedStore, PairWriteArgs, PairWriteEntry, Result, SchedulerError, TripletWriteArgs,
-    TripletWriteEntry,
-};
+use crate::traits::{EmbedStore, PairWriteArgs, Result, SchedulerError, TripletWriteArgs};
 
 /// Newtype wrapping [`DataStore`] to implement [`EmbedStore`].
 ///
@@ -127,6 +124,7 @@ pub fn init_split_states_with_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::traits::{PairWriteEntry, TripletWriteEntry};
     use tempfile::TempDir;
     use triplets_core::data::PairLabel;
 
@@ -138,9 +136,9 @@ mod tests {
 
         assert_eq!(adapter.len().unwrap(), 0);
 
-        let vecs = vec![vec![1.0f32, 2.0, 3.0]];
-        let texts = vec!["hello"];
-        let entries = vec![PairWriteEntry {
+        let vecs = [[1.0f32, 2.0, 3.0]];
+        let texts = ["hello"];
+        let entries = [PairWriteEntry {
             anchor_vec: &vecs[0],
             anchor_text: texts[0],
             candidate_vec: &vecs[0],
@@ -214,12 +212,12 @@ mod tests {
 
         assert_eq!(adapter.len().unwrap(), 0);
 
-        let anchor_vecs = vec![vec![1.0f32, 2.0, 3.0], vec![4.0, 5.0, 6.0]];
-        let anchor_texts = vec!["a1", "a2"];
-        let pos_vecs = vec![vec![7.0f32, 8.0, 9.0], vec![10.0, 11.0, 12.0]];
-        let pos_texts = vec!["p1", "p2"];
-        let neg_vecs = vec![vec![13.0f32, 14.0, 15.0], vec![16.0, 17.0, 18.0]];
-        let neg_texts = vec!["n1", "n2"];
+        let anchor_vecs = [[1.0f32, 2.0, 3.0], [4.0, 5.0, 6.0]];
+        let anchor_texts = ["a1", "a2"];
+        let pos_vecs = [[7.0f32, 8.0, 9.0], [10.0, 11.0, 12.0]];
+        let pos_texts = ["p1", "p2"];
+        let neg_vecs = [[13.0f32, 14.0, 15.0], [16.0, 17.0, 18.0]];
+        let neg_texts = ["n1", "n2"];
 
         let entries: Vec<TripletWriteEntry> = (0..2)
             .map(|i| TripletWriteEntry {

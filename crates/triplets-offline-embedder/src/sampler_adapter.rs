@@ -6,7 +6,7 @@ use triplets_core::{Sampler, SplitLabel};
 use triplets_srd_source::srd_triplet::SrdMode;
 
 use crate::sampler_prefetcher::{filter_pair_batch, filter_triplet_batch};
-use crate::traits::{BatchProvider, PairEntry, Result, SamplerBatch, SchedulerError, TripletEntry};
+use crate::traits::{BatchProvider, Result, SamplerBatch, SchedulerError};
 
 /// Adapter that routes batch-fetching calls to a [`Sampler`] trait object
 /// and converts the core [`SampleBatch`](triplets_core::data::SampleBatch) / [`TripletBatch`](triplets_core::data::TripletBatch) types into the

@@ -1080,8 +1080,8 @@ mod tests {
 
     #[test]
     fn validate_write_batch_ok() {
-        let vecs = vec![vec![1.0, 2.0], vec![3.0, 4.0]];
-        let texts = vec!["hello", "world"];
+        let vecs = [[1.0, 2.0], [3.0, 4.0]];
+        let texts = ["hello", "world"];
         assert!(
             validate_write_batch(
                 vecs.iter()
@@ -1108,8 +1108,8 @@ mod tests {
 
     #[test]
     fn validate_write_batch_non_finite() {
-        let vecs = vec![vec![1.0, f32::NAN]];
-        let texts = vec!["hello"];
+        let vecs = [[1.0, f32::NAN]];
+        let texts = ["hello"];
         assert!(
             validate_write_batch(
                 vecs.iter()
@@ -1121,9 +1121,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::useless_vec)]
     fn validate_write_batch_inconsistent_dim() {
         let vecs = vec![vec![1.0, 2.0], vec![3.0]];
-        let texts = vec!["hello", "world"];
+        let texts = ["hello", "world"];
         assert!(
             validate_write_batch(
                 vecs.iter()
@@ -1136,8 +1137,8 @@ mod tests {
 
     #[test]
     fn validate_write_batch_zero_dim() {
-        let vecs = vec![vec![]];
-        let texts = vec!["hello"];
+        let vecs: Vec<Vec<f32>> = vec![vec![]];
+        let texts = ["hello"];
         assert!(
             validate_write_batch(
                 vecs.iter()

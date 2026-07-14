@@ -5,55 +5,71 @@ use triplets_core::SplitLabel;
 use triplets_core::data::PairLabel;
 
 use crate::traits::{
-    BatchProvider, EmbedStore, Embedder, PairEntry, PairWriteArgs, PairWriteEntry, Result,
-    SamplerBatch, SchedulerConfig, SchedulerError, StepResult, TripletEntry, TripletWriteArgs,
-    TripletWriteEntry,
+    BatchProvider, EmbedStore, Embedder, PairWriteArgs, PairWriteEntry, Result, SamplerBatch,
+    SchedulerConfig, SchedulerError, StepResult, TripletWriteArgs, TripletWriteEntry,
 };
 
 /// Accumulated pair entry ready for flush.
 #[derive(Debug, Clone)]
 pub struct PendingPair {
+    /// The anchor text for this pair.
     pub anchor_text: String,
+    /// The embedding vector for the anchor text.
     pub anchor_vec: Vec<f32>,
+    /// The candidate (positive/negative) text for this pair.
     pub candidate_text: String,
+    /// The embedding vector for the candidate text.
     pub candidate_vec: Vec<f32>,
+    /// The label indicating whether this is a positive or negative pair.
     pub label: PairLabel,
 }
 
 /// Accumulated triplet entry ready for flush.
 #[derive(Debug, Clone)]
 pub struct PendingTriplet {
+    /// The anchor text for this triplet.
     pub anchor_text: String,
+    /// The embedding vector for the anchor text.
     pub anchor_vec: Vec<f32>,
+    /// The positive text for this triplet.
     pub pos_text: String,
+    /// The embedding vector for the positive text.
     pub pos_vec: Vec<f32>,
+    /// The negative text for this triplet.
     pub neg_text: String,
+    /// The embedding vector for the negative text.
     pub neg_vec: Vec<f32>,
 }
 
 /// Pending accumulation state — either pairs or triplets.
 #[derive(Debug, Clone)]
 pub enum PendingState {
+    /// A batch of pair entries awaiting flush.
     Pairs(Vec<PendingPair>),
+    /// A batch of triplet entries awaiting flush.
     Triplets(Vec<PendingTriplet>),
 }
 
 impl PendingState {
+    /// Returns the number of pending entries.
     pub fn len(&self) -> usize {
         match self {
             PendingState::Pairs(v) => v.len(),
             PendingState::Triplets(v) => v.len(),
         }
     }
+    /// Returns `true` if there are no pending entries.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+    /// Clears all pending entries, preserving the variant.
     pub fn clear(&mut self) {
         *self = match self {
             PendingState::Pairs(_) => PendingState::Pairs(Vec::new()),
             PendingState::Triplets(_) => PendingState::Triplets(Vec::new()),
         };
     }
+    /// Pushes a pair entry. Panics if called on `Triplets` state.
     pub fn push_pair(&mut self, entry: PendingPair) {
         if let PendingState::Pairs(v) = self {
             v.push(entry);
@@ -61,6 +77,7 @@ impl PendingState {
             unreachable!("push_pair called on Triplets state");
         }
     }
+    /// Pushes a triplet entry. Panics if called on `Pairs` state.
     pub fn push_triplet(&mut self, entry: PendingTriplet) {
         if let PendingState::Triplets(v) = self {
             v.push(entry);
@@ -183,7 +200,8 @@ impl<S: EmbedStore> SplitState<S> {
         match batch {
             SamplerBatch::Pairs(entries) => {
                 let mut all_anchor_vecs = Vec::with_capacity(entries.len());
-                let mut all_candidate_vecs: Vec<Option<Vec<f32>>> = Vec::with_capacity(entries.len());
+                let mut all_candidate_vecs: Vec<Option<Vec<f32>>> =
+                    Vec::with_capacity(entries.len());
                 let mut keep = vec![false; entries.len()];
                 let mut chunk_start = 0;
 
@@ -264,25 +282,19 @@ impl<S: EmbedStore> SplitState<S> {
                     total_processed += chunk.len() as u64;
 
                     // Resolve candidate options (push None for identical, Some for unique)
-                    for i in 0..chunk.len() {
-                        let candidate_vec_opt = match candidate_indices[i] {
-                            Some(idx) => Some(candidate_embs[idx].clone()),
-                            None => None, // Defer anchor clone to Phase 2
-                        };
-                        all_candidate_vecs.push(candidate_vec_opt);
+                    for idx in candidate_indices.iter().take(chunk.len()) {
+                        all_candidate_vecs.push(idx.map(|i| candidate_embs[i].clone()));
                     }
 
                     // Consume anchor_vecs exactly once
                     all_anchor_vecs.extend(anchor_vecs);
 
-                    for idx in chunk_start..chunk_end {
-                        keep[idx] = true;
-                    }
+                    keep[chunk_start..chunk_end].fill(true);
                     chunk_start = chunk_end;
                 }
 
                 // Phase 2: Consume and Assemble (zero-copy string moves)
-                let mut vec_iter = all_anchor_vecs.into_iter().zip(all_candidate_vecs.into_iter());
+                let mut vec_iter = all_anchor_vecs.into_iter().zip(all_candidate_vecs);
 
                 for (i, entry) in entries.into_iter().enumerate() {
                     if !keep[i] {
@@ -293,10 +305,10 @@ impl<S: EmbedStore> SplitState<S> {
                     let final_c_vec = c_vec_opt.unwrap_or_else(|| a_vec.clone());
 
                     self.pending.push_pair(PendingPair {
-                        anchor_text: entry.anchor_text,       // MOVED
-                        anchor_vec: a_vec,                    // MOVED
-                        candidate_text: entry.candidate_text,  // MOVED
-                        candidate_vec: final_c_vec,            // MOVED
+                        anchor_text: entry.anchor_text,
+                        anchor_vec: a_vec,
+                        candidate_text: entry.candidate_text,
+                        candidate_vec: final_c_vec,
                         label: entry.label,
                     });
                 }
@@ -340,18 +352,20 @@ impl<S: EmbedStore> SplitState<S> {
                     }
 
                     let embedded = match embedder.embed(&unique_texts) {
-                        Ok(v) => match validate_embed_response(&v, unique_texts.len(), self.emb_dim) {
-                            Ok(()) => v,
-                            Err(_e) => {
-                                self.step_num += 1;
-                                self.dropped_batches += 1;
-                                self.total_batches += 1;
-                                self.dropped_samples += chunk.len() as u64;
-                                total_dropped += chunk.len() as u64;
-                                chunk_start = chunk_end;
-                                continue;
+                        Ok(v) => {
+                            match validate_embed_response(&v, unique_texts.len(), self.emb_dim) {
+                                Ok(()) => v,
+                                Err(_e) => {
+                                    self.step_num += 1;
+                                    self.dropped_batches += 1;
+                                    self.total_batches += 1;
+                                    self.dropped_samples += chunk.len() as u64;
+                                    total_dropped += chunk.len() as u64;
+                                    chunk_start = chunk_end;
+                                    continue;
+                                }
                             }
-                        },
+                        }
                         Err(_e) => {
                             self.step_num += 1;
                             self.dropped_batches += 1;
@@ -373,16 +387,15 @@ impl<S: EmbedStore> SplitState<S> {
                         all_neg_vecs.push(embedded[neg_map[local_i]].clone());
                     }
 
-                    for idx in chunk_start..chunk_end {
-                        keep[idx] = true;
-                    }
+                    keep[chunk_start..chunk_end].fill(true);
                     chunk_start = chunk_end;
                 }
 
                 // Phase 2: Consume and Assemble (zero-copy string moves)
-                let mut vec_iter = all_anchor_vecs.into_iter()
-                    .zip(all_pos_vecs.into_iter())
-                    .zip(all_neg_vecs.into_iter());
+                let mut vec_iter = all_anchor_vecs
+                    .into_iter()
+                    .zip(all_pos_vecs)
+                    .zip(all_neg_vecs);
 
                 for (i, entry) in entries.into_iter().enumerate() {
                     if !keep[i] {
@@ -392,12 +405,12 @@ impl<S: EmbedStore> SplitState<S> {
                     let ((a_vec, p_vec), n_vec) = vec_iter.next().expect("sync error in Phase 2");
 
                     self.pending.push_triplet(PendingTriplet {
-                        anchor_text: entry.anchor_text,  // MOVED
-                        anchor_vec: a_vec,               // MOVED
-                        pos_text: entry.pos_text,        // MOVED
-                        pos_vec: p_vec,                  // MOVED
-                        neg_text: entry.neg_text,        // MOVED
-                        neg_vec: n_vec,                  // MOVED
+                        anchor_text: entry.anchor_text, // MOVED
+                        anchor_vec: a_vec,              // MOVED
+                        pos_text: entry.pos_text,       // MOVED
+                        pos_vec: p_vec,                 // MOVED
+                        neg_text: entry.neg_text,       // MOVED
+                        neg_vec: n_vec,                 // MOVED
                     });
                 }
             }
@@ -513,6 +526,7 @@ pub fn flush_pending<S: EmbedStore, P: BatchProvider>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::traits::{PairEntry, TripletEntry};
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 

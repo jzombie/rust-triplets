@@ -3,7 +3,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
 use triplets_core::SplitLabel;
-use triplets_core::data::PairLabel;
 use triplets_core::data::{SamplePair, SampleTriplet};
 
 use crate::split_scheduler::is_exhaustion_error;
@@ -252,9 +251,9 @@ mod tests {
     #[test]
     fn prefetcher_returns_batches_then_exhausted() {
         let batch = SamplerBatch::Pairs(
-            vec!["a".into()]
+            ["a".into()]
                 .into_iter()
-                .zip(vec!["p".into()].into_iter())
+                .zip(["p".into()])
                 .map(|(a, c)| PairEntry {
                     anchor_text: a,
                     candidate_text: c,
@@ -474,9 +473,9 @@ mod tests {
 
         // Provider that returns 3 batches then exhausted.
         let batch = SamplerBatch::Pairs(
-            vec!["a".into()]
+            ["a".into()]
                 .into_iter()
-                .zip(vec!["p".into()].into_iter())
+                .zip(["p".into()])
                 .map(|(a, c)| PairEntry {
                     anchor_text: a,
                     candidate_text: c,

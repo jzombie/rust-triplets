@@ -10,8 +10,6 @@ use triplets::data::{DataRecord, QualityScore, RecordSection, SectionRole};
 use triplets::source::{DataSource, SourceCursor, SourceSnapshot};
 use triplets::types::RecordId;
 
-use triplets_core::data::PairLabel;
-
 use crate::error::SrdError;
 use crate::srd_triplet::{self, SrdMode};
 
@@ -183,6 +181,7 @@ impl DataSource for SrdSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use triplets::data::PairLabel;
 
     use crate::srd_triplet::{SrdPairWriteEntry, SrdTripletWriteEntry};
 
