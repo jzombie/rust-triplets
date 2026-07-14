@@ -2,10 +2,59 @@ use std::time::Instant;
 
 use triplets_core::SplitLabel;
 
+use triplets_core::data::PairLabel;
+
 use crate::traits::{
-    BatchProvider, EmbedStore, Embedder, PairWriteArgs, Result, SamplerBatch, SchedulerConfig,
-    SchedulerError, StepResult, TripletWriteArgs,
+    BatchProvider, EmbedStore, Embedder, PairEntry, PairWriteArgs, PairWriteEntry,
+    Result, SamplerBatch, SchedulerConfig, SchedulerError, StepResult, TripletEntry,
+    TripletWriteArgs, TripletWriteEntry,
 };
+
+/// Accumulated pair entry ready for flush.
+#[derive(Debug, Clone)]
+pub struct PendingPair {
+    pub anchor_text: String,
+    pub anchor_vec: Vec<f32>,
+    pub candidate_text: String,
+    pub candidate_vec: Vec<f32>,
+    pub label: PairLabel,
+}
+
+/// Accumulated triplet entry ready for flush.
+#[derive(Debug, Clone)]
+pub struct PendingTriplet {
+    pub anchor_text: String,
+    pub anchor_vec: Vec<f32>,
+    pub pos_text: String,
+    pub pos_vec: Vec<f32>,
+    pub neg_text: String,
+    pub neg_vec: Vec<f32>,
+}
+
+/// Pending accumulation state — either pairs or triplets.
+#[derive(Debug, Clone)]
+pub enum PendingState {
+    Pairs(Vec<PendingPair>),
+    Triplets(Vec<PendingTriplet>),
+}
+
+impl PendingState {
+    pub fn len(&self) -> usize {
+        match self {
+            PendingState::Pairs(v) => v.len(),
+            PendingState::Triplets(v) => v.len(),
+        }
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    pub fn clear(&mut self) {
+        *self = match self {
+            PendingState::Pairs(_) => PendingState::Pairs(Vec::new()),
+            PendingState::Triplets(_) => PendingState::Triplets(Vec::new()),
+        };
+    }
+}
 
 /// Output mode for the embedding store.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,19 +90,8 @@ pub struct SplitState<S: EmbedStore> {
     pub step_num: u64,
     /// Per-split flush counter.
     pub batch_num: u64,
-    // TODO: Refactor these pending things; what is preventing massive syncronization issues?
-    /// Accumulation buffers between flush points (pair mode).
-    pub pending_anchor_vecs: Vec<Vec<f32>>,
-    /// Pending anchor texts.
-    pub pending_anchor_texts: Vec<String>,
-    /// Pending positive embedding vectors.
-    pub pending_pos_vecs: Vec<Vec<f32>>,
-    /// Pending positive texts.
-    pub pending_pos_texts: Vec<String>,
-    /// Additional buffers for triplet mode.
-    pub pending_neg_vecs: Vec<Vec<f32>>,
-    /// Pending negative texts.
-    pub pending_neg_texts: Vec<String>,
+    /// Pending entries (AoS — Pair or Triplet variant).
+    pub pending: PendingState,
     /// Sampler has no more data for this split.
     pub exhausted: bool,
     /// Number of batches dropped due to embed/validation failures.
@@ -72,12 +110,12 @@ pub struct SplitState<S: EmbedStore> {
 impl<S: EmbedStore> SplitState<S> {
     /// Whether the pending buffers are empty.
     pub fn is_pending_empty(&self) -> bool {
-        self.pending_anchor_vecs.is_empty()
+        self.pending.is_empty()
     }
 
     /// Number of pending samples.
     pub fn pending_len(&self) -> u64 {
-        self.pending_anchor_vecs.len() as u64
+        self.pending.len() as u64
     }
 
     /// Total in-flight samples (written + pending).
@@ -91,35 +129,38 @@ impl<S: EmbedStore> SplitState<S> {
         self.segment_base = self.total_written;
     }
 
-    /// Accumulate a batch of embeddings and texts into the pending buffers.
+    /// Accumulate embedded texts into the pending state.
     pub fn accumulate(
         &mut self,
         anchor_vecs: Vec<Vec<f32>>,
         anchor_texts: &[String],
-        pos_vecs: Vec<Vec<f32>>,
-        pos_texts: &[String],
-        neg_vecs: Option<Vec<Vec<f32>>>,
-        neg_texts: Option<&[String]>,
+        candidate_vecs: Vec<Vec<f32>>,
+        candidate_texts: &[String],
+        labels: Option<&[PairLabel]>,
     ) {
-        self.pending_anchor_texts
-            .extend(anchor_texts.iter().cloned());
-        self.pending_anchor_vecs.extend(anchor_vecs);
-        self.pending_pos_texts.extend(pos_texts.iter().cloned());
-        self.pending_pos_vecs.extend(pos_vecs);
-        if let (Some(neg_v), Some(neg_t)) = (neg_vecs, neg_texts) {
-            self.pending_neg_texts.extend(neg_t.iter().cloned());
-            self.pending_neg_vecs.extend(neg_v);
+        // Only valid for Pair mode
+        match &mut self.pending {
+            PendingState::Pairs(v) => {
+                for i in 0..anchor_texts.len() {
+                    let label = labels.map_or(PairLabel::Positive, |l| l[i].clone());
+                    v.push(PendingPair {
+                        anchor_text: anchor_texts[i].clone(),
+                        anchor_vec: anchor_vecs[i].clone(),
+                        candidate_text: candidate_texts[i].clone(),
+                        candidate_vec: candidate_vecs[i].clone(),
+                        label,
+                    });
+                }
+            }
+            PendingState::Triplets(_) => {
+                // accumulate not used for triplets — step handles them directly
+            }
         }
     }
 
     /// Clear all pending buffers.
     pub fn clear_pending(&mut self) {
-        self.pending_anchor_vecs.clear();
-        self.pending_anchor_texts.clear();
-        self.pending_pos_vecs.clear();
-        self.pending_pos_texts.clear();
-        self.pending_neg_vecs.clear();
-        self.pending_neg_texts.clear();
+        self.pending.clear();
     }
 
     /// Process one embed step: embed the batch, validate, accumulate.
@@ -135,7 +176,10 @@ impl<S: EmbedStore> SplitState<S> {
         embedder: &dyn Embedder,
         config: &SchedulerConfig,
     ) -> Result<StepResult> {
-        let anchor_count = batch.anchor_texts.len();
+        let anchor_count = match &batch {
+            SamplerBatch::Pairs(v) => v.len(),
+            SamplerBatch::Triplets(v) => v.len(),
+        };
         if anchor_count == 0 {
             self.step_num += 1;
             return Ok(StepResult {
@@ -145,128 +189,160 @@ impl<S: EmbedStore> SplitState<S> {
             });
         }
 
-        // Latch start time on first real embed
         self.start.get_or_insert_with(std::time::Instant::now);
 
-        // Chunk the batch if embed_batch_size < batch size
         let chunk_size = config.embed_batch_size.max(1);
         let mut total_processed = 0u64;
         let mut total_dropped = 0u64;
 
-        for chunk_start in (0..anchor_count).step_by(chunk_size) {
-            let chunk_end = (chunk_start + chunk_size).min(anchor_count);
-            let chunk_anchor = &batch.anchor_texts[chunk_start..chunk_end];
-            let chunk_pos = &batch.pos_texts[chunk_start..chunk_end];
-            let chunk_neg = batch.neg_texts.as_ref().map(|n| &n[chunk_start..chunk_end]);
+        match batch {
+            SamplerBatch::Pairs(entries) => {
+                for chunk_start in (0..anchor_count).step_by(chunk_size) {
+                    let chunk_end = (chunk_start + chunk_size).min(anchor_count);
+                    let chunk = &entries[chunk_start..chunk_end];
 
-            // Embed anchor texts
-            let anchor_refs: Vec<&str> = chunk_anchor.iter().map(String::as_str).collect();
-            let anchor_vecs = match embedder.embed(&anchor_refs) {
-                Ok(v) => {
-                    match validate_embed_response(&v, chunk_anchor.len(), self.emb_dim) {
-                        Ok(()) => v, // zero-copy: validate in-place, keep ownership
-                        Err(_e) => {
-                            self.step_num += 1;
-                            self.dropped_batches += 1;
-                            self.total_batches += 1;
-                            self.dropped_samples += chunk_anchor.len() as u64;
-                            total_dropped += chunk_anchor.len() as u64;
-                            continue;
-                        }
-                    }
-                }
-                Err(_e) => {
-                    self.step_num += 1;
-                    self.dropped_batches += 1;
-                    self.total_batches += 1;
-                    self.dropped_samples += chunk_anchor.len() as u64;
-                    total_dropped += chunk_anchor.len() as u64;
-                    continue;
-                }
-            };
-
-            // Embed positive texts (only if different from anchor)
-            let pos_vecs = if chunk_pos == chunk_anchor {
-                anchor_vecs.clone()
-            } else {
-                let pos_refs: Vec<&str> = chunk_pos.iter().map(String::as_str).collect();
-                match embedder.embed(&pos_refs) {
-                    Ok(v) => {
-                        match validate_embed_response(&v, chunk_pos.len(), self.emb_dim) {
-                            Ok(()) => v, // zero-copy
+                    let anchor_refs: Vec<&str> = chunk.iter().map(|e| e.anchor_text.as_str()).collect();
+                    let anchor_vecs = match embedder.embed(&anchor_refs) {
+                        Ok(v) => match validate_embed_response(&v, chunk.len(), self.emb_dim) {
+                            Ok(()) => v,
                             Err(_e) => {
                                 self.step_num += 1;
                                 self.dropped_batches += 1;
                                 self.total_batches += 1;
-                                self.dropped_samples += chunk_pos.len() as u64;
-                                total_dropped += chunk_pos.len() as u64;
+                                self.dropped_samples += chunk.len() as u64;
+                                total_dropped += chunk.len() as u64;
                                 continue;
                             }
-                        }
-                    }
-                    Err(_e) => {
-                        self.step_num += 1;
-                        self.dropped_batches += 1;
-                        self.total_batches += 1;
-                        self.dropped_samples += chunk_pos.len() as u64;
-                        total_dropped += chunk_pos.len() as u64;
-                        continue;
-                    }
-                }
-            };
-
-            // Embed negative texts (triplet mode only)
-            let neg_vecs = if let Some(neg_texts) = chunk_neg {
-                if neg_texts == chunk_anchor {
-                    Some(anchor_vecs.clone())
-                } else if neg_texts == chunk_pos {
-                    Some(pos_vecs.clone())
-                } else {
-                    let neg_refs: Vec<&str> = neg_texts.iter().map(String::as_str).collect();
-                    match embedder.embed(&neg_refs) {
-                        Ok(v) => {
-                            match validate_embed_response(&v, neg_texts.len(), self.emb_dim) {
-                                Ok(()) => Some(v), // zero-copy
-                                Err(_e) => {
-                                    self.step_num += 1;
-                                    self.dropped_batches += 1;
-                                    self.total_batches += 1;
-                                    self.dropped_samples += neg_texts.len() as u64;
-                                    total_dropped += neg_texts.len() as u64;
-                                    continue;
-                                }
-                            }
-                        }
+                        },
                         Err(_e) => {
                             self.step_num += 1;
                             self.dropped_batches += 1;
                             self.total_batches += 1;
-                            self.dropped_samples += neg_texts.len() as u64;
-                            total_dropped += neg_texts.len() as u64;
+                            self.dropped_samples += chunk.len() as u64;
+                            total_dropped += chunk.len() as u64;
                             continue;
                         }
+                    };
+
+                    // Embed candidates with dedup (reuse anchor embedding when same text)
+                    let mut candidate_indices = Vec::with_capacity(chunk.len());
+                    let mut unique_refs = Vec::new();
+                    for entry in chunk {
+                        if entry.candidate_text == entry.anchor_text {
+                            candidate_indices.push(None);
+                        } else {
+                            candidate_indices.push(Some(unique_refs.len()));
+                            unique_refs.push(entry.candidate_text.as_str());
+                        }
+                    }
+
+                    let candidate_embs = if unique_refs.is_empty() {
+                        Vec::new()
+                    } else {
+                        match embedder.embed(&unique_refs) {
+                            Ok(v) => v,
+                            Err(_e) => {
+                                self.step_num += 1;
+                                self.dropped_batches += 1;
+                                self.total_batches += 1;
+                                self.dropped_samples += chunk.len() as u64;
+                                total_dropped += chunk.len() as u64;
+                                continue;
+                            }
+                        }
+                    };
+
+                    self.step_num += 1;
+                    self.total_batches += 1;
+                    total_processed += chunk.len() as u64;
+
+                    match &mut self.pending {
+                        PendingState::Pairs(v) => {
+                            for (i, entry) in chunk.iter().enumerate() {
+                                let candidate_vec = match candidate_indices[i] {
+                                    Some(idx) => candidate_embs[idx].clone(),
+                                    None => anchor_vecs[i].clone(),
+                                };
+                                v.push(PendingPair {
+                                    anchor_text: entry.anchor_text.clone(),
+                                    anchor_vec: anchor_vecs[i].clone(),
+                                    candidate_text: entry.candidate_text.clone(),
+                                    candidate_vec,
+                                    label: entry.label.clone(),
+                                });
+                            }
+                        }
+                        PendingState::Triplets(_) => { /* unreachable for pairs */ }
                     }
                 }
-            } else {
-                None
-            };
+            }
+            SamplerBatch::Triplets(entries) => {
+                for chunk_start in (0..anchor_count).step_by(chunk_size) {
+                    let chunk_end = (chunk_start + chunk_size).min(anchor_count);
+                    let chunk = &entries[chunk_start..chunk_end];
 
-            self.step_num += 1;
-            self.total_batches += 1;
-            total_processed += chunk_anchor.len() as u64;
+                    // Collect unique texts across all 3 roles with index maps
+                    let mut unique_texts = Vec::new();
+                    let mut anchor_map = Vec::with_capacity(chunk.len());
+                    let mut pos_map = Vec::with_capacity(chunk.len());
+                    let mut neg_map = Vec::with_capacity(chunk.len());
 
-            // Accumulate into pending buffers
-            self.accumulate(
-                anchor_vecs,
-                chunk_anchor,
-                pos_vecs,
-                chunk_pos,
-                neg_vecs,
-                chunk_neg,
-            );
+                    for entry in chunk {
+                        anchor_map.push(unique_texts.len());
+                        unique_texts.push(entry.anchor_text.as_str());
+
+                        if entry.pos_text == entry.anchor_text {
+                            pos_map.push(anchor_map.last().copied().unwrap());
+                        } else {
+                            pos_map.push(unique_texts.len());
+                            unique_texts.push(entry.pos_text.as_str());
+                        }
+
+                        if entry.neg_text == entry.anchor_text {
+                            neg_map.push(anchor_map.last().copied().unwrap());
+                        } else if entry.neg_text == entry.pos_text {
+                            neg_map.push(pos_map.last().copied().unwrap());
+                        } else {
+                            neg_map.push(unique_texts.len());
+                            unique_texts.push(entry.neg_text.as_str());
+                        }
+                    }
+
+                    let embedded = match embedder.embed(&unique_texts) {
+                        Ok(v) => v,
+                        Err(_e) => {
+                            self.step_num += 1;
+                            self.dropped_batches += 1;
+                            self.total_batches += 1;
+                            self.dropped_samples += chunk.len() as u64;
+                            total_dropped += chunk.len() as u64;
+                            continue;
+                        }
+                    };
+
+                    self.step_num += 1;
+                    self.total_batches += 1;
+                    total_processed += chunk.len() as u64;
+
+                    match &mut self.pending {
+                        PendingState::Triplets(v) => {
+                            for i in 0..chunk.len() {
+                                v.push(PendingTriplet {
+                                    anchor_text: chunk[i].anchor_text.clone(),
+                                    anchor_vec: embedded[anchor_map[i]].clone(),
+                                    pos_text: chunk[i].pos_text.clone(),
+                                    pos_vec: embedded[pos_map[i]].clone(),
+                                    neg_text: chunk[i].neg_text.clone(),
+                                    neg_vec: embedded[neg_map[i]].clone(),
+                                });
+                            }
+                        }
+                        PendingState::Pairs(_) => { /* unreachable for triplets */ }
+                    }
+                }
+            }
         }
 
-        // Circuit breaker: halt if sustained failure rate exceeds 5%
         if self.total_batches >= 10 {
             let drop_rate = self.dropped_batches as f64 / self.total_batches as f64;
             if drop_rate > 0.05 {
@@ -329,42 +405,37 @@ pub fn flush_pending<S: EmbedStore, P: BatchProvider>(
     state: &mut SplitState<S>,
     provider: &P,
 ) -> Result<()> {
-    let pending_count = state.pending_anchor_vecs.len();
+    let pending_count = state.pending.len();
     if pending_count == 0 {
         return Ok(());
     }
 
-    let anchor_texts: Vec<&str> = state
-        .pending_anchor_texts
-        .iter()
-        .map(String::as_str)
-        .collect();
-    let pos_texts: Vec<&str> = state.pending_pos_texts.iter().map(String::as_str).collect();
-
-    match state.mode {
-        EmbedMode::Pair => {
+    match state.pending {
+        PendingState::Pairs(ref pairs) => {
+            let entries: Vec<PairWriteEntry> = pairs.iter().map(|p| PairWriteEntry {
+                anchor_text: p.anchor_text.as_str(),
+                anchor_vec: &p.anchor_vec,
+                candidate_text: p.candidate_text.as_str(),
+                candidate_vec: &p.candidate_vec,
+                label: &p.label,
+            }).collect();
             state.store.write_pairs(
                 state.total_written,
-                &PairWriteArgs {
-                    anchor_vecs: &state.pending_anchor_vecs,
-                    anchor_texts: &anchor_texts,
-                    pos_vecs: &state.pending_pos_vecs,
-                    pos_texts: &pos_texts,
-                },
+                &PairWriteArgs { entries: &entries },
             )?;
         }
-        EmbedMode::Triplet => {
-            let neg_texts: Vec<&str> = state.pending_neg_texts.iter().map(String::as_str).collect();
+        PendingState::Triplets(ref triplets) => {
+            let entries: Vec<TripletWriteEntry> = triplets.iter().map(|t| TripletWriteEntry {
+                anchor_text: t.anchor_text.as_str(),
+                anchor_vec: &t.anchor_vec,
+                pos_text: t.pos_text.as_str(),
+                pos_vec: &t.pos_vec,
+                neg_text: t.neg_text.as_str(),
+                neg_vec: &t.neg_vec,
+            }).collect();
             state.store.write_triplets(
                 state.total_written,
-                &TripletWriteArgs {
-                    anchor_vecs: &state.pending_anchor_vecs,
-                    anchor_texts: &anchor_texts,
-                    pos_vecs: &state.pending_pos_vecs,
-                    pos_texts: &pos_texts,
-                    neg_vecs: &state.pending_neg_vecs,
-                    neg_texts: &neg_texts,
-                },
+                &TripletWriteArgs { entries: &entries },
             )?;
         }
     }

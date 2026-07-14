@@ -6,7 +6,7 @@ use triplets_core::{Sampler, SplitLabel};
 use triplets_srd_source::srd_triplet::SrdMode;
 
 use crate::sampler_prefetcher::{filter_pair_batch, filter_triplet_batch};
-use crate::traits::{BatchProvider, Result, SamplerBatch, SchedulerError};
+use crate::traits::{BatchProvider, PairEntry, Result, SamplerBatch, SchedulerError, TripletEntry};
 
 /// Adapter that routes batch-fetching calls to a [`Sampler`] trait object
 /// and converts the core [`SampleBatch`](triplets_core::data::SampleBatch) / [`TripletBatch`](triplets_core::data::TripletBatch) types into the
@@ -29,15 +29,11 @@ impl BatchProvider for SamplerAdapter {
                 if batch.pairs.is_empty() {
                     return Ok(None);
                 }
-                let (anchor_texts, pos_texts) = filter_pair_batch(&batch.pairs);
-                if anchor_texts.is_empty() {
+                let entries = filter_pair_batch(&batch.pairs);
+                if entries.is_empty() {
                     return Ok(None);
                 }
-                Ok(Some(SamplerBatch {
-                    anchor_texts,
-                    pos_texts,
-                    neg_texts: None,
-                }))
+                Ok(Some(SamplerBatch::Pairs(entries)))
             }
             SrdMode::Triplet => {
                 let batch = self
@@ -47,15 +43,11 @@ impl BatchProvider for SamplerAdapter {
                 if batch.triplets.is_empty() {
                     return Ok(None);
                 }
-                let (anchor_texts, pos_texts, neg_texts) = filter_triplet_batch(&batch.triplets);
-                if anchor_texts.is_empty() {
+                let entries = filter_triplet_batch(&batch.triplets);
+                if entries.is_empty() {
                     return Ok(None);
                 }
-                Ok(Some(SamplerBatch {
-                    anchor_texts,
-                    pos_texts,
-                    neg_texts: Some(neg_texts),
-                }))
+                Ok(Some(SamplerBatch::Triplets(entries)))
             }
         }
     }

@@ -4,10 +4,10 @@
 use simd_r_drive::storage_engine::DataStore;
 use simd_r_drive::storage_engine::traits::DataStoreReader;
 use triplets_core::SplitLabel;
-use triplets_srd_source::srd_triplet::{self, SrdMode};
+use triplets_srd_source::srd_triplet::{self, SrdMode, SrdPairWriteEntry, SrdTripletWriteEntry};
 
-use crate::split_state::{EmbedMode, SplitState};
-use crate::traits::{EmbedStore, PairWriteArgs, Result, SchedulerError, TripletWriteArgs};
+use crate::split_state::{EmbedMode, PendingState, SplitState};
+use crate::traits::{EmbedStore, PairWriteArgs, PairWriteEntry, Result, SchedulerError, TripletWriteArgs, TripletWriteEntry};
 
 /// Newtype wrapping [`DataStore`] to implement [`EmbedStore`].
 ///
@@ -17,29 +17,28 @@ pub struct SrdStoreAdapter(pub DataStore);
 
 impl EmbedStore for SrdStoreAdapter {
     fn write_pairs(&self, start_idx: u64, args: &PairWriteArgs<'_>) -> Result<()> {
-        srd_triplet::write_pair_entries(
-            &self.0,
-            start_idx,
-            args.anchor_vecs,
-            args.anchor_texts,
-            args.pos_vecs,
-            args.pos_texts,
-        )
-        .map_err(|e| SchedulerError::Msg(format!("write error: {e}")))
+        let srd_entries: Vec<SrdPairWriteEntry> = args.entries.iter().map(|e| SrdPairWriteEntry {
+            anchor_vec: e.anchor_vec,
+            anchor_text: e.anchor_text,
+            candidate_vec: e.candidate_vec,
+            candidate_text: e.candidate_text,
+            label: e.label,
+        }).collect();
+        srd_triplet::write_pair_entries(&self.0, start_idx, &srd_entries)
+            .map_err(|e| SchedulerError::Msg(format!("write error: {e}")))
     }
 
     fn write_triplets(&self, start_idx: u64, args: &TripletWriteArgs<'_>) -> Result<()> {
-        srd_triplet::write_triplet_entries(
-            &self.0,
-            start_idx,
-            args.anchor_vecs,
-            args.anchor_texts,
-            args.pos_vecs,
-            args.pos_texts,
-            args.neg_vecs,
-            args.neg_texts,
-        )
-        .map_err(|e| SchedulerError::Msg(format!("write error: {e}")))
+        let srd_entries: Vec<SrdTripletWriteEntry> = args.entries.iter().map(|e| SrdTripletWriteEntry {
+            anchor_vec: e.anchor_vec,
+            anchor_text: e.anchor_text,
+            pos_vec: e.pos_vec,
+            pos_text: e.pos_text,
+            neg_vec: e.neg_vec,
+            neg_text: e.neg_text,
+        }).collect();
+        srd_triplet::write_triplet_entries(&self.0, start_idx, &srd_entries)
+            .map_err(|e| SchedulerError::Msg(format!("write error: {e}")))
     }
 
     fn len(&self) -> Result<u64> {
@@ -102,12 +101,7 @@ pub fn init_split_states_with_batch(
             total_written: already_done,
             step_num,
             batch_num,
-            pending_anchor_vecs: Vec::new(),
-            pending_anchor_texts: Vec::new(),
-            pending_pos_vecs: Vec::new(),
-            pending_pos_texts: Vec::new(),
-            pending_neg_vecs: Vec::new(),
-            pending_neg_texts: Vec::new(),
+            pending: PendingState::Pairs(Vec::new()),
             exhausted: false,
             dropped_batches: 0,
             total_batches: 0,
@@ -134,16 +128,15 @@ mod tests {
 
         let vecs = vec![vec![1.0f32, 2.0, 3.0]];
         let texts = vec!["hello"];
+        let entries = vec![PairWriteEntry {
+            anchor_vec: &vecs[0],
+            anchor_text: texts[0],
+            candidate_vec: &vecs[0],
+            candidate_text: texts[0],
+            label: &PairLabel::Positive,
+        }];
         adapter
-            .write_pairs(
-                0,
-                &PairWriteArgs {
-                    anchor_vecs: &vecs,
-                    anchor_texts: &texts,
-                    pos_vecs: &vecs,
-                    pos_texts: &texts,
-                },
-            )
+            .write_pairs(0, &PairWriteArgs { entries: &entries })
             .unwrap();
 
         assert_eq!(adapter.len().unwrap(), 1);
@@ -172,23 +165,21 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let descs = vec![(SplitLabel::Train, "train", 0u64, 1.0f32)];
 
-        // First call: creates the store, writes some data.
         {
             let states =
                 init_split_states_with_batch(dir.path(), &descs, 8, SrdMode::Pair, 4, 400).unwrap();
             let vecs = vec![vec![1.0f32, 2.0, 3.0, 4.0]; 5];
             let texts: Vec<&str> = vec!["a", "b", "c", "d", "e"];
+            let entries: Vec<PairWriteEntry> = vecs.iter().zip(texts.iter()).map(|(v, t)| PairWriteEntry {
+                anchor_vec: v,
+                anchor_text: t,
+                candidate_vec: v,
+                candidate_text: t,
+                label: &PairLabel::Positive,
+            }).collect();
             states[0]
                 .store
-                .write_pairs(
-                    0,
-                    &PairWriteArgs {
-                        anchor_vecs: &vecs,
-                        anchor_texts: &texts,
-                        pos_vecs: &vecs,
-                        pos_texts: &texts,
-                    },
-                )
+                .write_pairs(0, &PairWriteArgs { entries: &entries })
                 .unwrap();
         }
 
@@ -214,18 +205,17 @@ mod tests {
         let neg_vecs = vec![vec![13.0f32, 14.0, 15.0], vec![16.0, 17.0, 18.0]];
         let neg_texts = vec!["n1", "n2"];
 
+        let entries: Vec<TripletWriteEntry> = (0..2).map(|i| TripletWriteEntry {
+            anchor_vec: &anchor_vecs[i],
+            anchor_text: anchor_texts[i],
+            pos_vec: &pos_vecs[i],
+            pos_text: pos_texts[i],
+            neg_vec: &neg_vecs[i],
+            neg_text: neg_texts[i],
+        }).collect();
+
         adapter
-            .write_triplets(
-                0,
-                &TripletWriteArgs {
-                    anchor_vecs: &anchor_vecs,
-                    anchor_texts: &anchor_texts,
-                    pos_vecs: &pos_vecs,
-                    pos_texts: &pos_texts,
-                    neg_vecs: &neg_vecs,
-                    neg_texts: &neg_texts,
-                },
-            )
+            .write_triplets(0, &TripletWriteArgs { entries: &entries })
             .unwrap();
 
         assert_eq!(adapter.len().unwrap(), 2);
@@ -237,7 +227,6 @@ mod tests {
         let ds = DataStore::open(&dir.path().join("deref.srd")).unwrap();
         let adapter = SrdStoreAdapter(ds);
 
-        // Deref to DataStore and call its inherent len method
         let inner_len = DataStoreReader::len(&*adapter).unwrap();
         assert_eq!(inner_len, 0);
     }
@@ -260,33 +249,30 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let descs = vec![(SplitLabel::Train, "train", 0u64, 1.0f32)];
 
-        // Write 20 entries, embed_batch_size=8 → step_num = 20/8 = 2
-        // steps_per_batch=4 → batch_num = 2/4 = 0
         {
             let states =
                 init_split_states_with_batch(dir.path(), &descs, 8, SrdMode::Pair, 4, 4).unwrap();
             let vecs = vec![vec![1.0f32; 4]; 20];
             let texts: Vec<&str> = (0..20).map(|_i| "").collect();
             let text_refs: Vec<&str> = texts.iter().map(|s| &**s).collect();
+            let entries: Vec<PairWriteEntry> = vecs.iter().zip(text_refs.iter()).map(|(v, t)| PairWriteEntry {
+                anchor_vec: v,
+                anchor_text: t,
+                candidate_vec: v,
+                candidate_text: t,
+                label: &PairLabel::Positive,
+            }).collect();
             states[0]
                 .store
-                .write_pairs(
-                    0,
-                    &PairWriteArgs {
-                        anchor_vecs: &vecs,
-                        anchor_texts: &text_refs,
-                        pos_vecs: &vecs,
-                        pos_texts: &text_refs,
-                    },
-                )
+                .write_pairs(0, &PairWriteArgs { entries: &entries })
                 .unwrap();
         }
 
         let states =
             init_split_states_with_batch(dir.path(), &descs, 8, SrdMode::Pair, 4, 4).unwrap();
         assert_eq!(states[0].total_written, 20);
-        assert_eq!(states[0].step_num, 2); // 20 / 8
-        assert_eq!(states[0].batch_num, 0); // 2 / 4
+        assert_eq!(states[0].step_num, 2);
+        assert_eq!(states[0].batch_num, 0);
         assert_eq!(states[0].segment_base, 20);
     }
 }

@@ -1,24 +1,44 @@
 use std::fmt;
 
+use triplets_core::data::PairLabel;
 use triplets_core::SplitLabel;
 
-/// A batch of texts from the sampler, with separate anchor/positive/negative.
+use triplets_srd_source::srd_triplet::{SrdPairWriteEntry, SrdTripletWriteEntry};
+
+// ---------------------------------------------------------------------------
+// Batch types (AoS — Array of Structs)
+// ---------------------------------------------------------------------------
+
+/// A single pair entry from the sampler: anchor + candidate + label.
 #[derive(Debug, Clone)]
-pub struct SamplerBatch {
-    /// Anchor texts for this batch.
-    pub anchor_texts: Vec<String>,
-    /// Positive texts for this batch.
-    pub pos_texts: Vec<String>,
-    /// Negative texts (only present in triplet mode).
-    pub neg_texts: Option<Vec<String>>,
+pub struct PairEntry {
+    pub anchor_text: String,
+    pub candidate_text: String,
+    pub label: PairLabel,
 }
 
-/// Error type for scheduler operations.
+/// A single triplet entry from the sampler: anchor + positive + negative.
+#[derive(Debug, Clone)]
+pub struct TripletEntry {
+    pub anchor_text: String,
+    pub pos_text: String,
+    pub neg_text: String,
+}
+
+/// A batch of texts from the sampler, either pairs or triplets.
+#[derive(Debug, Clone)]
+pub enum SamplerBatch {
+    Pairs(Vec<PairEntry>),
+    Triplets(Vec<TripletEntry>),
+}
+
+// ---------------------------------------------------------------------------
+// Error types
+// ---------------------------------------------------------------------------
+
 #[derive(Debug)]
 pub enum SchedulerError {
-    /// Underlying I/O error.
     Io(std::io::Error),
-    /// Generic message error.
     Msg(String),
 }
 
@@ -51,53 +71,46 @@ impl From<&str> for SchedulerError {
     }
 }
 
-/// Convenience type alias.
 pub type Result<T> = std::result::Result<T, SchedulerError>;
 
-/// Borrowed arguments for writing a pair batch to a store.
-///
-/// Currently uses `f32` for simplicity — most embedding models output f32 and
-/// simd-r-drive stores raw f32 bytes.  A future change could make this generic
-/// over the element type, but would require a conversion at the storage
-/// boundary.
+// ---------------------------------------------------------------------------
+// Write boundaries (AoS)
+// ---------------------------------------------------------------------------
+
+/// A single pair entry ready for writing to the store.
+#[derive(Debug, Clone)]
+pub struct PairWriteEntry<'a> {
+    pub anchor_text: &'a str,
+    pub anchor_vec: &'a [f32],
+    pub candidate_text: &'a str,
+    pub candidate_vec: &'a [f32],
+    pub label: &'a PairLabel,
+}
+
 #[derive(Debug, Clone)]
 pub struct PairWriteArgs<'a> {
-    /// Embedding vectors for anchor texts.
-    pub anchor_vecs: &'a [Vec<f32>],
-    /// Anchor text strings.
-    pub anchor_texts: &'a [&'a str],
-    /// Embedding vectors for positive texts.
-    pub pos_vecs: &'a [Vec<f32>],
-    /// Positive text strings.
-    pub pos_texts: &'a [&'a str],
+    pub entries: &'a [PairWriteEntry<'a>],
 }
 
-/// Borrowed arguments for writing a triplet batch to a store.
-///
-/// Currently uses `f32` for simplicity — most embedding models output f32 and
-/// simd-r-drive stores raw f32 bytes.  A future change could make this generic
-/// over the element type, but would require a conversion at the storage
-/// boundary.
+/// A single triplet entry ready for writing to the store.
+#[derive(Debug, Clone)]
+pub struct TripletWriteEntry<'a> {
+    pub anchor_text: &'a str,
+    pub anchor_vec: &'a [f32],
+    pub pos_text: &'a str,
+    pub pos_vec: &'a [f32],
+    pub neg_text: &'a str,
+    pub neg_vec: &'a [f32],
+}
+
 #[derive(Debug, Clone)]
 pub struct TripletWriteArgs<'a> {
-    /// Embedding vectors for anchor texts.
-    pub anchor_vecs: &'a [Vec<f32>],
-    /// Anchor text strings.
-    pub anchor_texts: &'a [&'a str],
-    /// Embedding vectors for positive texts.
-    pub pos_vecs: &'a [Vec<f32>],
-    /// Positive text strings.
-    pub pos_texts: &'a [&'a str],
-    /// Embedding vectors for negative texts.
-    pub neg_vecs: &'a [Vec<f32>],
-    /// Negative text strings.
-    pub neg_texts: &'a [&'a str],
+    pub entries: &'a [TripletWriteEntry<'a>],
 }
 
-/// How to write a batch of embeddings + texts to a store.
-pub trait EmbedStore: Send + Sync {
-    /// Write pair entries (anchor + positive) starting at `start_idx`.
-    fn write_pairs(&self, start_idx: u64, args: &PairWriteArgs<'_>) -> Result<()>;
+// ---------------------------------------------------------------------------
+// Traits
+// ---------------------------------------------------------------------------
 
     /// Write triplet entries (anchor + positive + negative) starting at `start_idx`.
     fn write_triplets(&self, start_idx: u64, args: &TripletWriteArgs<'_>) -> Result<()>;
