@@ -119,3 +119,11 @@ pub const ENV_TRIPLETS_HF_TOKEN_TEST_DATASET: &str = "TRIPLETS_HF_TOKEN_TEST_DAT
 pub const ENV_TRIPLETS_HF_WHOAMI_ENDPOINT: &str = "TRIPLETS_HF_WHOAMI_ENDPOINT";
 /// Managed cache group for Hugging Face snapshot-backed sources.
 pub const HF_GROUP: &str = "triplets/huggingface";
+
+/// Prefix for temporary download files created by `allocate_temp_download_path`.
+/// Used to identify temp files that can be safely deleted after transcoding.
+pub const HF_TEMP_DOWNLOAD_PREFIX: &str = "triplets_hf_";
+
+/// Default file extension when the original filename has no extension.
+/// Used as fallback when building temp download paths.
+pub const HF_TEMP_DEFAULT_EXTENSION: &str = "part";

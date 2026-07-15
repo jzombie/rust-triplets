@@ -38,7 +38,7 @@ use crate::constants::{
     HF_REMOTE_EXPANSION_HEADROOM_MULTIPLIER, HF_REMOTE_URL_PREFIX, HF_RESOLVE_URL_SEPARATOR,
     HF_SHARD_CANDIDATE_SEED_TAG, HF_SHARD_STORE_EXTENSION, HF_SHARD_STORE_META_ROWS_KEY,
     HF_SHARD_STORE_ROW_PREFIX, HF_SHARD_STORE_SOURCE_SIZE_KEY, HF_SHARED_RUNTIME_WORKER_THREADS,
-    HF_WHOAMI_DEFAULT_ENDPOINT,
+    HF_TEMP_DEFAULT_EXTENSION, HF_TEMP_DOWNLOAD_PREFIX, HF_WHOAMI_DEFAULT_ENDPOINT,
 };
 #[cfg(not(debug_assertions))]
 use crate::constants::{
@@ -1493,6 +1493,15 @@ impl HuggingFaceRowSource {
         }
 
         let store_path = Self::shard_store_path_for(&shard.path);
+        let in_manifest = shard.path.starts_with(self.manifest_cache_root());
+        let is_temp_download = shard
+            .path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .starts_with(HF_TEMP_DOWNLOAD_PREFIX);
+        let can_delete_transient = in_manifest || is_temp_download;
+
         let store = self.get_or_open_shard_store(&store_path)?;
         if store_path.exists() {
             let existing_rows = self.read_store_row_count(&store)?;
@@ -1647,10 +1656,9 @@ impl HuggingFaceRowSource {
 
         self.write_store_row_count(&store, served_rows)?;
 
-        // Only delete transient files inside the managed manifest root,
-        // never delete user-provided local files.
-        let in_manifest = shard.path.starts_with(self.manifest_cache_root());
-        if shard.path != store_path && shard.path.exists() && in_manifest {
+        // Only delete transient files inside the managed manifest root or
+        // system temp downloads, never delete user-provided local files.
+        if shard.path != store_path && shard.path.exists() && can_delete_transient {
             fs::remove_file(&shard.path).map_err(|err| SamplerError::SourceUnavailable {
                 source_id: self.config.source_id.clone(),
                 reason: format!(
@@ -2561,7 +2569,7 @@ impl HuggingFaceRowSource {
         config.source_id.hash(&mut hasher);
         remote_path.hash(&mut hasher);
         let fingerprint = hasher.finish();
-        let prefix = format!("triplets_hf_{fingerprint:016x}_");
+        let prefix = format!("{HF_TEMP_DOWNLOAD_PREFIX}{fingerprint:016x}_");
         let suffix = format!(".{}", extension.trim_start_matches('.'));
         let temp_file = tempfile::Builder::new()
             .prefix(&prefix)
@@ -2869,9 +2877,18 @@ impl HuggingFaceRowSource {
         }
 
         // ── Download ──────────────────────────────────────────────────────────
-        let parquet_candidate = Self::is_parquet_path(&target);
-        if parquet_candidate {
-            let temp_target = Self::allocate_temp_download_path(config, remote_path, "parquet")?;
+        let is_transient =
+            Self::is_parquet_path(&target) || is_gzip_path(&target) || is_transient_text(&target);
+
+        if is_transient {
+            // Preserve full compound extension (e.g. "jsonl.gz") so transcoder
+            // routing (is_gzip_path) still works on the staged temp file.
+            let file_name = target.file_name().unwrap_or_default().to_string_lossy();
+            let compound_ext = file_name
+                .split_once('.')
+                .map(|(_, e)| e)
+                .unwrap_or(HF_TEMP_DEFAULT_EXTENSION);
+            let temp_target = Self::allocate_temp_download_path(config, remote_path, compound_ext)?;
             Self::download_remote_url_to_target_with_runtime(
                 http_client,
                 config,
@@ -3438,6 +3455,14 @@ impl HuggingFaceRowSource {
                 &remote_path,
             ));
             if shard.path != canonical_store {
+                // Drop the active DataStore handle before rename/remove to avoid
+                // file lock violations on Windows.
+                let _ = self
+                    .config
+                    .store_cache
+                    .lock_ok()
+                    .map(|mut cache| cache.remove(&shard.path));
+
                 if let Some(parent) = canonical_store.parent() {
                     fs::create_dir_all(parent).map_err(|err| SamplerError::SourceUnavailable {
                         source_id: self.config.source_id.clone(),
@@ -3495,11 +3520,8 @@ impl HuggingFaceRowSource {
                 .unwrap_or(0)
         });
         if source_size > 0 {
-            // Write to the already-cached store handle (opened during transcode)
-            // to avoid opening a second handle to the same file.
-            if let Ok(cache) = self.config.store_cache.lock()
-                && let Some(store) = cache.get(&shard.path)
-            {
+            // Force the engine to acquire the handle using the new canonical path.
+            if let Ok(store) = self.get_or_open_shard_store(&shard.path) {
                 let _ = store.write(HF_SHARD_STORE_SOURCE_SIZE_KEY, &source_size.to_le_bytes());
             }
         }
@@ -6496,8 +6518,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(out, target);
-        assert_eq!(fs::read(&target).unwrap(), payload);
+        // Transient formats (ndjson) are staged to a temp path, not the cache target.
+        assert_ne!(out, target, "transient download should go to temp path");
+        assert!(out.exists(), "temp file should exist");
+        assert_eq!(fs::read(&out).unwrap(), payload);
     }
 
     #[test]
@@ -7143,8 +7167,13 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(refreshed, target);
-        assert_eq!(fs::read(&target).unwrap(), payload);
+        // Transient formats (ndjson) are staged to a temp path, not the cache target.
+        assert_ne!(
+            refreshed, target,
+            "transient download should go to temp path"
+        );
+        assert!(refreshed.exists(), "temp file should exist");
+        assert_eq!(fs::read(&refreshed).unwrap(), payload);
     }
 
     #[test]
@@ -7179,6 +7208,45 @@ mod tests {
         assert_eq!(state.shards.len(), 1);
         assert_eq!(state.shards[0].path, store_target);
         assert_eq!(state.materialized_rows, 2);
+    }
+
+    // Temp-staged files (with triplet_hf_ prefix) must be removed after
+    // transcoding completes — no leaked temp files in the OS temp directory.
+    #[test]
+    fn transcode_transient_shard_to_store_cleans_up_temp_downloads() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config.clone());
+
+        // Create a temp file with the triplet_hf_ prefix (simulates a staged download).
+        let temp_parquet = dir.path().join("triplets_hf_aabbccdd00112233_temp.parquet");
+        write_parquet_fixture(&temp_parquet, &[("r1", "hello")]);
+        assert!(temp_parquet.exists(), "temp parquet must exist before test");
+
+        let shard = ShardIndex {
+            path: temp_parquet.clone(),
+            global_start: 0,
+            row_count: 1,
+            parquet_row_groups: vec![(0, 1)],
+            remote_candidate: None,
+        };
+
+        let result = source
+            .transcode_transient_shard_to_store(&shard)
+            .expect("transcode must succeed");
+
+        // Temp file must be gone after transcoding.
+        assert!(
+            !temp_parquet.exists(),
+            "temp download file must be cleaned up after transcode"
+        );
+
+        // Store must still be present.
+        let store_path = result.expect("must yield Some(ShardIndex)").path;
+        assert!(
+            store_path.exists(),
+            "simdr store must exist after transcode"
+        );
     }
 
     // When transcode_transient_shard_to_store takes the early-return path
