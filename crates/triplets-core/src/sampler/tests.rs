@@ -13256,3 +13256,115 @@ fn same_record_and_wrong_article_recipes_coexist() {
         "batch must contain at least one WrongArticle triplet"
     );
 }
+
+#[test]
+fn text_batch_samples_from_positive_and_negative_pair_label_records() {
+    fn labeled_record(
+        id: &str,
+        date: &str,
+        title: &str,
+        body: &str,
+        label: PairLabel,
+    ) -> DataRecord {
+        let now = Utc::now();
+        DataRecord {
+            id: id.into(),
+            source: PRIMARY_SOURCE_ID.into(),
+            created_at: now,
+            updated_at: now,
+            quality: QualityScore { trust: 0.9 },
+            taxonomy: vec![PRIMARY_SOURCE_ID.into(), META_FIELD_DATE.encode(date)],
+            sections: vec![
+                RecordSection {
+                    role: SectionRole::Anchor,
+                    heading: Some("Title".into()),
+                    text: title.into(),
+                    sentences: vec![title.into()],
+                },
+                RecordSection {
+                    role: SectionRole::Context,
+                    heading: Some("Summary".into()),
+                    text: body.into(),
+                    sentences: vec![body.into()],
+                },
+            ],
+            meta_prefix: None,
+            label: Some(label),
+        }
+    }
+
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 42).unwrap());
+    let mut config = base_config();
+    config.batch_size = 4;
+    config.text_recipes = vec![TextRecipe {
+        name: "pair_labeled_text".into(),
+        selector: Selector::Role(SectionRole::Context),
+        weight: 1.0,
+        instruction: None,
+    }];
+
+    let mut inner = TripletSamplerInner::new(config, Arc::clone(&store));
+
+    let pos_record = labeled_record(
+        "pair_label::2025-01-01/positive.txt",
+        "2025-01-01",
+        "Positive Title",
+        "Positive body text for pair label testing",
+        PairLabel::Positive,
+    );
+    let neg_record = labeled_record(
+        "pair_label::2025-01-01/negative.txt",
+        "2025-01-01",
+        "Negative Title",
+        "Negative body text for pair label testing",
+        PairLabel::Negative,
+    );
+
+    for record in [pos_record.clone(), neg_record.clone()] {
+        store.upsert(record.id.clone(), SplitLabel::Train).unwrap();
+        inner
+            .chunk_index
+            .insert(record.id.clone(), record.id.clone());
+        inner.records.insert(record.id.clone(), Arc::new(record));
+    }
+    inner.epoch_tracker.ensure_loaded().unwrap();
+    let records_by_split = inner.records_by_split().unwrap();
+    inner
+        .epoch_tracker
+        .reconcile(SplitLabel::Train, &records_by_split);
+
+    let text_batch = inner
+        .next_text_batch_inner_with_weights(SplitLabel::Train, None)
+        .expect("text batch should sample from records with PairLabel");
+
+    assert_eq!(text_batch.samples.len(), 4);
+    assert!(
+        text_batch
+            .samples
+            .iter()
+            .all(|sample| sample.recipe == "pair_labeled_text"),
+        "all samples should use the pair_labeled_text recipe"
+    );
+
+    let mut saw_positive_record = false;
+    let mut saw_negative_record = false;
+    for sample in &text_batch.samples {
+        if let Some(record) = inner.records.get(&sample.chunk.record_id) {
+            match record.label {
+                Some(PairLabel::Positive) => saw_positive_record = true,
+                Some(PairLabel::Negative) => saw_negative_record = true,
+                None => {}
+            }
+        }
+    }
+
+    assert!(
+        saw_positive_record,
+        "text batch should contain at least one sample from a PairLabel::Positive record"
+    );
+    assert!(
+        saw_negative_record,
+        "text batch should contain at least one sample from a PairLabel::Negative record"
+    );
+}
