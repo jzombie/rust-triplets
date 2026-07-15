@@ -9584,9 +9584,9 @@ mod tests {
     // the Windows Winsock layer behaves non-deterministically under parallel test
     // execution profiles, frequently caching socket state or delaying connection drops
     // to match synthetic connect timeouts.
-    #[cfg_attr(windows, ignore = "Windows TCP hangs on unreachable ports")]
     #[test]
     #[serial(global_state)]
+    #[cfg(not(target_os = "windows"))]
     fn trigger_expansion_if_needed_starts_background_thread() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().to_path_buf());
