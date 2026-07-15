@@ -9575,7 +9575,7 @@ mod tests {
 
     #[test]
     // FIXME: Windows tests timeout here, theoretically due to the following reason:
-    // 
+    //
     // Testing live thread spawning combined with a deliberate fallback to an
     // unreachable dead port (127.0.0.1:1) binds your test suite's determinism
     // directly to OS-level TCP/IP implementation details. While Unix environments
