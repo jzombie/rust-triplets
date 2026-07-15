@@ -5,7 +5,7 @@ Hugging Face integration for the [triplets](https://crates.io/crates/triplets) d
 For full documentation on configuring sources, sampling, chunking, and pipeline orchestration,
 see the [main triplets README](https://github.com/jzombie/rust-triplets/blob/main/README.md) on GitHub.
 
-## Why Not Use the `hf-hub` Crate?
+## Why No `hf-hub` Dependency?
 
 This crate uses a custom downloader rather than the official [`hf-hub`](https://crates.io/crates/hf-hub) crate, for several structural reasons:
 
