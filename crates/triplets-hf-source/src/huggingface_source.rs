@@ -9574,7 +9574,9 @@ mod tests {
     }
 
     #[test]
-    // FIXME: Windows tests timeout here, theoretically due to the following reason:
+    // FIXME: This test passes in isolation, but times out when running with all of the tests.
+    //
+    // Additional context (may be inaccurate):
     //
     // Testing live thread spawning combined with a deliberate fallback to an
     // unreachable dead port (127.0.0.1:1) binds your test suite's determinism
