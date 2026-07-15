@@ -9573,7 +9573,6 @@ mod tests {
         }
     }
 
-    #[test]
     // FIXME: This test passes in isolation, but times out when running with all of the tests.
     //
     // Additional context (may be inaccurate):
@@ -9585,7 +9584,8 @@ mod tests {
     // the Windows Winsock layer behaves non-deterministically under parallel test
     // execution profiles, frequently caching socket state or delaying connection drops
     // to match synthetic connect timeouts.
-    #[cfg_attr(windows, ignore)]
+    #[cfg_attr(windows, ignore = "Windows TCP hangs on unreachable ports")]
+    #[test]
     #[serial(global_state)]
     fn trigger_expansion_if_needed_starts_background_thread() {
         let dir = tempdir().unwrap();
