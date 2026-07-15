@@ -615,28 +615,59 @@ mod tests {
     #[test]
     fn pair_same_is_smaller() {
         let a_emb = vec![0.1, 0.2, 0.3];
-        let a_text = "shared text";
+        let a_text = "some shared text"; // Purposely longer than `different text`
+        let c_emb = vec![0.4, 0.5, 0.6];
+        let c_text = "different text";
 
-        let full = encode_entry(&SrdRecord::Pair(SrdPairRecord {
+        let distinct = encode_entry(&SrdRecord::Pair(SrdPairRecord {
             anchor_emb: a_emb.clone(),
             anchor_text: a_text.to_string(),
-            candidate_emb: a_emb.clone(),
-            candidate_text: a_text.to_string(),
+            candidate_emb: c_emb,
+            candidate_text: c_text.to_string(),
             label: PairLabel::Positive,
         }));
-        let compact = encode_entry(&SrdRecord::Pair(SrdPairRecord {
+        let same = encode_entry(&SrdRecord::Pair(SrdPairRecord {
             anchor_emb: a_emb.clone(),
             anchor_text: a_text.to_string(),
             candidate_emb: a_emb,
             candidate_text: a_text.to_string(),
             label: PairLabel::Positive,
         }));
-        // The "full" and "compact" are actually the same since anchor == candidate in both.
-        // Test that encoding works and produces valid bytes.
-        assert!(!compact.is_empty());
-        assert!(!full.is_empty());
-        // Both encode the same data, so sizes should match.
-        assert_eq!(compact.len(), full.len());
+        // When anchor == candidate, FLAG_POS_SAME is set and less data is stored.
+        assert!(same.len() < distinct.len());
+    }
+
+    #[test]
+    fn pair_same_sets_flag_byte() {
+        let a_emb = vec![0.1, 0.2, 0.3];
+        let a_text = "shared text";
+
+        let encoded = encode_entry(&SrdRecord::Pair(SrdPairRecord {
+            anchor_emb: a_emb.clone(),
+            anchor_text: a_text.to_string(),
+            candidate_emb: a_emb,
+            candidate_text: a_text.to_string(),
+            label: PairLabel::Positive,
+        }));
+        // Byte 0 = mode (0), byte 1 = flags. FLAG_POS_SAME = 0x01.
+        assert_eq!(encoded[0], MODE_PAIR);
+        assert_eq!(encoded[1], FLAG_POS_SAME);
+    }
+
+    #[test]
+    fn pair_distinct_does_not_set_pos_same_flag() {
+        let a_emb = vec![0.1, 0.2, 0.3];
+        let c_emb = vec![0.4, 0.5, 0.6];
+
+        let encoded = encode_entry(&SrdRecord::Pair(SrdPairRecord {
+            anchor_emb: a_emb,
+            anchor_text: "anchor".to_string(),
+            candidate_emb: c_emb,
+            candidate_text: "candidate".to_string(),
+            label: PairLabel::Positive,
+        }));
+        assert_eq!(encoded[0], MODE_PAIR);
+        assert_eq!(encoded[1] & FLAG_POS_SAME, 0);
     }
 
     #[test]
@@ -697,6 +728,148 @@ mod tests {
             assert_eq!(t.neg_emb, n_emb);
             assert_eq!(t.neg_text, n_text);
         }
+    }
+
+    #[test]
+    fn triplet_pos_same_is_smaller() {
+        let a_emb = vec![0.1, 0.2, 0.3];
+        let a_text = "anchor";
+        let p_emb = vec![0.4, 0.5, 0.6];
+        let p_text = "positive";
+        let n_emb = vec![0.7, 0.8, 0.9];
+        let n_text = "negative";
+
+        let distinct = encode_entry(&SrdRecord::Triplet(SrdTripletRecord {
+            anchor_emb: a_emb.clone(),
+            anchor_text: a_text.to_string(),
+            pos_emb: p_emb.clone(),
+            pos_text: p_text.to_string(),
+            neg_emb: n_emb.clone(),
+            neg_text: n_text.to_string(),
+        }));
+        let pos_same = encode_entry(&SrdRecord::Triplet(SrdTripletRecord {
+            anchor_emb: a_emb.clone(),
+            anchor_text: a_text.to_string(),
+            pos_emb: a_emb.clone(),
+            pos_text: a_text.to_string(),
+            neg_emb: n_emb,
+            neg_text: n_text.to_string(),
+        }));
+        assert!(pos_same.len() < distinct.len());
+    }
+
+    #[test]
+    fn triplet_neg_same_is_smaller() {
+        let a_emb = vec![0.1, 0.2, 0.3];
+        let a_text = "anchor";
+        let p_emb = vec![0.4, 0.5, 0.6];
+        let p_text = "positive";
+        let n_emb = vec![0.7, 0.8, 0.9];
+        let n_text = "negative";
+
+        let distinct = encode_entry(&SrdRecord::Triplet(SrdTripletRecord {
+            anchor_emb: a_emb.clone(),
+            anchor_text: a_text.to_string(),
+            pos_emb: p_emb.clone(),
+            pos_text: p_text.to_string(),
+            neg_emb: n_emb,
+            neg_text: n_text.to_string(),
+        }));
+        let neg_same = encode_entry(&SrdRecord::Triplet(SrdTripletRecord {
+            anchor_emb: a_emb.clone(),
+            anchor_text: a_text.to_string(),
+            pos_emb: p_emb,
+            pos_text: p_text.to_string(),
+            neg_emb: a_emb.clone(),
+            neg_text: a_text.to_string(),
+        }));
+        assert!(neg_same.len() < distinct.len());
+    }
+
+    #[test]
+    fn triplet_all_same_is_smallest() {
+        let a_emb = vec![0.1, 0.2, 0.3];
+        let a_text = "same";
+
+        let distinct = encode_entry(&SrdRecord::Triplet(SrdTripletRecord {
+            anchor_emb: a_emb.clone(),
+            anchor_text: a_text.to_string(),
+            pos_emb: vec![0.4, 0.5, 0.6],
+            pos_text: "positive".to_string(),
+            neg_emb: vec![0.7, 0.8, 0.9],
+            neg_text: "negative".to_string(),
+        }));
+        let pos_same = encode_entry(&SrdRecord::Triplet(SrdTripletRecord {
+            anchor_emb: a_emb.clone(),
+            anchor_text: a_text.to_string(),
+            pos_emb: a_emb.clone(),
+            pos_text: a_text.to_string(),
+            neg_emb: vec![0.7, 0.8, 0.9],
+            neg_text: "negative".to_string(),
+        }));
+        let all_same = encode_entry(&SrdRecord::Triplet(SrdTripletRecord {
+            anchor_emb: a_emb.clone(),
+            anchor_text: a_text.to_string(),
+            pos_emb: a_emb.clone(),
+            pos_text: a_text.to_string(),
+            neg_emb: a_emb,
+            neg_text: a_text.to_string(),
+        }));
+        assert!(pos_same.len() < distinct.len());
+        assert!(all_same.len() < pos_same.len());
+    }
+
+    #[test]
+    fn triplet_pos_same_sets_flag() {
+        let a_emb = vec![0.1, 0.2, 0.3];
+        let n_emb = vec![0.7, 0.8, 0.9];
+
+        let encoded = encode_entry(&SrdRecord::Triplet(SrdTripletRecord {
+            anchor_emb: a_emb.clone(),
+            anchor_text: "anchor".to_string(),
+            pos_emb: a_emb,
+            pos_text: "anchor".to_string(),
+            neg_emb: n_emb,
+            neg_text: "negative".to_string(),
+        }));
+        assert_eq!(encoded[0], MODE_TRIPLET);
+        assert_eq!(encoded[1] & FLAG_POS_SAME, FLAG_POS_SAME);
+        assert_eq!(encoded[1] & FLAG_NEG_SAME, 0);
+    }
+
+    #[test]
+    fn triplet_neg_same_sets_flag() {
+        let a_emb = vec![0.1, 0.2, 0.3];
+        let p_emb = vec![0.4, 0.5, 0.6];
+
+        let encoded = encode_entry(&SrdRecord::Triplet(SrdTripletRecord {
+            anchor_emb: a_emb.clone(),
+            anchor_text: "anchor".to_string(),
+            pos_emb: p_emb,
+            pos_text: "positive".to_string(),
+            neg_emb: a_emb,
+            neg_text: "anchor".to_string(),
+        }));
+        assert_eq!(encoded[0], MODE_TRIPLET);
+        assert_eq!(encoded[1] & FLAG_NEG_SAME, FLAG_NEG_SAME);
+        assert_eq!(encoded[1] & FLAG_POS_SAME, 0);
+    }
+
+    #[test]
+    fn triplet_all_same_sets_both_flags() {
+        let a_emb = vec![0.1, 0.2, 0.3];
+
+        let encoded = encode_entry(&SrdRecord::Triplet(SrdTripletRecord {
+            anchor_emb: a_emb.clone(),
+            anchor_text: "same".to_string(),
+            pos_emb: a_emb.clone(),
+            pos_text: "same".to_string(),
+            neg_emb: a_emb,
+            neg_text: "same".to_string(),
+        }));
+        assert_eq!(encoded[0], MODE_TRIPLET);
+        assert_eq!(encoded[1] & FLAG_POS_SAME, FLAG_POS_SAME);
+        assert_eq!(encoded[1] & FLAG_NEG_SAME, FLAG_NEG_SAME);
     }
 
     #[test]
