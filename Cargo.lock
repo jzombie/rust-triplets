@@ -650,9 +650,9 @@ dependencies = [
 
 [[package]]
 name = "dashmap"
-version = "6.1.0"
+version = "6.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5041cc499144891f3790297212f32a74fb938e5136a14943f338ef9e0ae276cf"
+checksum = "e6361d5c062261c78a176addb82d4c821ae42bed6089de0e12603cd25de2059c"
 dependencies = [
  "cfg-if",
  "crossbeam-utils",
@@ -975,9 +975,9 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "http"
-version = "1.4.0"
+version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3ba2a386d7f85a81f119ad7498ebe444d2e22c2af0b86b069416ace48b3311a"
+checksum = "6970f50e31d6fc17d3fa27329444bfa74e196cf62e95052a3f6fee181dba6425"
 dependencies = [
  "bytes",
  "itoa",
@@ -1503,9 +1503,9 @@ dependencies = [
 
 [[package]]
 name = "once_cell"
-version = "1.21.3"
+version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42f5e15c9953c5e4ccceeb2e7382a716482c34515315f7b03532b8b4e8393d2d"
+checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "once_cell_polyfill"
@@ -1867,9 +1867,9 @@ dependencies = [
 
 [[package]]
 name = "reqwest-drive"
-version = "0.13.3-alpha"
+version = "0.13.4-alpha"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37d86211ffc8a5da633aab47b53f0c471ebdd7aacfc826dbae5c64aad90bf6f7"
+checksum = "691b80c2d7ac9df6ed28d4587e2af8821d8ee66770761b4a4e600fe6c597d03f"
 dependencies = [
  "async-trait",
  "bitcode",
@@ -1887,9 +1887,9 @@ dependencies = [
 
 [[package]]
 name = "reqwest-middleware"
-version = "0.5.1"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "199dda04a536b532d0cc04d7979e39b1c763ea749bf91507017069c00b96056f"
+checksum = "07bc3f1384cffa4f274dad2d4ddd73aed32fed8f786d96c6be8aa4e5fd3c3b58"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2200,9 +2200,9 @@ checksum = "e320a6c5ad31d271ad523dcf3ad13e2767ad8b1cb8f047f75a8aeaf8da139da2"
 
 [[package]]
 name = "simd-r-drive"
-version = "0.16.2-alpha"
+version = "0.16.3-alpha"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb10ea72a9bff142ed5d4ccfa192fb289ea4ea4b38cdfac48cad37964a06a040"
+checksum = "763aa09219c810fe26c60f9591fc911de2e6359537d22d431d142b86f8201862"
 dependencies = [
  "async-trait",
  "clap",
@@ -2218,9 +2218,9 @@ dependencies = [
 
 [[package]]
 name = "simd-r-drive-entry-handle"
-version = "0.16.2-alpha"
+version = "0.16.3-alpha"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2464ffb8e9883ca9ab025786c38deac5bec582d00453f3d075ec6c8b128b925"
+checksum = "91b54ec80fc0a705916b9931f2f1674dd44e1b0efdc10d1cc60dad6948792a77"
 dependencies = [
  "crc32fast",
  "memmap2",
