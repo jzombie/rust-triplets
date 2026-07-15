@@ -597,11 +597,10 @@ fn huggingface_refresh_surfaces_invalid_json_rows_as_errors() {
     config.shard_extensions = vec!["ndjson".to_string()];
     config.text_columns = vec!["text".to_string()];
 
-    let source = HuggingFaceRowSource::new(config).expect("failed creating huggingface source");
-    let seed = seeded_config(29);
-    let err = source
-        .refresh(&seed, None, Some(1))
-        .expect_err("refresh should fail on invalid JSON row");
+    let err = match HuggingFaceRowSource::new(config) {
+        Ok(_) => panic!("expected Err from new with invalid JSON"),
+        Err(e) => e,
+    };
     let message = err.to_string();
     assert!(message.contains("failed decoding JSON row") || message.contains("inconsistent"));
 }
@@ -1897,9 +1896,9 @@ fn sampler_next_text_batch_re_expands_after_cache_eviction() {
     config.parquet_endpoint = server.url().to_string();
     config.hf_token = None;
     config.text_columns = vec!["text".to_string()];
-    // Tight cap: room for ~2 shards.  After 3+ shards are downloaded the
+    // Tight cap: room for ~2 simdr stores.  After 3+ shards are downloaded the
     // oldest get evicted by the cache manager.
-    config.local_disk_cap_bytes = Some(70);
+    config.local_disk_cap_bytes = Some(500);
     // Small capacity so the in-memory row cache doesn't mask any eviction.
     config.cache_capacity = 2;
 

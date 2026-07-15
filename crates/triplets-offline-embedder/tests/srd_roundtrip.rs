@@ -149,7 +149,7 @@ fn scheduler_writes_train_val_to_separate_files() {
     assert_eq!(states[1].name, "val");
 
     // 2 batches of 2 entries each → 4 entries per split, flushed at steps_per_batch=2
-    let provider = Arc::new(TestProvider::new(2, 2));
+    let provider = Arc::new(SplitAwareProvider::new(2, 2));
     let embedder = TestEmbedder;
     let config = SchedulerConfig::new(2, 2, 3, 2);
 
