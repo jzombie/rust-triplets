@@ -9574,10 +9574,16 @@ mod tests {
     }
 
     #[test]
-    // FIXME: Debug hell trying to figure race/deadlock conditions here on Windows
-    // This isn't something I typically *want* to do, but I've spent hours debugging
-    // this without success.
-    #[cfg(not(target_os = "windows"))]
+    // FIXME: Windows tests timeout here, theoretically due to the following reason:
+    // 
+    // Testing live thread spawning combined with a deliberate fallback to an
+    // unreachable dead port (127.0.0.1:1) binds your test suite's determinism
+    // directly to OS-level TCP/IP implementation details. While Unix environments
+    // typically reject connections to unbound low ports instantaneously (ECONNREFUSED),
+    // the Windows Winsock layer behaves non-deterministically under parallel test
+    // execution profiles, frequently caching socket state or delaying connection drops
+    // to match synthetic connect timeouts.
+    #[cfg_attr(windows, ignore)]
     #[serial(global_state)]
     fn trigger_expansion_if_needed_starts_background_thread() {
         let dir = tempdir().unwrap();
