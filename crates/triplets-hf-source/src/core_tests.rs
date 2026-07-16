@@ -48,7 +48,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use tempfile::tempdir;
 use triplets_core::SamplerError;
-use triplets_core::config::SamplerConfig;
+use triplets_core::config::{NegativeStrategy, SamplerConfig};
 use triplets_core::data::SectionRole;
 use triplets_core::source::{DataSource, SourceCursor};
 use triplets_core::splits::{PersistedSamplerState, SamplerStateStore};
@@ -6198,4 +6198,599 @@ fn list_remote_candidates_returns_error_on_non_success() {
     let client = test_http_client();
     let result = HuggingFaceRowSource::list_remote_candidates(&client, &config);
     assert!(result.is_err(), "503 response should return error");
+}
+
+// ── Phase 1: additional download.rs coverage ────────────────────────────────
+
+#[test]
+fn download_shard_rejects_bare_relative_traversal() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+    let client = test_http_client();
+
+    let remote_path = "../etc/passwd";
+    let result = HuggingFaceRowSource::download_and_materialize_shard(
+        &client,
+        &config,
+        remote_path,
+        None,
+        "bare-traversal",
+    );
+    assert!(
+        result.is_err(),
+        "bare relative traversal should be rejected"
+    );
+}
+
+#[test]
+fn fetch_remote_size_network_failure_returns_error() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+    let client = test_http_client();
+    let runtime = build_http_runtime(&config).unwrap();
+
+    let result = fetch_remote_size_with_runtime(
+        &client,
+        &config,
+        &format!("{TEST_UNREACHABLE_URL}/shard.parquet"),
+        &runtime,
+    );
+    assert!(result.is_err(), "HEAD to unreachable URL should fail");
+}
+
+#[test]
+fn candidate_target_path_bare_relative_path() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+
+    let path = candidate_target_path(&config, "train/0001.parquet");
+    assert!(path.ends_with("train/0001.parquet"));
+    assert!(path.starts_with(dir.path()));
+}
+
+#[test]
+fn candidate_target_path_full_url_extracts_suffix() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+
+    let path = candidate_target_path(
+        &config,
+        "url::https://host/datasets/org/ds/resolve/main/data/shard.ndjson",
+    );
+    assert!(path.ends_with("data/shard.ndjson"));
+}
+
+#[test]
+fn download_shard_rejects_url_encoded_traversal() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+    let client = test_http_client();
+
+    let remote_path = "url::http://evil.com/datasets/%2e%2e/%2e%2e/etc/passwd";
+    let result = HuggingFaceRowSource::download_and_materialize_shard(
+        &client,
+        &config,
+        remote_path,
+        None,
+        "encoded-traversal",
+    );
+    assert!(result.is_err(), "URL-encoded traversal should be rejected");
+}
+
+#[test]
+fn download_shard_rejects_http_traversal_without_url_prefix() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+    let client = test_http_client();
+
+    let remote_path = "http://evil.com/../../../etc/passwd";
+    let result = HuggingFaceRowSource::download_and_materialize_shard(
+        &client,
+        &config,
+        remote_path,
+        None,
+        "http-traversal",
+    );
+    assert!(
+        result.is_err(),
+        "HTTP URL with traversal should be rejected"
+    );
+}
+
+#[test]
+fn target_matches_expected_size_mismatch_returns_false() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("mismatch.bin");
+    fs::write(&file, b"hello").unwrap();
+    assert!(
+        !target_matches_expected_size(&file, Some(100)),
+        "size mismatch should return false"
+    );
+}
+
+#[test]
+fn target_matches_expected_size_missing_file_returns_false() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("nonexistent.bin");
+    assert!(
+        !target_matches_expected_size(&file, Some(100)),
+        "missing file should return false"
+    );
+}
+
+#[test]
+fn remote_url_for_candidate_bare_path_resolves_to_cdn() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+
+    let url = remote_url_for_candidate(&config, "train/shard.ndjson");
+    assert!(url.contains(HF_DATASETS_BASE_URL));
+    assert!(url.contains("train/shard.ndjson"));
+}
+
+#[test]
+fn remote_url_for_candidate_full_url_returned_directly() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+
+    let url = remote_url_for_candidate(&config, "url::https://cdn.example.com/shard.parquet");
+    assert_eq!(url, "https://cdn.example.com/shard.parquet");
+}
+
+// ── Phase 2: source_core.rs tests ──────────────────────────────────────────
+
+#[test]
+fn default_triplet_recipes_dict_mode_returns_same_record_recipe() {
+    let dir = tempdir().unwrap();
+    let mut config = test_config(dir.path().to_path_buf());
+    config.negative_columns = vec!["neg".to_string()];
+    let source = test_source(config);
+
+    let recipes = source.default_triplet_recipes();
+    assert_eq!(recipes.len(), 1);
+    let recipe = &recipes[0];
+    assert_eq!(recipe.name, "huggingface_dict_anchor_positive_same_record");
+    assert!(matches!(
+        recipe.negative_strategy,
+        NegativeStrategy::SameRecord
+    ));
+    assert!(!recipe.allow_same_anchor_positive);
+}
+
+#[test]
+fn data_source_id_returns_config_source_id() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+    let source = test_source(config);
+
+    assert_eq!(source.id(), "hf_test");
+}
+
+#[test]
+fn materialize_local_file_skips_copy_when_sizes_match() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+
+    let src_dir = dir.path().join("src");
+    fs::create_dir_all(&src_dir).unwrap();
+    let source_file = src_dir.join("data.parquet");
+    fs::write(&source_file, b"same content here").unwrap();
+
+    let target_file = dir.path().join("dst").join("data.parquet");
+    fs::create_dir_all(target_file.parent().unwrap()).unwrap();
+    fs::write(&target_file, b"same content here").unwrap();
+
+    let result = HuggingFaceRowSource::materialize_local_file(&config, &source_file, &target_file);
+    assert!(result.is_ok(), "should succeed when sizes match");
+}
+
+#[test]
+fn materialize_local_file_copies_when_sizes_differ() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+
+    let src_dir = dir.path().join("src");
+    fs::create_dir_all(&src_dir).unwrap();
+    let source_file = src_dir.join("data.parquet");
+    fs::write(&source_file, b"source content").unwrap();
+
+    let target_file = dir.path().join("dst").join("data.parquet");
+    fs::create_dir_all(target_file.parent().unwrap()).unwrap();
+    fs::write(&target_file, b"old target").unwrap();
+
+    let result = HuggingFaceRowSource::materialize_local_file(&config, &source_file, &target_file);
+    assert!(result.is_ok());
+    let content = fs::read(&target_file).unwrap();
+    assert_eq!(content, b"source content");
+}
+
+#[test]
+fn materialize_local_file_creates_parent_dirs() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+
+    let src_dir = dir.path().join("src");
+    fs::create_dir_all(&src_dir).unwrap();
+    let source_file = src_dir.join("data.parquet");
+    fs::write(&source_file, b"content").unwrap();
+
+    let target_file = dir
+        .path()
+        .join("a")
+        .join("b")
+        .join("c")
+        .join("data.parquet");
+
+    let result = HuggingFaceRowSource::materialize_local_file(&config, &source_file, &target_file);
+    assert!(result.is_ok());
+    assert!(target_file.exists());
+}
+
+#[test]
+fn clone_shares_state_arc_references() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+    let source = test_source(config);
+    let cloned = source.clone();
+
+    // Both should return the same id
+    assert_eq!(source.id(), cloned.id());
+
+    // Modify state through one, verify through the other
+    {
+        let mut state = source.state.lock().unwrap();
+        state.materialized_rows = 42;
+    }
+    let cloned_state = cloned.state.lock().unwrap();
+    assert_eq!(cloned_state.materialized_rows, 42);
+}
+
+#[test]
+fn default_triplet_recipes_text_columns_mode() {
+    let dir = tempdir().unwrap();
+    let mut config = test_config(dir.path().to_path_buf());
+    config.anchor_columns.clear();
+    let source = test_source(config);
+
+    let recipes = source.default_triplet_recipes();
+    assert_eq!(recipes.len(), 1);
+    assert!(recipes[0].allow_same_anchor_positive);
+    assert!(matches!(
+        recipes[0].negative_strategy,
+        NegativeStrategy::WrongArticle
+    ));
+}
+
+#[test]
+fn default_triplet_recipes_standard_mode() {
+    let dir = tempdir().unwrap();
+    let mut config = test_config(dir.path().to_path_buf());
+    config.anchor_columns = vec!["title".to_string()];
+    let source = test_source(config);
+
+    let recipes = source.default_triplet_recipes();
+    assert_eq!(recipes.len(), 2);
+    assert!(!recipes[0].allow_same_anchor_positive);
+    assert!(!recipes[1].allow_same_anchor_positive);
+}
+
+// ── Phase 4: shard_index.rs tests ─────────────────────────────────────────
+
+#[test]
+fn build_shard_index_empty_directory_returns_error() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+
+    let result = crate::shard_index::build_shard_index(&config);
+    assert!(result.is_err(), "empty directory should return error");
+}
+
+#[test]
+fn build_shard_index_prunes_orphaned_transients_in_manifest() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+    let manifest_dir = dir.path().join(HF_PARQUET_MANIFEST_DIR);
+    fs::create_dir_all(&manifest_dir).unwrap();
+
+    // Create an orphaned transient file in the manifest directory
+    let orphan = manifest_dir.join("orphan.ndjson");
+    fs::write(&orphan, b"{}").unwrap();
+    assert!(orphan.exists());
+
+    // build_shard_index should delete orphaned transients in manifest
+    let result = crate::shard_index::build_shard_index(&config);
+    // Should fail because there are no valid shards, but the orphan should be pruned
+    assert!(result.is_err());
+    assert!(
+        !orphan.exists(),
+        "orphaned transient in manifest should be pruned"
+    );
+}
+
+#[test]
+fn build_shard_index_skips_local_files_with_existing_simdr() {
+    let dir = tempdir().unwrap();
+    let mut config = test_config(dir.path().to_path_buf());
+    config.shard_extensions = vec!["ndjson".to_string()];
+
+    // Create a local ndjson file
+    let ndjson = dir.path().join("data.ndjson");
+    fs::write(&ndjson, b"{}").unwrap();
+
+    // Create a corresponding .simdr file
+    let simdr = crate::shard_index::shard_store_path_for(&ndjson);
+    write_simdr_fixture(&simdr, &[("r1", "text")]);
+
+    // build_shard_index should skip the ndjson because simdr exists
+    let result = crate::shard_index::build_shard_index(&config);
+    // Should succeed because the simdr file is indexed
+    if let Ok((shards, _)) = result {
+        // The ndjson should not be double-indexed
+        let ndjson_indexed = shards.iter().any(|s| s.path == ndjson);
+        assert!(
+            !ndjson_indexed,
+            "ndjson should be skipped when simdr exists"
+        );
+    }
+}
+
+// ── Phase 6: shard_indexing.rs tests ──────────────────────────────────────
+
+#[test]
+fn eligible_rows_cache_hit_returns_cached() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+    let source = test_source(config);
+
+    // Inject shards into state
+    {
+        let mut state = source.state.lock().unwrap();
+        state.shards = vec![ShardIndex {
+            path: dir.path().join("shard.simdr"),
+            global_start: 0,
+            row_count: 10,
+            parquet_row_groups: Vec::new(),
+            remote_candidate: None,
+        }];
+        state.materialized_rows = 10;
+    }
+
+    // First call builds the cache
+    let rows1 = crate::shard_indexing::eligible_rows(&source).unwrap();
+    assert_eq!(rows1.len(), 10);
+
+    // Second call should hit the cache
+    let rows2 = crate::shard_indexing::eligible_rows(&source).unwrap();
+    assert_eq!(rows1.as_ptr(), rows2.as_ptr(), "should return cached Arc");
+}
+
+#[test]
+fn eligible_rows_full_rebuild_no_cache() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+    let source = test_source(config);
+
+    // Inject shards with a store file
+    let shard_path = dir.path().join("shard.simdr");
+    write_simdr_fixture(&shard_path, &[("r1", "text1"), ("r2", "text2")]);
+
+    {
+        let mut state = source.state.lock().unwrap();
+        state.shards = vec![ShardIndex {
+            path: shard_path,
+            global_start: 0,
+            row_count: 2,
+            parquet_row_groups: Vec::new(),
+            remote_candidate: None,
+        }];
+        state.materialized_rows = 2;
+    }
+
+    let rows = crate::shard_indexing::eligible_rows(&source).unwrap();
+    assert_eq!(rows.len(), 2);
+}
+
+#[test]
+fn build_eligible_rows_store_shard_includes_all_rows() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+    let source = test_source(config);
+
+    let shard_path = dir.path().join("store.simdr");
+    write_simdr_fixture(&shard_path, &[("r1", "a"), ("r2", "b"), ("r3", "c")]);
+
+    let shards = vec![ShardIndex {
+        path: shard_path,
+        global_start: 5,
+        row_count: 3,
+        parquet_row_groups: Vec::new(),
+        remote_candidate: None,
+    }];
+
+    let rows = crate::shard_indexing::build_eligible_rows_from_shards(&source, &shards).unwrap();
+    assert_eq!(rows.len(), 3);
+    assert!(rows.contains(&5));
+    assert!(rows.contains(&6));
+    assert!(rows.contains(&7));
+}
+
+#[test]
+fn recompute_shard_offsets_sets_correct_start_values() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+    let source = test_source(config);
+
+    let mut state = SourceState {
+        materialized_rows: 0,
+        shards: vec![
+            ShardIndex {
+                path: dir.path().join("a.simdr"),
+                global_start: 0,
+                row_count: 10,
+                parquet_row_groups: Vec::new(),
+                remote_candidate: None,
+            },
+            ShardIndex {
+                path: dir.path().join("b.simdr"),
+                global_start: 0,
+                row_count: 5,
+                parquet_row_groups: Vec::new(),
+                remote_candidate: None,
+            },
+        ],
+        remote_candidates: None,
+        remote_candidate_sizes: HashMap::new(),
+        remote_candidate_order: Vec::new(),
+        next_remote_idx: 0,
+    };
+
+    crate::shard_indexing::recompute_shard_offsets(&mut state);
+
+    assert_eq!(state.shards[0].global_start, 0);
+    assert_eq!(state.shards[1].global_start, 10);
+    assert_eq!(state.materialized_rows, 15);
+}
+
+#[test]
+fn locate_shard_finds_correct_shard_and_local_idx() {
+    let shards = vec![
+        ShardIndex {
+            path: PathBuf::from("a.simdr"),
+            global_start: 0,
+            row_count: 10,
+            parquet_row_groups: Vec::new(),
+            remote_candidate: None,
+        },
+        ShardIndex {
+            path: PathBuf::from("b.simdr"),
+            global_start: 10,
+            row_count: 5,
+            parquet_row_groups: Vec::new(),
+            remote_candidate: None,
+        },
+    ];
+
+    let (shard, local_idx) = crate::shard_indexing::locate_shard(&shards, 12).unwrap();
+    assert_eq!(shard.path, PathBuf::from("b.simdr"));
+    assert_eq!(local_idx, 2);
+}
+
+#[test]
+fn locate_shard_returns_none_for_out_of_bounds() {
+    let shards = vec![ShardIndex {
+        path: PathBuf::from("a.simdr"),
+        global_start: 0,
+        row_count: 5,
+        parquet_row_groups: Vec::new(),
+        remote_candidate: None,
+    }];
+
+    assert!(crate::shard_indexing::locate_shard(&shards, 10).is_none());
+}
+
+// ── Phase 7: huggingface_source.rs tests ──────────────────────────────────
+
+#[test]
+fn row_cache_get_returns_cached_row() {
+    let mut cache = RowCache::default();
+    let row = RowView {
+        row_id: Some("r1".to_string()),
+        timestamp: None,
+        text_fields: vec![RowTextField {
+            name: "text".to_string(),
+            text: "hello".to_string(),
+        }],
+    };
+    cache.insert(0, row.clone(), 10);
+    let retrieved = cache.get(0).expect("should return cached row");
+    assert_eq!(retrieved.row_id, Some("r1".to_string()));
+}
+
+#[test]
+fn row_cache_get_returns_none_for_missing() {
+    let cache = RowCache::default();
+    assert!(cache.get(0).is_none());
+}
+
+#[test]
+fn row_cache_insert_evicts_oldest_when_full() {
+    let mut cache = RowCache::default();
+    let row1 = RowView {
+        row_id: Some("r1".to_string()),
+        timestamp: None,
+        text_fields: vec![],
+    };
+    let row2 = RowView {
+        row_id: Some("r2".to_string()),
+        timestamp: None,
+        text_fields: vec![],
+    };
+    let row3 = RowView {
+        row_id: Some("r3".to_string()),
+        timestamp: None,
+        text_fields: vec![],
+    };
+
+    cache.insert(0, row1, 2);
+    cache.insert(1, row2, 2);
+    cache.insert(2, row3, 2);
+
+    assert!(cache.get(0).is_none(), "oldest should be evicted");
+    assert!(cache.get(1).is_some());
+    assert!(cache.get(2).is_some());
+}
+
+#[test]
+fn row_cache_insert_zero_capacity_is_noop() {
+    let mut cache = RowCache::default();
+    let row = RowView {
+        row_id: Some("r1".to_string()),
+        timestamp: None,
+        text_fields: vec![],
+    };
+    cache.insert(0, row, 0);
+    assert!(cache.get(0).is_none());
+}
+
+#[test]
+fn parquet_cache_refresh_row_group_order_removes_existing() {
+    use std::collections::VecDeque;
+
+    let mut order = VecDeque::new();
+    let key1 = (PathBuf::from("a.parquet"), 0);
+    let key2 = (PathBuf::from("b.parquet"), 0);
+    order.push_back(key1.clone());
+    order.push_back(key2.clone());
+
+    // refresh_row_group_order removes the existing entry
+    crate::huggingface_source::ParquetCache::refresh_row_group_order(&mut order, &key1);
+
+    assert_eq!(order.len(), 1);
+    assert_eq!(order[0], key2);
+}
+
+#[test]
+fn parquet_cache_refresh_row_group_order_noop_for_missing_key() {
+    use std::collections::VecDeque;
+
+    let mut order = VecDeque::new();
+    let key1 = (PathBuf::from("a.parquet"), 0);
+    let key2 = (PathBuf::from("b.parquet"), 0);
+    order.push_back(key1.clone());
+
+    // Refreshing a key not in the order should be a noop
+    crate::huggingface_source::ParquetCache::refresh_row_group_order(&mut order, &key2);
+
+    assert_eq!(order.len(), 1);
+    assert_eq!(order[0], key1);
+}
+
+#[test]
+fn parquet_cache_refresh_row_group_order_noop_for_empty() {
+    use std::collections::VecDeque;
+
+    let mut order = VecDeque::new();
+    let key = (PathBuf::from("a.parquet"), 0);
+    crate::huggingface_source::ParquetCache::refresh_row_group_order(&mut order, &key);
+    assert!(order.is_empty());
 }

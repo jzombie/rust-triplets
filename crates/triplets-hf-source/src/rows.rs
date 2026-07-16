@@ -1056,4 +1056,44 @@ mod tests {
         assert!(decoded.row_id.is_none());
         assert!(decoded.text_fields.is_empty());
     }
+
+    #[test]
+    fn decode_row_view_truncated_input_returns_error() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config);
+
+        let result = decode_row_view(&source, b"{\"row_id\":");
+        assert!(result.is_err(), "truncated JSON should fail");
+    }
+
+    #[test]
+    fn decode_row_view_invalid_json_returns_error() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config);
+
+        let result = decode_row_view(&source, b"not valid json at all");
+        assert!(result.is_err(), "invalid JSON should fail");
+    }
+
+    #[test]
+    fn coalesce_list_field_mixed_types_array() {
+        let result = coalesce_list_field("data", &json!(["text", 42, true]));
+        let fields = result.expect("should return Some");
+        assert_eq!(fields.len(), 3);
+        assert_eq!(fields[0].text, "text");
+        assert_eq!(fields[1].text, "42");
+        assert_eq!(fields[2].text, "true");
+    }
+
+    #[test]
+    fn coalesce_list_field_nested_array() {
+        let result = coalesce_list_field("data", &json!([["a", "b"], ["c"]]));
+        let fields = result.expect("should return Some");
+        assert_eq!(fields.len(), 2);
+        // Nested arrays are flattened by value_to_text - returns first non-empty text
+        assert_eq!(fields[0].text, "a");
+        assert_eq!(fields[1].text, "c");
+    }
 }
