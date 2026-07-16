@@ -494,4 +494,51 @@ mod tests {
         assert_eq!(shards.len(), 1);
         assert_eq!(shards[0].row_count, 1);
     }
+
+    #[test]
+    fn build_shard_index_prunes_orphaned_remote_transients() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+
+        // Create a transient file inside _parquet_manifest/ (simulates a
+        // crashed/truncated remote download).
+        let manifest_root = dir.path().join(HF_PARQUET_MANIFEST_DIR);
+        fs::create_dir_all(&manifest_root).unwrap();
+        let orphan = manifest_root.join("orphaned_shard.ndjson");
+        fs::write(&orphan, b"{\"id\":\"r1\",\"text\":\"x\"}\n").unwrap();
+        assert!(orphan.exists(), "orphan must exist before indexing");
+
+        // Also create a valid local shard so build_shard_index succeeds.
+        let local = dir.path().join("local.ndjson");
+        fs::write(&local, b"{\"id\":\"l1\",\"text\":\"y\"}\n").unwrap();
+
+        let (shards, discovered) = build_shard_index(&config).unwrap();
+        assert_eq!(discovered, 1, "only local shard should be discovered");
+        assert_eq!(shards.len(), 1);
+        assert!(!orphan.exists(), "orphaned transient must be pruned");
+    }
+
+    #[test]
+    fn build_shard_index_skips_local_files_with_existing_simdr() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.shard_extensions = vec!["ndjson".to_string()];
+
+        // Create a .ndjson file and its corresponding .simdr store.
+        let ndjson = dir.path().join("shard.ndjson");
+        fs::write(&ndjson, b"{\"id\":\"r1\",\"text\":\"x\"}\n").unwrap();
+
+        let simdr = ndjson.with_extension(HF_SHARD_STORE_EXTENSION);
+        write_simdr_fixture(&simdr, &[("r1", "x")]);
+
+        let (shards, discovered) = build_shard_index(&config).unwrap();
+        // The .simdr store is always accepted, and the .ndjson is skipped
+        // because its .simdr already exists (avoid double-indexing).
+        assert_eq!(discovered, 1);
+        assert_eq!(shards.len(), 1);
+        assert!(
+            shards[0].path.extension().and_then(|e| e.to_str()) == Some(HF_SHARD_STORE_EXTENSION),
+            "indexed shard should be the .simdr store, not the .ndjson"
+        );
+    }
 }

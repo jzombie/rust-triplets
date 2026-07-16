@@ -5737,3 +5737,465 @@ fn manifest_cache_rootjoins_parquet_manifest_dir() {
     let root = source.manifest_cache_root();
     assert!(root.ends_with(crate::constants::HF_PARQUET_MANIFEST_DIR));
 }
+
+// ── Phase 1c: transcode_transient_shard_to_store additional paths ──────────
+
+fn write_gzip_fixture(path: &std::path::Path, content: &[u8]) {
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use std::io::Write;
+    let file = std::fs::File::create(path).unwrap();
+    let mut encoder = GzEncoder::new(file, Compression::default());
+    encoder.write_all(content).unwrap();
+    encoder.finish().unwrap();
+}
+
+#[test]
+fn transcode_ndjson_multiple_rows_batch_flush() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+    let source = test_source(config.clone());
+
+    // Create an .ndjson file with 2000+ rows to cross the 1024 batch flush boundary.
+    let ndjson_path = dir.path().join("big.ndjson");
+    let mut content = String::new();
+    for i in 0..2000 {
+        content.push_str(&format!(r#"{{"id":"r{i}","text":"txt_{i}"}}"#));
+        content.push('\n');
+    }
+    std::fs::write(&ndjson_path, content).unwrap();
+
+    let shard = ShardIndex {
+        path: ndjson_path.clone(),
+        global_start: 0,
+        row_count: 2000,
+        parquet_row_groups: vec![(0, 2000)],
+        remote_candidate: None,
+    };
+
+    let result =
+        rows::transcode_transient_shard_to_store(&source, &shard).expect("transcode must succeed");
+
+    let store_shard = result.expect("must yield Some(ShardIndex)");
+    assert_eq!(store_shard.row_count, 2000);
+    assert!(shard_store_path_for(&ndjson_path).exists());
+}
+
+#[test]
+fn transcode_jsonl_gzip_decompression() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+    let source = test_source(config.clone());
+
+    let gz_path = dir.path().join("shard.jsonl.gz");
+    let payload = br#"{"id":"r1","text":"hello"}"#;
+    write_gzip_fixture(&gz_path, payload);
+
+    let shard = ShardIndex {
+        path: gz_path.clone(),
+        global_start: 0,
+        row_count: 1,
+        parquet_row_groups: vec![(0, 1)],
+        remote_candidate: None,
+    };
+
+    let result =
+        rows::transcode_transient_shard_to_store(&source, &shard).expect("transcode must succeed");
+
+    let store_shard = result.expect("must yield Some(ShardIndex)");
+    assert_eq!(store_shard.row_count, 1);
+}
+
+#[test]
+fn transcode_empty_shard_returns_none() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+    let source = test_source(config.clone());
+
+    // Empty .ndjson file (no rows).
+    let ndjson_path = dir.path().join("empty.ndjson");
+    std::fs::write(&ndjson_path, "").unwrap();
+
+    let shard = ShardIndex {
+        path: ndjson_path.clone(),
+        global_start: 0,
+        row_count: 0,
+        parquet_row_groups: Vec::new(),
+        remote_candidate: None,
+    };
+
+    let result =
+        rows::transcode_transient_shard_to_store(&source, &shard).expect("transcode must succeed");
+
+    assert!(result.is_none(), "empty shard should return None");
+}
+
+#[test]
+fn transcode_manifest_dir_file_cleans_up() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+    let source = test_source(config.clone());
+
+    // Create a .ndjson file inside the _parquet_manifest directory.
+    let manifest_root = source.manifest_cache_root();
+    fs::create_dir_all(&manifest_root).unwrap();
+    let transient_path = manifest_root.join("remote_shard.ndjson");
+    fs::write(&transient_path, r#"{"id":"r1","text":"data"}"#).unwrap();
+    assert!(transient_path.exists());
+
+    let shard = ShardIndex {
+        path: transient_path.clone(),
+        global_start: 0,
+        row_count: 1,
+        parquet_row_groups: vec![(0, 1)],
+        remote_candidate: None,
+    };
+
+    let _result =
+        rows::transcode_transient_shard_to_store(&source, &shard).expect("transcode must succeed");
+
+    // The transient file in manifest dir should be cleaned up after transcode.
+    assert!(
+        !transient_path.exists(),
+        "transient file in manifest dir must be cleaned up"
+    );
+}
+
+// ── Phase 2: shard_indexing.rs tests ───────────────────────────────────────
+
+#[test]
+fn eligible_rows_cache_hit_returns_cached_without_rebuild() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+    let source = test_source(config);
+
+    let shard = ShardIndex {
+        path: dir.path().join("s1.simdr"),
+        global_start: 0,
+        row_count: 3,
+        parquet_row_groups: Vec::new(),
+        remote_candidate: None,
+    };
+
+    {
+        let mut state = source.state.lock().unwrap();
+        state.shards = vec![shard.clone()];
+        state.materialized_rows = 3;
+    }
+
+    let sig = crate::shard_indexing::shard_signature(std::slice::from_ref(&shard));
+    {
+        let mut cache = source.eligible_index.lock().unwrap();
+        cache.signature = Some(sig);
+        cache.rows = Some(Arc::new(vec![0, 1, 2]));
+        cache.shards = vec![shard];
+    }
+
+    let rows = crate::shard_indexing::eligible_rows(source.deref()).unwrap();
+    assert_eq!(rows.as_ref(), &vec![0, 1, 2]);
+}
+
+#[test]
+fn eligible_rows_full_rebuild_when_no_cache() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+    let source = test_source(config.clone());
+
+    let simdr = dir.path().join("shard.simdr");
+    write_simdr_fixture(&simdr, &[("r1", "hello"), ("r2", "world")]);
+    let shard = index_single_shard(&config, &simdr, 0).unwrap().0.unwrap();
+
+    {
+        let mut state = source.state.lock().unwrap();
+        state.shards = vec![shard];
+        state.materialized_rows = 2;
+    }
+
+    // eligible_index starts empty (default) — forces full rebuild.
+    let rows = crate::shard_indexing::eligible_rows(source.deref()).unwrap();
+    assert_eq!(rows.as_ref(), &vec![0, 1]);
+}
+
+#[test]
+fn build_eligible_rows_parquet_shard_exercises_cache() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+    let source = test_source(config.clone());
+
+    let parquet_path = dir.path().join("shard.parquet");
+    write_parquet_fixture(&parquet_path, &[("r1", "hello"), ("r2", "world")]);
+
+    let shard = ShardIndex {
+        path: parquet_path.clone(),
+        global_start: 0,
+        row_count: 2,
+        parquet_row_groups: vec![(0, 2)],
+        remote_candidate: None,
+    };
+
+    let eligible =
+        crate::shard_indexing::build_eligible_rows_from_shards(source.deref(), &[shard]).unwrap();
+    assert_eq!(eligible, vec![0, 1]);
+}
+
+#[test]
+fn open_shard_store_creates_directory_and_store() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+    let source = test_source(config);
+
+    let nested_path = dir.path().join("a").join("b").join("shard.simdr");
+    let result = crate::shard_indexing::get_or_open_shard_store(&source, &nested_path);
+    assert!(
+        result.is_ok(),
+        "should create directory and store: {:?}",
+        result.err()
+    );
+    assert!(nested_path.exists(), "store file should exist");
+}
+
+// ── Phase 3: source_core.rs tests ──────────────────────────────────────────
+
+#[test]
+fn new_source_indexes_local_simdr_files() {
+    let dir = tempdir().unwrap();
+    let mut config = test_config(dir.path().to_path_buf());
+
+    // Pre-create a .simdr file so new() discovers it during indexing.
+    let simdr = dir.path().join("_parquet_manifest").join("shard.simdr");
+    fs::create_dir_all(simdr.parent().unwrap()).unwrap();
+    write_simdr_fixture(&simdr, &[("r1", "hello"), ("r2", "world")]);
+
+    // Provide explicit mapping so has_explicit_mapping() returns true.
+    config.anchor_columns = vec!["anchor".to_string()];
+    config.positive_columns = vec!["positive".to_string()];
+
+    let source = HuggingFaceRowSource::new(config).expect("new should succeed");
+    let state = source.state.lock().unwrap();
+    assert_eq!(state.materialized_rows, 2);
+    assert_eq!(state.shards.len(), 1);
+}
+
+#[test]
+#[serial(global_state)]
+fn new_source_with_hf_token_validates_via_mock() {
+    let dir = tempdir().unwrap();
+    let mut config = test_config(dir.path().to_path_buf());
+    config.hf_token = Some("valid-token".to_string());
+    config.anchor_columns = vec!["anchor".to_string()];
+    config.positive_columns = vec!["positive".to_string()];
+
+    let server = spawn_one_shot_http(b"{\"name\":\"testuser\"}".to_vec());
+    let base_url = server.url().to_string();
+    with_env_var(ENV_TRIPLETS_HF_WHOAMI_ENDPOINT, &base_url, || {
+        let result = HuggingFaceRowSource::new(config);
+        assert!(
+            result.is_ok(),
+            "new with valid token should succeed: {:?}",
+            result.err()
+        );
+    });
+}
+
+#[test]
+#[serial(global_state)]
+fn new_source_rejects_invalid_token() {
+    let dir = tempdir().unwrap();
+    let mut config = test_config(dir.path().to_path_buf());
+    config.hf_token = Some("bad-token".to_string());
+    config.anchor_columns = vec!["anchor".to_string()];
+    config.positive_columns = vec!["positive".to_string()];
+
+    let server = TestHttpServer::new(401, b"Unauthorized".to_vec());
+    let base_url = server.url().to_string();
+    with_env_var(ENV_TRIPLETS_HF_WHOAMI_ENDPOINT, &base_url, || {
+        let result = HuggingFaceRowSource::new(config);
+        assert!(result.is_err(), "new with invalid token should fail");
+    });
+}
+
+#[test]
+fn new_source_without_explicit_mapping_returns_error() {
+    let dir = tempdir().unwrap();
+    let mut config = test_config(dir.path().to_path_buf());
+    // Clear all column mappings so has_explicit_mapping() returns false.
+    config.text_columns.clear();
+    config.anchor_columns.clear();
+    config.positive_columns.clear();
+    config.context_columns.clear();
+    assert!(!config.has_explicit_mapping());
+
+    let result = HuggingFaceRowSource::new(config);
+    assert!(result.is_err(), "new without mapping should fail");
+    match result {
+        Err(SamplerError::Configuration(msg)) => {
+            assert!(
+                msg.contains("explicit field mapping"),
+                "error should mention field mapping"
+            );
+        }
+        Err(_) => panic!("expected Configuration error variant"),
+        Ok(_) => panic!("expected error, got Ok"),
+    }
+}
+
+#[test]
+fn ensure_row_available_row_already_materialized() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+    let source = test_source(config);
+
+    {
+        let mut state = source.state.lock().unwrap();
+        state.materialized_rows = 10;
+    }
+
+    let result = source.ensure_row_available(5).unwrap();
+    assert!(
+        result,
+        "row 5 should be available when materialized_rows=10"
+    );
+}
+
+#[test]
+fn ensure_row_available_candidates_exhausted() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+    let source = test_source(config);
+
+    {
+        let mut state = source.state.lock().unwrap();
+        state.materialized_rows = 0;
+        state.remote_candidates = Some(vec![]);
+        state.next_remote_idx = 0;
+    }
+
+    let result = source.ensure_row_available(0).unwrap();
+    assert!(!result, "should return false when candidates exhausted");
+}
+
+#[test]
+fn download_next_shard_store_already_on_disk_skips_download() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+    let source = test_source(config.clone());
+
+    // Create a candidate path and pre-create its .simdr store.
+    let candidate = "url::http://mock.example.com/datasets/org/ds/resolve/main/train/shard.ndjson";
+    let store_path = crate::shard_indexing::candidate_store_path(&config, candidate);
+    fs::create_dir_all(store_path.parent().unwrap()).unwrap();
+    write_simdr_fixture(&store_path, &[("r1", "hello")]);
+
+    {
+        let mut state = source.state.lock().unwrap();
+        state.materialized_rows = 0;
+        state.remote_candidates = Some(vec![candidate.to_string()]);
+        state.remote_candidate_sizes = HashMap::new();
+        state.next_remote_idx = 0;
+        state.remote_candidate_order = vec![0];
+    }
+
+    let result = source.download_next_remote_shard().unwrap();
+    assert!(result, "should return true when store already on disk");
+
+    let state = source.state.lock().unwrap();
+    assert_eq!(
+        state.next_remote_idx, 1,
+        "candidate position should be consumed"
+    );
+}
+
+// ── Phase 4: download.rs tests ─────────────────────────────────────────────
+
+#[test]
+fn download_shard_rejects_path_traversal_double_dot() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+    let client = test_http_client();
+
+    let remote_path = "url::http://evil.com/../../etc/passwd";
+    let result = HuggingFaceRowSource::download_and_materialize_shard(
+        &client,
+        &config,
+        remote_path,
+        None,
+        "traversal-test",
+    );
+    assert!(result.is_err(), "path traversal should be rejected");
+    match result {
+        Err(SamplerError::SourceUnavailable { reason, .. }) => {
+            assert!(
+                reason.contains("traversal"),
+                "error should mention traversal, got: {reason}"
+            );
+        }
+        other => panic!("expected SourceUnavailable error, got: {:?}", other),
+    }
+}
+
+#[test]
+fn download_shard_rejects_path_traversal_in_full_url() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+    let client = test_http_client();
+
+    let remote_path = "url::https://host/datasets/org/ds/resolve/main/../../../etc/passwd";
+    let result = HuggingFaceRowSource::download_and_materialize_shard(
+        &client,
+        &config,
+        remote_path,
+        None,
+        "traversal-test-2",
+    );
+    assert!(
+        result.is_err(),
+        "path traversal in full URL should be rejected"
+    );
+}
+
+#[test]
+fn download_shard_store_already_exists_returns_cached() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+    let client = test_http_client();
+
+    let remote_path =
+        "url::http://mock.example.com/datasets/org/ds/resolve/main/train/shard.ndjson";
+    let store_path = crate::shard_indexing::candidate_store_path(&config, remote_path);
+    fs::create_dir_all(store_path.parent().unwrap()).unwrap();
+    write_simdr_fixture(&store_path, &[("r1", "cached")]);
+
+    let result = HuggingFaceRowSource::download_and_materialize_shard(
+        &client,
+        &config,
+        remote_path,
+        None,
+        "cache-test",
+    );
+    let path = result.expect("should return Ok with store path");
+    assert_eq!(path, store_path, "should return the existing store path");
+}
+
+#[test]
+fn list_remote_candidates_returns_error_on_invalid_json() {
+    let dir = tempdir().unwrap();
+    let mut config = test_config(dir.path().to_path_buf());
+    let server = spawn_one_shot_http(b"this is not json at all".to_vec());
+    config.parquet_endpoint = server.url().to_string();
+
+    let client = test_http_client();
+    let result = HuggingFaceRowSource::list_remote_candidates(&client, &config);
+    assert!(result.is_err(), "invalid JSON should return error");
+}
+
+#[test]
+fn list_remote_candidates_returns_error_on_non_success() {
+    let dir = tempdir().unwrap();
+    let mut config = test_config(dir.path().to_path_buf());
+    let server = TestHttpServer::new(503, b"Service Unavailable".to_vec());
+    config.parquet_endpoint = server.url().to_string();
+
+    let client = test_http_client();
+    let result = HuggingFaceRowSource::list_remote_candidates(&client, &config);
+    assert!(result.is_err(), "503 response should return error");
+}

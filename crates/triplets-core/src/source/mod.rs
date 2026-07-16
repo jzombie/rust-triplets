@@ -688,4 +688,31 @@ mod tests {
         assert_ne!(with_a, with_b);
         assert_ne!(with_a, base);
     }
+
+    #[test]
+    fn stable_hash_is_deterministic_across_calls() {
+        let a = crate::hash::stable_hash_str(42, "hello");
+        let b = crate::hash::stable_hash_str(42, "hello");
+        assert_eq!(a, b, "same inputs must produce same hash");
+    }
+
+    #[test]
+    fn stable_hash_varies_with_seed() {
+        let a = crate::hash::stable_hash_str(1, "hello");
+        let b = crate::hash::stable_hash_str(2, "hello");
+        assert_ne!(a, b, "different seeds should produce different hashes");
+    }
+
+    #[test]
+    fn stable_hash_varies_with_value() {
+        let a = crate::hash::stable_hash_str(42, "hello");
+        let b = crate::hash::stable_hash_str(42, "world");
+        assert_ne!(a, b, "different values should produce different hashes");
+    }
+
+    #[test]
+    fn stable_hash_str_handles_empty_string() {
+        let result = crate::hash::stable_hash_str(0, "");
+        assert_ne!(result, 0, "empty string should produce non-zero hash");
+    }
 }
