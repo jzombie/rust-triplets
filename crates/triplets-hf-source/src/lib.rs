@@ -9,6 +9,7 @@ mod core_tests;
 mod disk_cache;
 /// Download utilities and HTTP helpers for Hugging Face shard fetching.
 pub mod download;
+mod expansion;
 mod file_utils;
 mod huggingface_source;
 mod parsing;

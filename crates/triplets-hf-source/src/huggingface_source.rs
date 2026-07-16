@@ -302,9 +302,3 @@ impl RowCache {
 pub(crate) type ParquetGroupKey = (PathBuf, usize);
 pub(crate) type ParquetGroupRequest = (usize, usize, ShardIndex);
 pub(crate) type ParquetManifestCandidates = (Vec<String>, HashMap<String, u64>, usize);
-
-/// Global gate that serializes expansion downloads across ALL HuggingFace
-/// sources.  Only one source downloads a shard at any given time, preventing
-/// bursts when multiple sources trigger expansion on the same cycle.
-pub(crate) static EXPANSION_GATE: std::sync::OnceLock<std::sync::Mutex<()>> =
-    std::sync::OnceLock::new();

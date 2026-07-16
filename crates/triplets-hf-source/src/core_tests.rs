@@ -4488,7 +4488,7 @@ fn trigger_expansion_if_needed_starts_background_thread() {
         state.remote_candidate_order = vec![0];
     }
     assert!(source.expansion_thread.lock().unwrap().is_none());
-    source.trigger_expansion_if_needed();
+    crate::expansion::trigger_expansion_if_needed(&source);
     let handle = source.expansion_thread.lock().unwrap().take();
     assert!(handle.is_some());
     if let Some(h) = handle {
@@ -4513,7 +4513,7 @@ fn trigger_expansion_if_needed_skips_when_all_remote_candidates_consumed() {
         state.remote_candidates = Some(vec!["done".to_string()]);
         state.next_remote_idx = 1;
     }
-    source.trigger_expansion_if_needed();
+    crate::expansion::trigger_expansion_if_needed(&source);
     assert!(source.expansion_thread.lock().unwrap().is_none());
 }
 
@@ -4526,7 +4526,7 @@ fn trigger_expansion_if_needed_skips_when_total_rows_is_zero() {
         let mut state = source.state.lock().unwrap();
         state.materialized_rows = 0;
     }
-    source.trigger_expansion_if_needed();
+    crate::expansion::trigger_expansion_if_needed(&source);
     assert!(source.expansion_thread.lock().unwrap().is_none());
 }
 
@@ -4545,7 +4545,7 @@ fn trigger_expansion_if_needed_skips_when_already_running() {
     *source.expansion_thread.lock().unwrap() = Some(dummy);
 
     // Must skip: slot is already occupied.
-    source.trigger_expansion_if_needed();
+    crate::expansion::trigger_expansion_if_needed(&source);
     assert!(source.expansion_thread.lock().unwrap().as_ref().is_some());
 
     // Release: signal the dummy to exit, join cleanly.
