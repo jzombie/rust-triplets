@@ -37,7 +37,7 @@ use std::time::{Duration, Instant};
 /// All `HuggingFaceRowSource` instances use this single runtime so that
 /// HTTP connections established by one source can be safely reused by
 /// another source via the shared `reqwest::Client` connection pool.
-pub(crate) fn shared_runtime() -> Arc<tokio::runtime::Runtime> {
+pub(crate) fn shared_http_runtime() -> Arc<tokio::runtime::Runtime> {
     use std::sync::OnceLock;
     static RUNTIME: OnceLock<Arc<tokio::runtime::Runtime>> = OnceLock::new();
     RUNTIME

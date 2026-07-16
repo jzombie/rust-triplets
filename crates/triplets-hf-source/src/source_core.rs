@@ -12,7 +12,7 @@ use crate::download::{
     build_candidate_order, build_http_client, candidate_target_path,
     download_and_materialize_shard_with_runtime, fetch_remote_size_with_runtime,
     first_uncached_order_position, format_shard_label, list_remote_candidates_with_runtime,
-    remote_url_for_candidate, shared_runtime, validate_token_with_runtime,
+    remote_url_for_candidate, shared_http_runtime, validate_token_with_runtime,
 };
 #[cfg(test)]
 use crate::huggingface_source::ParquetManifestCandidates;
@@ -145,7 +145,7 @@ impl HuggingFaceRowSource {
     /// Build a new source by indexing local shard files.
     pub fn new(mut config: HuggingFaceRowsConfig) -> Result<Self, SamplerError> {
         let start_new = Instant::now();
-        let http_runtime = shared_runtime();
+        let http_runtime = shared_http_runtime();
         let http_client = config
             .http_client
             .take()
