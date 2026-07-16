@@ -6617,8 +6617,6 @@ fn build_eligible_rows_store_shard_includes_all_rows() {
 #[test]
 fn recompute_shard_offsets_sets_correct_start_values() {
     let dir = tempdir().unwrap();
-    let config = test_config(dir.path().to_path_buf());
-    let source = test_source(config);
 
     let mut state = SourceState {
         materialized_rows: 0,
