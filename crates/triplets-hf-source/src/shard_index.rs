@@ -5,7 +5,7 @@ use crate::constants::{
 };
 use crate::disk_cache;
 use crate::disk_cache::open_store_via_cache;
-use crate::huggingface_source::{is_gzip_path, is_transient_text};
+use crate::file_utils::{is_gzip_path, is_transient_text};
 use crate::types::ShardIndex;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use rayon::prelude::*;

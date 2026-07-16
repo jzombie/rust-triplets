@@ -107,7 +107,7 @@ pub struct HuggingFaceRowsConfig {
     pub store_cache: StoreCache,
     /// Optional pre-built HTTP client.  When set, [`crate::huggingface_source::HuggingFaceRowSource::new`]
     /// uses this client instead of building a new one.  This allows callers
-    /// such as [`crate::huggingface_source::build_hf_sources`] to share a single connection pool and
+    /// such as [`crate::builder::build_hf_sources`] to share a single connection pool and
     /// throttle state across many sources.
     pub(crate) http_client: Option<ClientWithMiddleware>,
 }

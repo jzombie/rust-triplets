@@ -10,10 +10,8 @@ use crate::constants::{
     HF_THROTTLE_ADAPTIVE_JITTER_MS, HF_THROTTLE_BASE_DELAY_MS, HF_THROTTLE_MAX_CONCURRENT,
     HF_THROTTLE_MAX_RETRIES,
 };
-use crate::huggingface_source::{
-    HuggingFaceRowSource, ParquetManifestCandidates, is_gzip_path, is_transient_text,
-    resolve_inner_extension,
-};
+use crate::file_utils::{is_gzip_path, is_transient_text, resolve_inner_extension};
+use crate::huggingface_source::{HuggingFaceRowSource, ParquetManifestCandidates};
 use crate::shard_index::shard_store_path_for;
 use crate::types::ShardIndex;
 

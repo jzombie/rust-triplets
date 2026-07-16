@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 #![warn(missing_docs)]
 
+mod builder;
 mod config;
 mod constants;
 #[cfg(test)]
@@ -8,7 +9,9 @@ mod core_tests;
 mod disk_cache;
 /// Download utilities and HTTP helpers for Hugging Face shard fetching.
 pub mod download;
+mod file_utils;
 mod huggingface_source;
+mod parsing;
 mod shard_index;
 mod types;
 
@@ -24,10 +27,12 @@ pub use constants::{
     HF_BASE_URL, HF_DATASETS_BASE_URL, HF_GROUP, HF_PARQUET_DEFAULT_ENDPOINT,
     HF_PUBLIC_TEST_DATASET, HF_REMOTE_URL_PREFIX,
 };
-pub use huggingface_source::HuggingFaceRowSource;
+pub use builder::{build_hf_sources, build_hf_sources_with_weights};
 pub use huggingface_source::{
-    HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE, HfListRoots, HfSourceEntry, build_hf_sources,
-    build_hf_sources_with_weights, load_hf_sources_from_list, managed_hf_list_snapshot_dir,
-    managed_hf_snapshot_dir, parse_csv_fields, parse_hf_source_line, parse_hf_uri,
-    resolve_hf_list_roots,
+    HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE, HuggingFaceRowSource, managed_hf_list_snapshot_dir,
+    managed_hf_snapshot_dir,
+};
+pub use parsing::{
+    HfListRoots, HfSourceEntry, hf_source_id_slug, load_hf_sources_from_list, parse_csv_fields,
+    parse_hf_source_line, parse_hf_uri, resolve_hf_list_roots,
 };
