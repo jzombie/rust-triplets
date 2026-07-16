@@ -1,3 +1,4 @@
+use crate::builder::build_hf_sources;
 use crate::config::HuggingFaceRowsConfig;
 use crate::constants::{
     ENV_TRIPLETS_HF_TOKEN, ENV_TRIPLETS_HF_WHOAMI_ENDPOINT, HF_ALL_SPLITS_DIR,
@@ -5,7 +6,6 @@ use crate::constants::{
     HF_REMOTE_URL_PREFIX, HF_SHARD_STORE_META_ROWS_KEY, HF_SHARD_STORE_ROW_PREFIX,
     HF_SHARD_STORE_SOURCE_SIZE_KEY,
 };
-use crate::builder::build_hf_sources;
 use crate::disk_cache::ensure_cache_group;
 use crate::download::*;
 use crate::file_utils::{is_gzip_path, resolve_inner_extension};
@@ -16,8 +16,8 @@ use crate::huggingface_source::{
     managed_hf_list_snapshot_dir, managed_hf_snapshot_dir,
 };
 use crate::parsing::{
-    HfListRoots, HfSourceEntry, hf_source_id_slug, load_hf_sources_from_list,
-    parse_hf_source_line, parse_hf_uri, resolve_hf_list_roots,
+    HfListRoots, HfSourceEntry, hf_source_id_slug, load_hf_sources_from_list, parse_hf_source_line,
+    parse_hf_uri, resolve_hf_list_roots,
 };
 use crate::shard_index::{
     index_single_shard, is_store_shard_path, parquet_row_group_map, row_store_row_key,

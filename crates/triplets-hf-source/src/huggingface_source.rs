@@ -1,7 +1,6 @@
 use crate::config::HuggingFaceRowsConfig;
 use crate::disk_cache::StoreCache;
 use crate::disk_cache::ensure_cache_group;
-use crate::file_utils::{is_gzip_path, is_transient_text, resolve_inner_extension};
 #[cfg(test)]
 use crate::download::list_remote_candidates_from_parquet_manifest_with_runtime;
 use crate::download::{
@@ -10,6 +9,7 @@ use crate::download::{
     first_uncached_order_position, format_shard_label, list_remote_candidates_with_runtime,
     remote_url_for_candidate, shared_runtime, validate_token_with_runtime,
 };
+use crate::file_utils::{is_gzip_path, is_transient_text, resolve_inner_extension};
 use crate::shard_index::{
     build_shard_index, index_single_shard, is_store_shard_path, row_store_row_key,
     shard_store_path_for,
