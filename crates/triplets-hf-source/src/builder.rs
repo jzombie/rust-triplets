@@ -6,6 +6,7 @@ use crate::download::build_http_client;
 use crate::parsing::{HfListRoots, hf_source_id_slug, parse_hf_uri};
 use crate::source_core::HuggingFaceRowSource;
 use reqwest_drive::ClientWithMiddleware;
+use tracing::{info, warn};
 use triplets_core::source::DataSource;
 
 /// Build Hugging Face row sources from a parsed source list.
@@ -58,7 +59,7 @@ pub fn build_hf_sources_with_weights(
             let (dataset, config, split) = match parse_hf_uri(&source.uri) {
                 Ok(v) => v,
                 Err(err) => {
-                    eprintln!("Skipping Hugging Face source '{}': {}", source.uri, err);
+                    warn!(uri = %source.uri, error = %err, "Skipping Hugging Face source (URI parse failure)");
                     return None;
                 }
             };
@@ -81,7 +82,7 @@ pub fn build_hf_sources_with_weights(
             let snapshot_dir = match managed_hf_list_snapshot_dir(&dataset, &config, &split, idx) {
                 Ok(dir) => dir,
                 Err(err) => {
-                    eprintln!("Skipping Hugging Face source '{}': {}", source.uri, err);
+                    warn!(uri = %source.uri, error = %err, "Skipping Hugging Face source (snapshot dir failure)");
                     return None;
                 }
             };
@@ -98,9 +99,10 @@ pub fn build_hf_sources_with_weights(
                 match build_http_client(&hf) {
                     Ok(client) => shared_client = Some(client),
                     Err(err) => {
-                        eprintln!(
-                            "Skipping source '{}' due to HTTP client initialization failure: {}",
-                            source.uri, err
+                        warn!(
+                            uri = %source.uri,
+                            error = %err,
+                            "Skipping source due to HTTP client initialization failure"
                         );
                         return None;
                     }
@@ -113,24 +115,26 @@ pub fn build_hf_sources_with_weights(
                 weights.insert(hf.source_id.clone(), w);
             }
 
-            println!(
-                "source {idx}: hf://{}/{}/{} -> anchor={:?}, positive={:?}, negative={:?}, context={:?}, text_columns={:?}",
-                hf.dataset_name,
-                hf.config_name,
-                hf.split_name,
-                hf.anchor_columns,
-                hf.positive_columns,
-                hf.negative_columns,
-                hf.context_columns,
-                hf.text_columns
+            info!(
+                source_index = idx,
+                dataset = %hf.dataset_name,
+                config = %hf.config_name,
+                split = %hf.split_name,
+                anchor = ?hf.anchor_columns,
+                positive = ?hf.positive_columns,
+                negative = ?hf.negative_columns,
+                context = ?hf.context_columns,
+                text_columns = ?hf.text_columns,
+                "Initialized Hugging Face source mapping"
             );
 
             match HuggingFaceRowSource::new(hf) {
                 Ok(source) => Some(Box::new(source) as Box<dyn DataSource + 'static>),
                 Err(err) => {
-                    eprintln!(
-                        "Skipping Hugging Face source initialization for '{}': {}",
-                        source.uri, err
+                    warn!(
+                        uri = %source.uri,
+                        error = %err,
+                        "Skipping Hugging Face source initialization"
                     );
                     None
                 }

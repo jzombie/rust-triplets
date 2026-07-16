@@ -9,6 +9,7 @@
 use chrono::{DateTime, Utc};
 use std::hash::Hash;
 use std::time::Instant;
+use tracing::info;
 
 use crate::config::{SamplerConfig, TripletRecipe};
 use crate::data::DataRecord;
@@ -183,9 +184,11 @@ impl IndexablePager {
         let should_report = total >= 10_000 || max >= 1_024;
         let refresh_start = Instant::now();
         if should_report {
-            eprintln!(
-                "[triplets:source] refresh start source='{}' source_records={} ingestion_limit={}",
-                self.source_id, total, max
+            info!(
+                source = %self.source_id,
+                source_records = total,
+                ingestion_limit = max,
+                "Source refresh started"
             );
         }
 
@@ -228,12 +231,12 @@ impl IndexablePager {
         }
 
         if should_report {
-            eprintln!(
-                "[triplets:source] refresh done source='{}' source_records={} ingested={} elapsed={:.2}s",
-                self.source_id,
-                total,
-                records.len(),
-                refresh_start.elapsed().as_secs_f64()
+            info!(
+                source = %self.source_id,
+                source_records = total,
+                ingested = records.len(),
+                elapsed_secs = refresh_start.elapsed().as_secs_f64(),
+                "Source refresh completed"
             );
         }
         let last_seen = records
