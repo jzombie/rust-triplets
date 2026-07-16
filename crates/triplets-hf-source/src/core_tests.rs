@@ -11,9 +11,8 @@ use crate::download::*;
 use crate::file_utils::{is_gzip_path, resolve_inner_extension};
 use crate::huggingface_source::{
     EligibleIndexCache, HF_RECIPE_ANCHOR_ANCHOR_WRONG_ARTICLE,
-    HF_RECIPE_ANCHOR_CONTEXT_WRONG_ARTICLE, HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE,
-    HuggingFaceRowSource, ParquetCache, RowCache, RowTextField, RowView,
-    managed_hf_list_snapshot_dir, managed_hf_snapshot_dir,
+    HF_RECIPE_ANCHOR_CONTEXT_WRONG_ARTICLE, HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE, ParquetCache,
+    RowCache, RowTextField, RowView, managed_hf_list_snapshot_dir, managed_hf_snapshot_dir,
 };
 use crate::parsing::{
     HfListRoots, HfSourceEntry, hf_source_id_slug, load_hf_sources_from_list, parse_hf_source_line,
@@ -24,6 +23,7 @@ use crate::shard_index::{
     index_single_shard, is_store_shard_path, parquet_row_group_map, row_store_row_key,
     shard_store_path_for,
 };
+use crate::source_core::HuggingFaceRowSource;
 use crate::test_utils::{
     TEST_UNREACHABLE_URL, TestHttpServer, spawn_manifest_and_shard_http, spawn_one_shot_http,
     test_config, test_http_client, test_source, with_current_dir, with_env_var, with_env_vars,

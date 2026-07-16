@@ -12,10 +12,9 @@ use tracing::warn;
 
 use crate::constants::{HF_SHARD_STORE_META_ROWS_KEY, HF_TEMP_DOWNLOAD_PREFIX};
 use crate::file_utils::{is_gzip_path, is_transient_text, resolve_inner_extension};
-use crate::huggingface_source::{
-    HuggingFaceRowSource, ParquetGroupKey, ParquetGroupRequest, RowTextField, RowView,
-};
+use crate::huggingface_source::{ParquetGroupKey, ParquetGroupRequest, RowTextField, RowView};
 use crate::shard_index::{is_store_shard_path, row_store_row_key, shard_store_path_for};
+use crate::source_core::HuggingFaceRowSource;
 use crate::types::ShardIndex;
 use triplets_core::SamplerError;
 use triplets_core::data::{DataRecord, QualityScore, SectionRole};

@@ -15,6 +15,7 @@ mod parsing;
 mod rows;
 mod shard_index;
 mod shard_indexing;
+mod source_core;
 mod types;
 
 /// Test utilities for Hugging Face source tests.
@@ -31,10 +32,10 @@ pub use constants::{
     HF_PUBLIC_TEST_DATASET, HF_REMOTE_URL_PREFIX,
 };
 pub use huggingface_source::{
-    HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE, HuggingFaceRowSource, managed_hf_list_snapshot_dir,
-    managed_hf_snapshot_dir,
+    HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE, managed_hf_list_snapshot_dir, managed_hf_snapshot_dir,
 };
 pub use parsing::{
     HfListRoots, HfSourceEntry, hf_source_id_slug, load_hf_sources_from_list, parse_csv_fields,
     parse_hf_source_line, parse_hf_uri, resolve_hf_list_roots,
 };
+pub use source_core::HuggingFaceRowSource;

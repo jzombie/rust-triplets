@@ -11,8 +11,9 @@ use crate::constants::{
     HF_THROTTLE_MAX_RETRIES,
 };
 use crate::file_utils::{is_gzip_path, is_transient_text, resolve_inner_extension};
-use crate::huggingface_source::{HuggingFaceRowSource, ParquetManifestCandidates};
+use crate::huggingface_source::ParquetManifestCandidates;
 use crate::shard_index::shard_store_path_for;
+use crate::source_core::HuggingFaceRowSource;
 use crate::types::ShardIndex;
 
 use reqwest_drive::ClientWithMiddleware;

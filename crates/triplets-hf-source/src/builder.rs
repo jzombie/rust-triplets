@@ -2,8 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 use crate::config::HuggingFaceRowsConfig;
 use crate::download::build_http_client;
-use crate::huggingface_source::{HuggingFaceRowSource, managed_hf_list_snapshot_dir};
+use crate::huggingface_source::managed_hf_list_snapshot_dir;
 use crate::parsing::{HfListRoots, hf_source_id_slug, parse_hf_uri};
+use crate::source_core::HuggingFaceRowSource;
 use reqwest_drive::ClientWithMiddleware;
 use triplets_core::source::DataSource;
 

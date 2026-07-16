@@ -13,9 +13,9 @@ use crate::config::HuggingFaceRowsConfig;
 use crate::constants::HF_PARQUET_MANIFEST_DIR;
 use crate::download::candidate_target_path;
 use crate::huggingface_source::EligibleIndexCache;
-use crate::huggingface_source::HuggingFaceRowSource;
 use crate::rows;
 use crate::shard_index::{is_store_shard_path, shard_store_path_for};
+use crate::source_core::HuggingFaceRowSource;
 use crate::types::{ShardIndex, SourceState};
 use triplets_core::SamplerError;
 

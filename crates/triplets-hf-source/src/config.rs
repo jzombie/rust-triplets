@@ -105,7 +105,7 @@ pub struct HuggingFaceRowsConfig {
     /// Populated lazily as shards are accessed and cleared when the cache grows
     /// beyond the configured capacity.
     pub store_cache: StoreCache,
-    /// Optional pre-built HTTP client.  When set, [`crate::huggingface_source::HuggingFaceRowSource::new`]
+    /// Optional pre-built HTTP client.  When set, [`crate::source_core::HuggingFaceRowSource::new`]
     /// uses this client instead of building a new one.  This allows callers
     /// such as [`crate::builder::build_hf_sources`] to share a single connection pool and
     /// throttle state across many sources.

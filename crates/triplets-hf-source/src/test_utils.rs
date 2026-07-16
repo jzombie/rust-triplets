@@ -24,8 +24,9 @@ use crate::config::HuggingFaceRowsConfig;
 use crate::constants::{HF_SHARD_STORE_META_ROWS_KEY, HF_SHARD_STORE_ROW_PREFIX};
 use crate::download::build_http_runtime;
 use crate::huggingface_source::{
-    EligibleIndexCache, HuggingFaceRowSource, ParquetCache, RowCache, RowTextField, RowView,
+    EligibleIndexCache, ParquetCache, RowCache, RowTextField, RowView,
 };
+use crate::source_core::HuggingFaceRowSource;
 use crate::types::SourceState;
 use parquet::data_type::{ByteArray, ByteArrayType};
 use parquet::file::properties::WriterProperties;
