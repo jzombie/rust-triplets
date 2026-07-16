@@ -11,6 +11,10 @@ use triplets_core::{
     ChunkingStrategy, DataSource, DeterministicSplitStore, Sampler, SamplerConfig, SplitLabel,
     SplitRatios, TripletSampler,
 };
+use triplets_hf_source::download::{
+    build_http_runtime, fetch_remote_size_with_runtime, list_remote_candidates_with_runtime,
+    remote_url_for_candidate,
+};
 use triplets_hf_source::{
     ENV_TRIPLETS_HF_TOKEN, ENV_TRIPLETS_HF_TOKEN_TEST_DATASET, HF_BASE_URL, HF_PUBLIC_TEST_DATASET,
     HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE, HfListRoots, HfSourceEntry, HuggingFaceRowSource,
@@ -1383,10 +1387,9 @@ fn huggingface_live_e2e_candidate_and_shard_download() {
             .expect("test reqwest client should build");
         ClientBuilder::new(inner).build()
     };
-    let runtime =
-        HuggingFaceRowSource::build_http_runtime(&config).expect("failed building tokio runtime");
+    let runtime = build_http_runtime(&config).expect("failed building tokio runtime");
     let (candidates, _candidate_sizes) =
-        HuggingFaceRowSource::list_remote_candidates_with_runtime(&client, &config, Some(&runtime))
+        list_remote_candidates_with_runtime(&client, &config, Some(&runtime))
             .expect("remote candidate discovery failed");
     assert!(
         !candidates.is_empty(),
@@ -1424,20 +1427,15 @@ fn huggingface_live_e2e_candidate_and_shard_download() {
     // After the shard was downloaded through the E2E pipeline, validate that
     // remote_url_for_candidate correctly extracts the download URL from the
     // candidate, and that the HTTP HEAD request succeeds.
-    let remote_url = HuggingFaceRowSource::remote_url_for_candidate(&config, first_candidate);
+    let remote_url = remote_url_for_candidate(&config, first_candidate);
     assert!(
         remote_url.starts_with("http"),
         "remote_url_for_candidate must return a full URL, got: {remote_url}"
     );
 
-    let head_size = HuggingFaceRowSource::fetch_remote_size_with_runtime(
-        &client,
-        &config,
-        &remote_url,
-        &runtime,
-    )
-    .expect("HEAD request should succeed")
-    .expect("HEAD response should include Content-Length");
+    let head_size = fetch_remote_size_with_runtime(&client, &config, &remote_url, &runtime)
+        .expect("HEAD request should succeed")
+        .expect("HEAD response should include Content-Length");
 
     assert!(
         head_size > 0,

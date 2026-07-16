@@ -127,3 +127,26 @@ pub const HF_TEMP_DOWNLOAD_PREFIX: &str = "triplets_hf_";
 /// Default file extension when the original filename has no extension.
 /// Used as fallback when building temp download paths.
 pub const HF_TEMP_DEFAULT_EXTENSION: &str = "part";
+
+// ---------------------------------------------------------------------------
+// ── Source constants ─────────────────────────────────────
+
+pub(crate) const HF_SOURCE_KEY_ANCHOR: &str = "anchor";
+pub(crate) const HF_SOURCE_KEY_POSITIVE: &str = "positive";
+pub(crate) const HF_SOURCE_KEY_NEGATIVE: &str = "negative";
+pub(crate) const HF_SOURCE_KEY_CONTEXT: &str = "context";
+pub(crate) const HF_SOURCE_KEY_TEXT: &str = "text";
+pub(crate) const HF_SOURCE_KEY_TEXT_COLUMNS: &str = "text_columns";
+pub(crate) const HF_SOURCE_KEY_TRUST: &str = "trust";
+pub(crate) const HF_SOURCE_KEY_WEIGHT: &str = "weight";
+pub(crate) const HF_SOURCE_KEY_SOURCE_ID: &str = "source_id";
+
+// ---------------------------------------------------------------------------
+// ── Recipe constants ─────────────────────────────────────
+
+/// Default HF text-columns-mode SimCSE-style recipe name.
+pub const HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE: &str = "huggingface_text_simcse_wrong_article";
+pub(crate) const HF_RECIPE_ANCHOR_CONTEXT_WRONG_ARTICLE: &str =
+    "huggingface_anchor_context_wrong_article";
+pub(crate) const HF_RECIPE_ANCHOR_ANCHOR_WRONG_ARTICLE: &str =
+    "huggingface_anchor_anchor_wrong_article";

@@ -9,10 +9,33 @@
 /// server.
 pub const TEST_UNREACHABLE_URL: &str = "http://127.0.0.1:1";
 
+use std::collections::HashMap;
+use std::env;
+use std::fs::File;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::Duration;
+
+use crate::config::HuggingFaceRowsConfig;
+use crate::constants::{HF_SHARD_STORE_META_ROWS_KEY, HF_SHARD_STORE_ROW_PREFIX};
+use crate::download::build_http_runtime;
+use crate::huggingface_source::{
+    EligibleIndexCache, ParquetCache, RowCache, RowTextField, RowView,
+};
+use crate::source_core::HuggingFaceRowSource;
+use crate::types::SourceState;
+use parquet::data_type::{ByteArray, ByteArrayType};
+use parquet::file::properties::WriterProperties;
+use parquet::file::writer::SerializedFileWriter;
+use parquet::schema::parser::parse_message_type;
+use reqwest_drive::ClientWithMiddleware;
+use simd_r_drive::DataStore;
+use simd_r_drive::storage_engine::traits::DataStoreWriter;
+use triplets_core::config::SamplerConfig;
 
 // ---------------------------------------------------------------------------
 // HfMockServer — full-featured mock HF datasets-server
@@ -320,4 +343,260 @@ fn drain_http_request(stream: &mut TcpStream) {
             }
         }
     }
+}
+
+#[allow(dead_code)]
+pub(crate) fn test_config(snapshot_dir: PathBuf) -> HuggingFaceRowsConfig {
+    let mut config =
+        HuggingFaceRowsConfig::new("hf_test", "org/dataset", "default", "train", snapshot_dir);
+    // Unit tests should be deterministic and fully mock-driven; ignore any
+    // process-level HF_TOKEN that CI might inject.
+    config.hf_token = None;
+    config.cache_capacity = 10;
+    config.remote_expansion_headroom_multiplier = 3;
+    // Point endpoints to connection-refused so tests never wait on
+    // real HF servers.  Tests that exercise HTTP against mock servers
+    // override these in their own body.
+    config.parquet_endpoint = TEST_UNREACHABLE_URL.to_string();
+    config
+}
+
+#[allow(dead_code)]
+pub(crate) fn write_simdr_fixture(path: &Path, rows: &[(&str, &str)]) {
+    // Create/open the simd-r-drive DataStore and write row-view entries
+    let store = DataStore::open(path).expect("open simdr store");
+    if rows.is_empty() {
+        store
+            .write(HF_SHARD_STORE_META_ROWS_KEY, &(0u64).to_le_bytes())
+            .expect("write meta");
+        return;
+    }
+
+    let mut batch: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    for (i, (id, text)) in rows.iter().enumerate() {
+        let row = RowView {
+            row_id: Some(id.to_string()),
+            timestamp: None,
+            text_fields: vec![RowTextField {
+                name: "text".to_string(),
+                text: text.to_string(),
+            }],
+        };
+        let payload = serde_json::to_vec(&row).expect("encode row");
+        let mut key = HF_SHARD_STORE_ROW_PREFIX.to_vec();
+        key.extend_from_slice(&(i as u64).to_le_bytes());
+        batch.push((key, payload));
+    }
+
+    let refs: Vec<(&[u8], &[u8])> = batch
+        .iter()
+        .map(|(k, v)| (k.as_slice(), v.as_slice()))
+        .collect();
+    store.batch_write(&refs).expect("batch write");
+    store
+        .write(
+            HF_SHARD_STORE_META_ROWS_KEY,
+            &(rows.len() as u64).to_le_bytes(),
+        )
+        .expect("write meta");
+}
+
+#[allow(dead_code)]
+pub(crate) fn test_http_client() -> ClientWithMiddleware {
+    use reqwest_drive::ClientBuilder;
+
+    let inner = reqwest::Client::builder()
+        .connect_timeout(Duration::from_millis(500))
+        .timeout(Duration::from_secs(1))
+        .build()
+        .expect("fast test reqwest client should build");
+    ClientBuilder::new(inner).build()
+}
+
+#[allow(dead_code)]
+pub(crate) fn test_source(config: HuggingFaceRowsConfig) -> SafeTestSource {
+    let http_runtime = Arc::new(build_http_runtime(&config).unwrap());
+    // Use a non-throttled client in tests — mock servers serve a single
+    // request then shut down, so retry backoff would add unnecessary delay.
+    let http_client = test_http_client();
+    let source = HuggingFaceRowSource {
+        config,
+        http_runtime,
+        http_client,
+        sampler_config: Arc::new(Mutex::new(None)),
+        state: Arc::new(Mutex::new(SourceState {
+            materialized_rows: 0,
+            shards: Vec::new(),
+            // Use Some(vec![]) rather than None so that trigger_expansion_if_needed
+            // treats this source as "no remote candidates" and never spawns a
+            // background thread that would make live network calls during tests.
+            // Tests that explicitly exercise the remote-fetch path reset this field
+            // to None before the call under test.
+            remote_candidates: Some(vec![]),
+            remote_candidate_sizes: HashMap::new(),
+            next_remote_idx: 0,
+            remote_candidate_order: Vec::new(),
+        })),
+        cache: Arc::new(Mutex::new(RowCache::default())),
+        parquet_cache: Arc::new(Mutex::new(ParquetCache::default())),
+        eligible_index: Arc::new(Mutex::new(EligibleIndexCache::default())),
+        expansion_thread: Arc::new(Mutex::new(None)),
+    };
+    source.set_active_sampler_config(&SamplerConfig {
+        seed: 1,
+        ingestion_max_records: source.config.cache_capacity,
+        ..SamplerConfig::default()
+    });
+    SafeTestSource { source }
+}
+
+/// RAII wrapper that joins any leaked expansion thread on drop.
+/// Prevents zombie threads from holding `EXPANSION_GATE` and
+/// deadlocking subsequent tests in the CI runner.
+#[allow(dead_code)]
+pub(crate) struct SafeTestSource {
+    source: HuggingFaceRowSource,
+}
+
+impl std::ops::Deref for SafeTestSource {
+    type Target = HuggingFaceRowSource;
+    fn deref(&self) -> &Self::Target {
+        &self.source
+    }
+}
+
+impl std::ops::DerefMut for SafeTestSource {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.source
+    }
+}
+
+impl Drop for SafeTestSource {
+    fn drop(&mut self) {
+        let mut lock = match self.source.expansion_thread.lock() {
+            Ok(l) => l,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(handle) = lock.take() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(handle.join());
+            });
+            let _ = rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("Test teardown leaked a deadlocked expansion thread");
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn with_env_var<R>(key: &str, value: &str, run: impl FnOnce() -> R) -> R {
+    let previous = env::var(key).ok();
+    struct EnvRestore {
+        key: String,
+        previous: Option<String>,
+    }
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            if let Some(old) = self.previous.clone() {
+                unsafe { env::set_var(&self.key, old) };
+            } else {
+                unsafe { env::remove_var(&self.key) };
+            }
+        }
+    }
+    let _restore = EnvRestore {
+        key: key.to_string(),
+        previous,
+    };
+    unsafe { env::set_var(key, value) };
+    run()
+}
+
+/// Sets multiple `(key, value)` pairs atomically, restoring originals on drop.
+/// Use this instead of nesting `with_env_var` calls.
+#[allow(dead_code)]
+pub(crate) fn with_env_vars<R>(pairs: &[(&str, &str)], run: impl FnOnce() -> R) -> R {
+    let previous: Vec<(String, Option<String>)> = pairs
+        .iter()
+        .map(|(key, _)| (key.to_string(), env::var(key).ok()))
+        .collect();
+    struct EnvRestore(Vec<(String, Option<String>)>);
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            for (key, prev) in &self.0 {
+                if let Some(old) = prev {
+                    unsafe { env::set_var(key, old) };
+                } else {
+                    unsafe { env::remove_var(key) };
+                }
+            }
+        }
+    }
+    let _restore = EnvRestore(previous);
+    for (key, value) in pairs {
+        unsafe { env::set_var(key, value) };
+    }
+    run()
+}
+
+#[allow(dead_code)]
+pub(crate) fn with_current_dir<R>(dir: &Path, run: impl FnOnce() -> R) -> R {
+    let previous = env::current_dir().expect("get cwd");
+    struct CwdRestore {
+        previous: PathBuf,
+    }
+    impl Drop for CwdRestore {
+        fn drop(&mut self) {
+            let _ = env::set_current_dir(&self.previous);
+        }
+    }
+    let _restore = CwdRestore { previous };
+    env::set_current_dir(dir).expect("set cwd");
+    run()
+}
+
+#[allow(dead_code)]
+pub(crate) fn write_parquet_fixture(path: &Path, rows: &[(&str, &str)]) {
+    let schema = Arc::new(
+        parse_message_type(
+            "message test_schema {
+                    REQUIRED BINARY id (UTF8);
+                    REQUIRED BINARY text (UTF8);
+                }",
+        )
+        .unwrap(),
+    );
+    let props = Arc::new(WriterProperties::builder().build());
+    let file = File::create(path).unwrap();
+    let mut writer = SerializedFileWriter::new(file, schema, props).unwrap();
+    let mut row_group = writer.next_row_group().unwrap();
+
+    if let Some(mut col_writer) = row_group.next_column().unwrap() {
+        let values = rows
+            .iter()
+            .map(|(id, _)| ByteArray::from(*id))
+            .collect::<Vec<_>>();
+        col_writer
+            .typed::<ByteArrayType>()
+            .write_batch(&values, None, None)
+            .unwrap();
+        col_writer.close().unwrap();
+    }
+
+    if let Some(mut col_writer) = row_group.next_column().unwrap() {
+        let values = rows
+            .iter()
+            .map(|(_, text)| ByteArray::from(*text))
+            .collect::<Vec<_>>();
+        col_writer
+            .typed::<ByteArrayType>()
+            .write_batch(&values, None, None)
+            .unwrap();
+        col_writer.close().unwrap();
+    }
+
+    assert!(row_group.next_column().unwrap().is_none());
+    row_group.close().unwrap();
+    writer.close().unwrap();
 }
