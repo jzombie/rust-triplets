@@ -215,3 +215,128 @@ impl SchedulerConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+
+    #[test]
+    fn scheduler_error_display_io() {
+        let err = SchedulerError::Io(io::Error::new(io::ErrorKind::NotFound, "file missing"));
+        assert_eq!(err.to_string(), "file missing");
+    }
+
+    #[test]
+    fn scheduler_error_display_msg() {
+        let err = SchedulerError::Msg("something went wrong".to_string());
+        assert_eq!(err.to_string(), "something went wrong");
+    }
+
+    #[test]
+    fn scheduler_error_from_io_error() {
+        let io_err = io::Error::new(io::ErrorKind::PermissionDenied, "denied");
+        let err: SchedulerError = io_err.into();
+        assert!(matches!(err, SchedulerError::Io(_)));
+        assert_eq!(err.to_string(), "denied");
+    }
+
+    #[test]
+    fn scheduler_error_from_string() {
+        let err: SchedulerError = "bad input".to_string().into();
+        assert!(matches!(err, SchedulerError::Msg(_)));
+        assert_eq!(err.to_string(), "bad input");
+    }
+
+    #[test]
+    fn scheduler_error_from_str() {
+        let err: SchedulerError = "static msg".into();
+        assert!(matches!(err, SchedulerError::Msg(_)));
+        assert_eq!(err.to_string(), "static msg");
+    }
+
+    #[test]
+    fn scheduler_error_is_std_error() {
+        let err: SchedulerError = "test".into();
+        let _: &dyn std::error::Error = &err;
+    }
+
+    struct MockStore {
+        count: u64,
+    }
+
+    impl EmbedStore for MockStore {
+        fn write_pairs(&self, _start_idx: u64, _args: &PairWriteArgs<'_>) -> Result<()> {
+            Ok(())
+        }
+        fn write_triplets(&self, _start_idx: u64, _args: &TripletWriteArgs<'_>) -> Result<()> {
+            Ok(())
+        }
+        fn len(&self) -> Result<u64> {
+            Ok(self.count)
+        }
+    }
+
+    #[test]
+    fn embed_store_is_empty_true() {
+        let store = MockStore { count: 0 };
+        assert!(store.is_empty().unwrap());
+    }
+
+    #[test]
+    fn embed_store_is_empty_false() {
+        let store = MockStore { count: 5 };
+        assert!(!store.is_empty().unwrap());
+    }
+
+    #[test]
+    fn scheduler_config_new() {
+        let cfg = SchedulerConfig::new(32, 64, 768, 10);
+        assert_eq!(cfg.sampler_batch_size, 32);
+        assert_eq!(cfg.embed_batch_size, 64);
+        assert_eq!(cfg.emb_dim, 768);
+        assert_eq!(cfg.steps_per_batch, 10);
+    }
+
+    #[test]
+    fn step_result_fields() {
+        let r = StepResult {
+            samples_processed: 100,
+            samples_dropped: 3,
+            should_flush: true,
+        };
+        assert_eq!(r.samples_processed, 100);
+        assert_eq!(r.samples_dropped, 3);
+        assert!(r.should_flush);
+    }
+
+    #[test]
+    fn sampler_batch_variants() {
+        let pairs = SamplerBatch::Pairs(vec![]);
+        let triplets = SamplerBatch::Triplets(vec![]);
+        assert!(matches!(pairs, SamplerBatch::Pairs(_)));
+        assert!(matches!(triplets, SamplerBatch::Triplets(_)));
+    }
+
+    #[test]
+    fn pair_entry_clone() {
+        let e = PairEntry {
+            anchor_text: "a".into(),
+            candidate_text: "b".into(),
+            label: PairLabel::Positive,
+        };
+        let e2 = e.clone();
+        assert_eq!(e2.anchor_text, "a");
+    }
+
+    #[test]
+    fn triplet_entry_clone() {
+        let e = TripletEntry {
+            anchor_text: "a".into(),
+            pos_text: "p".into(),
+            neg_text: "n".into(),
+        };
+        let e2 = e.clone();
+        assert_eq!(e2.neg_text, "n");
+    }
+}

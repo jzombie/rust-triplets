@@ -844,3 +844,256 @@ pub(crate) fn write_store_row_count(
         })?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::{test_config, test_source};
+    use crate::types::ShardIndex;
+    use serde_json::json;
+    use tempfile::tempdir;
+
+    // ── Phase 1a: coalesce_list_field (pure function) ──────────────────────
+
+    #[test]
+    fn coalesce_list_field_array_with_nonempty_elements() {
+        let result = coalesce_list_field("neg", &json!(["a", "b", "c"]));
+        let fields = result.expect("should return Some");
+        assert_eq!(fields.len(), 3);
+        assert_eq!(fields[0].name, "neg[0]");
+        assert_eq!(fields[0].text, "a");
+        assert_eq!(fields[1].name, "neg[1]");
+        assert_eq!(fields[1].text, "b");
+        assert_eq!(fields[2].name, "neg[2]");
+        assert_eq!(fields[2].text, "c");
+    }
+
+    #[test]
+    fn coalesce_list_field_array_all_empty_returns_none() {
+        assert!(coalesce_list_field("neg", &json!(["", "  ", null])).is_none());
+    }
+
+    #[test]
+    fn coalesce_list_field_array_mixed_empty_and_nonempty() {
+        let result = coalesce_list_field("neg", &json!(["", "keep", null]));
+        let fields = result.expect("should return Some");
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].name, "neg[1]");
+        assert_eq!(fields[0].text, "keep");
+    }
+
+    #[test]
+    fn coalesce_list_field_scalar_string() {
+        let result = coalesce_list_field("neg", &json!("single"));
+        let fields = result.expect("should return Some");
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].name, "neg");
+        assert_eq!(fields[0].text, "single");
+    }
+
+    #[test]
+    fn coalesce_list_field_scalar_number() {
+        let result = coalesce_list_field("score", &json!(42));
+        let fields = result.expect("should return Some");
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].text, "42");
+    }
+
+    #[test]
+    fn coalesce_list_field_null_returns_none() {
+        assert!(coalesce_list_field("neg", &json!(null)).is_none());
+    }
+
+    #[test]
+    fn coalesce_list_field_bool_returns_some() {
+        let result = coalesce_list_field("flag", &json!(true));
+        let fields = result.expect("should return Some");
+        assert_eq!(fields[0].text, "true");
+    }
+
+    // ── Phase 1b: parse_non_parquet_line ───────────────────────────────────
+
+    fn make_source_and_shard(
+        dir: &tempfile::TempDir,
+        ext: &str,
+    ) -> (crate::test_utils::SafeTestSource, ShardIndex) {
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config);
+        let path = dir.path().join(format!("shard.{ext}"));
+        let shard = ShardIndex {
+            path,
+            global_start: 0,
+            row_count: 0,
+            parquet_row_groups: Vec::new(),
+            remote_candidate: None,
+        };
+        (source, shard)
+    }
+
+    #[test]
+    fn parse_non_parquet_json_object_ndjson() {
+        let dir = tempdir().unwrap();
+        let (source, shard) = make_source_and_shard(&dir, "ndjson");
+        let result = parse_non_parquet_line(&source, &shard, 0, r#"{"id":"r1","text":"hello"}"#);
+        let value = result.expect("should parse");
+        assert!(value.is_object());
+        assert_eq!(value["id"], "r1");
+    }
+
+    #[test]
+    fn parse_non_parquet_json_scalar_ndjson() {
+        let dir = tempdir().unwrap();
+        let (source, shard) = make_source_and_shard(&dir, "ndjson");
+        let result = parse_non_parquet_line(&source, &shard, 0, r#""hello""#);
+        let value = result.expect("should parse");
+        assert_eq!(value["text"], "hello");
+    }
+
+    #[test]
+    fn parse_non_parquet_plain_text_txt() {
+        let dir = tempdir().unwrap();
+        let (source, shard) = make_source_and_shard(&dir, "txt");
+        let result = parse_non_parquet_line(&source, &shard, 0, "hello world");
+        let value = result.expect("should parse");
+        assert_eq!(value["text"], "hello world");
+    }
+
+    #[test]
+    fn parse_non_parquet_invalid_json_strict_jsonl() {
+        let dir = tempdir().unwrap();
+        let (source, shard) = make_source_and_shard(&dir, "jsonl");
+        let result = parse_non_parquet_line(&source, &shard, 0, "not json");
+        assert!(result.is_err(), "strict JSONL should reject invalid JSON");
+    }
+
+    #[test]
+    fn parse_non_parquet_invalid_json_lenient_txt() {
+        let dir = tempdir().unwrap();
+        let (source, shard) = make_source_and_shard(&dir, "txt");
+        let result = parse_non_parquet_line(&source, &shard, 0, "not json");
+        let value = result.expect("lenient txt should accept plain text");
+        assert_eq!(value["text"], "not json");
+    }
+
+    #[test]
+    fn parse_non_parquet_empty_line_returns_error() {
+        let dir = tempdir().unwrap();
+        let (source, shard) = make_source_and_shard(&dir, "ndjson");
+        let result = parse_non_parquet_line(&source, &shard, 0, "");
+        assert!(result.is_err(), "empty line should error");
+    }
+
+    #[test]
+    fn parse_non_parquet_json_with_row_wrapper() {
+        let dir = tempdir().unwrap();
+        let (source, shard) = make_source_and_shard(&dir, "ndjson");
+        let result =
+            parse_non_parquet_line(&source, &shard, 0, r#"{"row":{"id":"r1","text":"hi"}}"#);
+        let value = result.expect("should unwrap row wrapper");
+        assert_eq!(value["row"]["id"], "r1");
+    }
+
+    #[test]
+    fn parse_non_parquet_json_null_scalar_returns_error() {
+        let dir = tempdir().unwrap();
+        let (source, shard) = make_source_and_shard(&dir, "ndjson");
+        let result = parse_non_parquet_line(&source, &shard, 0, "null");
+        assert!(
+            result.is_err(),
+            "null scalar should error (cannot convert to text)"
+        );
+    }
+
+    // ── Phase 1d: encode_row_view / decode_row_view round-trip ─────────────
+
+    #[test]
+    fn encode_decode_row_view_round_trip() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config);
+
+        let row = RowView {
+            row_id: Some("r1".to_string()),
+            timestamp: None,
+            text_fields: vec![
+                RowTextField {
+                    name: "anchor".to_string(),
+                    text: "hello".to_string(),
+                },
+                RowTextField {
+                    name: "positive".to_string(),
+                    text: "world".to_string(),
+                },
+            ],
+        };
+
+        let encoded = encode_row_view(&source, &row).expect("encode should succeed");
+        let decoded = decode_row_view(&source, &encoded).expect("decode should succeed");
+
+        assert_eq!(decoded.row_id, Some("r1".to_string()));
+        assert_eq!(decoded.text_fields.len(), 2);
+        assert_eq!(decoded.text_fields[0].name, "anchor");
+        assert_eq!(decoded.text_fields[0].text, "hello");
+        assert_eq!(decoded.text_fields[1].name, "positive");
+        assert_eq!(decoded.text_fields[1].text, "world");
+    }
+
+    #[test]
+    fn encode_decode_row_view_empty_fields() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config);
+
+        let row = RowView {
+            row_id: None,
+            timestamp: None,
+            text_fields: Vec::new(),
+        };
+
+        let encoded = encode_row_view(&source, &row).expect("encode should succeed");
+        let decoded = decode_row_view(&source, &encoded).expect("decode should succeed");
+
+        assert!(decoded.row_id.is_none());
+        assert!(decoded.text_fields.is_empty());
+    }
+
+    #[test]
+    fn decode_row_view_truncated_input_returns_error() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config);
+
+        let result = decode_row_view(&source, b"{\"row_id\":");
+        assert!(result.is_err(), "truncated JSON should fail");
+    }
+
+    #[test]
+    fn decode_row_view_invalid_json_returns_error() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let source = test_source(config);
+
+        let result = decode_row_view(&source, b"not valid json at all");
+        assert!(result.is_err(), "invalid JSON should fail");
+    }
+
+    #[test]
+    fn coalesce_list_field_mixed_types_array() {
+        let result = coalesce_list_field("data", &json!(["text", 42, true]));
+        let fields = result.expect("should return Some");
+        assert_eq!(fields.len(), 3);
+        assert_eq!(fields[0].text, "text");
+        assert_eq!(fields[1].text, "42");
+        assert_eq!(fields[2].text, "true");
+    }
+
+    #[test]
+    fn coalesce_list_field_nested_array() {
+        let result = coalesce_list_field("data", &json!([["a", "b"], ["c"]]));
+        let fields = result.expect("should return Some");
+        assert_eq!(fields.len(), 2);
+        // Nested arrays are flattened by value_to_text - returns first non-empty text
+        assert_eq!(fields[0].text, "a");
+        assert_eq!(fields[1].text, "c");
+    }
+}
