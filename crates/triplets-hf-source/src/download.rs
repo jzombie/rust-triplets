@@ -30,7 +30,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-// TODO: Rename to shared_http_runtime
 /// Return a reference to the process-wide shared multi-threaded tokio
 /// runtime, lazily initialized on first access.
 ///
