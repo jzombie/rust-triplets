@@ -1,4 +1,5 @@
 use crate::config::HuggingFaceRowsConfig;
+use crate::constants::{HF_ALL_SPLITS_DIR, HF_GROUP};
 use cache_manager::CacheRoot;
 use simd_r_drive::DataStore;
 use std::collections::HashMap;
@@ -114,43 +115,45 @@ pub(crate) fn open_store_via_cache(
     Ok(store)
 }
 
-// TODO: Finish refactor
-// Apply cache-manager eviction policy to manifest shards and sync in-memory state.
-// pub fn enforce_disk_cap_locked(
-//     &self,
-//     state: &mut SourceState,
-//     _protected_path: &Path,
-// ) -> Result<bool, SamplerError> {
-//     let Some(cap_bytes) = self.config.local_disk_cap_bytes else {
-//         return Ok(false);
-//     };
+/// Resolve a managed snapshot directory for a list-based Hugging Face source.
+pub fn managed_hf_list_snapshot_dir(
+    dataset: &str,
+    config: &str,
+    split: &str,
+    replica_idx: usize,
+) -> Result<PathBuf, String> {
+    // Empty split (all-splits mode) uses HF_ALL_SPLITS_DIR so the path hierarchy stays valid
+    // and won't collide with a split literally named "" on any filesystem.
+    let split_dir = if split.is_empty() {
+        HF_ALL_SPLITS_DIR
+    } else {
+        split
+    };
+    ensure_cache_group(
+        PathBuf::from(HF_GROUP)
+            .join("source-list")
+            .join(dataset.replace('/', "__"))
+            .join(config)
+            .join(split_dir)
+            .join(format!("replica_{replica_idx}")),
+    )
+}
 
-//     let before = state
-//         .shards
-//         .iter()
-//         .map(|shard| shard.path.clone())
-//         .collect::<Vec<_>>();
-//     let policy = EvictPolicy {
-//         max_bytes: Some(cap_bytes),
-//         ..EvictPolicy::default()
-//     };
-
-//     let cache_root = CacheRoot::from_root(&self.config.snapshot_dir);
-//     cache_root
-//         .ensure_group_with_policy(HF_PARQUET_MANIFEST_DIR, Some(&policy))
-//         .map_err(|err| SamplerError::SourceUnavailable {
-//             source_id: self.config.source_id.clone(),
-//             reason: format!(
-//                 "failed applying manifest cache eviction policy under {}: {err}",
-//                 self.config.snapshot_dir.display()
-//             ),
-//         })?;
-
-//     self.sync_shard_state_from_disk_locked(state);
-//     let after = state
-//         .shards
-//         .iter()
-//         .map(|shard| shard.path.clone())
-//         .collect::<Vec<_>>();
-//     Ok(before != after)
-// }
+/// Resolve a managed snapshot directory for a single Hugging Face source.
+pub fn managed_hf_snapshot_dir(
+    dataset: &str,
+    config: &str,
+    split: &str,
+) -> Result<PathBuf, String> {
+    let split_dir = if split.is_empty() {
+        HF_ALL_SPLITS_DIR
+    } else {
+        split
+    };
+    ensure_cache_group(
+        PathBuf::from(HF_GROUP)
+            .join(dataset.replace('/', "__"))
+            .join(config)
+            .join(split_dir),
+    )
+}

@@ -2,6 +2,10 @@ use crate::config::HuggingFaceRowsConfig;
 use crate::constants::{
     HF_PARQUET_MANIFEST_DIR, HF_REMOTE_BOOTSTRAP_SHARDS, HF_SHARD_STORE_SOURCE_SIZE_KEY,
 };
+use crate::constants::{
+    HF_RECIPE_ANCHOR_ANCHOR_WRONG_ARTICLE, HF_RECIPE_ANCHOR_CONTEXT_WRONG_ARTICLE,
+    HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE,
+};
 #[cfg(test)]
 use crate::download::list_remote_candidates_from_parquet_manifest_with_runtime;
 use crate::download::{
@@ -12,11 +16,7 @@ use crate::download::{
 };
 #[cfg(test)]
 use crate::huggingface_source::ParquetManifestCandidates;
-use crate::huggingface_source::{
-    EligibleIndexCache, HF_RECIPE_ANCHOR_ANCHOR_WRONG_ARTICLE,
-    HF_RECIPE_ANCHOR_CONTEXT_WRONG_ARTICLE, HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE, ParquetCache,
-    RowCache,
-};
+use crate::huggingface_source::{EligibleIndexCache, ParquetCache, RowCache};
 use crate::rows;
 use crate::shard_index::{
     build_shard_index, index_single_shard, is_store_shard_path, shard_store_path_for,

@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::config::HuggingFaceRowsConfig;
+use crate::disk_cache::managed_hf_list_snapshot_dir;
 use crate::download::build_http_client;
-use crate::huggingface_source::managed_hf_list_snapshot_dir;
 use crate::parsing::{HfListRoots, hf_source_id_slug, parse_hf_uri};
 use crate::source_core::HuggingFaceRowSource;
 use reqwest_drive::ClientWithMiddleware;

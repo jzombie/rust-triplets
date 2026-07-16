@@ -1,6 +1,3 @@
-use crate::config::HuggingFaceRowsConfig;
-use crate::disk_cache::StoreCache;
-use crate::disk_cache::ensure_cache_group;
 use crate::types::ShardIndex;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::record::reader::RowIter;
@@ -12,74 +9,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::constants::{
-    ENV_TRIPLETS_HF_TOKEN, HF_ALL_SPLITS_DIR, HF_GROUP, HF_LOCAL_DISK_CAP_BYTES,
-    HF_PARQUET_DEFAULT_ENDPOINT, HF_REFRESH_BATCH_MULTIPLIER,
-    HF_REMOTE_EXPANSION_HEADROOM_MULTIPLIER, HF_SHARD_STORE_EXTENSION,
-};
 use chrono::{DateTime, Utc};
 use triplets_core::SamplerError;
-use triplets_core::config::SamplerConfig;
-
-pub(crate) const HF_SOURCE_KEY_ANCHOR: &str = "anchor";
-pub(crate) const HF_SOURCE_KEY_POSITIVE: &str = "positive";
-pub(crate) const HF_SOURCE_KEY_NEGATIVE: &str = "negative";
-pub(crate) const HF_SOURCE_KEY_CONTEXT: &str = "context";
-pub(crate) const HF_SOURCE_KEY_TEXT: &str = "text";
-pub(crate) const HF_SOURCE_KEY_TEXT_COLUMNS: &str = "text_columns";
-pub(crate) const HF_SOURCE_KEY_TRUST: &str = "trust";
-pub(crate) const HF_SOURCE_KEY_WEIGHT: &str = "weight";
-pub(crate) const HF_SOURCE_KEY_SOURCE_ID: &str = "source_id";
-
-/// Default HF text-columns-mode SimCSE-style recipe name.
-pub const HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE: &str = "huggingface_text_simcse_wrong_article";
-pub(crate) const HF_RECIPE_ANCHOR_CONTEXT_WRONG_ARTICLE: &str =
-    "huggingface_anchor_context_wrong_article";
-pub(crate) const HF_RECIPE_ANCHOR_ANCHOR_WRONG_ARTICLE: &str =
-    "huggingface_anchor_anchor_wrong_article";
-
-/// Resolve a managed snapshot directory for a list-based Hugging Face source.
-pub fn managed_hf_list_snapshot_dir(
-    dataset: &str,
-    config: &str,
-    split: &str,
-    replica_idx: usize,
-) -> Result<PathBuf, String> {
-    // Empty split (all-splits mode) uses HF_ALL_SPLITS_DIR so the path hierarchy stays valid
-    // and won't collide with a split literally named "" on any filesystem.
-    let split_dir = if split.is_empty() {
-        HF_ALL_SPLITS_DIR
-    } else {
-        split
-    };
-    ensure_cache_group(
-        PathBuf::from(HF_GROUP)
-            .join("source-list")
-            .join(dataset.replace('/', "__"))
-            .join(config)
-            .join(split_dir)
-            .join(format!("replica_{replica_idx}")),
-    )
-}
-
-/// Resolve a managed snapshot directory for a single Hugging Face source.
-pub fn managed_hf_snapshot_dir(
-    dataset: &str,
-    config: &str,
-    split: &str,
-) -> Result<PathBuf, String> {
-    let split_dir = if split.is_empty() {
-        HF_ALL_SPLITS_DIR
-    } else {
-        split
-    };
-    ensure_cache_group(
-        PathBuf::from(HF_GROUP)
-            .join(dataset.replace('/', "__"))
-            .join(config)
-            .join(split_dir),
-    )
-}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct RowTextField {
@@ -92,58 +23,6 @@ pub(crate) struct RowView {
     pub(crate) row_id: Option<String>,
     pub(crate) timestamp: Option<DateTime<Utc>>,
     pub(crate) text_fields: Vec<RowTextField>,
-}
-
-impl HuggingFaceRowsConfig {
-    /// Create a config with required dataset identity values and local snapshot path.
-    pub fn new(
-        source_id: impl Into<String>,
-        dataset: impl Into<String>,
-        config: impl Into<String>,
-        split: impl Into<String>,
-        snapshot_dir: impl Into<PathBuf>,
-    ) -> Self {
-        Self {
-            source_id: source_id.into(),
-            dataset_name: dataset.into(),
-            config_name: config.into(),
-            split_name: split.into(),
-            snapshot_dir: snapshot_dir.into(),
-            shard_extensions: vec![
-                "parquet".to_string(),
-                HF_SHARD_STORE_EXTENSION.to_string(),
-                "jsonl".to_string(),
-                "ndjson".to_string(),
-                "json".to_string(),
-            ],
-            cache_capacity: SamplerConfig::default().ingestion_max_records,
-            parquet_row_group_cache_capacity: 8,
-            refresh_batch_multiplier: HF_REFRESH_BATCH_MULTIPLIER,
-            remote_expansion_headroom_multiplier: HF_REMOTE_EXPANSION_HEADROOM_MULTIPLIER,
-            local_disk_cap_bytes: Some(HF_LOCAL_DISK_CAP_BYTES),
-            id_column: Some("id".to_string()),
-            text_columns: vec!["text".to_string()],
-            anchor_columns: Vec::new(),
-            positive_columns: Vec::new(),
-            negative_columns: Vec::new(),
-            context_columns: Vec::new(),
-            trust_override: None,
-            hf_token: std::env::var(ENV_TRIPLETS_HF_TOKEN)
-                .ok()
-                .filter(|t| !t.trim().is_empty()),
-            parquet_endpoint: HF_PARQUET_DEFAULT_ENDPOINT.to_string(),
-            store_cache: StoreCache::new(),
-            http_client: None,
-        }
-    }
-
-    pub(crate) fn has_explicit_mapping(&self) -> bool {
-        !self.anchor_columns.is_empty()
-            || !self.positive_columns.is_empty()
-            || !self.negative_columns.is_empty()
-            || !self.context_columns.is_empty()
-            || !self.text_columns.is_empty()
-    }
 }
 
 #[derive(Default)]

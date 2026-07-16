@@ -1,6 +1,11 @@
+use crate::constants::{
+    ENV_TRIPLETS_HF_TOKEN, HF_LOCAL_DISK_CAP_BYTES, HF_PARQUET_DEFAULT_ENDPOINT,
+    HF_REFRESH_BATCH_MULTIPLIER, HF_REMOTE_EXPANSION_HEADROOM_MULTIPLIER, HF_SHARD_STORE_EXTENSION,
+};
 use crate::disk_cache::StoreCache;
 use reqwest_drive::ClientWithMiddleware;
 use std::path::PathBuf;
+use triplets_core::config::SamplerConfig;
 
 /// Configuration for a bulk Hugging Face row source backed by local snapshot files.
 #[derive(Clone, Debug)]
@@ -110,4 +115,56 @@ pub struct HuggingFaceRowsConfig {
     /// such as [`crate::builder::build_hf_sources`] to share a single connection pool and
     /// throttle state across many sources.
     pub(crate) http_client: Option<ClientWithMiddleware>,
+}
+
+impl HuggingFaceRowsConfig {
+    /// Create a config with required dataset identity values and local snapshot path.
+    pub fn new(
+        source_id: impl Into<String>,
+        dataset: impl Into<String>,
+        config: impl Into<String>,
+        split: impl Into<String>,
+        snapshot_dir: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            source_id: source_id.into(),
+            dataset_name: dataset.into(),
+            config_name: config.into(),
+            split_name: split.into(),
+            snapshot_dir: snapshot_dir.into(),
+            shard_extensions: vec![
+                "parquet".to_string(),
+                HF_SHARD_STORE_EXTENSION.to_string(),
+                "jsonl".to_string(),
+                "ndjson".to_string(),
+                "json".to_string(),
+            ],
+            cache_capacity: SamplerConfig::default().ingestion_max_records,
+            parquet_row_group_cache_capacity: 8,
+            refresh_batch_multiplier: HF_REFRESH_BATCH_MULTIPLIER,
+            remote_expansion_headroom_multiplier: HF_REMOTE_EXPANSION_HEADROOM_MULTIPLIER,
+            local_disk_cap_bytes: Some(HF_LOCAL_DISK_CAP_BYTES),
+            id_column: Some("id".to_string()),
+            text_columns: vec!["text".to_string()],
+            anchor_columns: Vec::new(),
+            positive_columns: Vec::new(),
+            negative_columns: Vec::new(),
+            context_columns: Vec::new(),
+            trust_override: None,
+            hf_token: std::env::var(ENV_TRIPLETS_HF_TOKEN)
+                .ok()
+                .filter(|t| !t.trim().is_empty()),
+            parquet_endpoint: HF_PARQUET_DEFAULT_ENDPOINT.to_string(),
+            store_cache: StoreCache::new(),
+            http_client: None,
+        }
+    }
+
+    pub(crate) fn has_explicit_mapping(&self) -> bool {
+        !self.anchor_columns.is_empty()
+            || !self.positive_columns.is_empty()
+            || !self.negative_columns.is_empty()
+            || !self.context_columns.is_empty()
+            || !self.text_columns.is_empty()
+    }
 }
