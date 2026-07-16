@@ -408,4 +408,73 @@ mod tests {
         assert!(recipe.instruction.is_none());
         assert!(!recipe.allow_same_anchor_positive);
     }
+
+    #[test]
+    fn denoiser_config_defaults() {
+        let cfg = DenoiserConfig::default();
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.max_digit_ratio, 0.35);
+        assert!(cfg.strip_markdown);
+    }
+
+    #[test]
+    fn chunking_strategy_clone() {
+        let cfg = ChunkingStrategy::default();
+        let cloned = cfg.clone();
+        assert_eq!(cloned.max_window_tokens, cfg.max_window_tokens);
+        assert_eq!(cloned.overlap_tokens, cfg.overlap_tokens);
+        assert_eq!(cloned.summary_fallback_weight, cfg.summary_fallback_weight);
+        assert_eq!(cloned.summary_fallback_tokens, cfg.summary_fallback_tokens);
+        assert_eq!(cloned.chunk_weight_floor, cfg.chunk_weight_floor);
+    }
+
+    #[test]
+    fn chunking_strategy_debug() {
+        let cfg = ChunkingStrategy::default();
+        let debug_str = format!("{:?}", cfg);
+        assert!(debug_str.contains("ChunkingStrategy"));
+        assert!(debug_str.contains("1024"));
+    }
+
+    #[test]
+    fn negative_strategy_variants() {
+        let strategies = [
+            NegativeStrategy::WrongPublicationDate,
+            NegativeStrategy::WrongArticle,
+            NegativeStrategy::QuestionAnswerMismatch,
+            NegativeStrategy::SameRecord,
+        ];
+        for s in &strategies {
+            let _ = format!("{:?}", s);
+        }
+    }
+
+    #[test]
+    fn selector_debug() {
+        let s = Selector::Role(SectionRole::Anchor);
+        let debug_str = format!("{:?}", s);
+        assert!(debug_str.contains("Role"));
+    }
+
+    #[test]
+    fn text_recipe_construction() {
+        let recipe = TextRecipe {
+            name: "test".into(),
+            selector: Selector::Role(SectionRole::Anchor),
+            weight: 2.0,
+            instruction: Some("do something".into()),
+        };
+        assert_eq!(recipe.weight, 2.0);
+        assert!(recipe.instruction.is_some());
+    }
+
+    #[test]
+    fn sampler_config_with_denoiser() {
+        let cfg = SamplerConfig::default().with_denoiser(DenoiserConfig {
+            enabled: true,
+            max_digit_ratio: 0.5,
+            strip_markdown: false,
+        });
+        assert_eq!(cfg.chunking.preprocessors.len(), 1);
+    }
 }
