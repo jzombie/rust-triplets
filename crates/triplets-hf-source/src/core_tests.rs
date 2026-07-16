@@ -19,6 +19,7 @@ use crate::parsing::{
     HfListRoots, HfSourceEntry, hf_source_id_slug, load_hf_sources_from_list, parse_hf_source_line,
     parse_hf_uri, resolve_hf_list_roots,
 };
+use crate::rows;
 use crate::shard_index::{
     index_single_shard, is_store_shard_path, parquet_row_group_map, row_store_row_key,
     shard_store_path_for,
@@ -577,12 +578,12 @@ fn read_store_row_count_validates_payload_size_and_roundtrips_written_value() {
     store
         .write(HF_SHARD_STORE_META_ROWS_KEY, &[1u8, 2, 3])
         .unwrap();
-    let err = source.read_store_row_count(&store).unwrap_err();
+    let err = rows::read_store_row_count(&source, &store).unwrap_err();
     let message = format!("{err}");
     assert!(message.contains("payload size mismatch"));
 
-    source.write_store_row_count(&store, 7).unwrap();
-    assert_eq!(source.read_store_row_count(&store).unwrap(), 7);
+    rows::write_store_row_count(&source, &store, 7).unwrap();
+    assert_eq!(rows::read_store_row_count(&source, &store).unwrap(), 7);
 }
 
 #[test]
@@ -593,7 +594,7 @@ fn read_store_row_count_returns_zero_when_meta_key_is_absent() {
     let store_path = dir.path().join("empty.simdr");
     let store = DataStore::open(&store_path).unwrap();
 
-    assert_eq!(source.read_store_row_count(&store).unwrap(), 0);
+    assert_eq!(rows::read_store_row_count(&source, &store).unwrap(), 0);
 }
 
 #[test]
@@ -878,13 +879,13 @@ fn parse_row_role_columns_mode_builds_expected_fields() {
     config.context_columns = vec!["ctx1".into(), "ctx2".into()];
     let source = test_source(config);
 
-    let row = source
-        .parse_row(
-            2,
-            &json!({"id":"r","anchor":"a","positive":"p","ctx1":"c1","ctx2":2}),
-        )
-        .unwrap()
-        .unwrap();
+    let row = rows::parse_row(
+        &source,
+        2,
+        &json!({"id":"r","anchor":"a","positive":"p","ctx1":"c1","ctx2":2}),
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(row.text_fields.len(), 4);
     assert_eq!(row.text_fields[0].name, "anchor");
     assert_eq!(row.text_fields[1].name, "positive");
@@ -898,10 +899,10 @@ fn parse_row_role_columns_mode_skips_missing_or_empty_values() {
     config.context_columns = vec!["ctx".into()];
     let source = test_source(config);
 
-    let missing = source.parse_row(0, &json!({"anchor":"a"}));
+    let missing = rows::parse_row(&source, 0, &json!({"anchor":"a"}));
     assert!(missing.unwrap().is_none());
 
-    let empty_anchor = source.parse_row(1, &json!({"anchor":"   ", "ctx":"ok"}));
+    let empty_anchor = rows::parse_row(&source, 1, &json!({"anchor":"   ", "ctx":"ok"}));
     assert!(empty_anchor.unwrap().is_none());
 }
 
@@ -919,7 +920,7 @@ fn row_to_record_uses_anchor_for_positive_when_single_field() {
         }],
     };
 
-    let record = source.row_to_record(&row, 0).unwrap().unwrap();
+    let record = rows::row_to_record(&source, &row, 0).unwrap().unwrap();
     assert_eq!(record.sections.len(), 2);
     assert_eq!(record.sections[0].text, record.sections[1].text);
 }
@@ -948,8 +949,7 @@ fn parse_row_falls_back_to_synthetic_id_when_missing_id_column() {
     config.id_column = Some("id".into());
     let source = test_source(config);
 
-    let row = source
-        .parse_row(42, &json!({"text": "hello"}))
+    let row = rows::parse_row(&source, 42, &json!({"text": "hello"}))
         .unwrap()
         .unwrap();
     assert_eq!(row.row_id, Some("org/dataset:train:42".to_string()));
@@ -969,7 +969,7 @@ fn row_to_record_falls_back_to_row_index_when_row_id_missing() {
         }],
     };
 
-    let record = source.row_to_record(&row, 7).unwrap().unwrap();
+    let record = rows::row_to_record(&source, &row, 7).unwrap().unwrap();
     assert!(record.id.ends_with("::row_7"));
 }
 
@@ -998,7 +998,7 @@ fn read_row_batch_errors_when_row_not_mappable_to_shard() {
     }
 
     let mut out = Vec::new();
-    let err = source.read_row_batch(&[0], &mut out, Some(1));
+    let err = rows::read_row_batch(&source, &[0], &mut out, Some(1));
     assert!(err.is_err());
 }
 
@@ -1023,7 +1023,7 @@ fn read_row_batch_errors_when_parquet_local_offsets_are_missing() {
     }
 
     let mut out = Vec::new();
-    let err = source.read_row_batch(&[2], &mut out, Some(1)).unwrap_err();
+    let err = rows::read_row_batch(&source, &[2], &mut out, Some(1)).unwrap_err();
     assert!(matches!(
         err,
         SamplerError::SourceUnavailable { ref reason, .. } if reason.contains("parquet rows missing")
@@ -1534,7 +1534,7 @@ fn read_row_batch_errors_when_parquet_reader_cannot_open_file() {
     }
 
     let mut out = Vec::new();
-    let err = source.read_row_batch(&[0], &mut out, Some(1));
+    let err = rows::read_row_batch(&source, &[0], &mut out, Some(1));
     assert!(err.is_err());
 }
 
@@ -1595,7 +1595,7 @@ fn row_to_record_preserves_explicit_timestamp() {
         }],
     };
 
-    let record = source.row_to_record(&row, 0).unwrap().unwrap();
+    let record = rows::row_to_record(&source, &row, 0).unwrap().unwrap();
     assert_eq!(record.created_at, ts);
     assert_eq!(record.updated_at, ts);
 }
@@ -1607,8 +1607,7 @@ fn parse_row_text_columns_accept_numeric_values() {
     config.text_columns = vec!["score".into()];
     let source = test_source(config);
 
-    let row = source
-        .parse_row(0, &json!({"score": 123}))
+    let row = rows::parse_row(&source, 0, &json!({"score": 123}))
         .unwrap()
         .unwrap();
     assert_eq!(row.text_fields.len(), 1);
@@ -1649,7 +1648,7 @@ fn read_row_batch_skips_unavailable_indices_without_error() {
     }
 
     let mut out = Vec::new();
-    source.read_row_batch(&[0, 1], &mut out, Some(2)).unwrap();
+    rows::read_row_batch(&source, &[0, 1], &mut out, Some(2)).unwrap();
     assert!(out.is_empty());
 }
 
@@ -1715,12 +1714,12 @@ fn read_row_batch_reads_parquet_rows_and_uses_cache_on_repeat() {
     }
 
     let mut first = Vec::new();
-    source.read_row_batch(&[0, 1], &mut first, None).unwrap();
+    rows::read_row_batch(&source, &[0, 1], &mut first, None).unwrap();
     assert_eq!(first.len(), 2);
     assert!(first.iter().any(|record| record.id.ends_with("::r10")));
 
     let mut second = Vec::new();
-    source.read_row_batch(&[0, 1], &mut second, None).unwrap();
+    rows::read_row_batch(&source, &[0, 1], &mut second, None).unwrap();
     assert_eq!(second.len(), 2);
 }
 
@@ -2152,9 +2151,8 @@ fn transcode_transient_shard_to_store_cleans_up_temp_downloads() {
         remote_candidate: None,
     };
 
-    let result = source
-        .transcode_transient_shard_to_store(&shard)
-        .expect("transcode must succeed");
+    let result =
+        rows::transcode_transient_shard_to_store(&source, &shard).expect("transcode must succeed");
 
     // Temp file must be gone after transcoding.
     assert!(
@@ -2201,9 +2199,8 @@ fn transcode_transient_shard_to_store_early_return_cleans_up_transient() {
         remote_candidate: None,
     };
 
-    let result = source
-        .transcode_transient_shard_to_store(&shard)
-        .expect("transcode must succeed");
+    let result =
+        rows::transcode_transient_shard_to_store(&source, &shard).expect("transcode must succeed");
 
     // Stale parquet must be gone.
     assert!(
@@ -2977,24 +2974,12 @@ fn expansion_headroom_uses_sampler_ingestion_max_records_when_configured() {
 
 #[test]
 fn value_to_text_handles_scalar_and_structured_values() {
-    assert_eq!(HuggingFaceRowSource::value_to_text(&json!(null)), None);
-    assert_eq!(HuggingFaceRowSource::value_to_text(&json!("   ")), None);
-    assert_eq!(
-        HuggingFaceRowSource::value_to_text(&json!("hello")),
-        Some("hello".into())
-    );
-    assert_eq!(
-        HuggingFaceRowSource::value_to_text(&json!(true)),
-        Some("true".into())
-    );
-    assert_eq!(
-        HuggingFaceRowSource::value_to_text(&json!(3.5)),
-        Some("3.5".into())
-    );
-    assert_eq!(
-        HuggingFaceRowSource::value_to_text(&json!([1, 2])),
-        Some("1".into())
-    );
+    assert_eq!(rows::value_to_text(&json!(null)), None);
+    assert_eq!(rows::value_to_text(&json!("   ")), None);
+    assert_eq!(rows::value_to_text(&json!("hello")), Some("hello".into()));
+    assert_eq!(rows::value_to_text(&json!(true)), Some("true".into()));
+    assert_eq!(rows::value_to_text(&json!(3.5)), Some("3.5".into()));
+    assert_eq!(rows::value_to_text(&json!([1, 2])), Some("1".into()));
 }
 
 #[test]
@@ -3005,18 +2990,18 @@ fn parse_row_uses_explicit_text_columns() {
     config.text_columns = vec!["title".into(), "body".into()];
     let source = test_source(config);
 
-    let row = source
-        .parse_row(
-            5,
-            &json!({
-                "id": "row-5",
-                "title": "Anchor text",
-                "body": "Context text",
-                "flag": true
-            }),
-        )
-        .unwrap()
-        .unwrap();
+    let row = rows::parse_row(
+        &source,
+        5,
+        &json!({
+            "id": "row-5",
+            "title": "Anchor text",
+            "body": "Context text",
+            "flag": true
+        }),
+    )
+    .unwrap()
+    .unwrap();
 
     // Candidate coalescing: the first non-empty column (title) is selected;
     // body is never tried because title already yielded a value.
@@ -3036,7 +3021,7 @@ fn parse_row_with_required_columns_skips_when_missing() {
     config.context_columns = vec!["context".into()];
     let source = test_source(config);
 
-    let parsed = source.parse_row(0, &json!({"anchor": "x", "context": "z"}));
+    let parsed = rows::parse_row(&source, 0, &json!({"anchor": "x", "context": "z"}));
     assert!(parsed.unwrap().is_none());
 }
 
@@ -3046,7 +3031,7 @@ fn parse_row_errors_when_payload_is_not_object() {
     let config = test_config(dir.path().to_path_buf());
     let source = test_source(config);
 
-    let err = source.parse_row(0, &json!("not-an-object"));
+    let err = rows::parse_row(&source, 0, &json!("not-an-object"));
     assert!(err.is_err());
 }
 
@@ -3074,7 +3059,7 @@ fn row_to_record_builds_expected_sections() {
         ],
     };
 
-    let record = source.row_to_record(&row, 1).unwrap().unwrap();
+    let record = rows::row_to_record(&source, &row, 1).unwrap().unwrap();
     assert_eq!(record.sections.len(), 3);
     assert_eq!(record.sections[0].role, SectionRole::Anchor);
     assert_eq!(record.sections[1].role, SectionRole::Context);
@@ -3541,13 +3526,13 @@ fn parse_row_supports_row_wrapped_payload_and_text_columns() {
     config.id_column = Some("rid".into());
     let source = test_source(config);
 
-    let parsed = source
-        .parse_row(
-            0,
-            &json!({"row": {"rid": "r-1", "headline": "h", "body": "b"}}),
-        )
-        .unwrap()
-        .unwrap();
+    let parsed = rows::parse_row(
+        &source,
+        0,
+        &json!({"row": {"rid": "r-1", "headline": "h", "body": "b"}}),
+    )
+    .unwrap()
+    .unwrap();
 
     // Candidate coalescing: headline is non-empty so it is selected;
     // body is not tried.
@@ -3566,7 +3551,7 @@ fn parse_row_returns_none_when_all_positive_or_text_candidates_are_missing() {
     role_config.positive_columns = vec!["positive".into()];
     let role_source = test_source(role_config);
 
-    let role_missing = role_source.parse_row(0, &json!({"anchor":"a"})).unwrap();
+    let role_missing = rows::parse_row(&role_source, 0, &json!({"anchor":"a"})).unwrap();
     assert!(role_missing.is_none());
 
     // Text-columns mode: a row that lacks all listed candidates → row skipped.
@@ -3574,9 +3559,8 @@ fn parse_row_returns_none_when_all_positive_or_text_candidates_are_missing() {
     text_config.text_columns = vec!["title".into(), "body".into()];
     let text_source = test_source(text_config);
     // Row has neither "title" nor "body" → no candidate matches → skipped.
-    let text_missing = text_source
-        .parse_row(1, &json!({"other_field": "irrelevant"}))
-        .unwrap();
+    let text_missing =
+        rows::parse_row(&text_source, 1, &json!({"other_field": "irrelevant"})).unwrap();
     assert!(text_missing.is_none());
 }
 
@@ -3588,19 +3572,25 @@ fn parse_row_text_columns_coalesces_to_first_nonempty_candidate() {
     let source = test_source(config);
 
     // "title" is empty string → coalesces to "body".
-    let row = source
-        .parse_row(0, &json!({"title": "", "body": "fallback content"}))
-        .unwrap()
-        .unwrap();
+    let row = rows::parse_row(
+        &source,
+        0,
+        &json!({"title": "", "body": "fallback content"}),
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(row.text_fields.len(), 1);
     assert_eq!(row.text_fields[0].name, "body");
     assert_eq!(row.text_fields[0].text, "fallback content");
 
     // "title" is present and non-empty → it is used; "body" is never tried.
-    let row2 = source
-        .parse_row(1, &json!({"title": "primary content", "body": "ignored"}))
-        .unwrap()
-        .unwrap();
+    let row2 = rows::parse_row(
+        &source,
+        1,
+        &json!({"title": "primary content", "body": "ignored"}),
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(row2.text_fields.len(), 1);
     assert_eq!(row2.text_fields[0].name, "title");
     assert_eq!(row2.text_fields[0].text, "primary content");
@@ -3615,28 +3605,31 @@ fn parse_row_positive_columns_coalesces_to_first_nonempty_candidate() {
     let source = test_source(config);
 
     // "summary" is absent → coalesces to "body".
-    let row = source
-        .parse_row(0, &json!({"anchor": "a", "body": "fallback positive"}))
-        .unwrap()
-        .unwrap();
+    let row = rows::parse_row(
+        &source,
+        0,
+        &json!({"anchor": "a", "body": "fallback positive"}),
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(row.text_fields.len(), 2);
     assert_eq!(row.text_fields[0].name, "anchor");
     assert_eq!(row.text_fields[1].name, "body");
 
     // "summary" is present and non-empty → it is used; "body" is ignored.
-    let row2 = source
-        .parse_row(
-            1,
-            &json!({"anchor": "a", "summary": "chosen", "body": "ignored"}),
-        )
-        .unwrap()
-        .unwrap();
+    let row2 = rows::parse_row(
+        &source,
+        1,
+        &json!({"anchor": "a", "summary": "chosen", "body": "ignored"}),
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(row2.text_fields.len(), 2);
     assert_eq!(row2.text_fields[1].name, "summary");
     assert_eq!(row2.text_fields[1].text, "chosen");
 
     // Both positive candidates absent → row skipped.
-    let none = source.parse_row(2, &json!({"anchor": "a"})).unwrap();
+    let none = rows::parse_row(&source, 2, &json!({"anchor": "a"})).unwrap();
     assert!(none.is_none());
 }
 
@@ -3649,32 +3642,30 @@ fn parse_row_anchor_columns_coalesces_to_first_nonempty_candidate() {
     let source = test_source(config);
 
     // "headline" is absent → coalesces to "title".
-    let row = source
-        .parse_row(
-            0,
-            &json!({"title": "fallback anchor", "body": "positive text"}),
-        )
-        .unwrap()
-        .unwrap();
+    let row = rows::parse_row(
+        &source,
+        0,
+        &json!({"title": "fallback anchor", "body": "positive text"}),
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(row.text_fields.len(), 2);
     assert_eq!(row.text_fields[0].name, "title");
     assert_eq!(row.text_fields[0].text, "fallback anchor");
 
     // "headline" is present and non-empty → it is used; "title" is ignored.
-    let row2 = source
-        .parse_row(
-            1,
-            &json!({"headline": "chosen anchor", "title": "ignored", "body": "positive"}),
-        )
-        .unwrap()
-        .unwrap();
+    let row2 = rows::parse_row(
+        &source,
+        1,
+        &json!({"headline": "chosen anchor", "title": "ignored", "body": "positive"}),
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(row2.text_fields[0].name, "headline");
     assert_eq!(row2.text_fields[0].text, "chosen anchor");
 
     // Both anchor candidates absent → row skipped.
-    let none = source
-        .parse_row(2, &json!({"body": "positive only"}))
-        .unwrap();
+    let none = rows::parse_row(&source, 2, &json!({"body": "positive only"})).unwrap();
     assert!(none.is_none());
 }
 
@@ -3686,7 +3677,7 @@ fn parse_row_errors_when_no_mapping_is_configured() {
     config.text_columns.clear();
     let source = test_source(config);
 
-    let parsed = source.parse_row(7, &json!({"id":"only-id"}));
+    let parsed = rows::parse_row(&source, 7, &json!({"id":"only-id"}));
     assert!(matches!(
         parsed,
         Err(SamplerError::SourceInconsistent { .. })
@@ -3703,7 +3694,7 @@ fn row_to_record_returns_none_for_empty_fields() {
         timestamp: None,
         text_fields: Vec::new(),
     };
-    assert!(source.row_to_record(&row, 0).unwrap().is_none());
+    assert!(rows::row_to_record(&source, &row, 0).unwrap().is_none());
 }
 
 #[test]
@@ -3837,7 +3828,7 @@ fn read_row_batch_uses_cached_rows_and_respects_limit() {
     }
 
     let mut out = Vec::new();
-    source.read_row_batch(&[0, 1], &mut out, Some(1)).unwrap();
+    rows::read_row_batch(&source, &[0, 1], &mut out, Some(1)).unwrap();
     assert_eq!(out.len(), 1);
 }
 
@@ -3857,7 +3848,7 @@ fn read_row_batch_errors_on_invalid_json_line() {
     }
 
     let mut out = Vec::new();
-    let result = source.read_row_batch(&[0], &mut out, Some(1));
+    let result = rows::read_row_batch(&source, &[0], &mut out, Some(1));
     assert!(result.is_err());
 }
 
@@ -4430,10 +4421,10 @@ fn write_store_row_count_and_read_store_row_count_roundtrip() {
     let source = test_source(config);
     let store_path = dir.path().join("roundtrip.simdr");
     let store = DataStore::open(&store_path).unwrap();
-    source.write_store_row_count(&store, 42).unwrap();
-    assert_eq!(source.read_store_row_count(&store).unwrap(), 42);
-    source.write_store_row_count(&store, 99).unwrap();
-    assert_eq!(source.read_store_row_count(&store).unwrap(), 99);
+    rows::write_store_row_count(&source, &store, 42).unwrap();
+    assert_eq!(rows::read_store_row_count(&source, &store).unwrap(), 42);
+    rows::write_store_row_count(&source, &store, 99).unwrap();
+    assert_eq!(rows::read_store_row_count(&source, &store).unwrap(), 99);
 }
 
 #[test]
@@ -4444,7 +4435,7 @@ fn read_store_row_count_errors_on_payload_size_mismatch() {
     let store_path = dir.path().join("bad-meta.simdr");
     let store = DataStore::open(&store_path).unwrap();
     store.write(HF_SHARD_STORE_META_ROWS_KEY, b"abc").unwrap();
-    match source.read_store_row_count(&store) {
+    match rows::read_store_row_count(&source, &store) {
         Err(SamplerError::SourceUnavailable { reason, .. }) => {
             assert!(reason.contains("payload size"));
         }
@@ -4998,10 +4989,7 @@ fn parse_hf_source_line_negative_key() {
 fn resolve_json_path_top_level() {
     let row = json!({"query": "hello", "pos": ["p"], "neg": ["n"]});
     let obj = row.as_object().unwrap();
-    assert_eq!(
-        HuggingFaceRowSource::resolve_json_path(obj, "query"),
-        Some(json!("hello"))
-    );
+    assert_eq!(rows::resolve_json_path(obj, "query"), Some(json!("hello")));
 }
 
 #[test]
@@ -5009,38 +4997,32 @@ fn resolve_json_path_nested_dict() {
     let row = json!({"set": {"query": "hello", "pos": ["p"], "neg": ["n"]}});
     let obj = row.as_object().unwrap();
     assert_eq!(
-        HuggingFaceRowSource::resolve_json_path(obj, "set.query"),
+        rows::resolve_json_path(obj, "set.query"),
         Some(json!("hello"))
     );
-    assert_eq!(
-        HuggingFaceRowSource::resolve_json_path(obj, "set.pos"),
-        Some(json!(["p"]))
-    );
+    assert_eq!(rows::resolve_json_path(obj, "set.pos"), Some(json!(["p"])));
 }
 
 #[test]
 fn resolve_json_path_missing_returns_none() {
     let row = json!({"set": {"query": "hello"}});
     let obj = row.as_object().unwrap();
-    assert_eq!(
-        HuggingFaceRowSource::resolve_json_path(obj, "missing"),
-        None
-    );
+    assert_eq!(rows::resolve_json_path(obj, "missing"), None);
 }
 
 #[test]
 fn value_to_text_array_first_element() {
     assert_eq!(
-        HuggingFaceRowSource::value_to_text(&json!(["single"])),
+        rows::value_to_text(&json!(["single"])),
         Some("single".into())
     );
     assert_eq!(
-        HuggingFaceRowSource::value_to_text(&json!(["a", "b", "c"])),
+        rows::value_to_text(&json!(["a", "b", "c"])),
         Some("a".into())
     );
-    assert_eq!(HuggingFaceRowSource::value_to_text(&json!([])), None);
+    assert_eq!(rows::value_to_text(&json!([])), None);
     assert_eq!(
-        HuggingFaceRowSource::value_to_text(&json!([null, "valid"])),
+        rows::value_to_text(&json!([null, "valid"])),
         Some("valid".into())
     );
 }
@@ -5055,19 +5037,19 @@ fn parse_row_dict_dataset() {
     config.id_column = None;
     let source = test_source(config);
 
-    let row = source
-        .parse_row(
-            0,
-            &json!({
-                "set": {
-                    "query": "What is Rust?",
-                    "pos": ["How does Rust work?"],
-                    "neg": ["Is Python better?", "What is Java?", "Tell me a joke"]
-                }
-            }),
-        )
-        .unwrap()
-        .unwrap();
+    let row = rows::parse_row(
+        &source,
+        0,
+        &json!({
+            "set": {
+                "query": "What is Rust?",
+                "pos": ["How does Rust work?"],
+                "neg": ["Is Python better?", "What is Java?", "Tell me a joke"]
+            }
+        }),
+    )
+    .unwrap()
+    .unwrap();
 
     // anchor = set.query, positive = first set.pos element, negatives = expanded set.neg elements
     assert_eq!(row.text_fields.len(), 5);
@@ -5093,10 +5075,13 @@ fn parse_row_dict_flat_columns_unaffected() {
     let source = test_source(config);
 
     // Flat (non-dict) row — should work exactly as before.
-    let row = source
-        .parse_row(0, &json!({"id": "r1", "anchor": "a", "positive": "p"}))
-        .unwrap()
-        .unwrap();
+    let row = rows::parse_row(
+        &source,
+        0,
+        &json!({"id": "r1", "anchor": "a", "positive": "p"}),
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(row.text_fields.len(), 2);
     assert_eq!(row.text_fields[0].text, "a");
     assert_eq!(row.text_fields[1].text, "p");
@@ -5134,7 +5119,7 @@ fn row_to_record_dict_dataset_sections() {
         ],
     };
 
-    let record = source.row_to_record(&row, 0).unwrap().unwrap();
+    let record = rows::row_to_record(&source, &row, 0).unwrap().unwrap();
     // First field → Anchor, second → Context (positive), rest → Context (negatives)
     assert_eq!(record.sections.len(), 4);
     assert_eq!(record.sections[0].role, SectionRole::Anchor);
@@ -5176,8 +5161,5 @@ fn resolve_json_path_non_object_intermediate_returns_none() {
     let row = json!({"set": "not-an-object"});
     let obj = row.as_object().unwrap();
     // "set" exists but is a string, not an object — inner.get should fail.
-    assert_eq!(
-        HuggingFaceRowSource::resolve_json_path(obj, "set.query"),
-        None
-    );
+    assert_eq!(rows::resolve_json_path(obj, "set.query"), None);
 }

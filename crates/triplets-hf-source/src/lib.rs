@@ -12,6 +12,7 @@ pub mod download;
 mod file_utils;
 mod huggingface_source;
 mod parsing;
+mod rows;
 mod shard_index;
 mod types;
 
