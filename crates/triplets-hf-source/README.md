@@ -5,6 +5,10 @@ Hugging Face integration for the [triplets](https://crates.io/crates/triplets) d
 For full documentation on configuring sources, sampling, chunking, and pipeline orchestration,
 see the [main triplets README](https://github.com/jzombie/rust-triplets/blob/main/README.md) on GitHub.
 
+## Random Access Hugging Face Source Acceleration
+
+The crate provides O(1) random access to rows through `.simdr` stores backed by [`simd-r-drive`](https://crates.io/crates/simd-r-drive). Transient files (parquet, jsonl.gz, ndjson) are transcoded to `.simdr` format for efficient random-access reads. Parquet files additionally use row-group indexing (`parquet_row_group_map`) to enable targeted reads from specific row groups without scanning the entire file.
+
 ## Why No `hf-hub` Dependency?
 
 This crate uses a custom downloader rather than the official [`hf-hub`](https://crates.io/crates/hf-hub) crate, for several structural reasons:
