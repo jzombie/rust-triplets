@@ -38,6 +38,7 @@ use simd_r_drive::storage_engine::traits::DataStoreWriter;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{Read, Write};
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::{Arc, Mutex};
@@ -613,24 +614,27 @@ fn get_or_open_shard_store_reuses_cached_handle_and_prune_keeps_active_only() {
     let store_a = dir.path().join("a.simdr");
     let store_b = dir.path().join("b.simdr");
 
-    let first = source.get_or_open_shard_store(&store_a).unwrap();
-    let second = source.get_or_open_shard_store(&store_a).unwrap();
+    let first = crate::shard_indexing::get_or_open_shard_store(source.deref(), &store_a).unwrap();
+    let second = crate::shard_indexing::get_or_open_shard_store(source.deref(), &store_a).unwrap();
     assert!(Arc::ptr_eq(&first, &second));
 
-    let _third = source.get_or_open_shard_store(&store_b).unwrap();
+    let _third = crate::shard_indexing::get_or_open_shard_store(source.deref(), &store_b).unwrap();
     {
         let cache = source.config.store_cache.lock().unwrap();
         assert!(cache.contains_key(&store_a));
         assert!(cache.contains_key(&store_b));
     }
 
-    source.prune_store_cache_to_shards(&[ShardIndex {
-        path: store_a.clone(),
-        global_start: 0,
-        row_count: 1,
-        parquet_row_groups: vec![(0, 1)],
-        remote_candidate: None,
-    }]);
+    crate::shard_indexing::prune_store_cache_to_shards(
+        source.deref(),
+        &[ShardIndex {
+            path: store_a.clone(),
+            global_start: 0,
+            row_count: 1,
+            parquet_row_groups: vec![(0, 1)],
+            remote_candidate: None,
+        }],
+    );
 
     let cache = source.config.store_cache.lock().unwrap();
     assert!(cache.contains_key(&store_a));
@@ -687,7 +691,8 @@ fn build_eligible_rows_from_store_shard_uses_global_offsets() {
         remote_candidate: None,
     }];
 
-    let eligible = source.build_eligible_rows_from_shards(&shards).unwrap();
+    let eligible =
+        crate::shard_indexing::build_eligible_rows_from_shards(source.deref(), &shards).unwrap();
     assert_eq!(eligible, vec![5, 6]);
 }
 
@@ -848,7 +853,10 @@ fn manifest_usage_bytes_locked_counts_only_manifest_shards() {
         remote_candidate_order: Vec::new(),
     };
 
-    assert_eq!(source.manifest_usage_bytes_locked(&state), 7);
+    assert_eq!(
+        crate::shard_indexing::manifest_usage_bytes_locked(source.deref(), &state),
+        7
+    );
 }
 
 #[test]
@@ -864,9 +872,9 @@ fn locate_parquet_group_maps_offsets_and_reports_missing() {
         remote_candidate: None,
     };
 
-    let mapped = source.locate_parquet_group(&shard, 3).unwrap();
+    let mapped = crate::shard_indexing::locate_parquet_group(source.deref(), &shard, 3).unwrap();
     assert_eq!(mapped, (1, 1));
-    let missing = source.locate_parquet_group(&shard, 99);
+    let missing = crate::shard_indexing::locate_parquet_group(source.deref(), &shard, 99);
     assert!(missing.is_err());
 }
 
@@ -983,7 +991,7 @@ fn locate_shard_returns_none_for_out_of_range_index() {
         remote_candidate: None,
     }];
 
-    assert!(HuggingFaceRowSource::locate_shard(&shards, 5).is_none());
+    assert!(crate::shard_indexing::locate_shard(&shards, 5).is_none());
 }
 
 #[test]
@@ -1046,8 +1054,7 @@ fn enforce_disk_cap_returns_false_when_disabled_or_under_limit() {
     };
     let protected = dir.path().join("p");
     assert!(
-        !source
-            .enforce_disk_cap_locked(&mut state, &protected)
+        !crate::shard_indexing::enforce_disk_cap_locked(source.deref(), &mut state, &protected)
             .unwrap()
     );
 
@@ -1073,8 +1080,7 @@ fn enforce_disk_cap_returns_false_when_disabled_or_under_limit() {
         remote_candidate_order: Vec::new(),
     };
     assert!(
-        !source2
-            .enforce_disk_cap_locked(&mut state2, &protected)
+        !crate::shard_indexing::enforce_disk_cap_locked(source2.deref(), &mut state2, &protected)
             .unwrap()
     );
 }
@@ -1117,7 +1123,9 @@ fn enforce_disk_cap_evicts_manifest_shards_and_recomputes_offsets() {
         remote_candidate_order: Vec::new(),
     };
 
-    let evicted = source.enforce_disk_cap_locked(&mut state, &second).unwrap();
+    let evicted =
+        crate::shard_indexing::enforce_disk_cap_locked(source.deref(), &mut state, &second)
+            .unwrap();
     assert!(evicted);
     assert!(!first.exists());
     assert!(second.exists());
@@ -1153,9 +1161,9 @@ fn enforce_disk_cap_evicts_when_single_file_exceeds_cap() {
         remote_candidate_order: Vec::new(),
     };
 
-    let evicted = source
-        .enforce_disk_cap_locked(&mut state, &protected)
-        .unwrap();
+    let evicted =
+        crate::shard_indexing::enforce_disk_cap_locked(source.deref(), &mut state, &protected)
+            .unwrap();
     assert!(evicted);
     assert!(!protected.exists());
     assert_eq!(state.shards.len(), 0);
@@ -1339,7 +1347,7 @@ fn download_next_remote_shard_clears_row_cache_when_eviction_occurs() {
     let server = spawn_one_shot_http(payload);
     let base_url = server.url().to_string();
     let candidate = format!("url::{base_url}/datasets/org/ds/resolve/main/train/new-shard.ndjson");
-    let new_path = HuggingFaceRowSource::candidate_store_path(&config, &candidate);
+    let new_path = crate::shard_indexing::candidate_store_path(&config, &candidate);
 
     {
         let mut state = source.state.lock().unwrap();
@@ -2356,7 +2364,7 @@ fn download_next_remote_shard_detects_stale_shard_by_size() {
     // Create a real .simdr store with source_size = 100.
     let candidate =
         format!("url::{TEST_UNREACHABLE_URL}/datasets/org/ds/resolve/main/train/stale.ndjson");
-    let store_path = HuggingFaceRowSource::candidate_store_path(&config, &candidate);
+    let store_path = crate::shard_indexing::candidate_store_path(&config, &candidate);
     fs::create_dir_all(store_path.parent().unwrap()).unwrap();
     write_simdr_fixture(&store_path, &[("r0", "row")]);
     {
@@ -2415,7 +2423,7 @@ fn download_next_remote_shard_preserves_fresh_shard_when_sizes_match() {
     // Create a store with source_size = 100 and set expected_bytes = 100.
     let candidate =
         format!("url::{TEST_UNREACHABLE_URL}/datasets/org/ds/resolve/main/train/fresh.ndjson");
-    let store_path = HuggingFaceRowSource::candidate_store_path(&config, &candidate);
+    let store_path = crate::shard_indexing::candidate_store_path(&config, &candidate);
     fs::create_dir_all(store_path.parent().unwrap()).unwrap();
     write_simdr_fixture(&store_path, &[("r0", "row")]);
     {
@@ -2661,7 +2669,7 @@ fn download_next_remote_shard_detects_stale_shard_via_head() {
 
     // Candidate uses url:: prefix so the HEAD targets the mock server.
     let candidate = format!("url::{base_url}/resolve/main/train/stale-shard.ndjson");
-    let store_path = HuggingFaceRowSource::candidate_store_path(&config, &candidate);
+    let store_path = crate::shard_indexing::candidate_store_path(&config, &candidate);
     fs::create_dir_all(store_path.parent().unwrap()).unwrap();
     write_simdr_fixture(&store_path, &[("r0", "row")]);
     {
@@ -2727,7 +2735,7 @@ fn download_next_remote_shard_preserves_fresh_shard_via_head() {
     let base_url = server.url().to_string();
 
     let candidate = format!("url::{base_url}/resolve/main/train/fresh-shard.ndjson");
-    let store_path = HuggingFaceRowSource::candidate_store_path(&config, &candidate);
+    let store_path = crate::shard_indexing::candidate_store_path(&config, &candidate);
     fs::create_dir_all(store_path.parent().unwrap()).unwrap();
     write_simdr_fixture(&store_path, &[("r0", "row")]);
     {
@@ -2779,7 +2787,7 @@ fn download_next_remote_shard_keeps_store_when_head_returns_error() {
 
     // Candidate pointing at an unreachable address — HEAD will Err.
     let candidate = format!("url::{TEST_UNREACHABLE_URL}/resolve/main/train/head-err.ndjson");
-    let store_path = HuggingFaceRowSource::candidate_store_path(&config, &candidate);
+    let store_path = crate::shard_indexing::candidate_store_path(&config, &candidate);
     fs::create_dir_all(store_path.parent().unwrap()).unwrap();
     write_simdr_fixture(&store_path, &[("r0", "row")]);
     {
@@ -2838,7 +2846,7 @@ fn download_next_remote_shard_keeps_store_when_head_returns_none() {
     let base_url = server.url().to_string();
 
     let candidate = format!("url::{base_url}/resolve/main/train/head-none.ndjson");
-    let store_path = HuggingFaceRowSource::candidate_store_path(&config, &candidate);
+    let store_path = crate::shard_indexing::candidate_store_path(&config, &candidate);
     fs::create_dir_all(store_path.parent().unwrap()).unwrap();
     write_simdr_fixture(&store_path, &[("r0", "row")]);
     {
@@ -3093,7 +3101,7 @@ fn locate_shard_and_recompute_offsets_work() {
             remote_candidate: None,
         },
     ];
-    let hit = HuggingFaceRowSource::locate_shard(&shards, 11).unwrap();
+    let hit = crate::shard_indexing::locate_shard(&shards, 11).unwrap();
     assert_eq!(hit.1, 1);
 
     let mut state = SourceState {
@@ -3104,7 +3112,7 @@ fn locate_shard_and_recompute_offsets_work() {
         next_remote_idx: 0,
         remote_candidate_order: Vec::new(),
     };
-    HuggingFaceRowSource::recompute_shard_offsets(&mut state);
+    crate::shard_indexing::recompute_shard_offsets(&mut state);
     assert_eq!(state.shards[0].global_start, 0);
     assert_eq!(state.shards[1].global_start, 3);
     assert_eq!(state.materialized_rows, 5);
@@ -3201,14 +3209,14 @@ fn eligible_rows_extends_cached_index_when_new_shard_is_appended() {
 
     {
         let mut cache = source.eligible_index.lock().unwrap();
-        cache.signature = Some(HuggingFaceRowSource::shard_signature(std::slice::from_ref(
-            &baseline,
-        )));
+        cache.signature = Some(crate::shard_indexing::shard_signature(
+            std::slice::from_ref(&baseline),
+        ));
         cache.rows = Some(Arc::new(vec![0]));
         cache.shards = vec![baseline];
     }
 
-    let rows = source.eligible_rows().unwrap();
+    let rows = crate::shard_indexing::eligible_rows(source.deref()).unwrap();
     assert_eq!(rows.as_ref(), &vec![0, 1]);
 }
 
@@ -3265,9 +3273,9 @@ fn enforce_disk_cap_evicts_old_manifest_shards() {
         remote_candidate_order: Vec::new(),
     };
 
-    let evicted = source
-        .enforce_disk_cap_locked(&mut state, &keep_path)
-        .unwrap();
+    let evicted =
+        crate::shard_indexing::enforce_disk_cap_locked(source.deref(), &mut state, &keep_path)
+            .unwrap();
     assert!(evicted);
     assert!(!evict_path.exists());
     assert!(keep_path.exists());
@@ -3301,9 +3309,9 @@ fn enforce_disk_cap_ignores_min_resident_and_applies_policy() {
         remote_candidate_order: Vec::new(),
     };
 
-    let evicted = source
-        .enforce_disk_cap_locked(&mut state, &protected)
-        .unwrap();
+    let evicted =
+        crate::shard_indexing::enforce_disk_cap_locked(source.deref(), &mut state, &protected)
+            .unwrap();
     assert!(evicted);
     assert!(!protected.exists());
     assert_eq!(state.shards.len(), 0);
@@ -4348,7 +4356,7 @@ fn open_shard_store_creates_parent_directories() {
     let nested = dir.path().join("a").join("b").join("c.simdr");
     assert!(!nested.parent().unwrap().exists());
     let config = test_config(dir.path().to_path_buf());
-    let store = HuggingFaceRowSource::open_shard_store(&config, &nested).unwrap();
+    let store = crate::shard_indexing::open_shard_store(&config, &nested).unwrap();
     assert!(nested.parent().unwrap().exists());
     drop(store);
 }
@@ -4360,7 +4368,7 @@ fn open_shard_store_errors_when_base_path_is_a_file() {
     let file_path = dir.path().join("not-a-dir");
     fs::write(&file_path, b"not-a-dir").unwrap();
     let bad_path = file_path.join("store.simdr");
-    let result = HuggingFaceRowSource::open_shard_store(&config, &bad_path);
+    let result = crate::shard_indexing::open_shard_store(&config, &bad_path);
     assert!(result.is_err());
 }
 
@@ -4407,7 +4415,7 @@ fn invalidate_eligible_index_resets_cache() {
             }],
         };
     }
-    source.invalidate_eligible_index();
+    crate::shard_indexing::invalidate_eligible_index(source.deref());
     let cache = source.eligible_index.lock().unwrap();
     assert!(cache.signature.is_none());
     assert!(cache.rows.is_none());
@@ -4684,7 +4692,7 @@ fn candidate_store_path_maps_via_target_path() {
     let config = test_config(dir.path().to_path_buf());
     let candidate = "url::https://host/ds/resolve/main/train/data-000.parquet";
     let target = candidate_target_path(&config, candidate);
-    let store = HuggingFaceRowSource::candidate_store_path(&config, candidate);
+    let store = crate::shard_indexing::candidate_store_path(&config, candidate);
     assert_eq!(store, target.with_extension("simdr"));
 }
 
@@ -4722,7 +4730,7 @@ fn recompute_shard_offsets_sums_row_counts() {
         next_remote_idx: 0,
         remote_candidate_order: Vec::new(),
     };
-    HuggingFaceRowSource::recompute_shard_offsets(&mut state);
+    crate::shard_indexing::recompute_shard_offsets(&mut state);
     assert_eq!(state.materialized_rows, 30);
     assert_eq!(state.shards[0].global_start, 0);
     assert_eq!(state.shards[1].global_start, 10);
@@ -4759,7 +4767,7 @@ fn sync_shard_state_from_disk_removes_missing_shards() {
         next_remote_idx: 0,
         remote_candidate_order: vec![0],
     };
-    source.sync_shard_state_from_disk_locked(&mut state);
+    crate::shard_indexing::sync_shard_state_from_disk_locked(source.deref(), &mut state);
     assert_eq!(state.shards.len(), 1);
     assert_eq!(state.shards[0].path, existing);
     assert_eq!(state.materialized_rows, 50);
@@ -4787,7 +4795,7 @@ fn sync_shard_state_from_disk_preserves_candidates_when_all_present() {
         next_remote_idx: 1,
         remote_candidate_order: vec![0],
     };
-    source.sync_shard_state_from_disk_locked(&mut state);
+    crate::shard_indexing::sync_shard_state_from_disk_locked(source.deref(), &mut state);
     assert_eq!(state.shards.len(), 1);
     assert_eq!(state.remote_candidates, Some(vec!["next".to_string()]));
     assert_eq!(state.next_remote_idx, 1);

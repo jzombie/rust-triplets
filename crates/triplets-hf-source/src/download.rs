@@ -535,7 +535,7 @@ pub(crate) fn first_uncached_order_position(
     order
         .iter()
         .position(|&idx| {
-            !existing.contains(&HuggingFaceRowSource::candidate_store_path(
+            !existing.contains(&crate::shard_indexing::candidate_store_path(
                 config,
                 &candidates[idx],
             ))

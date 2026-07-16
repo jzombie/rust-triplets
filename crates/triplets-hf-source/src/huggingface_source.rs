@@ -13,20 +13,16 @@ use crate::rows;
 use crate::shard_index::{
     build_shard_index, index_single_shard, is_store_shard_path, shard_store_path_for,
 };
+use crate::shard_indexing;
 use crate::types::{ShardIndex, SourceState};
-use cache_manager::{CacheRoot, EvictPolicy};
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::record::reader::RowIter;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use simd_r_drive::storage_engine::DataStore;
 use simd_r_drive::storage_engine::traits::{DataStoreReader, DataStoreWriter};
-use siphasher::sip::SipHasher;
-use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::fs::File;
-use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -542,195 +538,6 @@ impl HuggingFaceRowSource {
         Ok(source)
     }
 
-    /// Map a candidate identifier directly to its canonical on-disk shard store path.
-    pub(crate) fn candidate_store_path(config: &HuggingFaceRowsConfig, candidate: &str) -> PathBuf {
-        shard_store_path_for(&candidate_target_path(config, candidate))
-    }
-
-    pub(crate) fn open_shard_store(
-        config: &HuggingFaceRowsConfig,
-        shard_store_path: &Path,
-    ) -> Result<DataStore, SamplerError> {
-        if let Some(parent) = shard_store_path.parent() {
-            fs::create_dir_all(parent).map_err(|err| SamplerError::SourceUnavailable {
-                source_id: config.source_id.clone(),
-                reason: format!(
-                    "failed creating row-store directory {}: {err}",
-                    parent.display()
-                ),
-            })?;
-        }
-        DataStore::open(shard_store_path).map_err(|err| SamplerError::SourceUnavailable {
-            source_id: config.source_id.clone(),
-            reason: format!(
-                "failed opening row store {}: {err}",
-                shard_store_path.display()
-            ),
-        })
-    }
-
-    pub(crate) fn get_or_open_shard_store(
-        &self,
-        shard_store_path: &Path,
-    ) -> Result<Arc<DataStore>, SamplerError> {
-        let mut cache = self.config.store_cache.lock()?;
-        if let Some(store) = cache.get(shard_store_path).cloned() {
-            return Ok(store);
-        }
-        let store = Arc::new(Self::open_shard_store(&self.config, shard_store_path)?);
-        let entry = cache
-            .entry(shard_store_path.to_path_buf())
-            .or_insert_with(|| store.clone());
-        Ok(entry.clone())
-    }
-
-    pub(crate) fn prune_store_cache_to_shards(&self, shards: &[ShardIndex]) {
-        let keep = shards
-            .iter()
-            .map(|shard| shard.path.clone())
-            .collect::<HashSet<_>>();
-        if let Some(mut cache) = self.config.store_cache.lock_ok() {
-            cache.retain(|path, _| keep.contains(path));
-        }
-    }
-
-    pub(crate) fn invalidate_eligible_index(&self) {
-        if let Ok(mut cache) = self.eligible_index.lock() {
-            *cache = EligibleIndexCache::default();
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn shard_signature(shards: &[ShardIndex]) -> u64 {
-        let mut hasher = SipHasher::new();
-        for shard in shards {
-            shard.path.hash(&mut hasher);
-            shard.global_start.hash(&mut hasher);
-            shard.row_count.hash(&mut hasher);
-            shard.parquet_row_groups.hash(&mut hasher);
-        }
-        hasher.finish()
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn build_eligible_rows_from_shards(
-        &self,
-        shards: &[ShardIndex],
-    ) -> Result<Vec<usize>, SamplerError> {
-        let mut eligible = Vec::new();
-
-        for shard in shards {
-            if is_store_shard_path(&shard.path) {
-                for local_idx in 0..shard.row_count {
-                    let absolute_idx = shard.global_start.saturating_add(local_idx);
-                    eligible.push(absolute_idx);
-                }
-                continue;
-            }
-
-            for (group_pos, (group_start, group_count)) in
-                shard.parquet_row_groups.iter().copied().enumerate()
-            {
-                let rows = self
-                    .parquet_cache
-                    .lock()
-                    .map_err(|_| SamplerError::SourceUnavailable {
-                        source_id: self.config.source_id.clone(),
-                        reason: "huggingface parquet cache lock poisoned".to_string(),
-                    })?
-                    .row_group_rows_for(
-                        &self.config.source_id,
-                        &shard.path,
-                        group_pos,
-                        self.config.parquet_row_group_cache_capacity,
-                    )?;
-
-                for local_in_group in 0..group_count {
-                    let Some(row_value) = rows.get(local_in_group) else {
-                        break;
-                    };
-                    let local_idx = group_start.saturating_add(local_in_group);
-                    if local_idx >= shard.row_count {
-                        break;
-                    }
-                    let absolute_idx = shard.global_start.saturating_add(local_idx);
-                    if rows::parse_row(self, absolute_idx, row_value)?.is_some() {
-                        eligible.push(absolute_idx);
-                    }
-                }
-            }
-        }
-
-        Ok(eligible)
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn eligible_rows(&self) -> Result<Arc<Vec<usize>>, SamplerError> {
-        let (signature, shards) = {
-            let state = self
-                .state
-                .lock()
-                .map_err(|_| SamplerError::SourceUnavailable {
-                    source_id: self.config.source_id.clone(),
-                    reason: "huggingface source state lock poisoned".to_string(),
-                })?;
-            (Self::shard_signature(&state.shards), state.shards.clone())
-        };
-
-        if let Ok(cache) = self.eligible_index.lock()
-            && cache.signature == Some(signature)
-            && let Some(rows) = cache.rows.as_ref()
-        {
-            return Ok(rows.clone());
-        }
-
-        let incremental_seed = if let Ok(cache) = self.eligible_index.lock()
-            && cache.signature != Some(signature)
-            && !cache.shards.is_empty()
-            && cache.shards.len() < shards.len()
-            && shards
-                .iter()
-                .take(cache.shards.len())
-                .eq(cache.shards.iter())
-            && let Some(existing_rows) = cache.rows.as_ref()
-        {
-            Some((cache.shards.len(), existing_rows.as_ref().clone()))
-        } else {
-            None
-        };
-
-        if let Some((prefix_len, mut merged)) = incremental_seed {
-            let appended = self.build_eligible_rows_from_shards(&shards[prefix_len..])?;
-            merged.extend(appended);
-            let rows = Arc::new(merged);
-
-            let mut writable =
-                self.eligible_index
-                    .lock()
-                    .map_err(|_| SamplerError::SourceUnavailable {
-                        source_id: self.config.source_id.clone(),
-                        reason: "huggingface eligible-index cache lock poisoned".to_string(),
-                    })?;
-            writable.signature = Some(signature);
-            writable.shards = shards;
-            writable.rows = Some(rows.clone());
-            return Ok(rows);
-        }
-
-        let rows = Arc::new(self.build_eligible_rows_from_shards(&shards)?);
-        let mut cache =
-            self.eligible_index
-                .lock()
-                .map_err(|_| SamplerError::SourceUnavailable {
-                    source_id: self.config.source_id.clone(),
-                    reason: "huggingface eligible-index cache lock poisoned".to_string(),
-                })?;
-        cache.signature = Some(signature);
-        cache.shards = shards;
-        cache.rows = Some(rows.clone());
-        Ok(rows)
-    }
-
     pub(crate) fn set_active_sampler_config(&self, config: &SamplerConfig) {
         if let Ok(mut slot) = self.sampler_config.lock() {
             *slot = Some(config.clone());
@@ -858,83 +665,6 @@ impl HuggingFaceRowSource {
     /// Return root directory used for manifest-cached remote shards.
     pub(crate) fn manifest_cache_root(&self) -> PathBuf {
         self.config.snapshot_dir.join(HF_PARQUET_MANIFEST_DIR)
-    }
-
-    /// Recompute shard `global_start` offsets and total materialized row count.
-    pub(crate) fn recompute_shard_offsets(state: &mut SourceState) {
-        let mut running = 0usize;
-        for shard in &mut state.shards {
-            shard.global_start = running;
-            running = running.saturating_add(shard.row_count);
-        }
-        state.materialized_rows = running;
-    }
-
-    /// Sync in-memory shard state from current on-disk snapshot tree.
-    pub(crate) fn sync_shard_state_from_disk_locked(&self, state: &mut SourceState) {
-        // If any shards have been evicted by the cache manager, remove them from
-        // the in-memory index and reset the candidate list so the next expansion
-        // cycle re-queries HF.  `all_candidates_from_parquet_manifest` returns every
-        // shard from the manifest; evicted ones will be re-downloaded on next iteration.
-        let any_missing = state.shards.iter().any(|shard| !shard.path.exists());
-        state.shards.retain(|shard| shard.path.exists());
-        Self::recompute_shard_offsets(state);
-        if any_missing {
-            state.remote_candidates = None;
-            state.remote_candidate_order = Vec::new();
-            state.next_remote_idx = 0;
-        }
-    }
-
-    /// Apply cache-manager eviction policy to manifest shards and sync in-memory state.
-    pub(crate) fn enforce_disk_cap_locked(
-        &self,
-        state: &mut SourceState,
-        _protected_path: &Path,
-    ) -> Result<bool, SamplerError> {
-        let Some(cap_bytes) = self.config.local_disk_cap_bytes else {
-            return Ok(false);
-        };
-
-        let before = state
-            .shards
-            .iter()
-            .map(|shard| shard.path.clone())
-            .collect::<Vec<_>>();
-        let policy = EvictPolicy {
-            max_bytes: Some(cap_bytes),
-            ..EvictPolicy::default()
-        };
-
-        let cache_root = CacheRoot::from_root(&self.config.snapshot_dir);
-        cache_root
-            .ensure_group_with_policy(HF_PARQUET_MANIFEST_DIR, Some(&policy))
-            .map_err(|err| SamplerError::SourceUnavailable {
-                source_id: self.config.source_id.clone(),
-                reason: format!(
-                    "failed applying manifest cache eviction policy under {}: {err}",
-                    self.config.snapshot_dir.display()
-                ),
-            })?;
-
-        self.sync_shard_state_from_disk_locked(state);
-        let after = state
-            .shards
-            .iter()
-            .map(|shard| shard.path.clone())
-            .collect::<Vec<_>>();
-        Ok(before != after)
-    }
-
-    /// Return total on-disk bytes used by manifest-backed shards.
-    pub(crate) fn manifest_usage_bytes_locked(&self, state: &SourceState) -> u64 {
-        let manifest_root = self.manifest_cache_root();
-        state
-            .shards
-            .iter()
-            .filter(|shard| shard.path.starts_with(&manifest_root))
-            .map(|shard| Self::shard_size_bytes(&shard.path))
-            .sum::<u64>()
     }
 
     /// Ensure row index is available, expanding remote shard set lazily if needed.
@@ -1157,7 +887,7 @@ impl HuggingFaceRowSource {
                 // When the manifest does not provide a size, a lightweight HTTP HEAD
                 // size from `Content-Length` so that staleness detection still works
                 // without depending on the datasets-server API.
-                let store_path = Self::candidate_store_path(&self.config, &remote_path);
+                let store_path = shard_indexing::candidate_store_path(&self.config, &remote_path);
                 if store_path.exists() {
                     // Resolve the expected remote size: prefer the manifest-provided
                     // value, but fall back to an HTTP HEAD request so staleness
@@ -1388,7 +1118,7 @@ impl HuggingFaceRowSource {
         });
         if source_size > 0 {
             // Force the engine to acquire the handle using the new canonical path.
-            if let Ok(store) = self.get_or_open_shard_store(&shard.path) {
+            if let Ok(store) = shard_indexing::get_or_open_shard_store(self, &shard.path) {
                 let _ = store.write(HF_SHARD_STORE_SOURCE_SIZE_KEY, &source_size.to_le_bytes());
             }
         }
@@ -1404,7 +1134,7 @@ impl HuggingFaceRowSource {
         shard.remote_candidate = Some(remote_path.clone());
         state.shards.push(shard);
         drop(state);
-        self.invalidate_eligible_index();
+        shard_indexing::invalidate_eligible_index(self);
 
         let mut state = self
             .state
@@ -1414,7 +1144,7 @@ impl HuggingFaceRowSource {
                 reason: "huggingface source state lock poisoned".to_string(),
             })?;
 
-        let evicted_any = self.enforce_disk_cap_locked(&mut state, &local_path)?;
+        let evicted_any = shard_indexing::enforce_disk_cap_locked(self, &mut state, &local_path)?;
         let materialized_rows = state.materialized_rows;
         let shard_count = state.shards.len();
         let total_remote = state
@@ -1423,7 +1153,7 @@ impl HuggingFaceRowSource {
             .map(|c| c.len())
             .unwrap_or(0);
         let active_shards = state.shards.clone();
-        let usage_bytes = self.manifest_usage_bytes_locked(&state);
+        let usage_bytes = shard_indexing::manifest_usage_bytes_locked(self, &state);
         let usage_gib = usage_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
         let cap_str = self
             .config
@@ -1431,7 +1161,7 @@ impl HuggingFaceRowSource {
             .map(|bytes| format!("{:.2} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0)))
             .unwrap_or_else(|| "disabled".to_string());
         drop(state);
-        self.prune_store_cache_to_shards(&active_shards);
+        shard_indexing::prune_store_cache_to_shards(self, &active_shards);
 
         if evicted_any {
             if let Ok(mut cache) = self.cache.lock() {
@@ -1443,7 +1173,7 @@ impl HuggingFaceRowSource {
                 parquet_cache.row_groups.clear();
                 parquet_cache.row_group_order.clear();
             }
-            self.invalidate_eligible_index();
+            shard_indexing::invalidate_eligible_index(self);
         }
 
         // `shard_count` is the number of shards currently on disk; `total_remote` is
@@ -1514,52 +1244,6 @@ impl HuggingFaceRowSource {
             ),
         })?;
         Ok(())
-    }
-
-    /// Locate containing shard and local offset for a global row index.
-    pub(crate) fn locate_shard(shards: &[ShardIndex], idx: usize) -> Option<(&ShardIndex, usize)> {
-        let pos = shards
-            .binary_search_by(|shard| {
-                if idx < shard.global_start {
-                    Ordering::Greater
-                } else if idx >= shard.global_start + shard.row_count {
-                    Ordering::Less
-                } else {
-                    Ordering::Equal
-                }
-            })
-            .ok()?;
-        let shard = shards.get(pos)?;
-        Some((shard, idx - shard.global_start))
-    }
-
-    /// Locate parquet row-group and in-group row offset for a local row index.
-    pub(crate) fn locate_parquet_group(
-        &self,
-        shard: &ShardIndex,
-        local_idx: usize,
-    ) -> Result<(usize, usize), SamplerError> {
-        let group_pos = shard
-            .parquet_row_groups
-            .binary_search_by(|(start, count)| {
-                if local_idx < *start {
-                    Ordering::Greater
-                } else if local_idx >= start.saturating_add(*count) {
-                    Ordering::Less
-                } else {
-                    Ordering::Equal
-                }
-            })
-            .map_err(|_| SamplerError::SourceUnavailable {
-                source_id: self.config.source_id.clone(),
-                reason: format!(
-                    "parquet row {} could not be mapped to a row group in {}",
-                    local_idx,
-                    shard.path.display()
-                ),
-            })?;
-        let (group_start, _) = shard.parquet_row_groups[group_pos];
-        Ok((group_pos, local_idx.saturating_sub(group_start)))
     }
 
     /// Return the current index-domain upper bound for refresh paging.
