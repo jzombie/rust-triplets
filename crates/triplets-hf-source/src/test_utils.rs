@@ -22,6 +22,7 @@ use std::time::Duration;
 
 use crate::config::HuggingFaceRowsConfig;
 use crate::constants::{HF_SHARD_STORE_META_ROWS_KEY, HF_SHARD_STORE_ROW_PREFIX};
+use crate::download::build_http_runtime;
 use crate::huggingface_source::{
     EligibleIndexCache, HuggingFaceRowSource, ParquetCache, RowCache, RowTextField, RowView,
 };
@@ -413,7 +414,7 @@ pub(crate) fn test_http_client() -> ClientWithMiddleware {
 
 #[allow(dead_code)]
 pub(crate) fn test_source(config: HuggingFaceRowsConfig) -> SafeTestSource {
-    let http_runtime = Arc::new(HuggingFaceRowSource::build_http_runtime(&config).unwrap());
+    let http_runtime = Arc::new(build_http_runtime(&config).unwrap());
     // Use a non-throttled client in tests — mock servers serve a single
     // request then shut down, so retry backoff would add unnecessary delay.
     let http_client = test_http_client();

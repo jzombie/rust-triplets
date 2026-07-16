@@ -6,6 +6,8 @@ mod constants;
 #[cfg(test)]
 mod core_tests;
 mod disk_cache;
+/// Download utilities and HTTP helpers for Hugging Face shard fetching.
+pub mod download;
 mod huggingface_source;
 mod shard_index;
 mod types;

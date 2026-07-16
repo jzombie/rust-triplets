@@ -6,6 +6,7 @@ use crate::constants::{
     HF_SHARD_STORE_SOURCE_SIZE_KEY,
 };
 use crate::disk_cache::ensure_cache_group;
+use crate::download::*;
 use crate::huggingface_source::{
     EligibleIndexCache, HF_RECIPE_ANCHOR_ANCHOR_WRONG_ARTICLE,
     HF_RECIPE_ANCHOR_CONTEXT_WRONG_ARTICLE, HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE, HfListRoots,
@@ -186,7 +187,7 @@ fn http_client_builds_with_token() {
     let temp = tempdir().unwrap();
     let mut config = test_config(temp.path().to_path_buf());
     config.hf_token = Some("test-bearer-token".to_string());
-    let result = HuggingFaceRowSource::build_http_client(&config);
+    let result = build_http_client(&config);
     assert!(
         result.is_ok(),
         "build_http_client should succeed with a well-formed token string"
@@ -203,8 +204,8 @@ fn validate_token_accepts_200_response() {
     let base_url = server.url().to_string();
     with_env_var(ENV_TRIPLETS_HF_WHOAMI_ENDPOINT, &base_url, || {
         let client = test_http_client();
-        let runtime = HuggingFaceRowSource::build_http_runtime(&config).unwrap();
-        let result = HuggingFaceRowSource::validate_token_with_runtime(&client, &config, &runtime);
+        let runtime = build_http_runtime(&config).unwrap();
+        let result = validate_token_with_runtime(&client, &config, &runtime);
         assert!(result.is_ok(), "200 response should pass token validation");
     });
 }
@@ -219,8 +220,8 @@ fn validate_token_rejects_401_response() {
     let base_url = server.url().to_string();
     with_env_var(ENV_TRIPLETS_HF_WHOAMI_ENDPOINT, &base_url, || {
         let client = test_http_client();
-        let runtime = HuggingFaceRowSource::build_http_runtime(&config).unwrap();
-        let result = HuggingFaceRowSource::validate_token_with_runtime(&client, &config, &runtime);
+        let runtime = build_http_runtime(&config).unwrap();
+        let result = validate_token_with_runtime(&client, &config, &runtime);
         assert!(result.is_err(), "401 response should fail token validation");
         match result {
             Err(SamplerError::SourceUnavailable { reason, .. }) => {
@@ -391,7 +392,7 @@ fn manual_http_client_sharing_works() {
     // Pre-building a client and setting it on multiple configs should
     // produce working sources that share the same connection pool.
     let dir = tempdir().unwrap();
-    let client = HuggingFaceRowSource::build_http_client(&test_config(dir.path().to_path_buf()))
+    let client = build_http_client(&test_config(dir.path().to_path_buf()))
         .expect("build_http_client should succeed");
 
     for i in 0..3 {
@@ -717,7 +718,7 @@ fn all_candidates_from_parquet_manifest_returns_all_with_sizes() {
     ]);
 
     let (candidates, sizes, matched) =
-        HuggingFaceRowSource::all_candidates_from_parquet_manifest(&config, &payload).unwrap();
+        all_candidates_from_parquet_manifest(&config, &payload).unwrap();
     assert_eq!(candidates.len(), 2);
     assert!(candidates.iter().any(|c| c.ends_with("train/000.parquet")));
     assert!(candidates.iter().any(|c| c.ends_with("train/001.ndjson")));
@@ -738,13 +739,13 @@ fn all_candidates_from_parquet_manifest_includes_cached_and_replaces_stale() {
 
     // A parquet file with the correct declared size — considered fully cached.
     let complete_candidate = format!("{HF_REMOTE_URL_PREFIX}train/000.parquet");
-    let complete_target = HuggingFaceRowSource::candidate_target_path(&config, &complete_candidate);
+    let complete_target = candidate_target_path(&config, &complete_candidate);
     fs::create_dir_all(complete_target.parent().unwrap()).unwrap();
     fs::write(&complete_target, vec![1u8; 7]).unwrap();
 
     // A parquet file with the WRONG size — stale/incomplete, must be deleted.
     let stale_candidate = format!("{HF_REMOTE_URL_PREFIX}train/001.parquet");
-    let stale_target = HuggingFaceRowSource::candidate_target_path(&config, &stale_candidate);
+    let stale_target = candidate_target_path(&config, &stale_candidate);
     fs::create_dir_all(stale_target.parent().unwrap()).unwrap();
     fs::write(&stale_target, vec![2u8; 3]).unwrap();
 
@@ -754,7 +755,7 @@ fn all_candidates_from_parquet_manifest_includes_cached_and_replaces_stale() {
     ]);
 
     let (candidates, sizes, matched) =
-        HuggingFaceRowSource::all_candidates_from_parquet_manifest(&config, &payload).unwrap();
+        all_candidates_from_parquet_manifest(&config, &payload).unwrap();
 
     // Both shards are returned — cache state does not affect the candidate list.
     assert_eq!(candidates.len(), 2, "both shards must appear in candidates");
@@ -782,14 +783,14 @@ fn candidates_from_parquet_manifest_errors_when_removing_incomplete_target_fails
     let dir = tempdir().unwrap();
     let config = test_config(dir.path().to_path_buf());
     let candidate = format!("{HF_REMOTE_URL_PREFIX}train/blocked.parquet");
-    let target = HuggingFaceRowSource::candidate_target_path(&config, &candidate);
+    let target = candidate_target_path(&config, &candidate);
     fs::create_dir_all(&target).unwrap();
 
     let payload = json!([
         {"type": "file", "path": "train/blocked.parquet", "size": 1}
     ]);
 
-    let err = HuggingFaceRowSource::all_candidates_from_parquet_manifest(&config, &payload);
+    let err = all_candidates_from_parquet_manifest(&config, &payload);
     assert!(err.is_err());
 }
 
@@ -923,10 +924,7 @@ fn row_to_record_uses_anchor_for_positive_when_single_field() {
 fn target_matches_expected_size_is_false_for_missing_path() {
     let dir = tempdir().unwrap();
     let missing = dir.path().join("missing.bin");
-    assert!(!HuggingFaceRowSource::target_matches_expected_size(
-        &missing,
-        Some(1)
-    ));
+    assert!(!target_matches_expected_size(&missing, Some(1)));
 }
 
 #[test]
@@ -935,7 +933,7 @@ fn candidate_target_path_uses_bare_path_when_no_resolve_segment() {
     let config = test_config(dir.path().to_path_buf());
     // Bare relative path from tree endpoint (no /resolve/ segment)
     let candidate = "url::train/000.parquet";
-    let target = HuggingFaceRowSource::candidate_target_path(&config, candidate);
+    let target = candidate_target_path(&config, candidate);
     assert!(target.ends_with("_parquet_manifest/train/000.parquet"));
 }
 
@@ -1164,7 +1162,7 @@ fn enforce_disk_cap_evicts_when_single_file_exceeds_cap() {
 fn configured_sampler_seed_and_paging_seed_require_sampler_config() {
     let dir = tempdir().unwrap();
     let config = test_config(dir.path().to_path_buf());
-    let http_runtime = Arc::new(HuggingFaceRowSource::build_http_runtime(&config).unwrap());
+    let http_runtime = Arc::new(build_http_runtime(&config).unwrap());
     let http_client = test_http_client();
     let source = HuggingFaceRowSource {
         config,
@@ -1195,20 +1193,20 @@ fn shard_candidate_seed_and_shuffle_are_deterministic() {
     let mut config = test_config(dir.path().to_path_buf());
     config.source_id = "hf_rotator".to_string();
 
-    let seed_a = HuggingFaceRowSource::shard_candidate_seed(&config, 12, 1);
-    let seed_b = HuggingFaceRowSource::shard_candidate_seed(&config, 12, 2);
+    let seed_a = shard_candidate_seed(&config, 12, 1);
+    let seed_b = shard_candidate_seed(&config, 12, 2);
     assert_ne!(seed_a, seed_b);
 
     let baseline = vec!["c".to_string(), "a".to_string(), "b".to_string()];
     let mut left = baseline.clone();
     let mut right = baseline;
-    HuggingFaceRowSource::shuffle_candidates_deterministically(&config, &mut left, 42);
-    HuggingFaceRowSource::shuffle_candidates_deterministically(&config, &mut right, 42);
+    shuffle_candidates_deterministically(&config, &mut left, 42);
+    shuffle_candidates_deterministically(&config, &mut right, 42);
     assert_eq!(left, right);
 
     // Different seeds produce different orderings for non-trivial inputs.
     let mut alt = vec!["c".to_string(), "a".to_string(), "b".to_string()];
-    HuggingFaceRowSource::shuffle_candidates_deterministically(&config, &mut alt, 99);
+    shuffle_candidates_deterministically(&config, &mut alt, 99);
     // Membership is preserved regardless of seed.
     let mut sorted_left = left.clone();
     sorted_left.sort();
@@ -1439,7 +1437,7 @@ fn download_and_materialize_shard_url_short_circuits_when_cached_complete() {
     let dir = tempdir().unwrap();
     let config = test_config(dir.path().to_path_buf());
     let candidate = "url::https://host/datasets/org/ds/resolve/main/train/ok.ndjson";
-    let target = HuggingFaceRowSource::candidate_target_path(&config, candidate);
+    let target = candidate_target_path(&config, candidate);
     fs::create_dir_all(target.parent().unwrap()).unwrap();
     fs::write(&target, b"ok").unwrap();
 
@@ -1463,7 +1461,7 @@ fn download_and_materialize_shard_url_replaces_stale_part_file() {
     let server = spawn_one_shot_http(payload.clone());
     let base_url = server.url().to_string();
     let candidate = format!("url::{base_url}/datasets/org/ds/resolve/main/train/part-x.ndjson");
-    let target = HuggingFaceRowSource::candidate_target_path(&config, &candidate);
+    let target = candidate_target_path(&config, &candidate);
     let temp_target = target.with_extension("part");
     fs::create_dir_all(temp_target.parent().unwrap()).unwrap();
     fs::write(&temp_target, b"stale").unwrap();
@@ -1548,7 +1546,7 @@ fn shuffle_candidates_deterministically_is_noop_for_singleton() {
     let dir = tempdir().unwrap();
     let config = test_config(dir.path().to_path_buf());
     let mut candidates = vec!["one".to_string()];
-    HuggingFaceRowSource::shuffle_candidates_deterministically(&config, &mut candidates, 1);
+    shuffle_candidates_deterministically(&config, &mut candidates, 1);
     assert_eq!(candidates, vec!["one".to_string()]);
 }
 
@@ -1558,7 +1556,7 @@ fn uncached_candidates_from_parquet_manifest_returns_empty_without_entries() {
     let config = test_config(dir.path().to_path_buf());
     let payload = json!({"other": []});
     let (candidates, sizes, matched) =
-        HuggingFaceRowSource::all_candidates_from_parquet_manifest(&config, &payload).unwrap();
+        all_candidates_from_parquet_manifest(&config, &payload).unwrap();
     assert!(candidates.is_empty());
     assert!(sizes.is_empty());
     // No parquet_files key → zero matched entries.
@@ -1657,7 +1655,7 @@ fn candidate_target_path_maps_remote_urls_under_manifest_root() {
     let config = test_config(dir.path().to_path_buf());
     let candidate =
         "url::https://huggingface.co/datasets/org/ds/resolve/main/train/part-000.parquet";
-    let target = HuggingFaceRowSource::candidate_target_path(&config, candidate);
+    let target = candidate_target_path(&config, candidate);
     assert!(target.ends_with("_parquet_manifest/main/train/part-000.parquet"));
 }
 
@@ -1666,7 +1664,7 @@ fn candidate_target_path_keeps_local_candidates_relative() {
     let dir = tempdir().unwrap();
     let config = test_config(dir.path().to_path_buf());
     let candidate = "train/part-001.ndjson";
-    let target = HuggingFaceRowSource::candidate_target_path(&config, candidate);
+    let target = candidate_target_path(&config, candidate);
     assert_eq!(target, config.snapshot_dir.join(candidate));
 }
 
@@ -1676,17 +1674,9 @@ fn target_matches_expected_size_validates_when_expected_is_provided() {
     let path = dir.path().join("payload.bin");
     fs::write(&path, vec![0u8; 5]).unwrap();
 
-    assert!(HuggingFaceRowSource::target_matches_expected_size(
-        &path,
-        Some(5)
-    ));
-    assert!(!HuggingFaceRowSource::target_matches_expected_size(
-        &path,
-        Some(4)
-    ));
-    assert!(HuggingFaceRowSource::target_matches_expected_size(
-        &path, None
-    ));
+    assert!(target_matches_expected_size(&path, Some(5)));
+    assert!(!target_matches_expected_size(&path, Some(4)));
+    assert!(target_matches_expected_size(&path, None));
 }
 
 #[test]
@@ -1792,7 +1782,7 @@ fn configure_sampler_updates_len_hint_headroom_via_trait_methods() {
 fn parse_parquet_manifest_response_errors_on_invalid_json() {
     let dir = tempdir().unwrap();
     let config = test_config(dir.path().to_path_buf());
-    let parsed = HuggingFaceRowSource::parse_parquet_manifest_response(&config, "{bad-json");
+    let parsed = parse_parquet_manifest_response(&config, "{bad-json");
     assert!(parsed.is_err());
 }
 
@@ -1805,8 +1795,7 @@ fn parse_parquet_manifest_response_returns_candidates() {
      ]))
      .unwrap();
 
-    let (candidates, sizes, matched) =
-        HuggingFaceRowSource::parse_parquet_manifest_response(&config, &body).unwrap();
+    let (candidates, sizes, matched) = parse_parquet_manifest_response(&config, &body).unwrap();
     assert_eq!(candidates.len(), 1);
     assert!(!sizes.is_empty());
     assert_eq!(matched, 1);
@@ -1972,7 +1961,7 @@ fn list_remote_candidates_uses_root_tree_for_default_config() {
 fn list_remote_candidates_with_runtime_returns_manifest_candidates() {
     let dir = tempdir().unwrap();
     let mut config = test_config(dir.path().to_path_buf());
-    let runtime = HuggingFaceRowSource::build_http_runtime(&config).unwrap();
+    let runtime = build_http_runtime(&config).unwrap();
     let body = serde_json::to_vec(&json!([
         {"type": "file", "path": "https://host/datasets/x/resolve/main/train/2.ndjson", "size": 100}
     ]))
@@ -1983,8 +1972,7 @@ fn list_remote_candidates_with_runtime_returns_manifest_candidates() {
     config.parquet_endpoint = base_url;
     let client = test_http_client();
     let (candidates, sizes) =
-        HuggingFaceRowSource::list_remote_candidates_with_runtime(&client, &config, Some(&runtime))
-            .unwrap();
+        list_remote_candidates_with_runtime(&client, &config, Some(&runtime)).unwrap();
 
     assert_eq!(candidates.len(), 1);
     assert!(!sizes.is_empty());
@@ -2003,7 +1991,7 @@ fn list_remote_candidates_does_not_fall_back_when_all_manifest_shards_cached() {
     // Pre-create the .simdr store target so the manifest entry is "fully cached".
     let shard_url = "https://host/datasets/org/ds/resolve/main/train/part-000.ndjson";
     let candidate = format!("{HF_REMOTE_URL_PREFIX}{shard_url}");
-    let target = HuggingFaceRowSource::candidate_target_path(&config, &candidate);
+    let target = candidate_target_path(&config, &candidate);
     let store_target = shard_store_path_for(&target);
     fs::create_dir_all(store_target.parent().unwrap()).unwrap();
     fs::write(&store_target, b"cached").unwrap();
@@ -2083,7 +2071,7 @@ fn download_and_materialize_shard_replaces_incomplete_existing_target() {
     let base_url = server.url().to_string();
     let candidate = format!("url::{base_url}/datasets/org/ds/resolve/main/train/part-009.ndjson");
 
-    let target = HuggingFaceRowSource::candidate_target_path(&config, &candidate);
+    let target = candidate_target_path(&config, &candidate);
     fs::create_dir_all(target.parent().unwrap()).unwrap();
     fs::write(&target, b"bad").unwrap();
 
@@ -2127,7 +2115,7 @@ fn download_next_remote_shard_parquet_stages_temp_and_persists_store_only() {
 
     assert!(source.download_next_remote_shard().unwrap());
 
-    let parquet_target = HuggingFaceRowSource::candidate_target_path(&config, &candidate);
+    let parquet_target = candidate_target_path(&config, &candidate);
     let store_target = shard_store_path_for(&parquet_target);
 
     assert!(store_target.exists());
@@ -2320,7 +2308,7 @@ fn download_next_remote_shard_skips_already_materialised_shard() {
 
     let candidate =
         format!("url::{TEST_UNREACHABLE_URL}/datasets/org/ds/resolve/main/train/pre-cached.ndjson");
-    let target = HuggingFaceRowSource::candidate_target_path(&config, &candidate);
+    let target = candidate_target_path(&config, &candidate);
     let store_path = shard_store_path_for(&target);
     fs::create_dir_all(store_path.parent().unwrap()).unwrap();
     fs::write(&store_path, b"dummy").unwrap();
@@ -2571,7 +2559,7 @@ fn remote_url_for_candidate_constructs_correct_urls() {
     let config = test_config(PathBuf::from("/tmp/snap"));
     let full_url =
         format!("url::{HF_DATASETS_BASE_URL}/org/ds/resolve/main/train/part-000.parquet");
-    let result = HuggingFaceRowSource::remote_url_for_candidate(&config, &full_url);
+    let result = remote_url_for_candidate(&config, &full_url);
     assert_eq!(
         result,
         format!("{HF_DATASETS_BASE_URL}/org/ds/resolve/main/train/part-000.parquet")
@@ -2579,7 +2567,7 @@ fn remote_url_for_candidate_constructs_correct_urls() {
 
     // url:: prefix with relative path (Hub API format): CDN prefix is constructed.
     let hub_relative = "url::data/train-00000-of-00001.parquet";
-    let result = HuggingFaceRowSource::remote_url_for_candidate(&config, hub_relative);
+    let result = remote_url_for_candidate(&config, hub_relative);
     assert_eq!(
         result,
         format!(
@@ -2589,7 +2577,7 @@ fn remote_url_for_candidate_constructs_correct_urls() {
 
     // Bare path (hf-hub sibling fallback): CDN prefix is prepended.
     let bare_path = "data/train-00000-of-00001.parquet";
-    let result = HuggingFaceRowSource::remote_url_for_candidate(&config, bare_path);
+    let result = remote_url_for_candidate(&config, bare_path);
     assert_eq!(
         result,
         format!(
@@ -2599,7 +2587,7 @@ fn remote_url_for_candidate_constructs_correct_urls() {
 
     // Bare path with leading slash.
     let bare_path = "/data/train-00000-of-00001.parquet";
-    let result = HuggingFaceRowSource::remote_url_for_candidate(&config, bare_path);
+    let result = remote_url_for_candidate(&config, bare_path);
     assert_eq!(
         result,
         format!(
@@ -2621,10 +2609,8 @@ fn fetch_remote_size_with_runtime_returns_content_length() {
     config.hf_token = None;
 
     let client = test_http_client();
-    let runtime = HuggingFaceRowSource::build_http_runtime(&config).unwrap();
-    let size =
-        HuggingFaceRowSource::fetch_remote_size_with_runtime(&client, &config, &base_url, &runtime)
-            .unwrap();
+    let runtime = build_http_runtime(&config).unwrap();
+    let size = fetch_remote_size_with_runtime(&client, &config, &base_url, &runtime).unwrap();
     // Content-Length should match the payload size.
     assert_eq!(size, Some(payload.len() as u64));
 }
@@ -2641,10 +2627,8 @@ fn fetch_remote_size_with_runtime_returns_none_on_non_success() {
     config.hf_token = None;
 
     let client = test_http_client();
-    let runtime = HuggingFaceRowSource::build_http_runtime(&config).unwrap();
-    let size =
-        HuggingFaceRowSource::fetch_remote_size_with_runtime(&client, &config, &base_url, &runtime)
-            .unwrap();
+    let runtime = build_http_runtime(&config).unwrap();
+    let size = fetch_remote_size_with_runtime(&client, &config, &base_url, &runtime).unwrap();
     assert_eq!(size, None, "non-2xx response should yield None");
 }
 
@@ -2903,14 +2887,14 @@ fn shard_candidate_seed_is_seeded_and_source_scoped() {
     a.source_id = "source_a".to_string();
     b.source_id = "source_b".to_string();
 
-    let with_seed_a = HuggingFaceRowSource::shard_candidate_seed(&a, 100, 42);
-    let with_seed_a_again = HuggingFaceRowSource::shard_candidate_seed(&a, 100, 42);
+    let with_seed_a = shard_candidate_seed(&a, 100, 42);
+    let with_seed_a_again = shard_candidate_seed(&a, 100, 42);
     assert_eq!(with_seed_a, with_seed_a_again);
 
-    let with_seed_b = HuggingFaceRowSource::shard_candidate_seed(&b, 100, 42);
+    let with_seed_b = shard_candidate_seed(&b, 100, 42);
     assert_ne!(with_seed_a, with_seed_b);
 
-    let different_seed_a = HuggingFaceRowSource::shard_candidate_seed(&a, 100, 7);
+    let different_seed_a = shard_candidate_seed(&a, 100, 7);
     assert_ne!(with_seed_a, different_seed_a);
 }
 
@@ -2923,28 +2907,28 @@ fn shard_candidate_seed_changes_with_sampler_seed() {
     let config = test_config(dir.path().to_path_buf());
 
     // Different sampler seeds → different shard candidate seeds.
-    let seed_1 = HuggingFaceRowSource::shard_candidate_seed(&config, 100, 1);
-    let seed_2 = HuggingFaceRowSource::shard_candidate_seed(&config, 100, 2);
+    let seed_1 = shard_candidate_seed(&config, 100, 1);
+    let seed_2 = shard_candidate_seed(&config, 100, 2);
     assert_ne!(
         seed_1, seed_2,
         "different seeds must produce different shard seeds"
     );
 
     // Same sampler seed → deterministic.
-    let seed_1_again = HuggingFaceRowSource::shard_candidate_seed(&config, 100, 1);
+    let seed_1_again = shard_candidate_seed(&config, 100, 1);
     assert_eq!(seed_1, seed_1_again, "same seed must be deterministic");
 
     // Verify the permutation itself changes with seed.
     let candidates: Vec<String> = (0..10).map(|i| format!("shard-{i:02}")).collect();
-    let order_1 = HuggingFaceRowSource::build_candidate_order(&config, &candidates, 1);
-    let order_2 = HuggingFaceRowSource::build_candidate_order(&config, &candidates, 2);
+    let order_1 = build_candidate_order(&config, &candidates, 1);
+    let order_2 = build_candidate_order(&config, &candidates, 2);
     assert_ne!(
         order_1, order_2,
         "different seeds must produce different shard orders"
     );
 
     // Same seed produces same order.
-    let order_1_again = HuggingFaceRowSource::build_candidate_order(&config, &candidates, 1);
+    let order_1_again = build_candidate_order(&config, &candidates, 1);
     assert_eq!(order_1, order_1_again, "same seed must produce same order");
 }
 
@@ -2954,9 +2938,9 @@ fn remote_shard_permutation_is_deterministic_by_sampler_seed() {
     let config = test_config(dir.path().to_path_buf());
     let total = 8usize;
 
-    let seed_a = HuggingFaceRowSource::shard_candidate_seed(&config, total, 7);
-    let seed_b = HuggingFaceRowSource::shard_candidate_seed(&config, total, 7);
-    let seed_c = HuggingFaceRowSource::shard_candidate_seed(&config, total, 10);
+    let seed_a = shard_candidate_seed(&config, total, 7);
+    let seed_b = shard_candidate_seed(&config, total, 7);
+    let seed_c = shard_candidate_seed(&config, total, 10);
 
     let mut perm_a = triplets_core::source::IndexPermutation::new(total, seed_a, 0);
     let mut perm_b = triplets_core::source::IndexPermutation::new(total, seed_b, 0);
@@ -3475,7 +3459,7 @@ fn next_batch_methods_rebuild_shard_order_with_step() {
              ).collect();
              st.remote_candidates = Some(cand.clone());
              st.remote_candidate_order =
-                 HuggingFaceRowSource::build_candidate_order(&source.config, &cand, 0);
+                 build_candidate_order(&source.config, &cand, 0);
              st.next_remote_idx = 0;
          }
          let split = Arc::new(
@@ -3537,7 +3521,7 @@ fn shuffle_candidates_deterministically_preserves_membership() {
     let config = test_config(dir.path().to_path_buf());
     let original = vec!["a".to_string(), "b".to_string(), "c".to_string()];
     let mut shuffled = original.clone();
-    HuggingFaceRowSource::shuffle_candidates_deterministically(&config, &mut shuffled, 1);
+    shuffle_candidates_deterministically(&config, &mut shuffled, 1);
     let mut sorted_original = original;
     let mut sorted_shuffled = shuffled;
     sorted_original.sort();
@@ -3767,7 +3751,7 @@ fn ensure_row_available_skips_past_all_cached_candidates_on_restart() {
     let shard_raw_url =
         format!("{TEST_UNREACHABLE_URL}/datasets/org/ds/resolve/main/train/a.ndjson");
     let shard_candidate = format!("{HF_REMOTE_URL_PREFIX}{shard_raw_url}");
-    let target = HuggingFaceRowSource::candidate_target_path(&config, &shard_candidate);
+    let target = candidate_target_path(&config, &shard_candidate);
     let store_path = shard_store_path_for(&target);
     fs::create_dir_all(store_path.parent().unwrap()).unwrap();
     fs::write(&store_path, b"dummy").unwrap();
@@ -4002,7 +3986,7 @@ fn set_active_sampler_config_rebuilds_order_on_seed_change() {
     {
         let mut state = source.state.lock().unwrap();
         // Candidates stored sorted/immutable; order derived from seed 7, cursor 0.
-        let order = HuggingFaceRowSource::build_candidate_order(&config, &candidates, 7);
+        let order = build_candidate_order(&config, &candidates, 7);
         state.remote_candidates = Some(candidates.clone());
         state.remote_candidate_order = order.clone();
         state.next_remote_idx = 3;
@@ -4015,7 +3999,7 @@ fn set_active_sampler_config_rebuilds_order_on_seed_change() {
     });
     {
         let state = source.state.lock().unwrap();
-        let order = HuggingFaceRowSource::build_candidate_order(&config, &candidates, 7);
+        let order = build_candidate_order(&config, &candidates, 7);
         assert_eq!(state.remote_candidate_order, order);
         assert_eq!(
             state.next_remote_idx, 0,
@@ -4033,7 +4017,7 @@ fn set_active_sampler_config_rebuilds_order_on_seed_change() {
         // List is immutable — same sorted candidates.
         assert_eq!(state.remote_candidates.as_ref().unwrap(), &candidates);
         // Order is now derived from seed 18 (cursor_revision still 0).
-        let expected_order = HuggingFaceRowSource::build_candidate_order(&config, &candidates, 18);
+        let expected_order = build_candidate_order(&config, &candidates, 18);
         assert_eq!(state.remote_candidate_order, expected_order);
         // No shards are materialised on disk so the pointer lands at 0
         // (the first non-materialised position in the new order).
@@ -4076,7 +4060,7 @@ fn set_active_sampler_config_rebuilds_order_every_call() {
     let order_seed1: Vec<usize>;
     {
         let state = source.state.lock().unwrap();
-        let expected = HuggingFaceRowSource::build_candidate_order(&config, &candidates, 1);
+        let expected = build_candidate_order(&config, &candidates, 1);
         assert_eq!(state.remote_candidate_order, expected, "seed=1 order");
         order_seed1 = state.remote_candidate_order.clone();
     }
@@ -4088,7 +4072,7 @@ fn set_active_sampler_config_rebuilds_order_every_call() {
     });
     {
         let state = source.state.lock().unwrap();
-        let expected = HuggingFaceRowSource::build_candidate_order(&config, &candidates, 2);
+        let expected = build_candidate_order(&config, &candidates, 2);
         assert_eq!(state.remote_candidate_order, expected, "seed=2 order");
         assert_ne!(
             state.remote_candidate_order, order_seed1,
@@ -4118,13 +4102,12 @@ fn set_active_sampler_config_skips_materialised_shards_after_seed_change() {
 
     // Build the order for the *new* seed (18) up-front so we know which
     // positions map to which candidates and can pre-materialise the first 3.
-    let new_order = HuggingFaceRowSource::build_candidate_order(&config, &candidates, 18);
+    let new_order = build_candidate_order(&config, &candidates, 18);
     let materialised_count = 3;
     let shards_to_inject: Vec<ShardIndex> = (0..materialised_count)
         .map(|pos| {
             let candidate_idx = new_order[pos];
-            let target =
-                HuggingFaceRowSource::candidate_target_path(&config, &candidates[candidate_idx]);
+            let target = candidate_target_path(&config, &candidates[candidate_idx]);
             let store = shard_store_path_for(&target);
             ShardIndex {
                 path: store,
@@ -4138,7 +4121,7 @@ fn set_active_sampler_config_skips_materialised_shards_after_seed_change() {
 
     {
         let mut state = source.state.lock().unwrap();
-        let order_7 = HuggingFaceRowSource::build_candidate_order(&config, &candidates, 7);
+        let order_7 = build_candidate_order(&config, &candidates, 7);
         state.remote_candidates = Some(candidates.clone());
         state.remote_candidate_order = order_7;
         state.next_remote_idx = 0;
@@ -4157,7 +4140,7 @@ fn set_active_sampler_config_skips_materialised_shards_after_seed_change() {
         let state = source.state.lock().unwrap();
         assert_eq!(
             state.remote_candidate_order,
-            HuggingFaceRowSource::build_candidate_order(&config, &candidates, 18),
+            build_candidate_order(&config, &candidates, 18),
             "order must be rebuilt from new seed"
         );
         assert_eq!(
@@ -4705,7 +4688,7 @@ fn candidate_store_path_maps_via_target_path() {
     let dir = tempdir().unwrap();
     let config = test_config(dir.path().to_path_buf());
     let candidate = "url::https://host/ds/resolve/main/train/data-000.parquet";
-    let target = HuggingFaceRowSource::candidate_target_path(&config, candidate);
+    let target = candidate_target_path(&config, candidate);
     let store = HuggingFaceRowSource::candidate_store_path(&config, candidate);
     assert_eq!(store, target.with_extension("simdr"));
 }
@@ -4908,9 +4891,9 @@ fn managed_hf_list_snapshot_dir_uses_replica_suffix() {
 fn remote_url_for_candidate_builds_bare_urls() {
     let dir = tempdir().unwrap();
     let config = test_config(dir.path().to_path_buf());
-    let r1 = HuggingFaceRowSource::remote_url_for_candidate(&config, "url::https://server/parquet");
+    let r1 = remote_url_for_candidate(&config, "url::https://server/parquet");
     assert_eq!(r1, "https://server/parquet");
-    let r2 = HuggingFaceRowSource::remote_url_for_candidate(&config, "data/train-000.parquet");
+    let r2 = remote_url_for_candidate(&config, "data/train-000.parquet");
     assert!(r2.contains("/resolve/main/"));
 }
 
@@ -4966,7 +4949,7 @@ fn reported_record_count_uses_len_hint() {
 
 #[test]
 fn format_shard_label_includes_totals() {
-    let label = HuggingFaceRowSource::format_shard_label("data/train-000.parquet", 0, 5);
+    let label = format_shard_label("data/train-000.parquet", 0, 5);
     assert!(label.contains("1/5"));
     assert!(label.contains("train-000.parquet"));
 }
@@ -4986,10 +4969,10 @@ fn remote_shard_permutation_is_deterministic() {
     let c = ["a", "b", "c", "d", "e"];
     let c1: Vec<String> = c.iter().map(|s| s.to_string()).collect();
     let c2: Vec<String> = c.iter().map(|s| s.to_string()).collect();
-    let o1 = HuggingFaceRowSource::build_candidate_order(&config, &c1, 42);
-    let o2 = HuggingFaceRowSource::build_candidate_order(&config, &c2, 42);
+    let o1 = build_candidate_order(&config, &c1, 42);
+    let o2 = build_candidate_order(&config, &c2, 42);
     assert_eq!(o1, o2);
-    let o3 = HuggingFaceRowSource::build_candidate_order(&config, &c1, 99);
+    let o3 = build_candidate_order(&config, &c1, 99);
     assert_ne!(o1, o3);
 }
 
