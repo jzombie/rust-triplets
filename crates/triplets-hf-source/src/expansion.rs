@@ -89,8 +89,10 @@ pub(crate) fn trigger_expansion_if_needed(source: &HuggingFaceRowSource) {
 #[cfg(test)]
 mod tests {
     use crate::test_utils::{test_config, test_source};
-    use serial_test::serial;
     use tempfile::tempdir;
+
+    #[cfg(not(target_os = "windows"))]
+    use serial_test::serial;
 
     // FIXME: [WINDOWS] This test passes in isolation, but times out when running with all of the tests.
     //
