@@ -363,7 +363,9 @@ pub(crate) fn shard_store_path_for(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::write_parquet_fixture;
     use crate::test_utils::{test_config, write_simdr_fixture};
+    use simd_r_drive::traits::DataStoreWriter;
     use tempfile::tempdir;
 
     #[test]
@@ -519,30 +521,6 @@ mod tests {
     }
 
     #[test]
-    fn build_shard_index_skips_local_files_with_existing_simdr() {
-        let dir = tempdir().unwrap();
-        let mut config = test_config(dir.path().to_path_buf());
-        config.shard_extensions = vec!["ndjson".to_string()];
-
-        // Create a .ndjson file and its corresponding .simdr store.
-        let ndjson = dir.path().join("shard.ndjson");
-        fs::write(&ndjson, b"{\"id\":\"r1\",\"text\":\"x\"}\n").unwrap();
-
-        let simdr = ndjson.with_extension(HF_SHARD_STORE_EXTENSION);
-        write_simdr_fixture(&simdr, &[("r1", "x")]);
-
-        let (shards, discovered) = build_shard_index(&config).unwrap();
-        // The .simdr store is always accepted, and the .ndjson is skipped
-        // because its .simdr already exists (avoid double-indexing).
-        assert_eq!(discovered, 1);
-        assert_eq!(shards.len(), 1);
-        assert!(
-            shards[0].path.extension().and_then(|e| e.to_str()) == Some(HF_SHARD_STORE_EXTENSION),
-            "indexed shard should be the .simdr store, not the .ndjson"
-        );
-    }
-
-    #[test]
     fn is_store_shard_path_detects_simdr_extension() {
         assert!(is_store_shard_path(Path::new("shard.simdr")));
         assert!(is_store_shard_path(Path::new("shard.SIMDR")));
@@ -551,5 +529,202 @@ mod tests {
         assert!(!is_store_shard_path(Path::new("shard.ndjson")));
         assert!(!is_store_shard_path(Path::new("no-extension")));
         assert!(!is_store_shard_path(Path::new(".hidden")));
+    }
+
+    #[test]
+    fn is_parquet_path_recognizes_parquet_extension() {
+        assert!(crate::source_core::HuggingFaceRowSource::is_parquet_path(
+            Path::new("data/train.parquet")
+        ));
+        assert!(crate::source_core::HuggingFaceRowSource::is_parquet_path(
+            Path::new("data/train.PARQUET")
+        ));
+        assert!(!crate::source_core::HuggingFaceRowSource::is_parquet_path(
+            Path::new("data/train.jsonl")
+        ));
+        assert!(!crate::source_core::HuggingFaceRowSource::is_parquet_path(
+            Path::new("data/train.txt")
+        ));
+    }
+
+    #[test]
+    fn shard_store_path_for_passthrough_when_already_simdr() {
+        let path = PathBuf::from("cache/shard.simdr");
+        let mapped = shard_store_path_for(&path);
+        assert_eq!(mapped, path);
+    }
+
+    #[test]
+    fn shard_store_path_for_appends_simdr_extension() {
+        let path = PathBuf::from("cache/shard.parquet");
+        let mapped = shard_store_path_for(&path);
+        assert_eq!(mapped, PathBuf::from("cache/shard.simdr"));
+        let no_ext = PathBuf::from("cache/shard");
+        let mapped2 = shard_store_path_for(&no_ext);
+        assert_eq!(mapped2, PathBuf::from("cache/shard.simdr"));
+    }
+
+    #[test]
+    fn index_single_shard_errors_for_missing_file() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let missing = dir.path().join("missing.ndjson");
+
+        let err = index_single_shard(&config, &missing, 0)
+            .err()
+            .expect("index_single_shard should fail");
+        assert!(matches!(err, SamplerError::SourceUnavailable { .. }));
+    }
+
+    #[test]
+    fn index_single_shard_detects_corrupted_store() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let store_path = dir.path().join("shard.simdr");
+
+        // Write a store with 3 valid rows AND a metadata key claiming 5 rows.
+        // The last claimed row (index 4) does not exist — corruption.
+        write_simdr_fixture(&store_path, &[("r0", "zero"), ("r1", "one"), ("r2", "two")]);
+        let store = DataStore::open(&store_path).expect("open store");
+        store
+            .write(HF_SHARD_STORE_META_ROWS_KEY, &(5u64).to_le_bytes())
+            .expect("overwrite meta with inflated count");
+        drop(store);
+
+        // index_single_shard should detect the gap, delete the corrupt file,
+        // and return None.
+        let (maybe_shard, _) = index_single_shard(&config, &store_path, 0).expect(
+            "corrupted store should not produce a hard error — it deletes and returns None",
+        );
+        assert!(maybe_shard.is_none(), "corrupt store should be skipped");
+        assert!(!store_path.exists(), "corrupt store file should be deleted");
+    }
+
+    #[test]
+    fn index_single_shard_jsonl_returns_dummy_count() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("rows.ndjson");
+        fs::write(
+            &path,
+            b"{\"text\":\"a\"}\n{\"text\":\"b\"}\n{\"text\":\"c\"}\n",
+        )
+        .unwrap();
+        let config = test_config(dir.path().to_path_buf());
+
+        let shard = index_single_shard(&config, &path, 5).unwrap().0.unwrap();
+        assert_eq!(shard.global_start, 5);
+        assert_eq!(shard.row_count, 1); // Dummy count for transient text files
+    }
+
+    #[test]
+    fn index_single_shard_returns_none_for_empty_file() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let path = dir.path().join("empty.jsonl");
+        fs::write(&path, b"").unwrap();
+        let shard = index_single_shard(&config, &path, 0).unwrap();
+        assert!(shard.0.is_none());
+    }
+
+    #[test]
+    fn parquet_row_group_map_handles_empty_parquet_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("empty.parquet");
+        write_parquet_fixture(&path, &[]);
+        let config = test_config(dir.path().to_path_buf());
+
+        let (rows, groups) = parquet_row_group_map(&config, &path).unwrap();
+        assert_eq!(rows, 0);
+        assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn parquet_row_group_map_and_index_single_shard_cover_success_path() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("rows.parquet");
+        write_parquet_fixture(&path, &[("r1", "alpha"), ("r2", "beta"), ("r3", "gamma")]);
+        let config = test_config(dir.path().to_path_buf());
+
+        let (total_rows, groups) = parquet_row_group_map(&config, &path).unwrap();
+        assert_eq!(total_rows, 3);
+        assert!(!groups.is_empty());
+
+        let shard = index_single_shard(&config, &path, 0).unwrap().0.unwrap();
+        assert_eq!(shard.row_count, 3);
+        // All shards are now .simdr stores with O(1) random access
+    }
+
+    #[test]
+    fn row_store_row_key_uses_expected_format() {
+        let key = row_store_row_key(0);
+        assert!(key.starts_with(HF_SHARD_STORE_ROW_PREFIX));
+        assert_eq!(key.len(), HF_SHARD_STORE_ROW_PREFIX.len() + 8);
+        let key_42 = row_store_row_key(42);
+        assert!(key_42.starts_with(HF_SHARD_STORE_ROW_PREFIX));
+    }
+
+    #[test]
+    fn build_shard_index_empty_directory_returns_error() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+
+        let result = crate::shard_index::build_shard_index(&config);
+        assert!(result.is_err(), "empty directory should return error");
+    }
+
+    #[test]
+    fn build_shard_index_prunes_orphaned_transients_in_manifest() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let manifest_dir = dir.path().join(HF_PARQUET_MANIFEST_DIR);
+        fs::create_dir_all(&manifest_dir).unwrap();
+
+        // Create an orphaned transient file in the manifest directory
+        let orphan = manifest_dir.join("orphan.ndjson");
+        fs::write(&orphan, b"{}").unwrap();
+        assert!(orphan.exists());
+
+        // build_shard_index should delete orphaned transients in manifest
+        let result = crate::shard_index::build_shard_index(&config);
+        // Should fail because there are no valid shards, but the orphan should be pruned
+        assert!(result.is_err());
+        assert!(
+            !orphan.exists(),
+            "orphaned transient in manifest should be pruned"
+        );
+    }
+
+    #[test]
+    fn build_shard_index_skips_local_files_with_existing_simdr() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path().to_path_buf());
+        config.shard_extensions = vec!["ndjson".to_string()];
+
+        // Create a local ndjson file
+        let ndjson = dir.path().join("data.ndjson");
+        fs::write(&ndjson, b"{}").unwrap();
+
+        // Create a corresponding .simdr file
+        let simdr = shard_store_path_for(&ndjson);
+        write_simdr_fixture(&simdr, &[("r1", "text")]);
+
+        // build_shard_index should skip the ndjson because simdr exists
+        let (shards, discovered) = build_shard_index(&config).unwrap();
+        // The .simdr store is always accepted, and the .ndjson is skipped
+        // because its .simdr already exists (avoid double-indexing).
+        assert_eq!(discovered, 1);
+        assert_eq!(shards.len(), 1);
+
+        // The ndjson should not be double-indexed
+        let ndjson_indexed = shards.iter().any(|s| s.path == ndjson);
+        assert!(
+            !ndjson_indexed,
+            "ndjson should be skipped when simdr exists"
+        );
+
+        assert!(
+            shards[0].path.extension().and_then(|e| e.to_str()) == Some(HF_SHARD_STORE_EXTENSION),
+            "indexed shard should be the .simdr store, not the .ndjson"
+        );
     }
 }
