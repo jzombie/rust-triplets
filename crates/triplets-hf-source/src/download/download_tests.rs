@@ -1128,7 +1128,7 @@ fn download_shard_store_already_exists_returns_cached() {
 
     let remote_path =
         "url::http://mock.example.com/datasets/org/ds/resolve/main/train/shard.ndjson";
-    let store_path = crate::shard_indexing::candidate_store_path(&config, remote_path);
+    let store_path = crate::shard_indexer::candidate_store_path(&config, remote_path);
     fs::create_dir_all(store_path.parent().unwrap()).unwrap();
     write_simdr_fixture(&store_path, &[("r1", "cached")]);
 
