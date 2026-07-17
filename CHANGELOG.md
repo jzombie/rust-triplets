@@ -1,0 +1,45 @@
+# Changelog
+All notable changes to this project will be documented in this file.
+
+The format is based on Keep a Changelog and this project adheres to
+(or is loosely based on) Semantic Versioning.
+
+## [0.25.0-alpha] - 2026-07-17
+
+### Added
+- Expanded test coverage across `triplets-hf-source` and `triplets-core` (#138)
+- Modular sub-crate structure for `triplets-hf-source`: builder, config,
+  disk_cache, download, expansion, file_utils, parsing, rows, shard_index,
+  shard_indexing, source_core modules
+
+### Changed
+- **Refactored `triplets-hf-source` sub-crate** (#136): decomposed monolithic
+  `huggingface_source.rs` (11k+ lines) into focused modules with dedicated tests
+- **Refactored sampler batch from SoA to AoS** (#129): replaced flat
+  `SamplerBatch` (separate `anchor_texts`/`pos_texts`/`neg_texts` vectors)
+  with `PairEntry`/`TripletEntry` structs for zero-copy string movement
+- **Fixed PairLabel round-trip** (#133): split `SrdEntry` into
+  `SrdPairRecord`/`SrdTripletRecord`/`SrdRecord` enum; added `label` field
+  to `DataRecord` and label propagation through `SrdSource` and `Sampler`
+- **Replaced `println!`/`eprintln!` with `tracing` crate** (#137)
+- **Removed `hf-hub` dependency and legacy `datasets-server` fallback paths**
+  (#130): replaced `/parquet`, `/size`, `/info` endpoints with Hub API tree
+  endpoint (`/api/datasets/{dataset}/tree/main`)
+- Bumped `parquet` from 58.3.0 to 59.1.0 (#126)
+- Bumped `simd-r-drive` to v0.16.3-alpha and `reqwest-drive` to v0.13.4-alpha
+- Updated README files
+
+### Removed
+- `hf-hub` crate dependency entirely (#130)
+- Legacy `datasets-server` fallback paths: sibling-based candidate resolution,
+  `ClassLabel` `/info` resolution, global row count `/size` queries (#130)
+
+### Fixed
+- Negative pair labels silently converted to Positive on SRD read-back (#133):
+  negative labels were discarded because `DataRecord` had no label field and
+  `SrdSource::refresh()` dropped `entry.label`
+- Transient shard downloads incorrectly written into evictable managed cache (#135)
+
+### Security
+- Path traversal guard rejects `ParentDir`/`Prefix` components in HF source
+  candidate resolution (#130)
