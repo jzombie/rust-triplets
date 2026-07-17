@@ -10,6 +10,7 @@ use tempfile::TempDir;
 
 use triplets_core::SplitLabel;
 use triplets_core::config::SamplerConfig;
+use triplets_core::data::PairLabel;
 use triplets_core::source::DataSource;
 use triplets_offline_embedder::loop_runner::{LoopEvent, LoopHandler, run_interleaved_loop};
 use triplets_offline_embedder::sampler_prefetcher::SamplerPrefetcher;
@@ -59,13 +60,14 @@ impl BatchProvider for TestProvider {
             return Ok(None);
         }
         let n = self.batch_size;
-        let anchors: Vec<String> = (0..n).map(|i| format!("anchor_{remaining}_{i}")).collect();
-        let pos: Vec<String> = (0..n).map(|i| format!("pos_{remaining}_{i}")).collect();
-        Ok(Some(SamplerBatch {
-            anchor_texts: anchors,
-            pos_texts: pos,
-            neg_texts: None,
-        }))
+        let entries: Vec<PairEntry> = (0..n)
+            .map(|i| PairEntry {
+                anchor_text: format!("anchor_{remaining}_{i}"),
+                candidate_text: format!("pos_{remaining}_{i}"),
+                label: PairLabel::Positive,
+            })
+            .collect();
+        Ok(Some(SamplerBatch::Pairs(entries)))
     }
 
     fn save_state(&self) -> Result<()> {
@@ -114,17 +116,14 @@ impl BatchProvider for SplitAwareProvider {
             _ => "other",
         };
         let n = self.batch_size;
-        let anchors: Vec<String> = (0..n)
-            .map(|i| format!("{prefix}_a{remaining}_{i}"))
+        let entries: Vec<PairEntry> = (0..n)
+            .map(|i| PairEntry {
+                anchor_text: format!("{prefix}_a{remaining}_{i}"),
+                candidate_text: format!("{prefix}_p{remaining}_{i}"),
+                label: PairLabel::Positive,
+            })
             .collect();
-        let pos: Vec<String> = (0..n)
-            .map(|i| format!("{prefix}_p{remaining}_{i}"))
-            .collect();
-        Ok(Some(SamplerBatch {
-            anchor_texts: anchors,
-            pos_texts: pos,
-            neg_texts: None,
-        }))
+        Ok(Some(SamplerBatch::Pairs(entries)))
     }
 
     fn save_state(&self) -> Result<()> {
@@ -150,7 +149,7 @@ fn scheduler_writes_train_val_to_separate_files() {
     assert_eq!(states[1].name, "val");
 
     // 2 batches of 2 entries each → 4 entries per split, flushed at steps_per_batch=2
-    let provider = Arc::new(TestProvider::new(2, 2));
+    let provider = Arc::new(SplitAwareProvider::new(2, 2));
     let embedder = TestEmbedder;
     let config = SchedulerConfig::new(2, 2, 3, 2);
 
@@ -440,27 +439,21 @@ fn pair_write_and_read_via_srd_source() {
     // --- scope 1: write data, then drop the store handle ---
     {
         let store = DataStore::open(&store_path).unwrap();
-        let anchor_vecs = vec![
-            vec![1.0, 2.0, 3.0],
-            vec![4.0, 5.0, 6.0],
-            vec![7.0, 8.0, 9.0],
-        ];
-        let anchor_texts = vec!["hello", "world", "foo"];
-        let pos_vecs = vec![
-            vec![10.0, 11.0, 12.0],
-            vec![13.0, 14.0, 15.0],
-            vec![16.0, 17.0, 18.0],
-        ];
-        let pos_texts = vec!["hi", "earth", "bar"];
-        srd_triplet::write_pair_entries(
-            &store,
-            0,
-            &anchor_vecs,
-            &anchor_texts,
-            &pos_vecs,
-            &pos_texts,
-        )
-        .unwrap();
+        let anchor_vecs = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]];
+        let anchor_texts = ["hello", "world", "foo"];
+        let pos_vecs = [[10.0, 11.0, 12.0], [13.0, 14.0, 15.0], [16.0, 17.0, 18.0]];
+        let pos_texts = ["hi", "earth", "bar"];
+        let labels = vec![PairLabel::Positive; 3];
+        let entries: Vec<srd_triplet::SrdPairWriteEntry> = (0..3)
+            .map(|i| srd_triplet::SrdPairWriteEntry {
+                anchor_vec: &anchor_vecs[i],
+                anchor_text: anchor_texts[i],
+                candidate_vec: &pos_vecs[i],
+                candidate_text: pos_texts[i],
+                label: &labels[i],
+            })
+            .collect();
+        srd_triplet::write_pair_entries(&store, 0, &entries).unwrap();
         assert_eq!(store.len().unwrap(), 3);
     }
 
@@ -488,6 +481,58 @@ fn pair_write_and_read_via_srd_source() {
     assert_eq!(snapshot.records[2].sections[1].text, "bar");
 }
 
+#[test]
+fn pair_negative_label_roundtrip_via_srd_source() {
+    let dir = TempDir::new().unwrap();
+    let store_path = dir.path().join("data.srd");
+
+    // --- scope 1: write pairs with Negative labels ---
+    {
+        let store = DataStore::open(&store_path).unwrap();
+        let anchor_vecs = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]];
+        let anchor_texts = ["a1", "a2"];
+        let candidate_vecs = [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]];
+        let candidate_texts = ["neg1", "neg2"];
+        let labels = [PairLabel::Negative, PairLabel::Negative];
+        let entries: Vec<srd_triplet::SrdPairWriteEntry> = (0..2)
+            .map(|i| srd_triplet::SrdPairWriteEntry {
+                anchor_vec: &anchor_vecs[i],
+                anchor_text: anchor_texts[i],
+                candidate_vec: &candidate_vecs[i],
+                candidate_text: candidate_texts[i],
+                label: &labels[i],
+            })
+            .collect();
+        srd_triplet::write_pair_entries(&store, 0, &entries).unwrap();
+        assert_eq!(store.len().unwrap(), 2);
+    }
+
+    // --- scope 2: open as SrdSource and read back ---
+    let source = SrdSource::open(&store_path, "test_neg", 3, SrdMode::Pair).unwrap();
+    let snapshot = source
+        .refresh(&SamplerConfig::default(), None, None)
+        .unwrap();
+    assert_eq!(snapshot.records.len(), 2);
+
+    // Verify texts are correct
+    assert_eq!(snapshot.records[0].sections[0].text, "a1");
+    assert_eq!(snapshot.records[0].sections[1].text, "neg1");
+    assert_eq!(snapshot.records[1].sections[0].text, "a2");
+    assert_eq!(snapshot.records[1].sections[1].text, "neg2");
+
+    // Verify labels are preserved as Negative
+    assert_eq!(
+        snapshot.records[0].label,
+        Some(PairLabel::Negative),
+        "first record should have Negative label"
+    );
+    assert_eq!(
+        snapshot.records[1].label,
+        Some(PairLabel::Negative),
+        "second record should have Negative label"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Triplet mode
 // ---------------------------------------------------------------------------
@@ -499,23 +544,23 @@ fn triplet_write_and_read_via_srd_source() {
 
     {
         let store = DataStore::open(&store_path).unwrap();
-        let anchor_vecs = vec![vec![1.0; 4], vec![2.0; 4]];
-        let anchor_texts = vec!["anchor_a", "anchor_b"];
-        let pos_vecs = vec![vec![3.0; 4], vec![4.0; 4]];
-        let pos_texts = vec!["positive_a", "positive_b"];
-        let neg_vecs = vec![vec![5.0; 4], vec![6.0; 4]];
-        let neg_texts = vec!["negative_a", "negative_b"];
-        srd_triplet::write_triplet_entries(
-            &store,
-            0,
-            &anchor_vecs,
-            &anchor_texts,
-            &pos_vecs,
-            &pos_texts,
-            &neg_vecs,
-            &neg_texts,
-        )
-        .unwrap();
+        let anchor_vecs = [[1.0; 4], [2.0; 4]];
+        let anchor_texts = ["anchor_a", "anchor_b"];
+        let pos_vecs = [[3.0; 4], [4.0; 4]];
+        let pos_texts = ["positive_a", "positive_b"];
+        let neg_vecs = [[5.0; 4], [6.0; 4]];
+        let neg_texts = ["negative_a", "negative_b"];
+        let entries: Vec<srd_triplet::SrdTripletWriteEntry> = (0..2)
+            .map(|i| srd_triplet::SrdTripletWriteEntry {
+                anchor_vec: &anchor_vecs[i],
+                anchor_text: anchor_texts[i],
+                pos_vec: &pos_vecs[i],
+                pos_text: pos_texts[i],
+                neg_vec: &neg_vecs[i],
+                neg_text: neg_texts[i],
+            })
+            .collect();
+        srd_triplet::write_triplet_entries(&store, 0, &entries).unwrap();
         assert_eq!(store.len().unwrap(), 2);
     }
 
@@ -560,9 +605,19 @@ fn resume_after_partial_write() {
     // Write 2 entries.
     {
         let store = DataStore::open(&store_path).unwrap();
-        let vecs = vec![vec![1.0; 3]; 2];
-        let texts = vec!["a", "b"];
-        srd_triplet::write_pair_entries(&store, 0, &vecs, &texts, &vecs, &texts).unwrap();
+        let vecs = [[1.0; 3]; 2];
+        let texts = ["a", "b"];
+        let labels = vec![PairLabel::Positive; 2];
+        let entries: Vec<srd_triplet::SrdPairWriteEntry> = (0..2)
+            .map(|i| srd_triplet::SrdPairWriteEntry {
+                anchor_vec: &vecs[i],
+                anchor_text: texts[i],
+                candidate_vec: &vecs[i],
+                candidate_text: texts[i],
+                label: &labels[i],
+            })
+            .collect();
+        srd_triplet::write_pair_entries(&store, 0, &entries).unwrap();
     }
 
     // Re-open and verify we can read the 2 existing entries.
@@ -594,17 +649,19 @@ fn adapter_roundtrip_through_split_state() {
                 .unwrap();
         let vecs = vec![vec![1.0, 2.0, 3.0]; 4];
         let texts: Vec<&str> = vec!["alpha", "beta", "gamma", "delta"];
+        let labels = vec![PairLabel::Positive; 4];
+        let entries: Vec<PairWriteEntry> = (0..4)
+            .map(|i| PairWriteEntry {
+                anchor_vec: &vecs[i],
+                anchor_text: texts[i],
+                candidate_vec: &vecs[i],
+                candidate_text: texts[i],
+                label: &labels[i],
+            })
+            .collect();
         states[0]
             .store
-            .write_pairs(
-                0,
-                &PairWriteArgs {
-                    anchor_vecs: &vecs,
-                    anchor_texts: &texts,
-                    pos_vecs: &vecs,
-                    pos_texts: &texts,
-                },
-            )
+            .write_pairs(0, &PairWriteArgs { entries: &entries })
             .unwrap();
         assert_eq!(states[0].store.len().unwrap(), 4);
     }

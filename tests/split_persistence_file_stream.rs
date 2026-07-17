@@ -37,6 +37,7 @@ fn build_qa_record(
             make_section(SectionRole::Context, None, &body),
         ],
         meta_prefix: None,
+        label: None,
     }))
 }
 
@@ -68,6 +69,7 @@ fn build_record(source: &str, idx: usize) -> DataRecord {
             make_section(SectionRole::Context, None, &format!("{source} body {idx}")),
         ],
         meta_prefix: None,
+        label: None,
     }
 }
 

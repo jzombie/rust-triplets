@@ -38,45 +38,8 @@ pub const HF_ALL_SPLITS_DIR: &str = "_all";
 pub const HF_PARQUET_MANIFEST_DIR: &str = "_parquet_manifest";
 /// Path separator component used to extract a local path suffix from HF CDN resolve URLs.
 pub const HF_RESOLVE_URL_SEPARATOR: &str = "/resolve/";
-/// Fallback relative path used when a CDN resolve URL cannot yield a valid suffix.
-pub const HF_RESOLVE_UNKNOWN_FALLBACK_PATH: &str = "parquet/unknown.parquet";
 /// Domain tag mixed into the shard-candidate permutation seed hash for forward isolation.
 pub const HF_SHARD_CANDIDATE_SEED_TAG: &str = "hf_shard_candidate_sequence_v1";
-/// JSON field key for the parquet files array in the datasets-server manifest response.
-pub const HF_JSON_KEY_PARQUET_FILES: &str = "parquet_files";
-/// JSON field key for the shard URL within a parquet file manifest entry.
-pub const HF_JSON_KEY_URL: &str = "url";
-/// JSON field key for shard byte sizes (parquet entry) and the size response root object.
-pub const HF_JSON_KEY_SIZE: &str = "size";
-/// JSON field key for the splits array in size response objects.
-pub const HF_JSON_KEY_SPLITS: &str = "splits";
-/// JSON field key for the configs array in size response objects.
-pub const HF_JSON_KEY_CONFIGS: &str = "configs";
-/// JSON field key for config name in size response entries (primary form); also used as
-/// the HTTP query parameter name sent to the datasets-server API.
-pub const HF_JSON_KEY_CONFIG: &str = "config";
-/// JSON field key for config name in size response entries (alternate form).
-pub const HF_JSON_KEY_CONFIG_NAME: &str = "config_name";
-/// JSON field key for split name in size response entries (primary form); also used as
-/// the HTTP query parameter name sent to the datasets-server API.
-pub const HF_JSON_KEY_SPLIT: &str = "split";
-/// JSON field key for split name in size response entries (alternate form).
-pub const HF_JSON_KEY_SPLIT_NAME: &str = "name";
-/// JSON field key for the row count in size response entries.
-pub const HF_JSON_KEY_NUM_ROWS: &str = "num_rows";
-/// JSON field key for dataset-level size metrics in size response; also the HTTP query
-/// parameter name for the dataset identifier sent to the datasets-server API.
-pub const HF_JSON_KEY_DATASET: &str = "dataset";
-/// JSON key for the top-level dataset info object in the /info response.
-pub const HF_JSON_KEY_DATASET_INFO: &str = "dataset_info";
-/// JSON key for the features map within the dataset info object.
-pub const HF_JSON_KEY_FEATURES: &str = "features";
-/// JSON key for the feature type discriminator within a feature entry.
-pub const HF_JSON_KEY_FEATURE_TYPE: &str = "_type";
-/// JSON key for the label names array within a ClassLabel feature entry.
-pub const HF_JSON_KEY_LABEL_NAMES: &str = "names";
-/// Feature type string that identifies a ClassLabel column.
-pub const HF_CLASSLABEL_TYPE: &str = "ClassLabel";
 /// Root base URL for the Hugging Face website.
 pub const HF_BASE_URL: &str = "https://huggingface.co";
 
@@ -126,21 +89,15 @@ pub const HF_THROTTLE_MAX_CONCURRENT: usize = 4;
 #[allow(dead_code)]
 pub const HF_THROTTLE_MAX_RETRIES: usize = 3;
 
-/// Default base URL for the datasets-server parquet-manifest endpoint.
-pub const HF_PARQUET_DEFAULT_ENDPOINT: &str = "https://datasets-server.huggingface.co/parquet";
-
-/// Default base URL for the datasets-server size endpoint.
-pub const HF_SIZE_DEFAULT_ENDPOINT: &str = "https://datasets-server.huggingface.co/size";
-
-/// Default base URL for the datasets-server info endpoint.
-pub const HF_INFO_DEFAULT_ENDPOINT: &str = "https://datasets-server.huggingface.co/info";
+/// Base URL for the Hub API tree endpoint.
+///
+/// Lists files in a dataset repository: `{base}/{dataset}/tree/main`.
+pub const HF_PARQUET_DEFAULT_ENDPOINT: &str = "https://huggingface.co/api/datasets";
 
 /// Public Hugging Face dataset used as a fallback in live integration tests.
 ///
 /// When `TRIPLETS_HF_TOKEN_TEST_DATASET` is not set (or is empty), live tests
-/// fall back to this public dataset.  It has a `sentiment` column declared as
-/// `ClassLabel` with names `["neutral", "bullish", "bearish"]`, making it
-/// suitable for end-to-end tests of `/info` endpoint ClassLabel resolution.
+/// fall back to this public dataset.
 pub const HF_PUBLIC_TEST_DATASET: &str = "TimKoornstra/financial-tweets-sentiment";
 
 /// Endpoint used to validate a Hugging Face API token.
@@ -162,3 +119,34 @@ pub const ENV_TRIPLETS_HF_TOKEN_TEST_DATASET: &str = "TRIPLETS_HF_TOKEN_TEST_DAT
 pub const ENV_TRIPLETS_HF_WHOAMI_ENDPOINT: &str = "TRIPLETS_HF_WHOAMI_ENDPOINT";
 /// Managed cache group for Hugging Face snapshot-backed sources.
 pub const HF_GROUP: &str = "triplets/huggingface";
+
+/// Prefix for temporary download files created by `allocate_temp_download_path`.
+/// Used to identify temp files that can be safely deleted after transcoding.
+pub const HF_TEMP_DOWNLOAD_PREFIX: &str = "triplets_hf_";
+
+/// Default file extension when the original filename has no extension.
+/// Used as fallback when building temp download paths.
+pub const HF_TEMP_DEFAULT_EXTENSION: &str = "part";
+
+// ---------------------------------------------------------------------------
+// ── Source constants ─────────────────────────────────────
+
+pub(crate) const HF_SOURCE_KEY_ANCHOR: &str = "anchor";
+pub(crate) const HF_SOURCE_KEY_POSITIVE: &str = "positive";
+pub(crate) const HF_SOURCE_KEY_NEGATIVE: &str = "negative";
+pub(crate) const HF_SOURCE_KEY_CONTEXT: &str = "context";
+pub(crate) const HF_SOURCE_KEY_TEXT: &str = "text";
+pub(crate) const HF_SOURCE_KEY_TEXT_COLUMNS: &str = "text_columns";
+pub(crate) const HF_SOURCE_KEY_TRUST: &str = "trust";
+pub(crate) const HF_SOURCE_KEY_WEIGHT: &str = "weight";
+pub(crate) const HF_SOURCE_KEY_SOURCE_ID: &str = "source_id";
+
+// ---------------------------------------------------------------------------
+// ── Recipe constants ─────────────────────────────────────
+
+/// Default HF text-columns-mode SimCSE-style recipe name.
+pub const HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE: &str = "huggingface_text_simcse_wrong_article";
+pub(crate) const HF_RECIPE_ANCHOR_CONTEXT_WRONG_ARTICLE: &str =
+    "huggingface_anchor_context_wrong_article";
+pub(crate) const HF_RECIPE_ANCHOR_ANCHOR_WRONG_ARTICLE: &str =
+    "huggingface_anchor_anchor_wrong_article";

@@ -36,6 +36,7 @@ fn build_record(source: &str, suffix: &str, day_offset: u32) -> DataRecord {
             ),
         ],
         meta_prefix: None,
+        label: None,
     }
 }
 

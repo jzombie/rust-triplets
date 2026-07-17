@@ -11,7 +11,7 @@ use triplets::source::{DataSource, SourceCursor, SourceSnapshot};
 use triplets::types::RecordId;
 
 use crate::error::SrdError;
-use crate::srd_triplet::{self, SrdMode};
+use crate::srd_triplet::{self, SrdMode, SrdRecord};
 
 /// A [`DataSource`] backed by a simd-r-drive embedding store.
 ///
@@ -85,45 +85,49 @@ impl DataSource for SrdSource {
 
         let now = Utc::now();
         let mut records = Vec::with_capacity(entries.len());
-        for (offset, entry) in indices.iter().zip(entries.iter()) {
+        for (offset, record) in indices.iter().zip(entries.iter()) {
             let id: RecordId = (*offset as u64).to_string();
-            let sections = match entry.mode {
-                SrdMode::Pair => vec![
-                    RecordSection {
-                        role: SectionRole::Anchor,
-                        heading: None,
-                        text: entry.anchor_text.clone(),
-                        sentences: vec![],
-                    },
-                    RecordSection {
-                        role: SectionRole::Context,
-                        heading: None,
-                        text: entry.pos_text.clone(),
-                        sentences: vec![],
-                    },
-                ],
-                SrdMode::Triplet => vec![
-                    RecordSection {
-                        role: SectionRole::Anchor,
-                        heading: None,
-                        text: entry.anchor_text.clone(),
-                        sentences: vec![],
-                    },
-                    RecordSection {
-                        role: SectionRole::Context,
-                        heading: None,
-                        text: entry.pos_text.clone(),
-                        sentences: vec![],
-                    },
-                    RecordSection {
-                        role: SectionRole::Context,
-                        heading: None,
-                        text: entry.neg_text.clone().ok_or_else(|| {
-                            SamplerError::Configuration("triplet entry missing neg_text".into())
-                        })?,
-                        sentences: vec![],
-                    },
-                ],
+            let (sections, label) = match record {
+                SrdRecord::Pair(pair) => (
+                    vec![
+                        RecordSection {
+                            role: SectionRole::Anchor,
+                            heading: None,
+                            text: pair.anchor_text.clone(),
+                            sentences: vec![],
+                        },
+                        RecordSection {
+                            role: SectionRole::Context,
+                            heading: None,
+                            text: pair.candidate_text.clone(),
+                            sentences: vec![],
+                        },
+                    ],
+                    Some(pair.label.clone()),
+                ),
+                SrdRecord::Triplet(triplet) => (
+                    vec![
+                        RecordSection {
+                            role: SectionRole::Anchor,
+                            heading: None,
+                            text: triplet.anchor_text.clone(),
+                            sentences: vec![],
+                        },
+                        RecordSection {
+                            role: SectionRole::Context,
+                            heading: None,
+                            text: triplet.pos_text.clone(),
+                            sentences: vec![],
+                        },
+                        RecordSection {
+                            role: SectionRole::Context,
+                            heading: None,
+                            text: triplet.neg_text.clone(),
+                            sentences: vec![],
+                        },
+                    ],
+                    None,
+                ),
             };
             records.push(DataRecord {
                 id,
@@ -134,6 +138,7 @@ impl DataSource for SrdSource {
                 taxonomy: vec![],
                 sections,
                 meta_prefix: None,
+                label,
             });
         }
 
@@ -181,6 +186,55 @@ impl DataSource for SrdSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use triplets::data::PairLabel;
+
+    use crate::srd_triplet::{SrdPairWriteEntry, SrdTripletWriteEntry};
+
+    /// Helper to create an SrdPairWriteEntry slice for tests.
+    fn make_pair_entries<'a>(
+        a_vecs: &'a [Vec<f32>],
+        a_texts: &'a [&'a str],
+        p_vecs: &'a [Vec<f32>],
+        p_texts: &'a [&'a str],
+    ) -> Vec<SrdPairWriteEntry<'a>> {
+        a_vecs
+            .iter()
+            .zip(a_texts.iter())
+            .zip(p_vecs.iter().zip(p_texts.iter()))
+            .map(|((av, at), (pv, pt))| SrdPairWriteEntry {
+                anchor_vec: av,
+                anchor_text: at,
+                candidate_vec: pv,
+                candidate_text: pt,
+                label: &PairLabel::Positive,
+            })
+            .collect()
+    }
+
+    /// Helper to create an SrdTripletWriteEntry slice for tests.
+    fn make_triplet_entries<'a>(
+        a_vecs: &'a [Vec<f32>],
+        a_texts: &'a [&'a str],
+        p_vecs: &'a [Vec<f32>],
+        p_texts: &'a [&'a str],
+        n_vecs: &'a [Vec<f32>],
+        n_texts: &'a [&'a str],
+    ) -> Vec<SrdTripletWriteEntry<'a>> {
+        a_vecs
+            .iter()
+            .zip(a_texts.iter())
+            .zip(p_vecs.iter().zip(p_texts.iter()))
+            .zip(n_vecs.iter().zip(n_texts.iter()))
+            .map(|(((av, at), (pv, pt)), (nv, nt))| SrdTripletWriteEntry {
+                anchor_vec: av,
+                anchor_text: at,
+                pos_vec: pv,
+                pos_text: pt,
+                neg_vec: nv,
+                neg_text: nt,
+            })
+            .collect()
+    }
     use tempfile::TempDir;
 
     const TEST_EMB_DIM: usize = 768;
@@ -192,7 +246,8 @@ mod tests {
         let pos_texts: Vec<String> = (0..n).map(|i| format!("positive_{i}")).collect();
         let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
         let pos_refs: Vec<&str> = pos_texts.iter().map(|s| s.as_str()).collect();
-        srd_triplet::write_pair_entries(&store, 0, &vecs, &refs, &vecs, &pos_refs).unwrap();
+        let pair_entries = make_pair_entries(&vecs, &refs, &vecs, &pos_refs);
+        srd_triplet::write_pair_entries(&store, 0, pair_entries.as_slice()).unwrap();
     }
 
     fn make_triplet_store(dir: &TempDir, n: usize) {
@@ -204,10 +259,8 @@ mod tests {
         let a_refs: Vec<&str> = a_texts.iter().map(|s| s.as_str()).collect();
         let p_refs: Vec<&str> = p_texts.iter().map(|s| s.as_str()).collect();
         let n_refs: Vec<&str> = n_texts.iter().map(|s| s.as_str()).collect();
-        srd_triplet::write_triplet_entries(
-            &store, 0, &vecs, &a_refs, &vecs, &p_refs, &vecs, &n_refs,
-        )
-        .unwrap();
+        let trip_entries = make_triplet_entries(&vecs, &a_refs, &vecs, &p_refs, &vecs, &n_refs);
+        srd_triplet::write_triplet_entries(&store, 0, trip_entries.as_slice()).unwrap();
     }
 
     #[test]

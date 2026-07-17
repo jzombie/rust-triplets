@@ -1,24 +1,53 @@
 use std::fmt;
 
 use triplets_core::SplitLabel;
+use triplets_core::data::PairLabel;
 
-/// A batch of texts from the sampler, with separate anchor/positive/negative.
+// ---------------------------------------------------------------------------
+// Batch types (AoS — Array of Structs)
+// ---------------------------------------------------------------------------
+
+/// A single pair entry from the sampler: anchor + candidate + label.
 #[derive(Debug, Clone)]
-pub struct SamplerBatch {
-    /// Anchor texts for this batch.
-    pub anchor_texts: Vec<String>,
-    /// Positive texts for this batch.
-    pub pos_texts: Vec<String>,
-    /// Negative texts (only present in triplet mode).
-    pub neg_texts: Option<Vec<String>>,
+pub struct PairEntry {
+    /// The anchor text for this pair.
+    pub anchor_text: String,
+    /// The candidate (positive/negative) text for this pair.
+    pub candidate_text: String,
+    /// The label indicating whether this is a positive or negative pair.
+    pub label: PairLabel,
 }
 
-/// Error type for scheduler operations.
+/// A single triplet entry from the sampler: anchor + positive + negative.
+#[derive(Debug, Clone)]
+pub struct TripletEntry {
+    /// The anchor text for this triplet.
+    pub anchor_text: String,
+    /// The positive text for this triplet.
+    pub pos_text: String,
+    /// The negative text for this triplet.
+    pub neg_text: String,
+}
+
+/// A batch of texts from the sampler, either pairs or triplets.
+#[derive(Debug, Clone)]
+pub enum SamplerBatch {
+    /// A batch of pair entries.
+    Pairs(Vec<PairEntry>),
+    /// A batch of triplet entries.
+    Triplets(Vec<TripletEntry>),
+}
+
+// ---------------------------------------------------------------------------
+// Error types
+// ---------------------------------------------------------------------------
+
+/// Errors that can occur during the embedding pipeline.
 #[derive(Debug)]
 pub enum SchedulerError {
-    /// Underlying I/O error.
+    /// An I/O error occurred.
     Io(std::io::Error),
-    /// Generic message error.
+    /// A semantic error with a message.
     Msg(String),
 }
 
@@ -51,52 +80,66 @@ impl From<&str> for SchedulerError {
     }
 }
 
-/// Convenience type alias.
+/// A specialized `Result` type for the embedding pipeline.
 pub type Result<T> = std::result::Result<T, SchedulerError>;
 
-/// Borrowed arguments for writing a pair batch to a store.
-///
-/// Currently uses `f32` for simplicity — most embedding models output f32 and
-/// simd-r-drive stores raw f32 bytes.  A future change could make this generic
-/// over the element type, but would require a conversion at the storage
-/// boundary.
+// ---------------------------------------------------------------------------
+// Write boundaries (AoS)
+// ---------------------------------------------------------------------------
+
+/// A single pair entry ready for writing to the store.
+#[derive(Debug, Clone)]
+pub struct PairWriteEntry<'a> {
+    /// The anchor text (borrowed).
+    pub anchor_text: &'a str,
+    /// The anchor embedding vector (borrowed).
+    pub anchor_vec: &'a [f32],
+    /// The candidate text (borrowed).
+    pub candidate_text: &'a str,
+    /// The candidate embedding vector (borrowed).
+    pub candidate_vec: &'a [f32],
+    /// The pair label (borrowed).
+    pub label: &'a PairLabel,
+}
+
+/// Arguments for writing a batch of pair entries.
 #[derive(Debug, Clone)]
 pub struct PairWriteArgs<'a> {
-    /// Embedding vectors for anchor texts.
-    pub anchor_vecs: &'a [Vec<f32>],
-    /// Anchor text strings.
-    pub anchor_texts: &'a [&'a str],
-    /// Embedding vectors for positive texts.
-    pub pos_vecs: &'a [Vec<f32>],
-    /// Positive text strings.
-    pub pos_texts: &'a [&'a str],
+    /// The pair entries to write.
+    pub entries: &'a [PairWriteEntry<'a>],
 }
 
-/// Borrowed arguments for writing a triplet batch to a store.
-///
-/// Currently uses `f32` for simplicity — most embedding models output f32 and
-/// simd-r-drive stores raw f32 bytes.  A future change could make this generic
-/// over the element type, but would require a conversion at the storage
-/// boundary.
+/// A single triplet entry ready for writing to the store.
+#[derive(Debug, Clone)]
+pub struct TripletWriteEntry<'a> {
+    /// The anchor text (borrowed).
+    pub anchor_text: &'a str,
+    /// The anchor embedding vector (borrowed).
+    pub anchor_vec: &'a [f32],
+    /// The positive text (borrowed).
+    pub pos_text: &'a str,
+    /// The positive embedding vector (borrowed).
+    pub pos_vec: &'a [f32],
+    /// The negative text (borrowed).
+    pub neg_text: &'a str,
+    /// The negative embedding vector (borrowed).
+    pub neg_vec: &'a [f32],
+}
+
+/// Arguments for writing a batch of triplet entries.
 #[derive(Debug, Clone)]
 pub struct TripletWriteArgs<'a> {
-    /// Embedding vectors for anchor texts.
-    pub anchor_vecs: &'a [Vec<f32>],
-    /// Anchor text strings.
-    pub anchor_texts: &'a [&'a str],
-    /// Embedding vectors for positive texts.
-    pub pos_vecs: &'a [Vec<f32>],
-    /// Positive text strings.
-    pub pos_texts: &'a [&'a str],
-    /// Embedding vectors for negative texts.
-    pub neg_vecs: &'a [Vec<f32>],
-    /// Negative text strings.
-    pub neg_texts: &'a [&'a str],
+    /// The triplet entries to write.
+    pub entries: &'a [TripletWriteEntry<'a>],
 }
 
-/// How to write a batch of embeddings + texts to a store.
+// ---------------------------------------------------------------------------
+// Traits
+// ---------------------------------------------------------------------------
+
+/// Trait for embedding stores that persist pair/triplet data.
 pub trait EmbedStore: Send + Sync {
-    /// Write pair entries (anchor + positive) starting at `start_idx`.
+    /// Write pair entries starting at `start_idx`.
     fn write_pairs(&self, start_idx: u64, args: &PairWriteArgs<'_>) -> Result<()>;
 
     /// Write triplet entries (anchor + positive + negative) starting at `start_idx`.
@@ -170,5 +213,130 @@ impl SchedulerConfig {
             emb_dim,
             steps_per_batch,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+
+    #[test]
+    fn scheduler_error_display_io() {
+        let err = SchedulerError::Io(io::Error::new(io::ErrorKind::NotFound, "file missing"));
+        assert_eq!(err.to_string(), "file missing");
+    }
+
+    #[test]
+    fn scheduler_error_display_msg() {
+        let err = SchedulerError::Msg("something went wrong".to_string());
+        assert_eq!(err.to_string(), "something went wrong");
+    }
+
+    #[test]
+    fn scheduler_error_from_io_error() {
+        let io_err = io::Error::new(io::ErrorKind::PermissionDenied, "denied");
+        let err: SchedulerError = io_err.into();
+        assert!(matches!(err, SchedulerError::Io(_)));
+        assert_eq!(err.to_string(), "denied");
+    }
+
+    #[test]
+    fn scheduler_error_from_string() {
+        let err: SchedulerError = "bad input".to_string().into();
+        assert!(matches!(err, SchedulerError::Msg(_)));
+        assert_eq!(err.to_string(), "bad input");
+    }
+
+    #[test]
+    fn scheduler_error_from_str() {
+        let err: SchedulerError = "static msg".into();
+        assert!(matches!(err, SchedulerError::Msg(_)));
+        assert_eq!(err.to_string(), "static msg");
+    }
+
+    #[test]
+    fn scheduler_error_is_std_error() {
+        let err: SchedulerError = "test".into();
+        let _: &dyn std::error::Error = &err;
+    }
+
+    struct MockStore {
+        count: u64,
+    }
+
+    impl EmbedStore for MockStore {
+        fn write_pairs(&self, _start_idx: u64, _args: &PairWriteArgs<'_>) -> Result<()> {
+            Ok(())
+        }
+        fn write_triplets(&self, _start_idx: u64, _args: &TripletWriteArgs<'_>) -> Result<()> {
+            Ok(())
+        }
+        fn len(&self) -> Result<u64> {
+            Ok(self.count)
+        }
+    }
+
+    #[test]
+    fn embed_store_is_empty_true() {
+        let store = MockStore { count: 0 };
+        assert!(store.is_empty().unwrap());
+    }
+
+    #[test]
+    fn embed_store_is_empty_false() {
+        let store = MockStore { count: 5 };
+        assert!(!store.is_empty().unwrap());
+    }
+
+    #[test]
+    fn scheduler_config_new() {
+        let cfg = SchedulerConfig::new(32, 64, 768, 10);
+        assert_eq!(cfg.sampler_batch_size, 32);
+        assert_eq!(cfg.embed_batch_size, 64);
+        assert_eq!(cfg.emb_dim, 768);
+        assert_eq!(cfg.steps_per_batch, 10);
+    }
+
+    #[test]
+    fn step_result_fields() {
+        let r = StepResult {
+            samples_processed: 100,
+            samples_dropped: 3,
+            should_flush: true,
+        };
+        assert_eq!(r.samples_processed, 100);
+        assert_eq!(r.samples_dropped, 3);
+        assert!(r.should_flush);
+    }
+
+    #[test]
+    fn sampler_batch_variants() {
+        let pairs = SamplerBatch::Pairs(vec![]);
+        let triplets = SamplerBatch::Triplets(vec![]);
+        assert!(matches!(pairs, SamplerBatch::Pairs(_)));
+        assert!(matches!(triplets, SamplerBatch::Triplets(_)));
+    }
+
+    #[test]
+    fn pair_entry_clone() {
+        let e = PairEntry {
+            anchor_text: "a".into(),
+            candidate_text: "b".into(),
+            label: PairLabel::Positive,
+        };
+        let e2 = e.clone();
+        assert_eq!(e2.anchor_text, "a");
+    }
+
+    #[test]
+    fn triplet_entry_clone() {
+        let e = TripletEntry {
+            anchor_text: "a".into(),
+            pos_text: "p".into(),
+            neg_text: "n".into(),
+        };
+        let e2 = e.clone();
+        assert_eq!(e2.neg_text, "n");
     }
 }

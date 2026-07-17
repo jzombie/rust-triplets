@@ -30,7 +30,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.24.1-alpha"
+version = "0.25.0-alpha"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 authors = ["Jeremy Harris <jeremy.harris@zenosmosis.com>"]
@@ -43,31 +43,32 @@ cache-manager = "0.4.1"
 chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.1", features = ["derive"] }
 csv = "1.4.0"
-hf-hub = { version = "0.5.0", default-features = false, features = ["tokio", "rustls-tls"] }
+filetime = "0.2.29"
+flate2 = "1.1.9"
 indexmap = "2.14.0"
 indoc = "2.0.7"
 line-ending = "1.5.1"
-parquet = { version = "58.3.0", features = ["json"] }
+parquet = { version = "59.1.0", features = ["json"] }
 rand = { version = "0.9.3", features = ["std", "small_rng"] }
 rayon = "1.12.0"
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "stream", "json", "query"] }
-reqwest-drive = "0.13.3-alpha"
+reqwest-drive = "0.13.4-alpha"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 serial_test = "3.5.0"
-simd-r-drive = "0.16.2-alpha"
+simd-r-drive = "0.16.3-alpha"
 siphasher = "1.0.3"
 tempfile = "3.27.0"
 thiserror = "2.0.18"
-tokio = { version = "1.52.3", features = ["rt", "fs", "io-util"] }
+tokio = { version = "1.52.3", features = ["rt", "rt-multi-thread", "fs", "io-util"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-triplets = { path = ".", version = "0.24.1-alpha" }
-triplets-core = { path = "crates/triplets-core", version = "0.24.1-alpha" }
-triplets-debug = { path = "crates/triplets-debug", version = "0.24.1-alpha" }
-triplets-hf-source = { path = "crates/triplets-hf-source", version = "0.24.1-alpha" }
-triplets-offline-embedder = { path = "crates/triplets-offline-embedder", version = "0.24.1-alpha" }
-triplets-srd-source = { path = "crates/triplets-srd-source", version = "0.24.1-alpha" }
+triplets = { path = ".", version = "0.25.0-alpha" }
+triplets-core = { path = "crates/triplets-core", version = "0.25.0-alpha" }
+triplets-debug = { path = "crates/triplets-debug", version = "0.25.0-alpha" }
+triplets-hf-source = { path = "crates/triplets-hf-source", version = "0.25.0-alpha" }
+triplets-offline-embedder = { path = "crates/triplets-offline-embedder", version = "0.25.0-alpha" }
+triplets-srd-source = { path = "crates/triplets-srd-source", version = "0.25.0-alpha" }
 walkdir = "2.5.0"
 
 [workspace.metadata.cargo-udeps.ignore]
@@ -86,7 +87,6 @@ cache-manager = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
 csv = { workspace = true }
-hf-hub = { workspace = true, optional = true }
 indexmap = { workspace = true }
 line-ending = { workspace = true }
 parquet = { workspace = true, optional = true }

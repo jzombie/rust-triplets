@@ -281,6 +281,7 @@ impl FileSource {
             taxonomy,
             sections,
             meta_prefix: None,
+            label: None,
         }))
     }
 }

@@ -130,6 +130,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Streams rows directly from the Hugging Face Hub without requiring a full dataset download. Map dataset columns to anchor, positive, or plain-text roles the same way as the CSV source.
 
+The HF source provides O(1) random access to rows through `.simdr` stores backed by [`simd-r-drive`](https://crates.io/crates/simd-r-drive). Transient files (parquet, jsonl.gz, ndjson) are transcoded to `.simdr` format for efficient random-access reads. Parquet files additionally use row-group indexing to enable targeted reads from specific row groups without scanning the entire file.
+
 ```rust,no_run
 #[cfg(feature = "huggingface")]
 {
@@ -613,6 +615,7 @@ impl IndexableSource for MyApiSource {
             // prefixed and plain chunks. See the "Metadata Prefixes and Tag Dropout"
             // section for full usage.
             meta_prefix: None,
+            label: None,
         }))
     }
 }

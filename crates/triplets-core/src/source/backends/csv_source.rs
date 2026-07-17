@@ -330,6 +330,7 @@ fn build_record(
         taxonomy: vec![config.source_id.clone()],
         sections,
         meta_prefix: None,
+        label: None,
     })
 }
 

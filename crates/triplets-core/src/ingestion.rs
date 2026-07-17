@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// Thread-safe in-memory cache of ingested records keyed by record id.
 #[derive(Clone)]
@@ -599,10 +599,10 @@ impl IngestionManager {
                         stats.last_records_per_sec = 0.0;
                         stats.last_error = Some(err.to_string());
                         stats.error_count = stats.error_count.saturating_add(1);
-                        eprintln!(
-                            "[data_sampler] source '{}' refresh failed: {}",
-                            self.sources[idx].source.id(),
-                            err
+                        warn!(
+                            source = %self.sources[idx].source.id(),
+                            error = %err,
+                            "Source refresh failed"
                         );
                     }
                 }
@@ -797,6 +797,7 @@ mod tests {
                 sentences: vec![id.to_string()],
             }],
             meta_prefix: None,
+            label: None,
         }
     }
 
@@ -1681,6 +1682,7 @@ mod tests {
                         taxonomy: Vec::new(),
                         sections: Vec::new(),
                         meta_prefix: None,
+                        label: None,
                     })
                     .collect();
                 Ok(SourceSnapshot {
@@ -1763,6 +1765,7 @@ mod tests {
                             sentences: vec![format!("x{i}")],
                         }],
                         meta_prefix: None,
+                        label: None,
                     })
                     .collect();
                 Ok(SourceSnapshot {

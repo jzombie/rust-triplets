@@ -34,6 +34,7 @@ use crate::types::SourceId;
 ///         sentences: vec![],
 ///     }],
 ///     meta_prefix: None,
+///     label: None,
 /// });
 ///
 /// // InMemorySource implements DataSource directly — no adapter needed.
@@ -160,6 +161,7 @@ mod tests {
                 sentences: vec![id.to_string()],
             }],
             meta_prefix: None,
+            label: None,
         }
     }
 

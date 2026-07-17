@@ -47,7 +47,7 @@ pub fn flush_all_pending_states<S: EmbedStore, P: BatchProvider>(
     provider: &P,
 ) -> Result<()> {
     for s in states.iter_mut() {
-        if !s.pending_anchor_vecs.is_empty() {
+        if !s.pending.is_empty() {
             s.batch_num += 1;
             flush_pending(s, provider)?;
         }
@@ -58,7 +58,7 @@ pub fn flush_all_pending_states<S: EmbedStore, P: BatchProvider>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::split_state::EmbedMode;
+    use crate::split_state::{EmbedMode, PendingState, PendingTriplet};
     use crate::traits::{PairWriteArgs, SamplerBatch, TripletWriteArgs};
 
     /// Minimal in-memory store for testing.
@@ -103,12 +103,7 @@ mod tests {
             total_written: 0,
             step_num: 0,
             batch_num: 0,
-            pending_anchor_vecs: Vec::new(),
-            pending_anchor_texts: Vec::new(),
-            pending_pos_vecs: Vec::new(),
-            pending_pos_texts: Vec::new(),
-            pending_neg_vecs: Vec::new(),
-            pending_neg_texts: Vec::new(),
+            pending: PendingState::Pairs(Vec::new()),
             exhausted: false,
             dropped_batches: 0,
             total_batches: 0,
@@ -121,10 +116,14 @@ mod tests {
     #[test]
     fn handle_split_exhausted_marks_and_unlocks() {
         let mut state = make_test_state();
-        state.pending_anchor_vecs = vec![vec![1.0, 2.0, 3.0, 4.0]];
-        state.pending_anchor_texts = vec!["text".into()];
-        state.pending_pos_vecs = vec![vec![1.0, 2.0, 3.0, 4.0]];
-        state.pending_pos_texts = vec!["text".into()];
+        state.pending = PendingState::Triplets(vec![PendingTriplet {
+            anchor_text: "text".into(),
+            anchor_vec: vec![1.0, 2.0, 3.0, 4.0],
+            pos_text: "text".into(),
+            pos_vec: vec![1.0, 2.0, 3.0, 4.0],
+            neg_text: "neg".into(),
+            neg_vec: vec![0.0; 4],
+        }]);
         let provider = MockProvider;
         let mut scheduler = crate::SplitScheduler::new();
 
@@ -145,10 +144,32 @@ mod tests {
     #[test]
     fn flush_batch_unlocks_scheduler() {
         let mut state = make_test_state();
-        state.pending_anchor_vecs = vec![vec![1.0; 4]; 3];
-        state.pending_anchor_texts = vec!["a".into(), "b".into(), "c".into()];
-        state.pending_pos_vecs = vec![vec![1.0; 4]; 3];
-        state.pending_pos_texts = vec!["a".into(), "b".into(), "c".into()];
+        state.pending = PendingState::Triplets(vec![
+            PendingTriplet {
+                anchor_text: "a".into(),
+                anchor_vec: vec![1.0; 4],
+                pos_text: "a".into(),
+                pos_vec: vec![1.0; 4],
+                neg_text: "n".into(),
+                neg_vec: vec![0.0; 4],
+            },
+            PendingTriplet {
+                anchor_text: "b".into(),
+                anchor_vec: vec![1.0; 4],
+                pos_text: "b".into(),
+                pos_vec: vec![1.0; 4],
+                neg_text: "n".into(),
+                neg_vec: vec![0.0; 4],
+            },
+            PendingTriplet {
+                anchor_text: "c".into(),
+                anchor_vec: vec![1.0; 4],
+                pos_text: "c".into(),
+                pos_vec: vec![1.0; 4],
+                neg_text: "n".into(),
+                neg_vec: vec![0.0; 4],
+            },
+        ]);
         let provider = MockProvider;
         let mut scheduler = crate::SplitScheduler::new();
 
@@ -169,10 +190,14 @@ mod tests {
     #[test]
     fn flush_all_pending_states_flushes_dirty_splits() {
         let mut states = vec![make_test_state(), make_test_state()];
-        states[0].pending_anchor_vecs = vec![vec![1.0; 4]];
-        states[0].pending_anchor_texts = vec!["x".into()];
-        states[0].pending_pos_vecs = vec![vec![1.0; 4]];
-        states[0].pending_pos_texts = vec!["x".into()];
+        states[0].pending = PendingState::Triplets(vec![PendingTriplet {
+            anchor_text: "x".into(),
+            anchor_vec: vec![1.0; 4],
+            pos_text: "x".into(),
+            pos_vec: vec![1.0; 4],
+            neg_text: "n".into(),
+            neg_vec: vec![0.0; 4],
+        }]);
         let provider = MockProvider;
 
         flush_all_pending_states(&mut states, &provider).unwrap();
@@ -183,10 +208,24 @@ mod tests {
     #[test]
     fn handle_split_exhausted_with_pending_flushes_and_unlocks() {
         let mut state = make_test_state();
-        state.pending_anchor_vecs = vec![vec![1.0; 4], vec![2.0; 4]];
-        state.pending_anchor_texts = vec!["a".into(), "b".into()];
-        state.pending_pos_vecs = vec![vec![3.0; 4], vec![4.0; 4]];
-        state.pending_pos_texts = vec!["c".into(), "d".into()];
+        state.pending = PendingState::Triplets(vec![
+            PendingTriplet {
+                anchor_text: "a".into(),
+                anchor_vec: vec![1.0; 4],
+                pos_text: "c".into(),
+                pos_vec: vec![3.0; 4],
+                neg_text: "n".into(),
+                neg_vec: vec![0.0; 4],
+            },
+            PendingTriplet {
+                anchor_text: "b".into(),
+                anchor_vec: vec![2.0; 4],
+                pos_text: "d".into(),
+                pos_vec: vec![4.0; 4],
+                neg_text: "n".into(),
+                neg_vec: vec![0.0; 4],
+            },
+        ]);
         let provider = MockProvider;
         let mut scheduler = crate::SplitScheduler::new();
 
@@ -210,10 +249,48 @@ mod tests {
     #[test]
     fn flush_batch_with_pending_returns_count() {
         let mut state = make_test_state();
-        state.pending_anchor_vecs = vec![vec![1.0; 4]; 5];
-        state.pending_anchor_texts = vec!["a".into(); 5];
-        state.pending_pos_vecs = vec![vec![2.0; 4]; 5];
-        state.pending_pos_texts = vec!["b".into(); 5];
+        state.pending = PendingState::Triplets(vec![
+            PendingTriplet {
+                anchor_text: "a".into(),
+                anchor_vec: vec![1.0; 4],
+                pos_text: "b".into(),
+                pos_vec: vec![2.0; 4],
+                neg_text: "n".into(),
+                neg_vec: vec![0.0; 4],
+            },
+            PendingTriplet {
+                anchor_text: "a".into(),
+                anchor_vec: vec![1.0; 4],
+                pos_text: "b".into(),
+                pos_vec: vec![2.0; 4],
+                neg_text: "n".into(),
+                neg_vec: vec![0.0; 4],
+            },
+            PendingTriplet {
+                anchor_text: "a".into(),
+                anchor_vec: vec![1.0; 4],
+                pos_text: "b".into(),
+                pos_vec: vec![2.0; 4],
+                neg_text: "n".into(),
+                neg_vec: vec![0.0; 4],
+            },
+            PendingTriplet {
+                anchor_text: "a".into(),
+                anchor_vec: vec![1.0; 4],
+                pos_text: "b".into(),
+                pos_vec: vec![2.0; 4],
+                neg_text: "n".into(),
+                neg_vec: vec![0.0; 4],
+            },
+            PendingTriplet {
+                anchor_text: "a".into(),
+                anchor_vec: vec![1.0; 4],
+                pos_text: "b".into(),
+                pos_vec: vec![2.0; 4],
+                neg_text: "n".into(),
+                neg_vec: vec![0.0; 4],
+            },
+        ]);
         let provider = MockProvider;
         let mut scheduler = crate::SplitScheduler::new();
 
@@ -250,17 +327,53 @@ mod tests {
         let mut states = vec![make_test_state(), make_test_state(), make_test_state()];
 
         // State 0: 3 pending
-        states[0].pending_anchor_vecs = vec![vec![1.0; 4]; 3];
-        states[0].pending_anchor_texts = vec!["a".into(); 3];
-        states[0].pending_pos_vecs = vec![vec![2.0; 4]; 3];
-        states[0].pending_pos_texts = vec!["b".into(); 3];
+        states[0].pending = PendingState::Triplets(vec![
+            PendingTriplet {
+                anchor_text: "a".into(),
+                anchor_vec: vec![1.0; 4],
+                pos_text: "b".into(),
+                pos_vec: vec![2.0; 4],
+                neg_text: "n".into(),
+                neg_vec: vec![0.0; 4],
+            },
+            PendingTriplet {
+                anchor_text: "a".into(),
+                anchor_vec: vec![1.0; 4],
+                pos_text: "b".into(),
+                pos_vec: vec![2.0; 4],
+                neg_text: "n".into(),
+                neg_vec: vec![0.0; 4],
+            },
+            PendingTriplet {
+                anchor_text: "a".into(),
+                anchor_vec: vec![1.0; 4],
+                pos_text: "b".into(),
+                pos_vec: vec![2.0; 4],
+                neg_text: "n".into(),
+                neg_vec: vec![0.0; 4],
+            },
+        ]);
 
         // State 1: clean
         // State 2: 2 pending
-        states[2].pending_anchor_vecs = vec![vec![3.0; 4]; 2];
-        states[2].pending_anchor_texts = vec!["c".into(); 2];
-        states[2].pending_pos_vecs = vec![vec![4.0; 4]; 2];
-        states[2].pending_pos_texts = vec!["d".into(); 2];
+        states[2].pending = PendingState::Triplets(vec![
+            PendingTriplet {
+                anchor_text: "c".into(),
+                anchor_vec: vec![3.0; 4],
+                pos_text: "d".into(),
+                pos_vec: vec![4.0; 4],
+                neg_text: "n".into(),
+                neg_vec: vec![0.0; 4],
+            },
+            PendingTriplet {
+                anchor_text: "c".into(),
+                anchor_vec: vec![3.0; 4],
+                pos_text: "d".into(),
+                pos_vec: vec![4.0; 4],
+                neg_text: "n".into(),
+                neg_vec: vec![0.0; 4],
+            },
+        ]);
 
         let provider = MockProvider;
         flush_all_pending_states(&mut states, &provider).unwrap();

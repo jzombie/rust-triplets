@@ -100,6 +100,7 @@ mod tests {
                 sentences: vec![format!("text for {id}")],
             }],
             meta_prefix: None,
+            label: None,
         }
     }
 

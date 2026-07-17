@@ -222,6 +222,7 @@ fn select_chunk_random_handles_empty_and_non_empty_sections() {
         taxonomy: vec![],
         sections: vec![],
         meta_prefix: None,
+        label: None,
     };
     assert!(
         inner
@@ -243,6 +244,7 @@ fn select_chunk_random_handles_empty_and_non_empty_sections() {
             sentences: vec!["one two three four five six".into()],
         }],
         meta_prefix: None,
+        label: None,
     };
     let sampled = inner
         .select_chunk(&non_empty_record, &Selector::Random)
@@ -272,6 +274,7 @@ fn record_has_long_section_returns_false_when_window_tokens_are_disabled() {
             sentences: vec!["one two three four five six seven eight".into()],
         }],
         meta_prefix: None,
+        label: None,
     };
 
     assert!(!inner.record_has_long_anchor_or_context_section(&long_record));
@@ -504,6 +507,7 @@ fn sample_record() -> DataRecord {
             },
         ],
         meta_prefix: None,
+        label: None,
     }
 }
 
@@ -540,6 +544,7 @@ fn trader_record(id: &str, date: &str, title: &str, body: &str) -> DataRecord {
             },
         ],
         meta_prefix: None,
+        label: None,
     }
 }
 
@@ -569,6 +574,7 @@ fn text_columns_record(id: &str, common_text: &str) -> DataRecord {
             },
         ],
         meta_prefix: None,
+        label: None,
     }
 }
 
@@ -1156,6 +1162,7 @@ fn qa_pair_record(id: &str, question: &str, answer: &str) -> DataRecord {
             },
         ],
         meta_prefix: None,
+        label: None,
     }
 }
 
@@ -1237,6 +1244,7 @@ fn chunk_view_carries_window_index() {
             sentences: vec![section_text.into()],
         }],
         meta_prefix: None,
+        label: None,
     };
 
     let section = &record.sections[0];
@@ -1292,6 +1300,7 @@ fn chunk_windows_follow_stride_for_large_sections() {
             ],
         }],
         meta_prefix: None,
+        label: None,
     };
 
     let section = &record.sections[0];
@@ -1357,6 +1366,7 @@ fn chunk_windows_materialize_all_configured_overlaps() {
             sentences: vec![section_text.into()],
         }],
         meta_prefix: None,
+        label: None,
     };
 
     let section = &record.sections[0];
@@ -1471,6 +1481,7 @@ fn sampler_uses_custom_chunking_algorithm_when_provided() {
             sentences: vec![section_text.into()],
         }],
         meta_prefix: None,
+        label: None,
     };
 
     let chunks = sampler
@@ -1528,6 +1539,7 @@ fn runtime_batches_do_not_bypass_custom_chunker() {
             sentences: vec!["alpha beta gamma delta".into()],
         }],
         meta_prefix: None,
+        label: None,
     };
 
     sampler
@@ -2085,6 +2097,7 @@ fn non_adjacent_auto_window_pair_proximity_is_not_half() {
             sentences: vec!["one two three four five six seven eight nine ten".into()],
         }],
         meta_prefix: None,
+        label: None,
     };
 
     let mut inner = sampler.inner.lock().unwrap();
@@ -2196,6 +2209,7 @@ fn text_pair_and_triplet_chunks_all_come_from_materialize_pool() {
             sentences: vec![context_text.into()],
         }],
         meta_prefix: None,
+        label: None,
     };
     let records = vec![make_record(&parity_a), make_record(&parity_b)];
 
@@ -2325,6 +2339,7 @@ fn end_to_end_text_weighting_uses_chunk_offsets() {
             sentences: vec!["one two three four".into()],
         }],
         meta_prefix: None,
+        label: None,
     };
     sampler
         .register_source(Box::new(InMemorySource::from_records("unit", vec![record])))
@@ -3289,6 +3304,7 @@ fn cross_batch_text_dedup_survives_window_advance() {
                 sentences: vec![shared_body.into()],
             }],
             meta_prefix: None,
+            label: None,
         })
         .collect();
 
@@ -3497,6 +3513,7 @@ fn cycles_through_section_windows_before_repeating() {
             sentences: vec!["one two three four".into()],
         }],
         meta_prefix: None,
+        label: None,
     };
     let sampler = TripletSampler::new(config, store);
     sampler
@@ -3568,6 +3585,7 @@ fn first_chunk_offset_is_deterministic_and_nonzero_when_hash_demands_it() {
                 sentences: vec!["one two three four five six".into()],
             }],
             meta_prefix: None,
+            label: None,
         };
 
         let sampler = TripletSampler::new(config, store);
@@ -3670,6 +3688,7 @@ fn first_role_section_offset_is_deterministic_and_nonzero_when_hash_demands_it()
                 },
             ],
             meta_prefix: None,
+            label: None,
         };
 
         let sampler = TripletSampler::new(config, store);
@@ -4339,6 +4358,7 @@ fn role_reentry_same_epoch_restarts_from_same_section_offset() {
             },
         ],
         meta_prefix: None,
+        label: None,
     };
 
     let first = inner
@@ -4413,6 +4433,7 @@ fn role_reentry_after_epoch_change_can_restart_from_different_section_offset() {
             },
         ],
         meta_prefix: None,
+        label: None,
     };
 
     let first_epoch0 = inner
@@ -5205,6 +5226,7 @@ fn selector_edge_cases_cover_internal_branches() {
             },
         ],
         meta_prefix: None,
+        label: None,
     };
 
     assert!(
@@ -8774,6 +8796,7 @@ fn oversampling_advances_cursors_on_large_records() {
             sentences: vec!["One Two Three".into()],
         }],
         meta_prefix: None,
+        label: None,
     };
 
     // Records 2, 3, 4: Large Source, Small Content
@@ -8793,6 +8816,7 @@ fn oversampling_advances_cursors_on_large_records() {
                 sentences: vec![char.to_string()],
             }],
             meta_prefix: None,
+            label: None,
         });
     }
 
@@ -9064,6 +9088,7 @@ fn adds_dynamic_chunk_pair_recipe_for_long_section_sources() {
                 },
             ],
             meta_prefix: None,
+            label: None,
         },
         DataRecord {
             id: "r2".into(),
@@ -9087,6 +9112,7 @@ fn adds_dynamic_chunk_pair_recipe_for_long_section_sources() {
                 },
             ],
             meta_prefix: None,
+            label: None,
         },
     ];
 
@@ -9184,6 +9210,7 @@ fn does_not_add_dynamic_chunk_pair_recipe_when_all_sections_fit_window() {
                 },
             ],
             meta_prefix: None,
+            label: None,
         },
         DataRecord {
             id: short2_id,
@@ -9207,6 +9234,7 @@ fn does_not_add_dynamic_chunk_pair_recipe_when_all_sections_fit_window() {
                 },
             ],
             meta_prefix: None,
+            label: None,
         },
     ];
     let sampler = TripletSampler::new(config, store);
@@ -9283,6 +9311,7 @@ fn adds_dynamic_chunk_pair_recipe_even_with_global_config_recipes() {
                 },
             ],
             meta_prefix: None,
+            label: None,
         },
         DataRecord {
             id: "cfg2".into(),
@@ -9306,6 +9335,7 @@ fn adds_dynamic_chunk_pair_recipe_even_with_global_config_recipes() {
                 },
             ],
             meta_prefix: None,
+            label: None,
         },
     ];
 
@@ -9387,6 +9417,7 @@ fn auto_injected_recipe_uses_distinct_context_chunks_for_anchor_and_positive() {
                 sentences: vec!["one two three four".into()],
             }],
             meta_prefix: None,
+            label: None,
         },
         DataRecord {
             id: other_neg_id,
@@ -9402,6 +9433,7 @@ fn auto_injected_recipe_uses_distinct_context_chunks_for_anchor_and_positive() {
                 sentences: vec!["other".into()],
             }],
             meta_prefix: None,
+            label: None,
         },
     ];
 
@@ -9498,6 +9530,7 @@ fn auto_injected_recipe_never_uses_identical_anchor_and_positive_chunks() {
                 sentences: vec!["one two three four".into()],
             }],
             meta_prefix: None,
+            label: None,
         },
         DataRecord {
             id: long2_id,
@@ -9513,6 +9546,7 @@ fn auto_injected_recipe_never_uses_identical_anchor_and_positive_chunks() {
                 sentences: vec!["alpha beta gamma delta".into()],
             }],
             meta_prefix: None,
+            label: None,
         },
     ];
 
@@ -9580,6 +9614,7 @@ fn auto_injected_recipe_uses_window_chunks_for_anchor_and_positive() {
                 sentences: vec!["one two three four five six seven eight nine ten".into()],
             }],
             meta_prefix: None,
+            label: None,
         },
         DataRecord {
             id: "long_w2".into(),
@@ -9595,6 +9630,7 @@ fn auto_injected_recipe_uses_window_chunks_for_anchor_and_positive() {
                 sentences: vec!["alpha beta gamma delta epsilon zeta eta theta iota kappa".into()],
             }],
             meta_prefix: None,
+            label: None,
         },
     ];
 
@@ -9680,6 +9716,7 @@ fn auto_injected_recipe_keeps_all_components_in_requested_split() {
                     sentences: vec![format!("ctx {split_label:?} {idx} one two three four")],
                 }],
                 meta_prefix: None,
+                label: None,
             });
         }
     }
@@ -9759,6 +9796,7 @@ fn same_selector_triplet_returns_none_when_only_one_chunk_exists() {
             sentences: vec!["one two".into()],
         }],
         meta_prefix: None,
+        label: None,
     };
 
     let negative = DataRecord {
@@ -9775,6 +9813,7 @@ fn same_selector_triplet_returns_none_when_only_one_chunk_exists() {
             sentences: vec!["alpha beta".into()],
         }],
         meta_prefix: None,
+        label: None,
     };
 
     inner
@@ -10726,6 +10765,7 @@ fn instruction_propagates_from_recipe_to_sample_triplet() {
             },
         ],
         meta_prefix: None,
+        label: None,
     };
 
     let records = vec![
@@ -10792,6 +10832,7 @@ fn allow_same_anchor_positive_permits_identical_text_triplet() {
             },
         ],
         meta_prefix: None,
+        label: None,
     };
 
     let records = vec![
@@ -11227,6 +11268,7 @@ fn select_chunk_parallel_paragraph_selector_returns_chunk_or_none() {
             sentences: vec!["one two three four five".into()],
         }],
         meta_prefix: None,
+        label: None,
     };
 
     let inner = sampler.inner.lock().unwrap();
@@ -11268,6 +11310,7 @@ fn select_chunk_parallel_random_selector_handles_empty_and_non_empty() {
         taxonomy: vec![],
         sections: vec![],
         meta_prefix: None,
+        label: None,
     };
 
     let record_with_sections = DataRecord {
@@ -11284,6 +11327,7 @@ fn select_chunk_parallel_random_selector_handles_empty_and_non_empty() {
             sentences: vec!["alpha beta gamma delta epsilon".into()],
         }],
         meta_prefix: None,
+        label: None,
     };
 
     let inner = sampler.inner.lock().unwrap();
@@ -11401,6 +11445,7 @@ fn select_role_parallel_returns_none_when_no_matching_role() {
             sentences: vec!["anchor text here".into()],
         }],
         meta_prefix: None,
+        label: None,
     };
 
     let inner = sampler.inner.lock().unwrap();
@@ -11465,6 +11510,7 @@ fn select_role_parallel_returns_none_when_all_pools_are_empty() {
             sentences: vec![],
         }],
         meta_prefix: None,
+        label: None,
     };
 
     let inner = sampler.inner.lock().unwrap();
@@ -11507,6 +11553,7 @@ fn decorate_chunk_parallel_truncation_paths() {
             sentences: vec!["word1 word2".into()],
         }],
         meta_prefix: None,
+        label: None,
     };
 
     // Prefix has 4 tokens, window = 3 → prefix_tokens.len() (4) >= max_window (3).
@@ -11557,6 +11604,7 @@ fn decorate_chunk_parallel_truncation_paths() {
             sentences: vec!["word1 word2 word3 word4 word5 word6 word7 word8".into()],
         }],
         meta_prefix: None,
+        label: None,
     };
 
     // Prefix has 2 tokens, window = 5 → remaining = 3 body tokens from the chunk.
@@ -11613,6 +11661,7 @@ fn decorate_chunk_no_truncation_when_window_is_zero() {
             sentences: vec!["body token one two three".into()],
         }],
         meta_prefix: None,
+        label: None,
     };
 
     // Prefix has 2 tokens; with max_window=0 no truncation occurs.
@@ -11683,6 +11732,7 @@ fn select_anchor_positive_parallel_returns_none_when_retries_exhausted() {
             sentences: vec!["unique text word".into()],
         }],
         meta_prefix: None,
+        label: None,
     };
 
     let inner = sampler.inner.lock().unwrap();
@@ -11878,6 +11928,7 @@ fn record_bm25_text_with_zero_max_tokens_returns_full_text() {
             },
         ],
         meta_prefix: None,
+        label: None,
     };
 
     // With max_tokens = 0 every token is kept.
@@ -11966,6 +12017,7 @@ fn for_split_non_exhausted_error_propagates_immediately() {
         taxonomy: vec![],
         sections: vec![section],
         meta_prefix: None,
+        label: None,
     };
     {
         let mut inner = sampler.inner.lock().unwrap();
@@ -12792,4 +12844,527 @@ fn resume_continues_epoch_step_from_saved_value() {
             "triplet step must continue after resume"
         );
     }
+}
+
+// ── SameRecord strategy tests ────────────────────────────────────────────────
+
+/// Verify that `SameRecord` strategy returns the anchor record itself as the
+/// negative record, bypassing any backend selection.
+#[test]
+fn same_record_strategy_returns_anchor_as_negative() {
+    let split = SplitRatios {
+        train: 0.7,
+        validation: 0.2,
+        test: 0.1,
+    };
+    let config = SamplerConfig {
+        seed: 42,
+        batch_size: 1,
+        chunking: ChunkingStrategy::default(),
+        recipes: Vec::new(),
+        text_recipes: Vec::new(),
+        split,
+        ..SamplerConfig::default()
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 42).unwrap());
+
+    let anchor = trader_record(
+        "same_rec_anchor",
+        "2025-01-01",
+        "Anchor title",
+        "Anchor body text with enough words for sampling purposes here",
+    );
+    let other = trader_record(
+        "same_rec_other",
+        "2025-01-02",
+        "Other title",
+        "Other body text with enough words for sampling purposes here",
+    );
+
+    let sampler = TripletSampler::new(config, Arc::clone(&store));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "test_src",
+            vec![anchor.clone(), other],
+        )))
+        .unwrap();
+    sampler
+        .inner
+        .lock()
+        .unwrap()
+        .ingest_internal(SplitLabel::Train)
+        .unwrap();
+
+    let mut inner = sampler.inner.lock().unwrap();
+    let (negative, fallback_used) = inner
+        .select_negative_record_seeded(&anchor, &NegativeStrategy::SameRecord, None)
+        .expect("SameRecord must return a negative");
+
+    assert_eq!(
+        negative.id, anchor.id,
+        "SameRecord must return the anchor record itself as the negative"
+    );
+    assert!(!fallback_used, "SameRecord never uses fallback");
+}
+
+/// Verify that `SameRecord` strategy never invokes the negative backend.
+///
+/// When both `bm25-mining` and `extended-metrics` features are active, the
+/// BM25 fallback stats must remain at `(0, 0)` after calling
+/// `select_negative_record` with `SameRecord`, proving the backend was never
+/// called.
+#[cfg(all(feature = "bm25-mining", feature = "extended-metrics"))]
+#[test]
+fn same_record_strategy_bypasses_negative_backend() {
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+    let config = SamplerConfig {
+        seed: 99,
+        batch_size: 1,
+        chunking: ChunkingStrategy::default(),
+        recipes: Vec::new(),
+        text_recipes: Vec::new(),
+        split,
+        ..SamplerConfig::default()
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 99).unwrap());
+
+    let anchor = trader_record(
+        "bm25_bypass_anchor",
+        "2025-03-15",
+        "Quarterly revenue report",
+        "revenue profit margin guidance outlook fiscal year analysis",
+    );
+    let peer = trader_record(
+        "bm25_bypass_peer",
+        "2025-03-16",
+        "Annual financial summary",
+        "revenue profit margin guidance outlook fiscal year analysis",
+    );
+
+    let sampler = TripletSampler::new(config, Arc::clone(&store));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "test_src",
+            vec![anchor.clone(), peer],
+        )))
+        .unwrap();
+    sampler
+        .inner
+        .lock()
+        .unwrap()
+        .ingest_internal(SplitLabel::Train)
+        .unwrap();
+
+    let mut inner = sampler.inner.lock().unwrap();
+
+    // Verify stats are zero before any call.
+    let (fb0, sel0) = inner.bm25_fallback_stats();
+    assert_eq!(sel0, 0, "selection count must be 0 before any call");
+    assert_eq!(fb0, 0, "fallback count must be 0 before any call");
+
+    // Call with SameRecord — backend must NOT be invoked.
+    let result = inner.select_negative_record_seeded(
+        &anchor,
+        &NegativeStrategy::SameRecord,
+        Some("revenue profit margin guidance"),
+    );
+    assert!(result.is_some(), "SameRecord must return a negative");
+
+    let (fb1, sel1) = inner.bm25_fallback_stats();
+    assert_eq!(
+        sel1, 0,
+        "selection count must still be 0 — SameRecord bypasses the backend"
+    );
+    assert_eq!(
+        fb1, 0,
+        "fallback count must still be 0 — SameRecord bypasses the backend"
+    );
+}
+
+/// Verify that `SameRecord` with a `Context` selector picks the negative
+/// chunk from the Context section of the same record (not a different record).
+#[test]
+fn same_record_negative_selector_picks_from_context() {
+    let split = SplitRatios {
+        train: 0.7,
+        validation: 0.2,
+        test: 0.1,
+    };
+    // Use a small window so even short text produces multiple chunks,
+    // enabling the same-selector anchor/positive pair selection.
+    let config = SamplerConfig {
+        seed: 7,
+        batch_size: 1,
+        chunking: ChunkingStrategy {
+            max_window_tokens: 8,
+            overlap_tokens: vec![2],
+            ..ChunkingStrategy::default()
+        },
+        recipes: Vec::new(),
+        text_recipes: Vec::new(),
+        split,
+        ..SamplerConfig::default()
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 7).unwrap());
+
+    // Build a record with distinct Anchor and Context sections.
+    // Use long enough text so that the default sliding-window chunker produces
+    // at least two window chunks for the Anchor selector.
+    let now = Utc::now();
+    let anchor = DataRecord {
+        id: "ctx_anchor".into(),
+        source: "unit".into(),
+        created_at: now,
+        updated_at: now,
+        quality: QualityScore { trust: 0.9 },
+        taxonomy: vec!["unit".into()],
+        sections: vec![
+            RecordSection {
+                role: SectionRole::Anchor,
+                heading: Some("Title".into()),
+                text: "The quick brown fox jumps over the lazy dog. \
+                       Pack my box with five dozen liquor jugs. \
+                       How vexingly quick daft zebras jump. \
+                       The five boxing wizards jump quickly. \
+                       Sphinx of black quartz judge my vow. \
+                       Two driven jocks help fax my big quiz."
+                    .into(),
+                sentences: vec![
+                    "The quick brown fox jumps over the lazy dog.".into(),
+                    "Pack my box with five dozen liquor jugs.".into(),
+                    "How vexingly quick daft zebras jump.".into(),
+                    "The five boxing wizards jump quickly.".into(),
+                    "Sphinx of black quartz judge my vow.".into(),
+                    "Two driven jocks help fax my big quiz.".into(),
+                ],
+            },
+            RecordSection {
+                role: SectionRole::Context,
+                heading: Some("Body".into()),
+                text: "Context section text for negative selection".into(),
+                sentences: vec!["Context section text for negative selection".into()],
+            },
+        ],
+        meta_prefix: None,
+        label: None,
+    };
+
+    let sampler = TripletSampler::new(config, Arc::clone(&store));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "test_src",
+            vec![anchor.clone()],
+        )))
+        .unwrap();
+    sampler
+        .inner
+        .lock()
+        .unwrap()
+        .ingest_internal(SplitLabel::Train)
+        .unwrap();
+
+    let recipe = TripletRecipe {
+        name: "same_record_ctx".into(),
+        anchor: Selector::Role(SectionRole::Anchor),
+        positive_selector: Selector::Role(SectionRole::Anchor),
+        negative_selector: Selector::Role(SectionRole::Context),
+        negative_strategy: NegativeStrategy::SameRecord,
+        weight: 1.0,
+        instruction: None,
+        allow_same_anchor_positive: false,
+    };
+
+    let mut inner = sampler.inner.lock().unwrap();
+    let triplet = inner.make_triplet_with_anchor_seeded(&recipe, &anchor);
+    let triplet = triplet.expect("SameRecord + Context selector must produce a triplet");
+
+    // The negative chunk must come from the same record.
+    assert_eq!(
+        triplet.negative.record_id, anchor.id,
+        "negative must come from the same record as the anchor"
+    );
+    // The negative chunk must be from the Context section.
+    assert_eq!(
+        triplet.negative.text, "Context section text for negative selection",
+        "negative chunk must be the Context section text"
+    );
+    // The negative must differ from the anchor (dedup guard).
+    assert_ne!(
+        triplet.negative.text, triplet.anchor.text,
+        "negative must differ from anchor"
+    );
+}
+
+/// Verify that `SameRecord` and `WrongArticle` recipes coexist in the same
+/// sampler — a single batch contains triplets from both strategies, each
+/// respecting its respective contract.
+///
+/// Models the real HuggingFace layout: records have multiple Context sections
+/// (positive in paragraph 1, negative in paragraph 2) so that SameRecord's
+/// negative text differs from its positive text (avoiding the dedup guard).
+#[test]
+fn same_record_and_wrong_article_recipes_coexist() {
+    let split = SplitRatios {
+        train: 0.7,
+        validation: 0.2,
+        test: 0.1,
+    };
+    let config = SamplerConfig {
+        seed: 55,
+        batch_size: 4,
+        chunking: ChunkingStrategy::default(),
+        recipes: vec![
+            TripletRecipe {
+                name: "wrong_article_recipe".into(),
+                anchor: Selector::Role(SectionRole::Anchor),
+                positive_selector: Selector::Paragraph(1),
+                negative_selector: Selector::Role(SectionRole::Context),
+                negative_strategy: NegativeStrategy::WrongArticle,
+                weight: 1.0,
+                instruction: None,
+                allow_same_anchor_positive: false,
+            },
+            TripletRecipe {
+                name: "same_record_recipe".into(),
+                anchor: Selector::Role(SectionRole::Anchor),
+                positive_selector: Selector::Paragraph(1),
+                negative_selector: Selector::Paragraph(2),
+                negative_strategy: NegativeStrategy::SameRecord,
+                weight: 1.0,
+                instruction: None,
+                allow_same_anchor_positive: false,
+            },
+        ],
+        text_recipes: Vec::new(),
+        split,
+        ..SamplerConfig::default()
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 55).unwrap());
+    let find_train_id = |prefix: &str| -> String {
+        (0u32..)
+            .find_map(|i| {
+                let id = format!("{prefix}_{i}");
+                (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+            })
+            .unwrap()
+    };
+    let id_a = find_train_id("mix_a");
+    let id_b = find_train_id("mix_b");
+    let id_c = find_train_id("mix_c");
+    let id_d = find_train_id("mix_d");
+
+    // Build records with 3 sections: Anchor, Context (positive), Context (negative).
+    // This mirrors the HF dict-dataset layout where negative_columns are stored
+    // as additional Context sections.
+    let make_record = |id: &str| -> DataRecord {
+        let now = Utc::now();
+        DataRecord {
+            id: id.into(),
+            source: PRIMARY_SOURCE_ID.into(),
+            created_at: now,
+            updated_at: now,
+            quality: QualityScore { trust: 0.9 },
+            taxonomy: vec![PRIMARY_SOURCE_ID.into()],
+            sections: vec![
+                RecordSection {
+                    role: SectionRole::Anchor,
+                    heading: Some("Title".into()),
+                    text: format!("Anchor text for {id}"),
+                    sentences: vec![format!("Anchor text for {id}")],
+                },
+                RecordSection {
+                    role: SectionRole::Context,
+                    heading: Some("Positive".into()),
+                    text: format!("positive_{id}"),
+                    sentences: vec![format!("positive_{id}")],
+                },
+                RecordSection {
+                    role: SectionRole::Context,
+                    heading: Some("Negative".into()),
+                    text: format!("negative_{id}"),
+                    sentences: vec![format!("negative_{id}")],
+                },
+            ],
+            meta_prefix: None,
+            label: None,
+        }
+    };
+
+    let records = vec![
+        make_record(&id_a),
+        make_record(&id_b),
+        make_record(&id_c),
+        make_record(&id_d),
+    ];
+
+    let sampler = TripletSampler::new(config, Arc::clone(&store));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            PRIMARY_SOURCE_ID,
+            records,
+        )))
+        .unwrap();
+    sampler
+        .inner
+        .lock()
+        .unwrap()
+        .ingest_internal(SplitLabel::Train)
+        .unwrap();
+
+    let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
+    assert!(
+        !batch.triplets.is_empty(),
+        "must produce at least one triplet"
+    );
+
+    let mut saw_same_record = false;
+    let mut saw_wrong_article = false;
+
+    for triplet in &batch.triplets {
+        if triplet.recipe.starts_with("same_record_recipe") {
+            saw_same_record = true;
+            // SameRecord: negative must come from the SAME record as the anchor.
+            assert_eq!(
+                triplet.negative.record_id, triplet.anchor.record_id,
+                "SameRecord: negative record must match anchor record"
+            );
+            // Negative text must differ from positive (different Context section).
+            assert_ne!(
+                triplet.negative.text, triplet.positive.text,
+                "SameRecord: negative text must differ from positive text"
+            );
+        } else if triplet.recipe.starts_with("wrong_article_recipe") {
+            saw_wrong_article = true;
+            // WrongArticle: negative must come from a DIFFERENT record.
+            assert_ne!(
+                triplet.negative.record_id, triplet.anchor.record_id,
+                "WrongArticle: negative record must differ from anchor record"
+            );
+        }
+    }
+
+    assert!(
+        saw_same_record,
+        "batch must contain at least one SameRecord triplet"
+    );
+    assert!(
+        saw_wrong_article,
+        "batch must contain at least one WrongArticle triplet"
+    );
+}
+
+#[test]
+fn text_batch_samples_from_positive_and_negative_pair_label_records() {
+    fn labeled_record(
+        id: &str,
+        date: &str,
+        title: &str,
+        body: &str,
+        label: PairLabel,
+    ) -> DataRecord {
+        let now = Utc::now();
+        DataRecord {
+            id: id.into(),
+            source: PRIMARY_SOURCE_ID.into(),
+            created_at: now,
+            updated_at: now,
+            quality: QualityScore { trust: 0.9 },
+            taxonomy: vec![PRIMARY_SOURCE_ID.into(), META_FIELD_DATE.encode(date)],
+            sections: vec![
+                RecordSection {
+                    role: SectionRole::Anchor,
+                    heading: Some("Title".into()),
+                    text: title.into(),
+                    sentences: vec![title.into()],
+                },
+                RecordSection {
+                    role: SectionRole::Context,
+                    heading: Some("Summary".into()),
+                    text: body.into(),
+                    sentences: vec![body.into()],
+                },
+            ],
+            meta_prefix: None,
+            label: Some(label),
+        }
+    }
+
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 42).unwrap());
+    let mut config = base_config();
+    config.batch_size = 4;
+    config.text_recipes = vec![TextRecipe {
+        name: "pair_labeled_text".into(),
+        selector: Selector::Role(SectionRole::Context),
+        weight: 1.0,
+        instruction: None,
+    }];
+
+    let mut inner = TripletSamplerInner::new(config, Arc::clone(&store));
+
+    let pos_record = labeled_record(
+        "pair_label::2025-01-01/positive.txt",
+        "2025-01-01",
+        "Positive Title",
+        "Positive body text for pair label testing",
+        PairLabel::Positive,
+    );
+    let neg_record = labeled_record(
+        "pair_label::2025-01-01/negative.txt",
+        "2025-01-01",
+        "Negative Title",
+        "Negative body text for pair label testing",
+        PairLabel::Negative,
+    );
+
+    for record in [pos_record.clone(), neg_record.clone()] {
+        store.upsert(record.id.clone(), SplitLabel::Train).unwrap();
+        inner
+            .chunk_index
+            .insert(record.id.clone(), record.id.clone());
+        inner.records.insert(record.id.clone(), Arc::new(record));
+    }
+    inner.epoch_tracker.ensure_loaded().unwrap();
+    let records_by_split = inner.records_by_split().unwrap();
+    inner
+        .epoch_tracker
+        .reconcile(SplitLabel::Train, &records_by_split);
+
+    let text_batch = inner
+        .next_text_batch_inner_with_weights(SplitLabel::Train, None)
+        .expect("text batch should sample from records with PairLabel");
+
+    assert_eq!(text_batch.samples.len(), 4);
+    assert!(
+        text_batch
+            .samples
+            .iter()
+            .all(|sample| sample.recipe == "pair_labeled_text"),
+        "all samples should use the pair_labeled_text recipe"
+    );
+
+    let mut saw_positive_record = false;
+    let mut saw_negative_record = false;
+    for sample in &text_batch.samples {
+        if let Some(record) = inner.records.get(&sample.chunk.record_id) {
+            match record.label {
+                Some(PairLabel::Positive) => saw_positive_record = true,
+                Some(PairLabel::Negative) => saw_negative_record = true,
+                None => {}
+            }
+        }
+    }
+
+    assert!(
+        saw_positive_record,
+        "text batch should contain at least one sample from a PairLabel::Positive record"
+    );
+    assert!(
+        saw_negative_record,
+        "text batch should contain at least one sample from a PairLabel::Negative record"
+    );
 }

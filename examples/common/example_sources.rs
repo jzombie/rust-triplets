@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
+use tracing::warn;
 use triplets::config::TripletRecipe;
 use triplets::data::{DataRecord, QualityScore, SectionRole};
 use triplets::metadata::META_FIELD_DATE;
@@ -157,11 +158,10 @@ fn maybe_huggingface_source() -> Option<Box<dyn DataSource + 'static>> {
     let dataset = "HuggingFaceFW/fineweb".to_string();
     let config_name = "default".to_string();
     let split_name = "train".to_string();
-    let skip_msg_prefix = "Skipping Hugging Face source initialization for multi_source_demo: ";
     let snapshot_dir = match managed_hf_snapshot_dir(&dataset, &config_name, &split_name) {
         Ok(path) => path,
         Err(err) => {
-            eprintln!("{}{}", skip_msg_prefix, err);
+            warn!(error = %err, "Skipping Hugging Face source initialization for multi_source_demo");
             return None;
         }
     };
@@ -175,7 +175,7 @@ fn maybe_huggingface_source() -> Option<Box<dyn DataSource + 'static>> {
     match HuggingFaceRowSource::new(hf) {
         Ok(source) => Some(Box::new(source)),
         Err(err) => {
-            eprintln!("{}{}", skip_msg_prefix, err);
+            warn!(error = %err, "Skipping Hugging Face source initialization for multi_source_demo");
             None
         }
     }
@@ -239,6 +239,7 @@ fn build_record(source_id: &str, root: &Path, path: &Path) -> Option<DataRecord>
             make_section(SectionRole::Context, Some("body"), &normalized),
         ],
         meta_prefix: None,
+        label: None,
     })
 }
 

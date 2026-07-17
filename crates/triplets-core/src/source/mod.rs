@@ -9,6 +9,7 @@
 use chrono::{DateTime, Utc};
 use std::hash::Hash;
 use std::time::Instant;
+use tracing::info;
 
 use crate::config::{SamplerConfig, TripletRecipe};
 use crate::data::DataRecord;
@@ -183,9 +184,11 @@ impl IndexablePager {
         let should_report = total >= 10_000 || max >= 1_024;
         let refresh_start = Instant::now();
         if should_report {
-            eprintln!(
-                "[triplets:source] refresh start source='{}' source_records={} ingestion_limit={}",
-                self.source_id, total, max
+            info!(
+                source = %self.source_id,
+                source_records = total,
+                ingestion_limit = max,
+                "Source refresh started"
             );
         }
 
@@ -228,12 +231,12 @@ impl IndexablePager {
         }
 
         if should_report {
-            eprintln!(
-                "[triplets:source] refresh done source='{}' source_records={} ingested={} elapsed={:.2}s",
-                self.source_id,
-                total,
-                records.len(),
-                refresh_start.elapsed().as_secs_f64()
+            info!(
+                source = %self.source_id,
+                source_records = total,
+                ingested = records.len(),
+                elapsed_secs = refresh_start.elapsed().as_secs_f64(),
+                "Source refresh completed"
             );
         }
         let last_seen = records
@@ -437,6 +440,7 @@ mod tests {
                     sentences: vec!["stub".into()],
                 }],
                 meta_prefix: None,
+                label: None,
             }))
         }
     }
@@ -583,6 +587,7 @@ mod tests {
                         sentences: vec!["t".to_string()],
                     }],
                     meta_prefix: None,
+                    label: None,
                 }))
             })
             .unwrap();
@@ -649,6 +654,7 @@ mod tests {
                             sentences: vec!["t".to_string()],
                         }],
                         meta_prefix: None,
+                        label: None,
                     }))
                 }
             })
@@ -681,5 +687,32 @@ mod tests {
         let with_b = IndexablePager::seed_for_sampler(&source_id, 17, 2);
         assert_ne!(with_a, with_b);
         assert_ne!(with_a, base);
+    }
+
+    #[test]
+    fn stable_hash_is_deterministic_across_calls() {
+        let a = crate::hash::stable_hash_str(42, "hello");
+        let b = crate::hash::stable_hash_str(42, "hello");
+        assert_eq!(a, b, "same inputs must produce same hash");
+    }
+
+    #[test]
+    fn stable_hash_varies_with_seed() {
+        let a = crate::hash::stable_hash_str(1, "hello");
+        let b = crate::hash::stable_hash_str(2, "hello");
+        assert_ne!(a, b, "different seeds should produce different hashes");
+    }
+
+    #[test]
+    fn stable_hash_varies_with_value() {
+        let a = crate::hash::stable_hash_str(42, "hello");
+        let b = crate::hash::stable_hash_str(42, "world");
+        assert_ne!(a, b, "different values should produce different hashes");
+    }
+
+    #[test]
+    fn stable_hash_str_handles_empty_string() {
+        let result = crate::hash::stable_hash_str(0, "");
+        assert_ne!(result, 0, "empty string should produce non-zero hash");
     }
 }

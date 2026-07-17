@@ -42,6 +42,12 @@ pub struct DataRecord {
     /// Optional metadata prefix policy for KVP sampling (key-value headers injected into text).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meta_prefix: Option<KvpPrefixSampler>,
+    /// Pair label for supervised pair entries (Positive/Negative).
+    ///
+    /// Only meaningful for pair-mode records written by the SRD pipeline.
+    /// `None` for records from other sources or triplet-mode entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<PairLabel>,
 }
 
 impl DataRecord {
@@ -100,6 +106,7 @@ impl DataRecord {
                 sentences: vec![],
             }],
             meta_prefix: None,
+            label: None,
         }
     }
 }
@@ -367,10 +374,137 @@ mod tests {
                 sentences: vec!["body".to_string()],
             }],
             meta_prefix: None,
+            label: None,
         };
 
         assert_eq!(record.source, "source_a");
         assert_eq!(record.sections.len(), 1);
         assert!(matches!(record.sections[0].role, SectionRole::Anchor));
+    }
+
+    #[test]
+    fn from_text_creates_record_with_context_role() {
+        let record = DataRecord::from_text("id1", "src1", "hello world");
+        assert_eq!(record.id.as_str(), "id1");
+        assert_eq!(record.source.as_str(), "src1");
+        assert_eq!(record.sections.len(), 1);
+        assert_eq!(record.sections[0].text, "hello world");
+        assert!(matches!(record.sections[0].role, SectionRole::Context));
+    }
+
+    #[test]
+    fn from_text_with_role_creates_record_with_specified_role() {
+        let record =
+            DataRecord::from_text_with_role("id1", "src1", "anchor text", SectionRole::Anchor);
+        assert!(matches!(record.sections[0].role, SectionRole::Anchor));
+        assert_eq!(record.sections[0].text, "anchor text");
+    }
+
+    #[test]
+    fn data_record_with_label() {
+        let record = DataRecord {
+            id: "id".into(),
+            source: "src".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            quality: QualityScore::default(),
+            taxonomy: vec![],
+            sections: vec![],
+            meta_prefix: None,
+            label: Some(PairLabel::Positive),
+        };
+        assert_eq!(record.label, Some(PairLabel::Positive));
+    }
+
+    #[test]
+    fn data_record_with_taxonomy() {
+        let record = DataRecord {
+            id: "id".into(),
+            source: "src".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            quality: QualityScore::default(),
+            taxonomy: vec!["year:2025".into(), "topic:ai".into()],
+            sections: vec![],
+            meta_prefix: None,
+            label: None,
+        };
+        assert_eq!(record.taxonomy.len(), 2);
+    }
+
+    #[test]
+    fn pair_label_variants() {
+        let pos = PairLabel::Positive;
+        let neg = PairLabel::Negative;
+        assert_ne!(pos, neg);
+        assert_eq!(pos, PairLabel::Positive);
+        assert_eq!(neg, PairLabel::Negative);
+    }
+
+    #[test]
+    fn chunk_view_variants() {
+        let window = ChunkView::Window {
+            index: 0,
+            overlap: 10,
+            span: 100,
+        };
+        let summary = ChunkView::SummaryFallback {
+            strategy: "head".into(),
+            weight: 0.5,
+        };
+        assert!(matches!(window, ChunkView::Window { .. }));
+        assert!(matches!(summary, ChunkView::SummaryFallback { .. }));
+    }
+
+    #[test]
+    fn record_section_with_heading() {
+        let section = RecordSection {
+            role: SectionRole::Context,
+            heading: Some("Title".into()),
+            text: "content".into(),
+            sentences: vec!["content".into()],
+        };
+        assert_eq!(section.heading, Some("Title".to_string()));
+    }
+
+    #[test]
+    fn sample_pair_with_reason() {
+        let pair = SamplePair {
+            recipe: "test".into(),
+            anchor: sample_chunk("a"),
+            positive: sample_chunk("b"),
+            weight: 1.5,
+            instruction: Some("instruction".into()),
+            label: PairLabel::Negative,
+            reason: Some("wrong topic".into()),
+        };
+        assert_eq!(pair.weight, 1.5);
+        assert_eq!(pair.reason, Some("wrong topic".to_string()));
+    }
+
+    #[test]
+    fn sample_triplet_construction() {
+        let triplet = SampleTriplet {
+            recipe: "triplet_recipe".into(),
+            anchor: sample_chunk("a"),
+            positive: sample_chunk("p"),
+            negative: sample_chunk("n"),
+            weight: 2.0,
+            instruction: None,
+        };
+        assert_eq!(triplet.recipe, "triplet_recipe");
+        assert_eq!(triplet.weight, 2.0);
+    }
+
+    #[test]
+    fn text_sample_construction() {
+        let sample = TextSample {
+            recipe: "text_recipe".into(),
+            chunk: sample_chunk("t"),
+            weight: 1.0,
+            instruction: Some("do this".into()),
+        };
+        assert_eq!(sample.recipe, "text_recipe");
+        assert!(sample.instruction.is_some());
     }
 }
