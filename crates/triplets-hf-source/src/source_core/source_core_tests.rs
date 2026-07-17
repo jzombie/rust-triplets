@@ -596,7 +596,7 @@ fn download_next_remote_shard_clears_row_cache_when_eviction_occurs() {
     let server = spawn_one_shot_http(payload);
     let base_url = server.url().to_string();
     let candidate = format!("url::{base_url}/datasets/org/ds/resolve/main/train/new-shard.ndjson");
-    let new_path = crate::shard_indexing::candidate_store_path(&config, &candidate);
+    let new_path = crate::shard_indexer::candidate_store_path(&config, &candidate);
 
     {
         let mut state = source.state.lock().unwrap();
@@ -823,7 +823,7 @@ fn download_next_remote_shard_detects_stale_shard_by_size() {
     // Create a real .simdr store with source_size = 100.
     let candidate =
         format!("url::{TEST_UNREACHABLE_URL}/datasets/org/ds/resolve/main/train/stale.ndjson");
-    let store_path = crate::shard_indexing::candidate_store_path(&config, &candidate);
+    let store_path = crate::shard_indexer::candidate_store_path(&config, &candidate);
     fs::create_dir_all(store_path.parent().unwrap()).unwrap();
     write_simdr_fixture(&store_path, &[("r0", "row")]);
     {
@@ -882,7 +882,7 @@ fn download_next_remote_shard_preserves_fresh_shard_when_sizes_match() {
     // Create a store with source_size = 100 and set expected_bytes = 100.
     let candidate =
         format!("url::{TEST_UNREACHABLE_URL}/datasets/org/ds/resolve/main/train/fresh.ndjson");
-    let store_path = crate::shard_indexing::candidate_store_path(&config, &candidate);
+    let store_path = crate::shard_indexer::candidate_store_path(&config, &candidate);
     fs::create_dir_all(store_path.parent().unwrap()).unwrap();
     write_simdr_fixture(&store_path, &[("r0", "row")]);
     {
@@ -1049,7 +1049,7 @@ fn download_next_remote_shard_detects_stale_shard_via_head() {
 
     // Candidate uses url:: prefix so the HEAD targets the mock server.
     let candidate = format!("url::{base_url}/resolve/main/train/stale-shard.ndjson");
-    let store_path = crate::shard_indexing::candidate_store_path(&config, &candidate);
+    let store_path = crate::shard_indexer::candidate_store_path(&config, &candidate);
     fs::create_dir_all(store_path.parent().unwrap()).unwrap();
     write_simdr_fixture(&store_path, &[("r0", "row")]);
     {
@@ -1115,7 +1115,7 @@ fn download_next_remote_shard_preserves_fresh_shard_via_head() {
     let base_url = server.url().to_string();
 
     let candidate = format!("url::{base_url}/resolve/main/train/fresh-shard.ndjson");
-    let store_path = crate::shard_indexing::candidate_store_path(&config, &candidate);
+    let store_path = crate::shard_indexer::candidate_store_path(&config, &candidate);
     fs::create_dir_all(store_path.parent().unwrap()).unwrap();
     write_simdr_fixture(&store_path, &[("r0", "row")]);
     {
@@ -1167,7 +1167,7 @@ fn download_next_remote_shard_keeps_store_when_head_returns_error() {
 
     // Candidate pointing at an unreachable address — HEAD will Err.
     let candidate = format!("url::{TEST_UNREACHABLE_URL}/resolve/main/train/head-err.ndjson");
-    let store_path = crate::shard_indexing::candidate_store_path(&config, &candidate);
+    let store_path = crate::shard_indexer::candidate_store_path(&config, &candidate);
     fs::create_dir_all(store_path.parent().unwrap()).unwrap();
     write_simdr_fixture(&store_path, &[("r0", "row")]);
     {
@@ -1226,7 +1226,7 @@ fn download_next_remote_shard_keeps_store_when_head_returns_none() {
     let base_url = server.url().to_string();
 
     let candidate = format!("url::{base_url}/resolve/main/train/head-none.ndjson");
-    let store_path = crate::shard_indexing::candidate_store_path(&config, &candidate);
+    let store_path = crate::shard_indexer::candidate_store_path(&config, &candidate);
     fs::create_dir_all(store_path.parent().unwrap()).unwrap();
     write_simdr_fixture(&store_path, &[("r0", "row")]);
     {
@@ -1276,7 +1276,7 @@ fn download_next_shard_store_already_on_disk_skips_download() {
 
     // Create a candidate path and pre-create its .simdr store.
     let candidate = "url::http://mock.example.com/datasets/org/ds/resolve/main/train/shard.ndjson";
-    let store_path = crate::shard_indexing::candidate_store_path(&config, candidate);
+    let store_path = crate::shard_indexer::candidate_store_path(&config, candidate);
     fs::create_dir_all(store_path.parent().unwrap()).unwrap();
     write_simdr_fixture(&store_path, &[("r1", "hello")]);
 

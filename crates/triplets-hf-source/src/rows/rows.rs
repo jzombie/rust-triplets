@@ -234,11 +234,11 @@ pub(crate) fn read_row_batch(
                 })?;
             let mut resolved = Vec::with_capacity(pending.len());
             for idx in &pending {
-                let (shard, local_idx) = crate::shard_indexing::locate_shard(&state.shards, *idx)
+                let (shard, local_idx) = crate::shard_indexer::locate_shard(&state.shards, *idx)
                     .ok_or_else(|| SamplerError::SourceUnavailable {
-                    source_id: source.config.source_id.clone(),
-                    reason: format!("row index out of range: {idx}"),
-                })?;
+                        source_id: source.config.source_id.clone(),
+                        reason: format!("row index out of range: {idx}"),
+                    })?;
                 resolved.push((*idx, shard.clone(), local_idx));
             }
             resolved
@@ -247,7 +247,7 @@ pub(crate) fn read_row_batch(
         let mut parquet_groups: HashMap<ParquetGroupKey, Vec<ParquetGroupRequest>> = HashMap::new();
         for (idx, shard, local_idx) in resolutions {
             let (group_pos, local_in_group) =
-                crate::shard_indexing::locate_parquet_group(source, &shard, local_idx)?;
+                crate::shard_indexer::locate_parquet_group(source, &shard, local_idx)?;
             parquet_groups
                 .entry((shard.path.clone(), group_pos))
                 .or_default()
@@ -277,7 +277,7 @@ pub(crate) fn read_row_batch(
             let mut unresolved_targets: BTreeMap<usize, Vec<usize>> = targets.clone();
 
             if is_store_shard_path(&shard.path) {
-                let store = crate::shard_indexing::get_or_open_shard_store(source, &shard.path)?;
+                let store = crate::shard_indexer::get_or_open_shard_store(source, &shard.path)?;
                 let requested_positions = targets.keys().copied().collect::<Vec<_>>();
                 let store_keys = requested_positions
                     .iter()
@@ -446,7 +446,7 @@ pub(crate) fn transcode_transient_shard_to_store(
         .starts_with(HF_TEMP_DOWNLOAD_PREFIX);
     let can_delete_transient = in_manifest || is_temp_download;
 
-    let store = crate::shard_indexing::get_or_open_shard_store(source, &store_path)?;
+    let store = crate::shard_indexer::get_or_open_shard_store(source, &store_path)?;
     if store_path.exists() {
         let existing_rows = read_store_row_count(source, &store)?;
         if existing_rows > 0 {

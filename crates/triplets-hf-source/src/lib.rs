@@ -35,6 +35,6 @@ mod huggingface_source;
 mod parsing;
 mod rows;
 mod shard_index;
-mod shard_indexing;
+mod shard_indexer;
 mod source_core;
 mod types;

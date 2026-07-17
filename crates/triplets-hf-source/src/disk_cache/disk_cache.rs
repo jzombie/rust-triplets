@@ -103,7 +103,7 @@ pub(crate) fn open_store_via_cache(
     // Open the store outside the lock so that concurrent calls (e.g. from
     // rayon's parallel iteration in build_shard_index) can proceed in
     // parallel instead of being serialized on the mutex.
-    let store = Arc::new(crate::shard_indexing::open_shard_store(config, path)?);
+    let store = Arc::new(crate::shard_indexer::open_shard_store(config, path)?);
     // Re-acquire the lock and insert into the cache.  If another thread
     // already inserted the same path, our duplicate handle is harmless
     // (the cache retains the first one).  We return our handle either way

@@ -21,7 +21,7 @@ use crate::rows;
 use crate::shard_index::{
     build_shard_index, index_single_shard, is_store_shard_path, shard_store_path_for,
 };
-use crate::shard_indexing;
+use crate::shard_indexer;
 use crate::types::SourceState;
 
 use chrono::Utc;
@@ -594,7 +594,7 @@ impl HuggingFaceRowSource {
                 // When the manifest does not provide a size, a lightweight HTTP HEAD
                 // size from `Content-Length` so that staleness detection still works
                 // without depending on the datasets-server API.
-                let store_path = shard_indexing::candidate_store_path(&self.config, &remote_path);
+                let store_path = shard_indexer::candidate_store_path(&self.config, &remote_path);
                 if store_path.exists() {
                     // Resolve the expected remote size: prefer the manifest-provided
                     // value, but fall back to an HTTP HEAD request so staleness
@@ -825,7 +825,7 @@ impl HuggingFaceRowSource {
         });
         if source_size > 0 {
             // Force the engine to acquire the handle using the new canonical path.
-            if let Ok(store) = shard_indexing::get_or_open_shard_store(self, &shard.path) {
+            if let Ok(store) = shard_indexer::get_or_open_shard_store(self, &shard.path) {
                 let _ = store.write(HF_SHARD_STORE_SOURCE_SIZE_KEY, &source_size.to_le_bytes());
             }
         }
@@ -841,7 +841,7 @@ impl HuggingFaceRowSource {
         shard.remote_candidate = Some(remote_path.clone());
         state.shards.push(shard);
         drop(state);
-        shard_indexing::invalidate_eligible_index(self);
+        shard_indexer::invalidate_eligible_index(self);
 
         let mut state = self
             .state
@@ -851,7 +851,7 @@ impl HuggingFaceRowSource {
                 reason: "huggingface source state lock poisoned".to_string(),
             })?;
 
-        let evicted_any = shard_indexing::enforce_disk_cap_locked(self, &mut state, &local_path)?;
+        let evicted_any = shard_indexer::enforce_disk_cap_locked(self, &mut state, &local_path)?;
         let materialized_rows = state.materialized_rows;
         let shard_count = state.shards.len();
         let total_remote = state
@@ -860,7 +860,7 @@ impl HuggingFaceRowSource {
             .map(|c| c.len())
             .unwrap_or(0);
         let active_shards = state.shards.clone();
-        let usage_bytes = shard_indexing::manifest_usage_bytes_locked(self, &state);
+        let usage_bytes = shard_indexer::manifest_usage_bytes_locked(self, &state);
         let usage_gib = usage_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
         let cap_str = self
             .config
@@ -868,7 +868,7 @@ impl HuggingFaceRowSource {
             .map(|bytes| format!("{:.2} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0)))
             .unwrap_or_else(|| "disabled".to_string());
         drop(state);
-        shard_indexing::prune_store_cache_to_shards(self, &active_shards);
+        shard_indexer::prune_store_cache_to_shards(self, &active_shards);
 
         if evicted_any {
             if let Ok(mut cache) = self.cache.lock() {
@@ -880,7 +880,7 @@ impl HuggingFaceRowSource {
                 parquet_cache.row_groups.clear();
                 parquet_cache.row_group_order.clear();
             }
-            shard_indexing::invalidate_eligible_index(self);
+            shard_indexer::invalidate_eligible_index(self);
         }
 
         // `shard_count` is the number of shards currently on disk; `total_remote` is
