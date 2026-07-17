@@ -211,8 +211,7 @@ fn enforce_disk_cap_evicts_manifest_shards_and_recomputes_offsets() {
     };
 
     let evicted =
-        crate::shard_indexer::enforce_disk_cap_locked(source.deref(), &mut state, &second)
-            .unwrap();
+        crate::shard_indexer::enforce_disk_cap_locked(source.deref(), &mut state, &second).unwrap();
     assert!(evicted);
     assert!(!first.exists());
     assert!(second.exists());
@@ -739,9 +738,9 @@ fn eligible_rows_extends_cached_index_when_new_shard_is_appended() {
 
     {
         let mut cache = source.eligible_index.lock().unwrap();
-        cache.signature = Some(crate::shard_indexer::shard_signature(
-            std::slice::from_ref(&baseline),
-        ));
+        cache.signature = Some(crate::shard_indexer::shard_signature(std::slice::from_ref(
+            &baseline,
+        )));
         cache.rows = Some(Arc::new(vec![0]));
         cache.shards = vec![baseline];
     }
