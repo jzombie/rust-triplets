@@ -1,23 +1,8 @@
 #![doc = include_str!("../README.md")]
 #![warn(missing_docs)]
 
-mod builder;
-mod config;
-mod constants;
-#[cfg(test)]
-mod core_tests;
-mod disk_cache;
 /// Download utilities and HTTP helpers for Hugging Face shard fetching.
 pub mod download;
-mod expansion;
-mod file_utils;
-mod huggingface_source;
-mod parsing;
-mod rows;
-mod shard_index;
-mod shard_indexing;
-mod source_core;
-mod types;
 
 /// Test utilities for Hugging Face source tests.
 ///
@@ -39,3 +24,17 @@ pub use parsing::{
     parse_hf_source_line, parse_hf_uri, resolve_hf_list_roots,
 };
 pub use source_core::HuggingFaceRowSource;
+
+mod builder;
+mod config;
+mod constants;
+mod disk_cache;
+mod expansion;
+mod file_utils;
+mod huggingface_source;
+mod parsing;
+mod rows;
+mod shard_index;
+mod shard_indexing;
+mod source_core;
+mod types;

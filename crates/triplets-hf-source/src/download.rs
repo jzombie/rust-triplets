@@ -1819,6 +1819,19 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // --- datasets viewer disabled (501) scenario ---
+    //
+    // Some HF datasets have the datasets viewer disabled.  In that case the
+    // /size, /info, and /parquet datasets-server endpoints all return HTTP 501
+    // with {"error":"Not supported: dataset viewer is disabled ..."}.
+    //
+    // The expected behaviour:
+    //   * /size   → fetch_global_row_count returns Ok(None), not Err.
+    //   * /info   → fetch_classlabel_maps returns an empty map, not an error.
+    //   * /parquet → list_remote_candidates_from_parquet_manifest returns Err,
+    //                which causes list_remote_candidates_with_runtime to fall
+    //                through to the hf-hub repository listing path.
+
     #[test]
     #[serial(global_state)]
     fn list_remote_candidates_from_parquet_manifest_errors_on_501() {
