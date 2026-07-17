@@ -911,3 +911,84 @@ fn allocate_temp_download_path(
         })?;
     Ok(path)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::constants::HF_DATASETS_BASE_URL;
+    use crate::test_utils::test_config;
+    use std::path::PathBuf;
+    use tempfile::tempdir;
+
+    #[test]
+    fn remote_url_for_candidate_constructs_correct_urls() {
+        // url:: prefix with full URL: returned as-is.
+        let config = test_config(PathBuf::from("/tmp/snap"));
+        let full_url =
+            format!("url::{HF_DATASETS_BASE_URL}/org/ds/resolve/main/train/part-000.parquet");
+        let result = remote_url_for_candidate(&config, &full_url);
+        assert_eq!(
+            result,
+            format!("{HF_DATASETS_BASE_URL}/org/ds/resolve/main/train/part-000.parquet")
+        );
+
+        // url:: prefix with relative path (Hub API format): CDN prefix is constructed.
+        let hub_relative = "url::data/train-00000-of-00001.parquet";
+        let result = remote_url_for_candidate(&config, hub_relative);
+        assert_eq!(
+            result,
+            format!(
+                "{HF_DATASETS_BASE_URL}/org/dataset/resolve/main/data/train-00000-of-00001.parquet"
+            )
+        );
+
+        // Bare path (hf-hub sibling fallback): CDN prefix is prepended.
+        let bare_path = "data/train-00000-of-00001.parquet";
+        let result = remote_url_for_candidate(&config, bare_path);
+        assert_eq!(
+            result,
+            format!(
+                "{HF_DATASETS_BASE_URL}/org/dataset/resolve/main/data/train-00000-of-00001.parquet"
+            )
+        );
+
+        // Bare path with leading slash.
+        let bare_path = "/data/train-00000-of-00001.parquet";
+        let result = remote_url_for_candidate(&config, bare_path);
+        assert_eq!(
+            result,
+            format!(
+                "{HF_DATASETS_BASE_URL}/org/dataset/resolve/main/data/train-00000-of-00001.parquet"
+            )
+        );
+    }
+
+    #[test]
+    fn remote_url_for_candidate_builds_bare_urls() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+        let r1 = remote_url_for_candidate(&config, "url::https://server/parquet");
+        assert_eq!(r1, "https://server/parquet");
+        let r2 = remote_url_for_candidate(&config, "data/train-000.parquet");
+        assert!(r2.contains("/resolve/main/"));
+    }
+
+    #[test]
+    fn remote_url_for_candidate_bare_path_resolves_to_cdn() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+
+        let url = remote_url_for_candidate(&config, "train/shard.ndjson");
+        assert!(url.contains(HF_DATASETS_BASE_URL));
+        assert!(url.contains("train/shard.ndjson"));
+    }
+
+    #[test]
+    fn remote_url_for_candidate_full_url_returned_directly() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path().to_path_buf());
+
+        let url = remote_url_for_candidate(&config, "url::https://cdn.example.com/shard.parquet");
+        assert_eq!(url, "https://cdn.example.com/shard.parquet");
+    }
+}

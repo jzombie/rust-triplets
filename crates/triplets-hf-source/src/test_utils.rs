@@ -600,3 +600,14 @@ pub(crate) fn write_parquet_fixture(path: &Path, rows: &[(&str, &str)]) {
     row_group.close().unwrap();
     writer.close().unwrap();
 }
+
+#[cfg(test)]
+pub(crate) fn write_gzip_fixture(path: &std::path::Path, content: &[u8]) {
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use std::io::Write;
+    let file = std::fs::File::create(path).unwrap();
+    let mut encoder = GzEncoder::new(file, Compression::default());
+    encoder.write_all(content).unwrap();
+    encoder.finish().unwrap();
+}

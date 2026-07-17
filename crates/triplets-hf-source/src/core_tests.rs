@@ -1,10 +1,9 @@
 use crate::builder::build_hf_sources;
 use crate::config::HuggingFaceRowsConfig;
 use crate::constants::{
-    ENV_TRIPLETS_HF_TOKEN, ENV_TRIPLETS_HF_WHOAMI_ENDPOINT, HF_ALL_SPLITS_DIR,
-    HF_DATASETS_BASE_URL, HF_GROUP, HF_PARQUET_DEFAULT_ENDPOINT, HF_PARQUET_MANIFEST_DIR,
-    HF_REMOTE_URL_PREFIX, HF_SHARD_STORE_META_ROWS_KEY, HF_SHARD_STORE_ROW_PREFIX,
-    HF_SHARD_STORE_SOURCE_SIZE_KEY,
+    ENV_TRIPLETS_HF_TOKEN, ENV_TRIPLETS_HF_WHOAMI_ENDPOINT, HF_ALL_SPLITS_DIR, HF_GROUP,
+    HF_PARQUET_MANIFEST_DIR, HF_REMOTE_URL_PREFIX, HF_SHARD_STORE_META_ROWS_KEY,
+    HF_SHARD_STORE_ROW_PREFIX, HF_SHARD_STORE_SOURCE_SIZE_KEY,
 };
 use crate::constants::{
     HF_RECIPE_ANCHOR_ANCHOR_WRONG_ARTICLE, HF_RECIPE_ANCHOR_CONTEXT_WRONG_ARTICLE,
@@ -13,7 +12,7 @@ use crate::constants::{
 use crate::disk_cache::ensure_cache_group;
 use crate::disk_cache::{managed_hf_list_snapshot_dir, managed_hf_snapshot_dir};
 use crate::download::*;
-use crate::file_utils::{is_gzip_path, resolve_inner_extension};
+use crate::file_utils::is_gzip_path;
 use crate::huggingface_source::{
     EligibleIndexCache, ParquetCache, RowCache, RowTextField, RowView,
 };
@@ -21,10 +20,8 @@ use crate::parsing::{
     HfListRoots, HfSourceEntry, hf_source_id_slug, load_hf_sources_from_list, parse_hf_source_line,
     parse_hf_uri, resolve_hf_list_roots,
 };
-use crate::rows;
 use crate::shard_index::{
-    index_single_shard, is_store_shard_path, parquet_row_group_map, row_store_row_key,
-    shard_store_path_for,
+    index_single_shard, parquet_row_group_map, row_store_row_key, shard_store_path_for,
 };
 use crate::source_core::HuggingFaceRowSource;
 use crate::test_utils::{
@@ -49,7 +46,6 @@ use std::time::{Duration, SystemTime};
 use tempfile::tempdir;
 use triplets_core::SamplerError;
 use triplets_core::config::{NegativeStrategy, SamplerConfig};
-use triplets_core::data::SectionRole;
 use triplets_core::source::{DataSource, SourceCursor};
 use triplets_core::splits::{PersistedSamplerState, SamplerStateStore};
 use triplets_core::utils::platform_newline;
@@ -414,58 +410,6 @@ fn manual_http_client_sharing_works() {
 }
 
 #[test]
-fn hf_source_id_slug_uses_short_dataset_name() {
-    assert_eq!(
-        hf_source_id_slug("allenai/dolmino-mix-1124", "default", "train"),
-        "dolmino-mix-1124"
-    );
-}
-
-#[test]
-fn hf_source_id_slug_appends_non_default_config() {
-    assert_eq!(
-        hf_source_id_slug("org/dataset", "en", "train"),
-        "dataset.en"
-    );
-}
-
-#[test]
-fn hf_source_id_slug_appends_non_train_split() {
-    assert_eq!(
-        hf_source_id_slug("org/dataset", "default", "validation"),
-        "dataset.validation"
-    );
-}
-
-#[test]
-fn hf_source_id_slug_omits_empty_split() {
-    assert_eq!(hf_source_id_slug("org/dataset", "default", ""), "dataset");
-}
-
-#[test]
-fn hf_source_id_slug_appends_both_config_and_split() {
-    assert_eq!(
-        hf_source_id_slug("org/dataset", "en", "validation"),
-        "dataset.en.validation"
-    );
-}
-
-#[test]
-fn hf_source_id_slug_sanitizes_special_chars() {
-    // dots and slashes in names become dashes
-    assert_eq!(
-        hf_source_id_slug("org/data.set", "v1.0", "train"),
-        "data-set.v1-0"
-    );
-}
-
-#[test]
-fn hf_source_id_slug_no_org_prefix() {
-    // dataset without org/ prefix — falls back to using the full string
-    assert_eq!(hf_source_id_slug("dataset", "default", "train"), "dataset");
-}
-
-#[test]
 fn build_hf_sources_disambiguates_duplicate_slugs() {
     // Two sources pointing at the same dataset/config/split should get
     // distinct IDs via the index suffix rather than silently colliding.
@@ -569,36 +513,6 @@ fn parquet_cache_reader_for_reports_open_and_parse_errors() {
     fs::write(&invalid_parquet, b"not parquet").unwrap();
     let invalid = cache.reader_for("hf_test", &invalid_parquet);
     assert!(invalid.is_err());
-}
-
-#[test]
-fn read_store_row_count_validates_payload_size_and_roundtrips_written_value() {
-    let dir = tempdir().unwrap();
-    let config = test_config(dir.path().to_path_buf());
-    let source = test_source(config);
-    let store_path = dir.path().join("rows.simdr");
-    let store = DataStore::open(&store_path).unwrap();
-
-    store
-        .write(HF_SHARD_STORE_META_ROWS_KEY, &[1u8, 2, 3])
-        .unwrap();
-    let err = rows::read_store_row_count(&source, &store).unwrap_err();
-    let message = format!("{err}");
-    assert!(message.contains("payload size mismatch"));
-
-    rows::write_store_row_count(&source, &store, 7).unwrap();
-    assert_eq!(rows::read_store_row_count(&source, &store).unwrap(), 7);
-}
-
-#[test]
-fn read_store_row_count_returns_zero_when_meta_key_is_absent() {
-    let dir = tempdir().unwrap();
-    let config = test_config(dir.path().to_path_buf());
-    let source = test_source(config);
-    let store_path = dir.path().join("empty.simdr");
-    let store = DataStore::open(&store_path).unwrap();
-
-    assert_eq!(rows::read_store_row_count(&source, &store).unwrap(), 0);
 }
 
 #[test]
@@ -882,61 +796,6 @@ fn locate_parquet_group_maps_offsets_and_reports_missing() {
 }
 
 #[test]
-fn parse_row_role_columns_mode_builds_expected_fields() {
-    let dir = tempdir().unwrap();
-    let mut config = test_config(dir.path().to_path_buf());
-    config.anchor_columns = vec!["anchor".into()];
-    config.positive_columns = vec!["positive".into()];
-    config.context_columns = vec!["ctx1".into(), "ctx2".into()];
-    let source = test_source(config);
-
-    let row = rows::parse_row(
-        &source,
-        2,
-        &json!({"id":"r","anchor":"a","positive":"p","ctx1":"c1","ctx2":2}),
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(row.text_fields.len(), 4);
-    assert_eq!(row.text_fields[0].name, "anchor");
-    assert_eq!(row.text_fields[1].name, "positive");
-}
-
-#[test]
-fn parse_row_role_columns_mode_skips_missing_or_empty_values() {
-    let dir = tempdir().unwrap();
-    let mut config = test_config(dir.path().to_path_buf());
-    config.anchor_columns = vec!["anchor".into()];
-    config.context_columns = vec!["ctx".into()];
-    let source = test_source(config);
-
-    let missing = rows::parse_row(&source, 0, &json!({"anchor":"a"}));
-    assert!(missing.unwrap().is_none());
-
-    let empty_anchor = rows::parse_row(&source, 1, &json!({"anchor":"   ", "ctx":"ok"}));
-    assert!(empty_anchor.unwrap().is_none());
-}
-
-#[test]
-fn row_to_record_uses_anchor_for_positive_when_single_field() {
-    let dir = tempdir().unwrap();
-    let config = test_config(dir.path().to_path_buf());
-    let source = test_source(config);
-    let row = RowView {
-        row_id: Some("r1".into()),
-        timestamp: None,
-        text_fields: vec![RowTextField {
-            name: "text".into(),
-            text: "alpha".into(),
-        }],
-    };
-
-    let record = rows::row_to_record(&source, &row, 0).unwrap().unwrap();
-    assert_eq!(record.sections.len(), 2);
-    assert_eq!(record.sections[0].text, record.sections[1].text);
-}
-
-#[test]
 fn target_matches_expected_size_is_false_for_missing_path() {
     let dir = tempdir().unwrap();
     let missing = dir.path().join("missing.bin");
@@ -954,37 +813,6 @@ fn candidate_target_path_uses_bare_path_when_no_resolve_segment() {
 }
 
 #[test]
-fn parse_row_falls_back_to_synthetic_id_when_missing_id_column() {
-    let dir = tempdir().unwrap();
-    let mut config = test_config(dir.path().to_path_buf());
-    config.id_column = Some("id".into());
-    let source = test_source(config);
-
-    let row = rows::parse_row(&source, 42, &json!({"text": "hello"}))
-        .unwrap()
-        .unwrap();
-    assert_eq!(row.row_id, Some("org/dataset:train:42".to_string()));
-}
-
-#[test]
-fn row_to_record_falls_back_to_row_index_when_row_id_missing() {
-    let dir = tempdir().unwrap();
-    let config = test_config(dir.path().to_path_buf());
-    let source = test_source(config);
-    let row = RowView {
-        row_id: None,
-        timestamp: None,
-        text_fields: vec![RowTextField {
-            name: "text".into(),
-            text: "body".into(),
-        }],
-    };
-
-    let record = rows::row_to_record(&source, &row, 7).unwrap().unwrap();
-    assert!(record.id.ends_with("::row_7"));
-}
-
-#[test]
 fn locate_shard_returns_none_for_out_of_range_index() {
     let shards = vec![ShardIndex {
         path: PathBuf::from("a.ndjson"),
@@ -995,50 +823,6 @@ fn locate_shard_returns_none_for_out_of_range_index() {
     }];
 
     assert!(crate::shard_indexing::locate_shard(&shards, 5).is_none());
-}
-
-#[test]
-fn read_row_batch_errors_when_row_not_mappable_to_shard() {
-    let dir = tempdir().unwrap();
-    let config = test_config(dir.path().to_path_buf());
-    let source = test_source(config);
-    {
-        let mut state = source.state.lock().unwrap();
-        state.materialized_rows = 1;
-        state.shards.clear();
-    }
-
-    let mut out = Vec::new();
-    let err = rows::read_row_batch(&source, &[0], &mut out, Some(1));
-    assert!(err.is_err());
-}
-
-#[test]
-fn read_row_batch_errors_when_parquet_local_offsets_are_missing() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("rows.parquet");
-    write_parquet_fixture(&path, &[("id-1", "text-1")]);
-    let config = test_config(dir.path().to_path_buf());
-    let source = test_source(config);
-
-    {
-        let mut state = source.state.lock().unwrap();
-        state.materialized_rows = 3;
-        state.shards = vec![ShardIndex {
-            path,
-            global_start: 0,
-            row_count: 3,
-            parquet_row_groups: vec![(0, 3)],
-            remote_candidate: None,
-        }];
-    }
-
-    let mut out = Vec::new();
-    let err = rows::read_row_batch(&source, &[2], &mut out, Some(1)).unwrap_err();
-    assert!(matches!(
-        err,
-        SamplerError::SourceUnavailable { ref reason, .. } if reason.contains("parquet rows missing")
-    ));
 }
 
 #[test]
@@ -1528,28 +1312,6 @@ fn download_next_remote_shard_skips_zero_row_download() {
 }
 
 #[test]
-fn read_row_batch_errors_when_parquet_reader_cannot_open_file() {
-    let dir = tempdir().unwrap();
-    let config = test_config(dir.path().to_path_buf());
-    let source = test_source(config);
-    {
-        let mut state = source.state.lock().unwrap();
-        state.materialized_rows = 1;
-        state.shards = vec![ShardIndex {
-            path: dir.path().join("missing.parquet"),
-            global_start: 0,
-            row_count: 1,
-            parquet_row_groups: vec![(0, 1)],
-            remote_candidate: None,
-        }];
-    }
-
-    let mut out = Vec::new();
-    let err = rows::read_row_batch(&source, &[0], &mut out, Some(1));
-    assert!(err.is_err());
-}
-
-#[test]
 fn shard_size_bytes_returns_zero_for_missing_path() {
     let dir = tempdir().unwrap();
     let missing = dir.path().join("missing.file");
@@ -1592,40 +1354,6 @@ fn materialize_local_file_replaces_target_when_size_differs() {
 }
 
 #[test]
-fn row_to_record_preserves_explicit_timestamp() {
-    let dir = tempdir().unwrap();
-    let config = test_config(dir.path().to_path_buf());
-    let source = test_source(config);
-    let ts = Utc::now();
-    let row = RowView {
-        row_id: Some("r1".into()),
-        timestamp: Some(ts),
-        text_fields: vec![RowTextField {
-            name: "text".into(),
-            text: "alpha".into(),
-        }],
-    };
-
-    let record = rows::row_to_record(&source, &row, 0).unwrap().unwrap();
-    assert_eq!(record.created_at, ts);
-    assert_eq!(record.updated_at, ts);
-}
-
-#[test]
-fn parse_row_text_columns_accept_numeric_values() {
-    let dir = tempdir().unwrap();
-    let mut config = test_config(dir.path().to_path_buf());
-    config.text_columns = vec!["score".into()];
-    let source = test_source(config);
-
-    let row = rows::parse_row(&source, 0, &json!({"score": 123}))
-        .unwrap()
-        .unwrap();
-    assert_eq!(row.text_fields.len(), 1);
-    assert_eq!(row.text_fields[0].text, "123");
-}
-
-#[test]
 fn refresh_limit_none_reads_up_to_total() {
     let dir = tempdir().unwrap();
     let simdr_path = dir.path().join("rows.simdr");
@@ -1645,22 +1373,6 @@ fn refresh_limit_none_reads_up_to_total() {
 
     let snapshot = source.refresh(None, None).unwrap();
     assert_eq!(snapshot.records.len(), 2);
-}
-
-#[test]
-fn read_row_batch_skips_unavailable_indices_without_error() {
-    let dir = tempdir().unwrap();
-    let config = test_config(dir.path().to_path_buf());
-    let source = test_source(config);
-    {
-        let mut state = source.state.lock().unwrap();
-        state.materialized_rows = 0;
-        state.remote_candidates = Some(Vec::new());
-    }
-
-    let mut out = Vec::new();
-    rows::read_row_batch(&source, &[0, 1], &mut out, Some(2)).unwrap();
-    assert!(out.is_empty());
 }
 
 #[test]
@@ -1707,31 +1419,6 @@ fn parquet_row_group_map_and_index_single_shard_cover_success_path() {
     let shard = index_single_shard(&config, &path, 0).unwrap().0.unwrap();
     assert_eq!(shard.row_count, 3);
     // All shards are now .simdr stores with O(1) random access
-}
-
-#[test]
-fn read_row_batch_reads_parquet_rows_and_uses_cache_on_repeat() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("rows.parquet");
-    write_parquet_fixture(&path, &[("r10", "ten"), ("r11", "eleven")]);
-
-    let config = test_config(dir.path().to_path_buf());
-    let source = test_source(config.clone());
-    let shard = index_single_shard(&config, &path, 0).unwrap().0.unwrap();
-    {
-        let mut state = source.state.lock().unwrap();
-        state.materialized_rows = 2;
-        state.shards = vec![shard];
-    }
-
-    let mut first = Vec::new();
-    rows::read_row_batch(&source, &[0, 1], &mut first, None).unwrap();
-    assert_eq!(first.len(), 2);
-    assert!(first.iter().any(|record| record.id.ends_with("::r10")));
-
-    let mut second = Vec::new();
-    rows::read_row_batch(&source, &[0, 1], &mut second, None).unwrap();
-    assert_eq!(second.len(), 2);
 }
 
 #[test]
@@ -1836,17 +1523,6 @@ fn list_remote_candidates_from_parquet_manifest_uses_test_endpoint_override() {
     assert_eq!(candidates.len(), 1);
     assert!(!sizes.is_empty());
     assert_eq!(matched, 1);
-}
-
-#[test]
-fn config_endpoint_fallback_for_empty_env_values() {
-    // `test_config` overrides endpoints to `TEST_UNREACHABLE_URL` for
-    // network isolation.  This test verifies the DEFAULT values from
-    // `HuggingFaceRowsConfig::new()`, so we call it directly.
-    let dir = tempdir().unwrap();
-
-    let c = HuggingFaceRowsConfig::new("ep_test", "org/dataset", "default", "train", dir.path());
-    assert_eq!(c.parquet_endpoint, HF_PARQUET_DEFAULT_ENDPOINT);
 }
 
 #[test]
@@ -2139,93 +1815,6 @@ fn download_next_remote_shard_parquet_stages_temp_and_persists_store_only() {
     assert_eq!(state.shards.len(), 1);
     assert_eq!(state.shards[0].path, store_target);
     assert_eq!(state.materialized_rows, 2);
-}
-
-// Temp-staged files (with triplet_hf_ prefix) must be removed after
-// transcoding completes — no leaked temp files in the OS temp directory.
-#[test]
-fn transcode_transient_shard_to_store_cleans_up_temp_downloads() {
-    let dir = tempdir().unwrap();
-    let config = test_config(dir.path().to_path_buf());
-    let source = test_source(config.clone());
-
-    // Create a temp file with the triplet_hf_ prefix (simulates a staged download).
-    let temp_parquet = dir.path().join("triplets_hf_aabbccdd00112233_temp.parquet");
-    write_parquet_fixture(&temp_parquet, &[("r1", "hello")]);
-    assert!(temp_parquet.exists(), "temp parquet must exist before test");
-
-    let shard = ShardIndex {
-        path: temp_parquet.clone(),
-        global_start: 0,
-        row_count: 1,
-        parquet_row_groups: vec![(0, 1)],
-        remote_candidate: None,
-    };
-
-    let result =
-        rows::transcode_transient_shard_to_store(&source, &shard).expect("transcode must succeed");
-
-    // Temp file must be gone after transcoding.
-    assert!(
-        !temp_parquet.exists(),
-        "temp download file must be cleaned up after transcode"
-    );
-
-    // Store must still be present.
-    let store_path = result.expect("must yield Some(ShardIndex)").path;
-    assert!(
-        store_path.exists(),
-        "simdr store must exist after transcode"
-    );
-}
-
-// When transcode_transient_shard_to_store takes the early-return path
-// (simdr store already fully populated), it must still delete the input
-// transient file and return a ShardIndex
-#[test]
-fn transcode_transient_shard_to_store_early_return_cleans_up_transient() {
-    let dir = tempdir().unwrap();
-    let config = test_config(dir.path().to_path_buf());
-    let source = test_source(config.clone());
-
-    // Write a parquet fixture (simulates a stale/unconsumed parquet from a
-    // previous run that crashed before the delete step fired).
-    let parquet_path = dir.path().join("stale.parquet");
-    write_parquet_fixture(&parquet_path, &[("r1", "hello"), ("r2", "world")]);
-    assert!(
-        parquet_path.exists(),
-        "parquet fixture must exist before test"
-    );
-
-    // Pre-populate the corresponding simdr store so the function short-circuits.
-    let store_path = shard_store_path_for(&parquet_path);
-    write_simdr_fixture(&store_path, &[("r1", "hello"), ("r2", "world")]);
-    assert!(store_path.exists(), "simdr store must exist before test");
-
-    let shard = ShardIndex {
-        path: parquet_path.clone(),
-        global_start: 0,
-        row_count: 2,
-        parquet_row_groups: vec![(0, 2)],
-        remote_candidate: None,
-    };
-
-    let result =
-        rows::transcode_transient_shard_to_store(&source, &shard).expect("transcode must succeed");
-
-    // Stale parquet must be gone.
-    assert!(
-        !parquet_path.exists(),
-        "stale parquet must be removed on early return"
-    );
-
-    // Simdr store must still be present.
-    assert!(store_path.exists(), "simdr store must survive early return");
-
-    // Returned shard must point to the store.
-    let returned = result.expect("early return must yield Some(ShardIndex)");
-    assert_eq!(returned.path, store_path);
-    assert_eq!(returned.row_count, 2);
 }
 
 #[test]
@@ -2563,49 +2152,6 @@ fn download_next_remote_shard_gz_corrupt_stream_returns_error() {
         SamplerError::SourceUnavailable { .. } => {} // Expected for corrupt stream
         other => panic!("expected SourceUnavailable, got: {other:?}"),
     }
-}
-
-#[test]
-fn remote_url_for_candidate_constructs_correct_urls() {
-    // url:: prefix with full URL: returned as-is.
-    let config = test_config(PathBuf::from("/tmp/snap"));
-    let full_url =
-        format!("url::{HF_DATASETS_BASE_URL}/org/ds/resolve/main/train/part-000.parquet");
-    let result = remote_url_for_candidate(&config, &full_url);
-    assert_eq!(
-        result,
-        format!("{HF_DATASETS_BASE_URL}/org/ds/resolve/main/train/part-000.parquet")
-    );
-
-    // url:: prefix with relative path (Hub API format): CDN prefix is constructed.
-    let hub_relative = "url::data/train-00000-of-00001.parquet";
-    let result = remote_url_for_candidate(&config, hub_relative);
-    assert_eq!(
-        result,
-        format!(
-            "{HF_DATASETS_BASE_URL}/org/dataset/resolve/main/data/train-00000-of-00001.parquet"
-        )
-    );
-
-    // Bare path (hf-hub sibling fallback): CDN prefix is prepended.
-    let bare_path = "data/train-00000-of-00001.parquet";
-    let result = remote_url_for_candidate(&config, bare_path);
-    assert_eq!(
-        result,
-        format!(
-            "{HF_DATASETS_BASE_URL}/org/dataset/resolve/main/data/train-00000-of-00001.parquet"
-        )
-    );
-
-    // Bare path with leading slash.
-    let bare_path = "/data/train-00000-of-00001.parquet";
-    let result = remote_url_for_candidate(&config, bare_path);
-    assert_eq!(
-        result,
-        format!(
-            "{HF_DATASETS_BASE_URL}/org/dataset/resolve/main/data/train-00000-of-00001.parquet"
-        )
-    );
 }
 
 #[test]
@@ -2981,100 +2527,6 @@ fn expansion_headroom_uses_sampler_ingestion_max_records_when_configured() {
     };
     source.configure_sampler(&sampler);
     assert_eq!(source.effective_expansion_headroom_rows(), 21);
-}
-
-#[test]
-fn value_to_text_handles_scalar_and_structured_values() {
-    assert_eq!(rows::value_to_text(&json!(null)), None);
-    assert_eq!(rows::value_to_text(&json!("   ")), None);
-    assert_eq!(rows::value_to_text(&json!("hello")), Some("hello".into()));
-    assert_eq!(rows::value_to_text(&json!(true)), Some("true".into()));
-    assert_eq!(rows::value_to_text(&json!(3.5)), Some("3.5".into()));
-    assert_eq!(rows::value_to_text(&json!([1, 2])), Some("1".into()));
-}
-
-#[test]
-fn parse_row_uses_explicit_text_columns() {
-    let dir = tempdir().unwrap();
-    let mut config = test_config(dir.path().to_path_buf());
-    config.id_column = Some("id".into());
-    config.text_columns = vec!["title".into(), "body".into()];
-    let source = test_source(config);
-
-    let row = rows::parse_row(
-        &source,
-        5,
-        &json!({
-            "id": "row-5",
-            "title": "Anchor text",
-            "body": "Context text",
-            "flag": true
-        }),
-    )
-    .unwrap()
-    .unwrap();
-
-    // Candidate coalescing: the first non-empty column (title) is selected;
-    // body is never tried because title already yielded a value.
-    assert_eq!(row.row_id.as_deref(), Some("row-5"));
-    assert_eq!(row.text_fields.len(), 1);
-    assert_eq!(row.text_fields[0].name, "title");
-    assert_eq!(row.text_fields[0].text, "Anchor text");
-    assert!(row.text_fields.iter().all(|field| field.name != "id"));
-}
-
-#[test]
-fn parse_row_with_required_columns_skips_when_missing() {
-    let dir = tempdir().unwrap();
-    let mut config = test_config(dir.path().to_path_buf());
-    config.anchor_columns = vec!["anchor".into()];
-    config.positive_columns = vec!["positive".into()];
-    config.context_columns = vec!["context".into()];
-    let source = test_source(config);
-
-    let parsed = rows::parse_row(&source, 0, &json!({"anchor": "x", "context": "z"}));
-    assert!(parsed.unwrap().is_none());
-}
-
-#[test]
-fn parse_row_errors_when_payload_is_not_object() {
-    let dir = tempdir().unwrap();
-    let config = test_config(dir.path().to_path_buf());
-    let source = test_source(config);
-
-    let err = rows::parse_row(&source, 0, &json!("not-an-object"));
-    assert!(err.is_err());
-}
-
-#[test]
-fn row_to_record_builds_expected_sections() {
-    let dir = tempdir().unwrap();
-    let config = test_config(dir.path().to_path_buf());
-    let source = test_source(config);
-    let row = RowView {
-        row_id: Some("abc".into()),
-        timestamp: Some(Utc::now()),
-        text_fields: vec![
-            RowTextField {
-                name: "title".into(),
-                text: "anchor".into(),
-            },
-            RowTextField {
-                name: "pos".into(),
-                text: "positive".into(),
-            },
-            RowTextField {
-                name: "ctx".into(),
-                text: "extra".into(),
-            },
-        ],
-    };
-
-    let record = rows::row_to_record(&source, &row, 1).unwrap().unwrap();
-    assert_eq!(record.sections.len(), 3);
-    assert_eq!(record.sections[0].role, SectionRole::Anchor);
-    assert_eq!(record.sections[1].role, SectionRole::Context);
-    assert_eq!(record.id, "hf_test::abc");
 }
 
 #[test]
@@ -3530,185 +2982,6 @@ fn shuffle_candidates_deterministically_preserves_membership() {
 }
 
 #[test]
-fn parse_row_supports_row_wrapped_payload_and_text_columns() {
-    let dir = tempdir().unwrap();
-    let mut config = test_config(dir.path().to_path_buf());
-    config.text_columns = vec!["headline".into(), "body".into()];
-    config.id_column = Some("rid".into());
-    let source = test_source(config);
-
-    let parsed = rows::parse_row(
-        &source,
-        0,
-        &json!({"row": {"rid": "r-1", "headline": "h", "body": "b"}}),
-    )
-    .unwrap()
-    .unwrap();
-
-    // Candidate coalescing: headline is non-empty so it is selected;
-    // body is not tried.
-    assert_eq!(parsed.row_id.as_deref(), Some("r-1"));
-    assert_eq!(parsed.text_fields.len(), 1);
-    assert_eq!(parsed.text_fields[0].name, "headline");
-}
-
-#[test]
-fn parse_row_returns_none_when_all_positive_or_text_candidates_are_missing() {
-    let dir = tempdir().unwrap();
-
-    // Role mode: all positive_columns candidates absent → row skipped.
-    let mut role_config = test_config(dir.path().to_path_buf());
-    role_config.anchor_columns = vec!["anchor".into()];
-    role_config.positive_columns = vec!["positive".into()];
-    let role_source = test_source(role_config);
-
-    let role_missing = rows::parse_row(&role_source, 0, &json!({"anchor":"a"})).unwrap();
-    assert!(role_missing.is_none());
-
-    // Text-columns mode: a row that lacks all listed candidates → row skipped.
-    let mut text_config = test_config(dir.path().to_path_buf());
-    text_config.text_columns = vec!["title".into(), "body".into()];
-    let text_source = test_source(text_config);
-    // Row has neither "title" nor "body" → no candidate matches → skipped.
-    let text_missing =
-        rows::parse_row(&text_source, 1, &json!({"other_field": "irrelevant"})).unwrap();
-    assert!(text_missing.is_none());
-}
-
-#[test]
-fn parse_row_text_columns_coalesces_to_first_nonempty_candidate() {
-    let dir = tempdir().unwrap();
-    let mut config = test_config(dir.path().to_path_buf());
-    config.text_columns = vec!["title".into(), "body".into()];
-    let source = test_source(config);
-
-    // "title" is empty string → coalesces to "body".
-    let row = rows::parse_row(
-        &source,
-        0,
-        &json!({"title": "", "body": "fallback content"}),
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(row.text_fields.len(), 1);
-    assert_eq!(row.text_fields[0].name, "body");
-    assert_eq!(row.text_fields[0].text, "fallback content");
-
-    // "title" is present and non-empty → it is used; "body" is never tried.
-    let row2 = rows::parse_row(
-        &source,
-        1,
-        &json!({"title": "primary content", "body": "ignored"}),
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(row2.text_fields.len(), 1);
-    assert_eq!(row2.text_fields[0].name, "title");
-    assert_eq!(row2.text_fields[0].text, "primary content");
-}
-
-#[test]
-fn parse_row_positive_columns_coalesces_to_first_nonempty_candidate() {
-    let dir = tempdir().unwrap();
-    let mut config = test_config(dir.path().to_path_buf());
-    config.anchor_columns = vec!["anchor".into()];
-    config.positive_columns = vec!["summary".into(), "body".into()];
-    let source = test_source(config);
-
-    // "summary" is absent → coalesces to "body".
-    let row = rows::parse_row(
-        &source,
-        0,
-        &json!({"anchor": "a", "body": "fallback positive"}),
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(row.text_fields.len(), 2);
-    assert_eq!(row.text_fields[0].name, "anchor");
-    assert_eq!(row.text_fields[1].name, "body");
-
-    // "summary" is present and non-empty → it is used; "body" is ignored.
-    let row2 = rows::parse_row(
-        &source,
-        1,
-        &json!({"anchor": "a", "summary": "chosen", "body": "ignored"}),
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(row2.text_fields.len(), 2);
-    assert_eq!(row2.text_fields[1].name, "summary");
-    assert_eq!(row2.text_fields[1].text, "chosen");
-
-    // Both positive candidates absent → row skipped.
-    let none = rows::parse_row(&source, 2, &json!({"anchor": "a"})).unwrap();
-    assert!(none.is_none());
-}
-
-#[test]
-fn parse_row_anchor_columns_coalesces_to_first_nonempty_candidate() {
-    let dir = tempdir().unwrap();
-    let mut config = test_config(dir.path().to_path_buf());
-    config.anchor_columns = vec!["headline".into(), "title".into()];
-    config.positive_columns = vec!["body".into()];
-    let source = test_source(config);
-
-    // "headline" is absent → coalesces to "title".
-    let row = rows::parse_row(
-        &source,
-        0,
-        &json!({"title": "fallback anchor", "body": "positive text"}),
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(row.text_fields.len(), 2);
-    assert_eq!(row.text_fields[0].name, "title");
-    assert_eq!(row.text_fields[0].text, "fallback anchor");
-
-    // "headline" is present and non-empty → it is used; "title" is ignored.
-    let row2 = rows::parse_row(
-        &source,
-        1,
-        &json!({"headline": "chosen anchor", "title": "ignored", "body": "positive"}),
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(row2.text_fields[0].name, "headline");
-    assert_eq!(row2.text_fields[0].text, "chosen anchor");
-
-    // Both anchor candidates absent → row skipped.
-    let none = rows::parse_row(&source, 2, &json!({"body": "positive only"})).unwrap();
-    assert!(none.is_none());
-}
-
-#[test]
-fn parse_row_errors_when_no_mapping_is_configured() {
-    let dir = tempdir().unwrap();
-    let mut config = test_config(dir.path().to_path_buf());
-    config.id_column = Some("id".into());
-    config.text_columns.clear();
-    let source = test_source(config);
-
-    let parsed = rows::parse_row(&source, 7, &json!({"id":"only-id"}));
-    assert!(matches!(
-        parsed,
-        Err(SamplerError::SourceInconsistent { .. })
-    ));
-}
-
-#[test]
-fn row_to_record_returns_none_for_empty_fields() {
-    let dir = tempdir().unwrap();
-    let config = test_config(dir.path().to_path_buf());
-    let source = test_source(config);
-    let row = RowView {
-        row_id: Some("x".into()),
-        timestamp: None,
-        text_fields: Vec::new(),
-    };
-    assert!(rows::row_to_record(&source, &row, 0).unwrap().is_none());
-}
-
-#[test]
 fn ensure_row_available_handles_materialized_max_and_exhausted_candidates() {
     let dir = tempdir().unwrap();
     let config = test_config(dir.path().to_path_buf());
@@ -3803,64 +3076,6 @@ fn ensure_row_available_skips_past_all_cached_candidates_on_restart() {
             .unwrap_or(0),
         "next_remote_idx must equal candidates.len() when all are cached"
     );
-}
-
-#[test]
-fn read_row_batch_uses_cached_rows_and_respects_limit() {
-    let dir = tempdir().unwrap();
-    let config = test_config(dir.path().to_path_buf());
-    let source = test_source(config.clone());
-
-    {
-        let mut state = source.state.lock().unwrap();
-        state.materialized_rows = 2;
-    }
-
-    let row0 = RowView {
-        row_id: Some("r0".into()),
-        timestamp: Some(Utc::now()),
-        text_fields: vec![RowTextField {
-            name: "text".into(),
-            text: "alpha".into(),
-        }],
-    };
-    let row1 = RowView {
-        row_id: Some("r1".into()),
-        timestamp: Some(Utc::now()),
-        text_fields: vec![RowTextField {
-            name: "text".into(),
-            text: "beta".into(),
-        }],
-    };
-    {
-        let mut cache = source.cache.lock().unwrap();
-        cache.insert(0, row0, config.cache_capacity);
-        cache.insert(1, row1, config.cache_capacity);
-    }
-
-    let mut out = Vec::new();
-    rows::read_row_batch(&source, &[0, 1], &mut out, Some(1)).unwrap();
-    assert_eq!(out.len(), 1);
-}
-
-#[test]
-fn read_row_batch_errors_on_invalid_json_line() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("broken.jsonl");
-    fs::write(&path, b"not-json\n").unwrap();
-
-    let config = test_config(dir.path().to_path_buf());
-    let source = test_source(config.clone());
-    let shard = index_single_shard(&config, &path, 0).unwrap().0.unwrap();
-    {
-        let mut state = source.state.lock().unwrap();
-        state.materialized_rows = 1;
-        state.shards = vec![shard];
-    }
-
-    let mut out = Vec::new();
-    let result = rows::read_row_batch(&source, &[0], &mut out, Some(1));
-    assert!(result.is_err());
 }
 
 #[test]
@@ -4425,35 +3640,6 @@ fn invalidate_eligible_index_resets_cache() {
     assert!(cache.shards.is_empty());
 }
 
-#[test]
-fn write_store_row_count_and_read_store_row_count_roundtrip() {
-    let dir = tempdir().unwrap();
-    let config = test_config(dir.path().to_path_buf());
-    let source = test_source(config);
-    let store_path = dir.path().join("roundtrip.simdr");
-    let store = DataStore::open(&store_path).unwrap();
-    rows::write_store_row_count(&source, &store, 42).unwrap();
-    assert_eq!(rows::read_store_row_count(&source, &store).unwrap(), 42);
-    rows::write_store_row_count(&source, &store, 99).unwrap();
-    assert_eq!(rows::read_store_row_count(&source, &store).unwrap(), 99);
-}
-
-#[test]
-fn read_store_row_count_errors_on_payload_size_mismatch() {
-    let dir = tempdir().unwrap();
-    let config = test_config(dir.path().to_path_buf());
-    let source = test_source(config);
-    let store_path = dir.path().join("bad-meta.simdr");
-    let store = DataStore::open(&store_path).unwrap();
-    store.write(HF_SHARD_STORE_META_ROWS_KEY, b"abc").unwrap();
-    match rows::read_store_row_count(&source, &store) {
-        Err(SamplerError::SourceUnavailable { reason, .. }) => {
-            assert!(reason.contains("payload size"));
-        }
-        other => panic!("expected SourceUnavailable error, got {other:?}"),
-    }
-}
-
 // FIXME: This test passes in isolation, but times out when running with all of the tests.
 //
 // Additional context (may be inaccurate):
@@ -4586,83 +3772,6 @@ fn id_returns_source_id() {
     let config = test_config(dir.path().to_path_buf());
     let source = test_source(config);
     assert_eq!(source.id(), "hf_test");
-}
-
-#[test]
-fn is_store_shard_path_detects_simdr_extension() {
-    assert!(is_store_shard_path(Path::new("shard.simdr")));
-    assert!(is_store_shard_path(Path::new("shard.SIMDR")));
-    assert!(is_store_shard_path(Path::new("shard.SimDr")));
-    assert!(!is_store_shard_path(Path::new("shard.parquet")));
-    assert!(!is_store_shard_path(Path::new("shard.ndjson")));
-    assert!(!is_store_shard_path(Path::new("no-extension")));
-    assert!(!is_store_shard_path(Path::new(".hidden")));
-}
-
-#[test]
-fn resolve_inner_extension_handles_compound_extensions() {
-    // Compound extensions
-    assert_eq!(
-        resolve_inner_extension(Path::new("file.jsonl.gz")),
-        Some("jsonl".to_string())
-    );
-    assert_eq!(
-        resolve_inner_extension(Path::new("file.ndjson.gz")),
-        Some("ndjson".to_string())
-    );
-    assert_eq!(
-        resolve_inner_extension(Path::new("file.txt.gz")),
-        Some("txt".to_string())
-    );
-
-    // Simple extensions
-    assert_eq!(
-        resolve_inner_extension(Path::new("file.parquet")),
-        Some("parquet".to_string())
-    );
-    assert_eq!(
-        resolve_inner_extension(Path::new("file.simdr")),
-        Some("simdr".to_string())
-    );
-    assert_eq!(
-        resolve_inner_extension(Path::new("file.jsonl")),
-        Some("jsonl".to_string())
-    );
-    assert_eq!(
-        resolve_inner_extension(Path::new("file.ndjson")),
-        Some("ndjson".to_string())
-    );
-
-    // No inner format (just .gz)
-    assert_eq!(resolve_inner_extension(Path::new("file.gz")), None);
-
-    // No extension
-    assert_eq!(resolve_inner_extension(Path::new("no-extension")), None);
-
-    // Case insensitive
-    assert_eq!(
-        resolve_inner_extension(Path::new("file.JSONL.GZ")),
-        Some("jsonl".to_string())
-    );
-    assert_eq!(
-        resolve_inner_extension(Path::new("file.PARQUET")),
-        Some("parquet".to_string())
-    );
-
-    // Boundary cases
-    assert_eq!(
-        resolve_inner_extension(Path::new("file.tar.gz")),
-        Some("tar".to_string())
-    );
-    assert_eq!(
-        resolve_inner_extension(Path::new(".hidden.jsonl.gz")),
-        Some("jsonl".to_string())
-    );
-    assert_eq!(
-        resolve_inner_extension(Path::new("file.gz.bak")),
-        Some("bak".to_string())
-    );
-    assert_eq!(resolve_inner_extension(Path::new("")), None);
 }
 
 #[test]
@@ -4894,16 +4003,6 @@ fn managed_hf_list_snapshot_dir_uses_replica_suffix() {
 }
 
 #[test]
-fn remote_url_for_candidate_builds_bare_urls() {
-    let dir = tempdir().unwrap();
-    let config = test_config(dir.path().to_path_buf());
-    let r1 = remote_url_for_candidate(&config, "url::https://server/parquet");
-    assert_eq!(r1, "https://server/parquet");
-    let r2 = remote_url_for_candidate(&config, "data/train-000.parquet");
-    assert!(r2.contains("/resolve/main/"));
-}
-
-#[test]
 fn row_store_row_key_uses_expected_format() {
     let key = row_store_row_key(0);
     assert!(key.starts_with(HF_SHARD_STORE_ROW_PREFIX));
@@ -5057,47 +4156,6 @@ fn first_uncached_order_position_returns_len_when_all_cached() {
     }];
     let pos = crate::download::first_uncached_order_position(&config, &candidates, &order, &shards);
     assert_eq!(pos, 1); // candidates.len() = all cached
-}
-
-#[test]
-fn value_to_text_object_returns_serialized() {
-    let obj = json!({"key": "value"});
-    let result = rows::value_to_text(&obj);
-    assert!(result.is_some());
-    let text = result.unwrap();
-    assert!(text.contains("key"));
-}
-
-#[test]
-fn value_to_text_empty_object_returns_none() {
-    let obj = json!({});
-    let result = rows::value_to_text(&obj);
-    // Empty object serializes to "{}" which is non-empty, so it returns Some
-    assert!(result.is_some());
-}
-
-#[test]
-fn shard_store_row_count_errors_on_payload_size_mismatch() {
-    let dir = tempdir().unwrap();
-    let config = test_config(dir.path().to_path_buf());
-    let source = test_source(config);
-    let store_path = dir.path().join("test.simdr");
-    let store = simd_r_drive::storage_engine::DataStore::open(&store_path).unwrap();
-    // Write a payload that's not 8 bytes (wrong size)
-    store.write(HF_SHARD_STORE_META_ROWS_KEY, b"short").unwrap();
-    let err = rows::read_store_row_count(&source, &store).unwrap_err();
-    assert!(matches!(err, SamplerError::SourceUnavailable { .. }));
-}
-
-#[test]
-fn read_store_row_count_returns_zero_when_no_meta_key() {
-    let dir = tempdir().unwrap();
-    let config = test_config(dir.path().to_path_buf());
-    let source = test_source(config);
-    let store_path = dir.path().join("test.simdr");
-    let store = simd_r_drive::storage_engine::DataStore::open(&store_path).unwrap();
-    // No meta key written — should return 0
-    assert_eq!(rows::read_store_row_count(&source, &store).unwrap(), 0);
 }
 
 #[test]
@@ -5465,153 +4523,6 @@ fn parse_hf_source_line_negative_key() {
 }
 
 #[test]
-fn resolve_json_path_top_level() {
-    let row = json!({"query": "hello", "pos": ["p"], "neg": ["n"]});
-    let obj = row.as_object().unwrap();
-    assert_eq!(rows::resolve_json_path(obj, "query"), Some(json!("hello")));
-}
-
-#[test]
-fn resolve_json_path_nested_dict() {
-    let row = json!({"set": {"query": "hello", "pos": ["p"], "neg": ["n"]}});
-    let obj = row.as_object().unwrap();
-    assert_eq!(
-        rows::resolve_json_path(obj, "set.query"),
-        Some(json!("hello"))
-    );
-    assert_eq!(rows::resolve_json_path(obj, "set.pos"), Some(json!(["p"])));
-}
-
-#[test]
-fn resolve_json_path_missing_returns_none() {
-    let row = json!({"set": {"query": "hello"}});
-    let obj = row.as_object().unwrap();
-    assert_eq!(rows::resolve_json_path(obj, "missing"), None);
-}
-
-#[test]
-fn value_to_text_array_first_element() {
-    assert_eq!(
-        rows::value_to_text(&json!(["single"])),
-        Some("single".into())
-    );
-    assert_eq!(
-        rows::value_to_text(&json!(["a", "b", "c"])),
-        Some("a".into())
-    );
-    assert_eq!(rows::value_to_text(&json!([])), None);
-    assert_eq!(
-        rows::value_to_text(&json!([null, "valid"])),
-        Some("valid".into())
-    );
-}
-
-#[test]
-fn parse_row_dict_dataset() {
-    let dir = tempdir().unwrap();
-    let mut config = test_config(dir.path().to_path_buf());
-    config.anchor_columns = vec!["set.query".into()];
-    config.positive_columns = vec!["set.pos".into()];
-    config.negative_columns = vec!["set.neg".into()];
-    config.id_column = None;
-    let source = test_source(config);
-
-    let row = rows::parse_row(
-        &source,
-        0,
-        &json!({
-            "set": {
-                "query": "What is Rust?",
-                "pos": ["How does Rust work?"],
-                "neg": ["Is Python better?", "What is Java?", "Tell me a joke"]
-            }
-        }),
-    )
-    .unwrap()
-    .unwrap();
-
-    // anchor = set.query, positive = first set.pos element, negatives = expanded set.neg elements
-    assert_eq!(row.text_fields.len(), 5);
-    assert_eq!(row.text_fields[0].name, "set.query");
-    assert_eq!(row.text_fields[0].text, "What is Rust?");
-    assert_eq!(row.text_fields[1].name, "set.pos");
-    assert_eq!(row.text_fields[1].text, "How does Rust work?");
-    assert_eq!(row.text_fields[2].name, "set.neg[0]");
-    assert_eq!(row.text_fields[2].text, "Is Python better?");
-    assert_eq!(row.text_fields[3].name, "set.neg[1]");
-    assert_eq!(row.text_fields[3].text, "What is Java?");
-    assert_eq!(row.text_fields[4].name, "set.neg[2]");
-    assert_eq!(row.text_fields[4].text, "Tell me a joke");
-}
-
-#[test]
-fn parse_row_dict_flat_columns_unaffected() {
-    let dir = tempdir().unwrap();
-    let mut config = test_config(dir.path().to_path_buf());
-    config.anchor_columns = vec!["anchor".into()];
-    config.positive_columns = vec!["positive".into()];
-    config.id_column = Some("id".into());
-    let source = test_source(config);
-
-    // Flat (non-dict) row — should work exactly as before.
-    let row = rows::parse_row(
-        &source,
-        0,
-        &json!({"id": "r1", "anchor": "a", "positive": "p"}),
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(row.text_fields.len(), 2);
-    assert_eq!(row.text_fields[0].text, "a");
-    assert_eq!(row.text_fields[1].text, "p");
-}
-
-#[test]
-fn row_to_record_dict_dataset_sections() {
-    let dir = tempdir().unwrap();
-    let mut config = test_config(dir.path().to_path_buf());
-    config.anchor_columns = vec!["query".into()];
-    config.positive_columns = vec!["pos".into()];
-    config.negative_columns = vec!["neg".into()];
-    let source = test_source(config);
-
-    let row = RowView {
-        row_id: Some("dict:0".into()),
-        timestamp: None,
-        text_fields: vec![
-            RowTextField {
-                name: "query".into(),
-                text: "anchor text".into(),
-            },
-            RowTextField {
-                name: "pos".into(),
-                text: "positive text".into(),
-            },
-            RowTextField {
-                name: "neg[0]".into(),
-                text: "negative one".into(),
-            },
-            RowTextField {
-                name: "neg[1]".into(),
-                text: "negative two".into(),
-            },
-        ],
-    };
-
-    let record = rows::row_to_record(&source, &row, 0).unwrap().unwrap();
-    // First field → Anchor, second → Context (positive), rest → Context (negatives)
-    assert_eq!(record.sections.len(), 4);
-    assert_eq!(record.sections[0].role, SectionRole::Anchor);
-    assert_eq!(record.sections[0].text, "anchor text");
-    assert_eq!(record.sections[1].role, SectionRole::Context);
-    assert_eq!(record.sections[1].text, "positive text");
-    assert_eq!(record.sections[2].role, SectionRole::Context);
-    assert_eq!(record.sections[2].text, "negative one");
-    assert_eq!(record.sections[3].role, SectionRole::Context);
-    assert_eq!(record.sections[3].text, "negative two");
-}
-
-#[test]
 fn parse_hf_source_line_weight_key() {
     let entry = parse_hf_source_line("hf://org/ds anchor=t positive=p weight=0.7").unwrap();
     assert_eq!(entry.weight, Some(0.7));
@@ -5633,14 +4544,6 @@ fn parse_hf_source_line_weight_negative_rejected() {
 fn parse_hf_source_line_weight_invalid_rejected() {
     let err = parse_hf_source_line("hf://org/ds anchor=t positive=p weight=abc").unwrap_err();
     assert!(err.contains("invalid weight"));
-}
-
-#[test]
-fn resolve_json_path_non_object_intermediate_returns_none() {
-    let row = json!({"set": "not-an-object"});
-    let obj = row.as_object().unwrap();
-    // "set" exists but is a string, not an object — inner.get should fail.
-    assert_eq!(rows::resolve_json_path(obj, "set.query"), None);
 }
 
 #[test]
@@ -5739,127 +4642,6 @@ fn manifest_cache_rootjoins_parquet_manifest_dir() {
 }
 
 // ── Phase 1c: transcode_transient_shard_to_store additional paths ──────────
-
-fn write_gzip_fixture(path: &std::path::Path, content: &[u8]) {
-    use flate2::Compression;
-    use flate2::write::GzEncoder;
-    use std::io::Write;
-    let file = std::fs::File::create(path).unwrap();
-    let mut encoder = GzEncoder::new(file, Compression::default());
-    encoder.write_all(content).unwrap();
-    encoder.finish().unwrap();
-}
-
-#[test]
-fn transcode_ndjson_multiple_rows_batch_flush() {
-    let dir = tempdir().unwrap();
-    let config = test_config(dir.path().to_path_buf());
-    let source = test_source(config.clone());
-
-    // Create an .ndjson file with 2000+ rows to cross the 1024 batch flush boundary.
-    let ndjson_path = dir.path().join("big.ndjson");
-    let mut content = String::new();
-    for i in 0..2000 {
-        content.push_str(&format!(r#"{{"id":"r{i}","text":"txt_{i}"}}"#));
-        content.push('\n');
-    }
-    std::fs::write(&ndjson_path, content).unwrap();
-
-    let shard = ShardIndex {
-        path: ndjson_path.clone(),
-        global_start: 0,
-        row_count: 2000,
-        parquet_row_groups: vec![(0, 2000)],
-        remote_candidate: None,
-    };
-
-    let result =
-        rows::transcode_transient_shard_to_store(&source, &shard).expect("transcode must succeed");
-
-    let store_shard = result.expect("must yield Some(ShardIndex)");
-    assert_eq!(store_shard.row_count, 2000);
-    assert!(shard_store_path_for(&ndjson_path).exists());
-}
-
-#[test]
-fn transcode_jsonl_gzip_decompression() {
-    let dir = tempdir().unwrap();
-    let config = test_config(dir.path().to_path_buf());
-    let source = test_source(config.clone());
-
-    let gz_path = dir.path().join("shard.jsonl.gz");
-    let payload = br#"{"id":"r1","text":"hello"}"#;
-    write_gzip_fixture(&gz_path, payload);
-
-    let shard = ShardIndex {
-        path: gz_path.clone(),
-        global_start: 0,
-        row_count: 1,
-        parquet_row_groups: vec![(0, 1)],
-        remote_candidate: None,
-    };
-
-    let result =
-        rows::transcode_transient_shard_to_store(&source, &shard).expect("transcode must succeed");
-
-    let store_shard = result.expect("must yield Some(ShardIndex)");
-    assert_eq!(store_shard.row_count, 1);
-}
-
-#[test]
-fn transcode_empty_shard_returns_none() {
-    let dir = tempdir().unwrap();
-    let config = test_config(dir.path().to_path_buf());
-    let source = test_source(config.clone());
-
-    // Empty .ndjson file (no rows).
-    let ndjson_path = dir.path().join("empty.ndjson");
-    std::fs::write(&ndjson_path, "").unwrap();
-
-    let shard = ShardIndex {
-        path: ndjson_path.clone(),
-        global_start: 0,
-        row_count: 0,
-        parquet_row_groups: Vec::new(),
-        remote_candidate: None,
-    };
-
-    let result =
-        rows::transcode_transient_shard_to_store(&source, &shard).expect("transcode must succeed");
-
-    assert!(result.is_none(), "empty shard should return None");
-}
-
-#[test]
-fn transcode_manifest_dir_file_cleans_up() {
-    let dir = tempdir().unwrap();
-    let config = test_config(dir.path().to_path_buf());
-    let source = test_source(config.clone());
-
-    // Create a .ndjson file inside the _parquet_manifest directory.
-    let manifest_root = source.manifest_cache_root();
-    fs::create_dir_all(&manifest_root).unwrap();
-    let transient_path = manifest_root.join("remote_shard.ndjson");
-    fs::write(&transient_path, r#"{"id":"r1","text":"data"}"#).unwrap();
-    assert!(transient_path.exists());
-
-    let shard = ShardIndex {
-        path: transient_path.clone(),
-        global_start: 0,
-        row_count: 1,
-        parquet_row_groups: vec![(0, 1)],
-        remote_candidate: None,
-    };
-
-    let _result =
-        rows::transcode_transient_shard_to_store(&source, &shard).expect("transcode must succeed");
-
-    // The transient file in manifest dir should be cleaned up after transcode.
-    assert!(
-        !transient_path.exists(),
-        "transient file in manifest dir must be cleaned up"
-    );
-}
 
 // ── Phase 2: shard_indexing.rs tests ───────────────────────────────────────
 
@@ -6316,25 +5098,6 @@ fn target_matches_expected_size_missing_file_returns_false() {
         !target_matches_expected_size(&file, Some(100)),
         "missing file should return false"
     );
-}
-
-#[test]
-fn remote_url_for_candidate_bare_path_resolves_to_cdn() {
-    let dir = tempdir().unwrap();
-    let config = test_config(dir.path().to_path_buf());
-
-    let url = remote_url_for_candidate(&config, "train/shard.ndjson");
-    assert!(url.contains(HF_DATASETS_BASE_URL));
-    assert!(url.contains("train/shard.ndjson"));
-}
-
-#[test]
-fn remote_url_for_candidate_full_url_returned_directly() {
-    let dir = tempdir().unwrap();
-    let config = test_config(dir.path().to_path_buf());
-
-    let url = remote_url_for_candidate(&config, "url::https://cdn.example.com/shard.parquet");
-    assert_eq!(url, "https://cdn.example.com/shard.parquet");
 }
 
 // ── Phase 2: source_core.rs tests ──────────────────────────────────────────

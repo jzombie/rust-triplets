@@ -301,3 +301,60 @@ pub fn hf_source_id_slug(dataset: &str, config: &str, split: &str) -> String {
     }
     slug
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hf_source_id_slug_uses_short_dataset_name() {
+        assert_eq!(
+            hf_source_id_slug("allenai/dolmino-mix-1124", "default", "train"),
+            "dolmino-mix-1124"
+        );
+    }
+
+    #[test]
+    fn hf_source_id_slug_appends_non_default_config() {
+        assert_eq!(
+            hf_source_id_slug("org/dataset", "en", "train"),
+            "dataset.en"
+        );
+    }
+
+    #[test]
+    fn hf_source_id_slug_appends_non_train_split() {
+        assert_eq!(
+            hf_source_id_slug("org/dataset", "default", "validation"),
+            "dataset.validation"
+        );
+    }
+
+    #[test]
+    fn hf_source_id_slug_omits_empty_split() {
+        assert_eq!(hf_source_id_slug("org/dataset", "default", ""), "dataset");
+    }
+
+    #[test]
+    fn hf_source_id_slug_appends_both_config_and_split() {
+        assert_eq!(
+            hf_source_id_slug("org/dataset", "en", "validation"),
+            "dataset.en.validation"
+        );
+    }
+
+    #[test]
+    fn hf_source_id_slug_sanitizes_special_chars() {
+        // dots and slashes in names become dashes
+        assert_eq!(
+            hf_source_id_slug("org/data.set", "v1.0", "train"),
+            "data-set.v1-0"
+        );
+    }
+
+    #[test]
+    fn hf_source_id_slug_no_org_prefix() {
+        // dataset without org/ prefix — falls back to using the full string
+        assert_eq!(hf_source_id_slug("dataset", "default", "train"), "dataset");
+    }
+}

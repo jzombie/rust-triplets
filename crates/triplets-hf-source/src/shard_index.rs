@@ -541,4 +541,15 @@ mod tests {
             "indexed shard should be the .simdr store, not the .ndjson"
         );
     }
+
+    #[test]
+    fn is_store_shard_path_detects_simdr_extension() {
+        assert!(is_store_shard_path(Path::new("shard.simdr")));
+        assert!(is_store_shard_path(Path::new("shard.SIMDR")));
+        assert!(is_store_shard_path(Path::new("shard.SimDr")));
+        assert!(!is_store_shard_path(Path::new("shard.parquet")));
+        assert!(!is_store_shard_path(Path::new("shard.ndjson")));
+        assert!(!is_store_shard_path(Path::new("no-extension")));
+        assert!(!is_store_shard_path(Path::new(".hidden")));
+    }
 }
