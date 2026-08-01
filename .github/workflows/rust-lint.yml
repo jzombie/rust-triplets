@@ -59,8 +59,7 @@ jobs:
                   fi
 
             - name: Check unused dependencies
-              # run: cargo udeps --workspace --all-targets --all-features
-              run: echo "TODO! Re-enable udeps"
+              run: cargo udeps --workspace --all-targets --all-features
 
     linux-lint-tools:
         name: lint (linux tools)
