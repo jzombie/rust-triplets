@@ -768,6 +768,11 @@ struct SourceState {
 }
 
 #[cfg(test)]
+// The unweighted batch-fetch convenience methods (`next_*_batch`,
+// `next_*_batch_for_split`, `prefetch_*_batches`) are deprecated in favor of the
+// `*_with_weights` variants. These tests intentionally exercise the unweighted
+// path, so suppress the deprecation lint here.
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::TripletSampler;

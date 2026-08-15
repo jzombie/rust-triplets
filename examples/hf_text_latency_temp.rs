@@ -1,4 +1,8 @@
 #![cfg_attr(not(feature = "huggingface"), allow(dead_code, unused_imports))]
+// This example intentionally measures both unweighted batch-fetch paths (direct
+// and prefetched) to mirror legacy streaming behavior; the *with_weights variants
+// are the supported API for honoring a data mixture.
+#![allow(deprecated)]
 
 use std::error::Error;
 

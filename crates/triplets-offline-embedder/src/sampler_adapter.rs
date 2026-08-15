@@ -69,6 +69,10 @@ impl BatchProvider for SamplerAdapter {
 }
 
 #[cfg(test)]
+// The unweighted batch-fetch methods on the `Sampler` trait are deprecated in
+// favor of the `*_with_weights` variants. The mocks here implement the trait and
+// delegate their weighted methods to the unweighted ones, so suppress the lint.
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
