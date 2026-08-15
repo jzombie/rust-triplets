@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
 (or is loosely based on) Semantic Versioning.
 
-## Unreleased
+## [0.26.0-alpha] - 2026-08-15
 
 ### Added
 - `SamplerAdapter` (`triplets-offline-embedder`) now carries a per-source
