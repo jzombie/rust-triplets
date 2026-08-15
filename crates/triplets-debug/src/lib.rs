@@ -624,7 +624,8 @@ where
     }
 
     if cli.show_pair_samples {
-        match sampler.next_pair_batch(selected_split) {
+        match sampler.next_pair_batch_with_weights(selected_split, &HashMap::<SourceId, f32>::new())
+        {
             Ok(pair_batch) => {
                 if pair_batch.pairs.is_empty() {
                     println!("Pair sampling produced no results.");
@@ -642,7 +643,8 @@ where
             Err(err) => return Err(err.into()),
         }
     } else if cli.show_text_samples {
-        match sampler.next_text_batch(selected_split) {
+        match sampler.next_text_batch_with_weights(selected_split, &HashMap::<SourceId, f32>::new())
+        {
             Ok(text_batch) => {
                 if text_batch.samples.is_empty() {
                     println!(
@@ -680,7 +682,9 @@ where
 
         for i in 0..batch_count {
             let t0 = Instant::now();
-            match sampler.next_triplet_batch(selected_split) {
+            match sampler
+                .next_triplet_batch_with_weights(selected_split, &HashMap::<SourceId, f32>::new())
+            {
                 Ok(batch) => {
                     let elapsed = t0.elapsed();
                     let n = batch.triplets.len();
@@ -746,7 +750,9 @@ where
             }
         }
     } else {
-        match sampler.next_triplet_batch(selected_split) {
+        match sampler
+            .next_triplet_batch_with_weights(selected_split, &HashMap::<SourceId, f32>::new())
+        {
             Ok(triplet_batch) => {
                 if triplet_batch.triplets.is_empty() {
                     println!(

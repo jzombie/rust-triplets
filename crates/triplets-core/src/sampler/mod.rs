@@ -125,14 +125,32 @@ pub fn chunk_weight(strategy: &ChunkingStrategy, chunk: &RecordChunk) -> f32 {
 /// Public sampling interface for pair, triplet, and text batch generation.
 pub trait Sampler {
     /// Returns a batch of pairs. Consumes the shared epoch cursor for anchor selection.
+    ///
+    /// Samples all sources uniformly. Prefer [`Sampler::next_pair_batch_with_weights`]
+    /// with an explicit per-source weight map to honor a data mixture.
+    #[deprecated(
+        note = "samples all sources uniformly; call next_pair_batch_with_weights(split, &weights) with an explicit per-source weight map to honor a data mixture"
+    )]
     fn next_pair_batch(&self, split: SplitLabel) -> Result<SampleBatch, SamplerError> {
         self.next_pair_batch_with_weights(split, &HashMap::new())
     }
     /// Returns a batch of text samples. Consumes the shared epoch cursor for anchor selection.
+    ///
+    /// Samples all sources uniformly. Prefer [`Sampler::next_text_batch_with_weights`]
+    /// with an explicit per-source weight map to honor a data mixture.
+    #[deprecated(
+        note = "samples all sources uniformly; call next_text_batch_with_weights(split, &weights) with an explicit per-source weight map to honor a data mixture"
+    )]
     fn next_text_batch(&self, split: SplitLabel) -> Result<TextBatch, SamplerError> {
         self.next_text_batch_with_weights(split, &HashMap::new())
     }
     /// Returns a batch of triplets. Consumes the shared epoch cursor for anchor selection.
+    ///
+    /// Samples all sources uniformly. Prefer [`Sampler::next_triplet_batch_with_weights`]
+    /// with an explicit per-source weight map to honor a data mixture.
+    #[deprecated(
+        note = "samples all sources uniformly; call next_triplet_batch_with_weights(split, &weights) with an explicit per-source weight map to honor a data mixture"
+    )]
     fn next_triplet_batch(&self, split: SplitLabel) -> Result<TripletBatch, SamplerError> {
         self.next_triplet_batch_with_weights(split, &HashMap::new())
     }
@@ -2960,6 +2978,13 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     }
 
     /// Return an unweighted pair batch for `split`.
+    ///
+    /// Samples all sources uniformly. Prefer
+    /// [`Self::next_pair_batch_with_weights_for_split`] with an explicit
+    /// per-source weight map to honor a data mixture.
+    #[deprecated(
+        note = "samples all sources uniformly; call next_pair_batch_with_weights_for_split(split, &weights) with an explicit per-source weight map to honor a data mixture"
+    )]
     pub fn next_pair_batch_for_split(
         &self,
         split: SplitLabel,
@@ -2968,11 +2993,25 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     }
 
     /// Return an unweighted text batch for `split`.
+    ///
+    /// Samples all sources uniformly. Prefer
+    /// [`Self::next_text_batch_with_weights_for_split`] with an explicit
+    /// per-source weight map to honor a data mixture.
+    #[deprecated(
+        note = "samples all sources uniformly; call next_text_batch_with_weights_for_split(split, &weights) with an explicit per-source weight map to honor a data mixture"
+    )]
     pub fn next_text_batch_for_split(&self, split: SplitLabel) -> Result<TextBatch, SamplerError> {
         self.next_text_batch_with_weights_for_split(split, &HashMap::new())
     }
 
     /// Return an unweighted triplet batch for `split`.
+    ///
+    /// Samples all sources uniformly. Prefer
+    /// [`Self::next_triplet_batch_with_weights_for_split`] with an explicit
+    /// per-source weight map to honor a data mixture.
+    #[deprecated(
+        note = "samples all sources uniformly; call next_triplet_batch_with_weights_for_split(split, &weights) with an explicit per-source weight map to honor a data mixture"
+    )]
     pub fn next_triplet_batch_for_split(
         &self,
         split: SplitLabel,
@@ -3047,12 +3086,21 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     }
 
     /// Spawn a background prefetcher for triplet batches.
+    ///
+    /// Samples all sources uniformly. Prefer
+    /// [`Self::prefetch_triplet_batches_with_weights`] with an explicit
+    /// per-source weight map to honor a data mixture.
+    #[deprecated(
+        note = "samples all sources uniformly; call prefetch_triplet_batches_with_weights(split, capacity, weights) with an explicit per-source weight map to honor a data mixture"
+    )]
     pub fn prefetch_triplet_batches(
         self: Arc<Self>,
         split: SplitLabel,
         capacity: usize,
     ) -> BatchPrefetcher<TripletBatch> {
-        BatchPrefetcher::new(capacity, move || self.next_triplet_batch_for_split(split))
+        BatchPrefetcher::new(capacity, move || {
+            self.next_triplet_batch_with_weights_for_split(split, &HashMap::new())
+        })
     }
 
     /// Spawn a background prefetcher for weighted triplet batches.
@@ -3068,12 +3116,21 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     }
 
     /// Spawn a background prefetcher for pair batches.
+    ///
+    /// Samples all sources uniformly. Prefer
+    /// [`Self::prefetch_pair_batches_with_weights`] with an explicit
+    /// per-source weight map to honor a data mixture.
+    #[deprecated(
+        note = "samples all sources uniformly; call prefetch_pair_batches_with_weights(split, capacity, weights) with an explicit per-source weight map to honor a data mixture"
+    )]
     pub fn prefetch_pair_batches(
         self: Arc<Self>,
         split: SplitLabel,
         capacity: usize,
     ) -> BatchPrefetcher<SampleBatch> {
-        BatchPrefetcher::new(capacity, move || self.next_pair_batch_for_split(split))
+        BatchPrefetcher::new(capacity, move || {
+            self.next_pair_batch_with_weights_for_split(split, &HashMap::new())
+        })
     }
 
     /// Spawn a background prefetcher for weighted pair batches.
@@ -3089,12 +3146,21 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     }
 
     /// Spawn a background prefetcher for text batches.
+    ///
+    /// Samples all sources uniformly. Prefer
+    /// [`Self::prefetch_text_batches_with_weights`] with an explicit
+    /// per-source weight map to honor a data mixture.
+    #[deprecated(
+        note = "samples all sources uniformly; call prefetch_text_batches_with_weights(split, capacity, weights) with an explicit per-source weight map to honor a data mixture"
+    )]
     pub fn prefetch_text_batches(
         self: Arc<Self>,
         split: SplitLabel,
         capacity: usize,
     ) -> BatchPrefetcher<TextBatch> {
-        BatchPrefetcher::new(capacity, move || self.next_text_batch_for_split(split))
+        BatchPrefetcher::new(capacity, move || {
+            self.next_text_batch_with_weights_for_split(split, &HashMap::new())
+        })
     }
 
     /// Spawn a background prefetcher for weighted text batches.
@@ -3158,7 +3224,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
 
 impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> Sampler for TripletSampler<S> {
     fn next_pair_batch(&self, split: SplitLabel) -> Result<SampleBatch, SamplerError> {
-        self.next_pair_batch_for_split(split)
+        self.next_pair_batch_with_weights_for_split(split, &HashMap::new())
     }
 
     fn next_pair_batch_with_weights(
@@ -3170,7 +3236,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> Sampler for 
     }
 
     fn next_text_batch(&self, split: SplitLabel) -> Result<TextBatch, SamplerError> {
-        self.next_text_batch_for_split(split)
+        self.next_text_batch_with_weights_for_split(split, &HashMap::new())
     }
 
     fn next_text_batch_with_weights(
@@ -3182,7 +3248,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> Sampler for 
     }
 
     fn next_triplet_batch(&self, split: SplitLabel) -> Result<TripletBatch, SamplerError> {
-        self.next_triplet_batch_for_split(split)
+        self.next_triplet_batch_with_weights_for_split(split, &HashMap::new())
     }
 
     fn next_triplet_batch_with_weights(
