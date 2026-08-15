@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 The format is based on Keep a Changelog and this project adheres to
 (or is loosely based on) Semantic Versioning.
 
+## Unreleased
+
+### Added
+- `SamplerAdapter` (`triplets-offline-embedder`) now carries a per-source
+  `weights` map and forwards it to the sampler's `next_*_batch_with_weights`
+  APIs, so callers can enforce an explicit source mixture (e.g. weighted
+  dataset ratios) through the offline embedder. An empty map degrades to the
+  existing unweighted behavior.
+
 ## [0.25.0-alpha] - 2026-07-17
 
 ### Added
