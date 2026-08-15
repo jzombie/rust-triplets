@@ -30,7 +30,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.25.0-alpha"
+version = "0.26.0-alpha"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 authors = ["Jeremy Harris <jeremy.harris@zenosmosis.com>"]
@@ -63,12 +63,12 @@ thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["rt", "rt-multi-thread", "fs", "io-util"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-triplets = { path = ".", version = "0.25.0-alpha" }
-triplets-core = { path = "crates/triplets-core", version = "0.25.0-alpha" }
-triplets-debug = { path = "crates/triplets-debug", version = "0.25.0-alpha" }
-triplets-hf-source = { path = "crates/triplets-hf-source", version = "0.25.0-alpha" }
-triplets-offline-embedder = { path = "crates/triplets-offline-embedder", version = "0.25.0-alpha" }
-triplets-srd-source = { path = "crates/triplets-srd-source", version = "0.25.0-alpha" }
+triplets = { path = ".", version = "0.26.0-alpha" }
+triplets-core = { path = "crates/triplets-core", version = "0.26.0-alpha" }
+triplets-debug = { path = "crates/triplets-debug", version = "0.26.0-alpha" }
+triplets-hf-source = { path = "crates/triplets-hf-source", version = "0.26.0-alpha" }
+triplets-offline-embedder = { path = "crates/triplets-offline-embedder", version = "0.26.0-alpha" }
+triplets-srd-source = { path = "crates/triplets-srd-source", version = "0.26.0-alpha" }
 walkdir = "2.5.0"
 
 [workspace.metadata.cargo-udeps.ignore]
