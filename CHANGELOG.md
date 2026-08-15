@@ -1,7 +1,7 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-The format is based on Keep a Changelog and this project adheres to
+The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
 (or is loosely based on) Semantic Versioning.
 
 ## Unreleased
@@ -12,6 +12,13 @@ The format is based on Keep a Changelog and this project adheres to
   APIs, so callers can enforce an explicit source mixture (e.g. weighted
   dataset ratios) through the offline embedder. An empty map degrades to the
   existing unweighted behavior.
+
+### Changed
+- Bumped `serde` from 1.0.228 to 1.0.229 (#145)
+- Bumped `serde_json` from 1.0.150 to 1.0.151 (#142)
+- Bumped `thiserror` from 2.0.18 to 2.0.19 (#144)
+- Bumped `clap` from 4.6.1 to 4.6.2 (#143)
+- Bumped `tokio` from 1.52.3 to 1.53.0 (#146)
 
 ## [0.25.0-alpha] - 2026-07-17
 
