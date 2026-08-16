@@ -1,3 +1,9 @@
+// These tests intentionally exercise the deprecated unweighted batch-fetch
+// convenience methods (next_*_batch, next_*_batch_for_split, prefetch_*_batches)
+// to validate uniform sampling. The *with_weights variants are the supported API
+// for honoring a data mixture.
+#![allow(deprecated)]
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 

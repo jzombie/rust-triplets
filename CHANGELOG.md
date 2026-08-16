@@ -20,6 +20,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - Bumped `clap` from 4.6.1 to 4.6.2 (#143)
 - Bumped `tokio` from 1.52.3 to 1.53.0 (#146)
 
+### Deprecated
+- Deprecated the unweighted batch-fetch methods on the `Sampler` trait
+  (`next_pair_batch`, `next_text_batch`, `next_triplet_batch`) and on
+  `TripletSampler` (`next_pair_batch_for_split`, `next_text_batch_for_split`,
+  `next_triplet_batch_for_split`, `prefetch_pair_batches`, `prefetch_text_batches`,
+  `prefetch_triplet_batches`). These sample all sources uniformly; use the
+  `*_with_weights` variants with an explicit per-source weight map to honor a
+  data mixture.
+
 ## [0.25.0-alpha] - 2026-07-17
 
 ### Added

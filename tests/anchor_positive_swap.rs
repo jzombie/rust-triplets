@@ -1,3 +1,9 @@
+// These tests intentionally exercise the deprecated unweighted batch-fetch
+// convenience methods (next_*_batch, next_*_batch_for_split, prefetch_*_batches)
+// to validate uniform sampling. The *with_weights variants are the supported API
+// for honoring a data mixture.
+#![allow(deprecated)]
+
 //! Tests for the deterministic 50 % anchor/positive swap applied at triplet finalization.
 //!
 //! # Background
