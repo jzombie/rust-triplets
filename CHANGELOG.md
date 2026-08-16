@@ -1,8 +1,33 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-The format is based on Keep a Changelog and this project adheres to
+The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
 (or is loosely based on) Semantic Versioning.
+
+## [0.26.0-alpha] - 2026-08-15
+
+### Added
+- `SamplerAdapter` (`triplets-offline-embedder`) now carries a per-source
+  `weights` map and forwards it to the sampler's `next_*_batch_with_weights`
+  APIs, so callers can enforce an explicit source mixture (e.g. weighted
+  dataset ratios) through the offline embedder. An empty map degrades to the
+  existing unweighted behavior.
+
+### Changed
+- Bumped `serde` from 1.0.228 to 1.0.229 (#145)
+- Bumped `serde_json` from 1.0.150 to 1.0.151 (#142)
+- Bumped `thiserror` from 2.0.18 to 2.0.19 (#144)
+- Bumped `clap` from 4.6.1 to 4.6.2 (#143)
+- Bumped `tokio` from 1.52.3 to 1.53.0 (#146)
+
+### Deprecated
+- Deprecated the unweighted batch-fetch methods on the `Sampler` trait
+  (`next_pair_batch`, `next_text_batch`, `next_triplet_batch`) and on
+  `TripletSampler` (`next_pair_batch_for_split`, `next_text_batch_for_split`,
+  `next_triplet_batch_for_split`, `prefetch_pair_batches`, `prefetch_text_batches`,
+  `prefetch_triplet_batches`). These sample all sources uniformly; use the
+  `*_with_weights` variants with an explicit per-source weight map to honor a
+  data mixture.
 
 ## [0.25.0-alpha] - 2026-07-17
 

@@ -1,8 +1,9 @@
 //! Adapter bridging a [`Sampler`](triplets_core::Sampler) trait object to the [`BatchProvider`] trait.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use triplets_core::{Sampler, SplitLabel};
+use triplets_core::{Sampler, SourceId, SplitLabel};
 use triplets_srd_source::srd_triplet::SrdMode;
 
 use crate::sampler_prefetcher::{filter_pair_batch, filter_triplet_batch};
@@ -11,11 +12,19 @@ use crate::traits::{BatchProvider, Result, SamplerBatch, SchedulerError};
 /// Adapter that routes batch-fetching calls to a [`Sampler`] trait object
 /// and converts the core [`SampleBatch`](triplets_core::data::SampleBatch) / [`TripletBatch`](triplets_core::data::TripletBatch) types into the
 /// scheduler's [`SamplerBatch`].
+///
+/// When `weights` is non-empty, per-source weights are forwarded to the
+/// sampler's `*_with_weights` APIs so the caller's source mixture is honored.
+/// An empty `weights` map degrades to exactly the unweighted behavior
+/// (`triplets-core` resolves missing keys to weight 1.0), so the adapter is
+/// safe to use unconditionally.
 pub struct SamplerAdapter {
     /// The underlying sampler (trait object for testability).
     pub sampler: Arc<dyn Sampler + Send + Sync>,
     /// Pair or triplet output mode.
     pub mode: SrdMode,
+    /// Per-source weights keyed by source id (empty = unweighted).
+    pub weights: HashMap<SourceId, f32>,
 }
 
 impl BatchProvider for SamplerAdapter {
@@ -24,7 +33,7 @@ impl BatchProvider for SamplerAdapter {
             SrdMode::Pair => {
                 let batch = self
                     .sampler
-                    .next_pair_batch(split)
+                    .next_pair_batch_with_weights(split, &self.weights)
                     .map_err(|e| SchedulerError::Msg(format!("sampler error: {e}")))?;
                 if batch.pairs.is_empty() {
                     return Ok(None);
@@ -38,7 +47,7 @@ impl BatchProvider for SamplerAdapter {
             SrdMode::Triplet => {
                 let batch = self
                     .sampler
-                    .next_triplet_batch(split)
+                    .next_triplet_batch_with_weights(split, &self.weights)
                     .map_err(|e| SchedulerError::Msg(format!("sampler error: {e}")))?;
                 if batch.triplets.is_empty() {
                     return Ok(None);
@@ -60,6 +69,10 @@ impl BatchProvider for SamplerAdapter {
 }
 
 #[cfg(test)]
+// The unweighted batch-fetch methods on the `Sampler` trait are deprecated in
+// favor of the `*_with_weights` variants. The mocks here implement the trait and
+// delegate their weighted methods to the unweighted ones, so suppress the lint.
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
@@ -89,6 +102,8 @@ mod tests {
         pair_batch: Option<SampleBatch>,
         triplet_batch: Option<TripletBatch>,
         save_called: std::sync::atomic::AtomicBool,
+        last_pair_weights: std::sync::Mutex<Option<HashMap<SourceId, f32>>>,
+        last_triplet_weights: std::sync::Mutex<Option<HashMap<SourceId, f32>>>,
     }
 
     impl MockSampler {
@@ -127,6 +142,8 @@ mod tests {
                     }],
                 }),
                 save_called: std::sync::atomic::AtomicBool::new(false),
+                last_pair_weights: std::sync::Mutex::new(None),
+                last_triplet_weights: std::sync::Mutex::new(None),
             }
         }
 
@@ -171,8 +188,9 @@ mod tests {
         fn next_pair_batch_with_weights(
             &self,
             split: SplitLabel,
-            _weights: &HashMap<SourceId, f32>,
+            weights: &HashMap<SourceId, f32>,
         ) -> std::result::Result<SampleBatch, SamplerError> {
+            *self.last_pair_weights.lock().unwrap() = Some(weights.clone());
             self.next_pair_batch(split)
         }
 
@@ -187,8 +205,9 @@ mod tests {
         fn next_triplet_batch_with_weights(
             &self,
             split: SplitLabel,
-            _weights: &HashMap<SourceId, f32>,
+            weights: &HashMap<SourceId, f32>,
         ) -> std::result::Result<TripletBatch, SamplerError> {
+            *self.last_triplet_weights.lock().unwrap() = Some(weights.clone());
             self.next_triplet_batch(split)
         }
 
@@ -207,6 +226,7 @@ mod tests {
         let adapter = SamplerAdapter {
             sampler: Arc::new(MockSampler::new()),
             mode: SrdMode::Pair,
+            weights: HashMap::new(),
         };
         let batch = adapter.next_batch(SplitLabel::Train).unwrap();
         let batch = batch.expect("should have batch");
@@ -227,6 +247,7 @@ mod tests {
         let adapter = SamplerAdapter {
             sampler: Arc::new(MockSampler::new()),
             mode: SrdMode::Triplet,
+            weights: HashMap::new(),
         };
         let batch = adapter.next_batch(SplitLabel::Train).unwrap();
         let batch = batch.expect("should have batch");
@@ -246,6 +267,7 @@ mod tests {
         let adapter = SamplerAdapter {
             sampler: Arc::new(MockSampler::with_empty_pairs()),
             mode: SrdMode::Pair,
+            weights: HashMap::new(),
         };
         let batch = adapter.next_batch(SplitLabel::Train).unwrap();
         assert!(batch.is_none());
@@ -256,6 +278,7 @@ mod tests {
         let adapter = SamplerAdapter {
             sampler: Arc::new(MockSampler::with_empty_triplets()),
             mode: SrdMode::Triplet,
+            weights: HashMap::new(),
         };
         let batch = adapter.next_batch(SplitLabel::Train).unwrap();
         assert!(batch.is_none());
@@ -267,6 +290,7 @@ mod tests {
         let adapter = SamplerAdapter {
             sampler: Arc::new(mock),
             mode: SrdMode::Pair,
+            weights: HashMap::new(),
         };
         adapter.save_state().unwrap();
         // The mock's save_called would be true if we could access it,
@@ -321,8 +345,55 @@ mod tests {
         let adapter = SamplerAdapter {
             sampler: Arc::new(FailingSampler),
             mode: SrdMode::Pair,
+            weights: HashMap::new(),
         };
         let err = adapter.next_batch(SplitLabel::Train).unwrap_err();
         assert!(err.to_string().contains("sampler error"));
+    }
+
+    #[test]
+    fn empty_weights_forwarded_as_empty_map() {
+        let mock = MockSampler::new();
+        let adapter = SamplerAdapter {
+            sampler: Arc::new(mock),
+            mode: SrdMode::Pair,
+            weights: HashMap::new(),
+        };
+        let batch = adapter.next_batch(SplitLabel::Train).unwrap();
+        assert!(batch.is_some(), "empty weights must still produce a batch");
+    }
+
+    #[test]
+    fn populated_weights_forwarded_through_pair_and_triplet() {
+        let mut weights = HashMap::new();
+        weights.insert("source_a".into(), 0.6);
+        weights.insert("source_b".into(), 0.2);
+        weights.insert("source_c".into(), 0.2);
+
+        let concrete = Arc::new(MockSampler::new());
+        let adapter = SamplerAdapter {
+            sampler: concrete.clone() as Arc<dyn Sampler + Send + Sync>,
+            mode: SrdMode::Pair,
+            weights: weights.clone(),
+        };
+        adapter.next_batch(SplitLabel::Train).unwrap();
+        assert_eq!(
+            *concrete.last_pair_weights.lock().unwrap(),
+            Some(weights.clone()),
+            "pair weights must be forwarded verbatim"
+        );
+
+        let concrete = Arc::new(MockSampler::new());
+        let adapter = SamplerAdapter {
+            sampler: concrete.clone() as Arc<dyn Sampler + Send + Sync>,
+            mode: SrdMode::Triplet,
+            weights: weights.clone(),
+        };
+        adapter.next_batch(SplitLabel::Train).unwrap();
+        assert_eq!(
+            *concrete.last_triplet_weights.lock().unwrap(),
+            Some(weights),
+            "triplet weights must be forwarded verbatim"
+        );
     }
 }
