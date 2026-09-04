@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
 (or is loosely based on) Semantic Versioning.
 
+## [Unreleased]
+
+### Fixed
+- JSON array `.json` files (e.g. `gbharti/finance-alpaca`) now stream-parse correctly
+  instead of failing on newline splits.
+- Large HuggingFace datasets with >1000 files (e.g. `shash42/forecast-news`) now
+  paginate the Hub API tree endpoint instead of silently returning no shards.
+- `build_hf_sources_with_weights` now returns partial successes with failure details
+  instead of silently dropping failed sources.
+- Weight map entries are only inserted after source initialization succeeds, preventing
+  `InvalidWeight` errors when a source fails.
+- `extract_next_link_url` no longer aborts early on malformed `Link` header segments.
+
 ## [0.26.0-alpha] - 2026-08-15
 
 ### Added
