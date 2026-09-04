@@ -4,7 +4,7 @@
 # Rules:
 # - comments start with '#'
 # - at least one of anchor= positive= context= text= is required per line
-# - accepted keys: anchor= positive= context= text= trust= source_id=
+# - accepted keys: anchor= positive= negative= context= text= trust= source_id=
 # - context= and text= accept comma-delimited columns
 # - anchor= positive= text= coalesce: first non-empty candidate column is used
 # - trust= (optional) overrides the default trust score (0.5); value in [0.0, 1.0]
