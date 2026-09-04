@@ -10,7 +10,7 @@ pub mod download;
 /// in `crates/triplets-hf/tests/huggingface_integration.rs`.
 pub mod test_utils;
 
-pub use builder::{build_hf_sources, build_hf_sources_with_weights};
+pub use builder::{BuildFailure, BuildResult, build_hf_sources, build_hf_sources_with_weights};
 pub use config::HuggingFaceRowsConfig;
 pub use constants::HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE;
 pub use constants::{

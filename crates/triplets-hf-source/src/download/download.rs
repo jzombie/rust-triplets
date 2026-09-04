@@ -1,9 +1,10 @@
 use crate::config::HuggingFaceRowsConfig;
 use crate::constants::{
     ENV_TRIPLETS_HF_WHOAMI_ENDPOINT, HF_DATASETS_BASE_URL, HF_HTTP_CONNECT_TIMEOUT_SECS,
-    HF_HTTP_REQUEST_TIMEOUT_SECS, HF_PARQUET_MANIFEST_DIR, HF_REMOTE_URL_PREFIX,
-    HF_RESOLVE_URL_SEPARATOR, HF_SHARD_CANDIDATE_SEED_TAG, HF_SHARED_RUNTIME_WORKER_THREADS,
-    HF_TEMP_DEFAULT_EXTENSION, HF_TEMP_DOWNLOAD_PREFIX, HF_WHOAMI_DEFAULT_ENDPOINT,
+    HF_HTTP_REQUEST_TIMEOUT_SECS, HF_MAX_PAGINATION_PAGES, HF_PARQUET_MANIFEST_DIR,
+    HF_REMOTE_URL_PREFIX, HF_RESOLVE_URL_SEPARATOR, HF_SHARD_CANDIDATE_SEED_TAG,
+    HF_SHARED_RUNTIME_WORKER_THREADS, HF_TEMP_DEFAULT_EXTENSION, HF_TEMP_DOWNLOAD_PREFIX,
+    HF_WHOAMI_DEFAULT_ENDPOINT,
 };
 #[cfg(not(debug_assertions))]
 use crate::constants::{
@@ -171,22 +172,44 @@ fn whoami_endpoint() -> String {
     HF_WHOAMI_DEFAULT_ENDPOINT.to_string()
 }
 
-async fn fetch_http_body_text(
+/// Extract the next pagination URL from `Link` header(s).
+/// Uses `get_all()` to handle split Link headers across multiple HTTP header lines.
+/// Resolves relative URIs against `request_url` to preserve custom endpoints.
+fn extract_next_link_url(
+    headers: &reqwest::header::HeaderMap,
+    request_url: &str,
+) -> Option<String> {
+    for header in headers.get_all("link") {
+        let Ok(link) = header.to_str() else {
+            continue;
+        };
+        for part in link.split(',') {
+            let lower = part.to_ascii_lowercase();
+            if !(lower.contains("rel=\"next\"") || lower.contains("rel=next")) {
+                continue;
+            }
+            // Use closure to isolate ? operators — malformed segment continues loop
+            let parsed = (|| {
+                let url_str = part.split('<').nth(1)?.split('>').next()?.trim();
+                let base = reqwest::Url::parse(request_url).ok()?;
+                let resolved = base.join(url_str).ok()?;
+                Some(resolved.to_string())
+            })();
+            if parsed.is_some() {
+                return parsed;
+            }
+        }
+    }
+    None
+}
+
+/// Fetch a single page and extract the next pagination URL from the Link header.
+async fn fetch_page_with_next_url(
     http_client: &ClientWithMiddleware,
     source_id: &str,
-    endpoint: &str,
-    query: &[(&str, &str)],
+    url: &str,
     endpoint_label: &str,
-) -> Result<String, SamplerError> {
-    // Build the URL with query parameters, then build a fresh request
-    // and execute it through the middleware client for throttling/retry.
-    // We use url::Url::parse_with_params so the request is built without
-    // creating a throwaway reqwest::Client (Client::new() has no timeouts).
-    let url = reqwest::Url::parse_with_params(endpoint, query.iter().map(|&(k, v)| (k, v)))
-        .map_err(|err| SamplerError::SourceUnavailable {
-            source_id: source_id.to_string(),
-            reason: format!("failed building URL for {endpoint_label}: {err}"),
-        })?;
+) -> Result<(String, Option<String>), SamplerError> {
     let response = http_client
         .get(url)
         .send()
@@ -198,16 +221,17 @@ async fn fetch_http_body_text(
         .error_for_status()
         .map_err(|err| SamplerError::SourceUnavailable {
             source_id: source_id.to_string(),
-            reason: format!("{endpoint_label} returned non-success response: {err}"),
+            reason: format!("{endpoint_label} returned non-success: {err}"),
         })?;
-
-    response
+    let next_url = extract_next_link_url(response.headers(), url);
+    let body = response
         .text()
         .await
         .map_err(|err| SamplerError::SourceUnavailable {
             source_id: source_id.to_string(),
-            reason: format!("failed reading {endpoint_label} response body: {err}"),
-        })
+            reason: format!("failed reading {endpoint_label} body: {err}"),
+        })?;
+    Ok((body, next_url))
 }
 
 /// Return ALL shards from the parquet manifest regardless of what is already cached
@@ -349,7 +373,7 @@ pub(crate) fn list_remote_candidates_from_parquet_manifest_with_runtime(
     // files under the config subdirectory, recursing into subdirectories.
     // Scoped to config_name so we don't pull files from other language
     // configs (e.g. wikimedia/wikipedia/20231101.en should not list .fr).
-    let tree_path = if config.config_name.is_empty() || config.config_name == "default" {
+    let initial_url = if config.config_name.is_empty() || config.config_name == "default" {
         format!("{base}/{}/tree/main?recursive=true", config.dataset_name)
     } else {
         format!(
@@ -357,24 +381,53 @@ pub(crate) fn list_remote_candidates_from_parquet_manifest_with_runtime(
             config.dataset_name, config.config_name
         )
     };
-    let url = tree_path;
+
     info!(
         "[triplets:hf] reading Hub API tree for dataset {}",
         config.dataset_name
     );
-    let body = block_on_http_with_runtime(
-        runtime,
-        config,
-        fetch_http_body_text(
-            http_client,
-            &config.source_id,
-            &url,
-            &[],
-            "Hub tree endpoint",
-        ),
-    )?;
 
-    parse_parquet_manifest_response(config, &body)
+    let mut all_candidates = Vec::new();
+    let mut all_sizes = HashMap::new();
+    let mut total_matched = 0usize;
+    let mut current_url = Some(initial_url);
+    let mut page_count = 0usize;
+
+    while let Some(url) = current_url {
+        if page_count >= HF_MAX_PAGINATION_PAGES {
+            return Err(SamplerError::SourceUnavailable {
+                source_id: config.source_id.clone(),
+                reason: format!(
+                    "pagination limit ({HF_MAX_PAGINATION_PAGES}) reached for dataset='{}'",
+                    config.dataset_name
+                ),
+            });
+        }
+        let (body, next) = block_on_http_with_runtime(
+            runtime,
+            config,
+            fetch_page_with_next_url(
+                http_client,
+                &config.source_id,
+                &url,
+                "Hub tree endpoint",
+            ),
+        )?;
+        let (page_candidates, page_sizes, matched) =
+            parse_parquet_manifest_response(config, &body)?;
+        all_candidates.extend(page_candidates);
+        all_sizes.extend(page_sizes);
+        total_matched += matched;
+        current_url = next;
+        page_count += 1;
+    }
+
+    // CRITICAL: sort after accumulation (required by build_candidate_order)
+    all_candidates.sort();
+    all_candidates.dedup();
+    all_sizes.retain(|k, _| all_candidates.binary_search(k).is_ok());
+
+    Ok((all_candidates, all_sizes, total_matched))
 }
 
 pub(crate) fn parse_parquet_manifest_response(
