@@ -1,8 +1,16 @@
 use super::*;
+use crate::constants::{
+    HF_PARQUET_MANIFEST_DIR, HF_SHARD_STORE_EXTENSION, HF_SHARD_STORE_META_ROWS_KEY,
+    HF_SHARD_STORE_ROW_PREFIX,
+};
 use crate::test_utils::write_parquet_fixture;
 use crate::test_utils::{test_config, write_simdr_fixture};
-use simd_r_drive::traits::DataStoreWriter;
+use simd_r_drive::storage_engine::DataStore;
+use simd_r_drive::storage_engine::traits::DataStoreWriter;
+use std::fs;
+use std::path::{Path, PathBuf};
 use tempfile::tempdir;
+use triplets_core::SamplerError;
 
 #[test]
 fn build_shard_index_ignores_manifest_non_shard_artifacts() {

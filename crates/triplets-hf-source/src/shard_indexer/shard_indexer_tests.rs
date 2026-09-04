@@ -1,8 +1,14 @@
-use super::*;
+use crate::download::candidate_target_path;
+use crate::huggingface_source::EligibleIndexCache;
 use crate::shard_index::index_single_shard;
 use crate::test_utils::{test_config, test_source, write_parquet_fixture, write_simdr_fixture};
+use crate::types::{ShardIndex, SourceState};
+use simd_r_drive::storage_engine::DataStore;
 use std::collections::HashMap;
+use std::fs;
 use std::ops::Deref;
+use std::path::PathBuf;
+use std::sync::Arc;
 use tempfile::tempdir;
 
 #[test]

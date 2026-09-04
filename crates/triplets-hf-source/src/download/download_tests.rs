@@ -1,15 +1,19 @@
 use super::*;
-use crate::constants::HF_DATASETS_BASE_URL;
+use crate::constants::{ENV_TRIPLETS_HF_WHOAMI_ENDPOINT, HF_DATASETS_BASE_URL, HF_REMOTE_URL_PREFIX};
+use crate::shard_index::shard_store_path_for;
+use crate::source_core::HuggingFaceRowSource;
 use crate::test_utils::{
     TEST_UNREACHABLE_URL, TestHttpServer, spawn_one_shot_http, test_config, test_http_client,
     with_env_var, write_simdr_fixture,
 };
 use serde_json::json;
 use serial_test::serial;
+use std::fs;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
+use triplets_core::SamplerError;
 
 #[test]
 fn remote_url_for_candidate_constructs_correct_urls() {

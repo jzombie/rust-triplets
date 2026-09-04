@@ -175,7 +175,7 @@ fn whoami_endpoint() -> String {
 /// Extract the next pagination URL from `Link` header(s).
 /// Uses `get_all()` to handle split Link headers across multiple HTTP header lines.
 /// Resolves relative URIs against `request_url` to preserve custom endpoints.
-fn extract_next_link_url(
+pub(crate) fn extract_next_link_url(
     headers: &reqwest::header::HeaderMap,
     request_url: &str,
 ) -> Option<String> {

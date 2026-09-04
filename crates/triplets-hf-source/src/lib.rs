@@ -1,5 +1,6 @@
 #![doc = include_str!("../README.md")]
 #![warn(missing_docs)]
+#![allow(clippy::module_inception)]
 
 /// Download utilities and HTTP helpers for Hugging Face shard fetching.
 pub mod download;
