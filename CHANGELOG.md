@@ -16,6 +16,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - Weight map entries are only inserted after source initialization succeeds, preventing
   `InvalidWeight` errors when a source fails.
 - `extract_next_link_url` no longer aborts early on malformed `Link` header segments.
+- Updated `h2` from v0.4.13 to v0.4.19 to fix RUSTSEC-2026-0258 (unbounded empty
+  DATA frames vulnerability).
 
 ## [0.26.0-alpha] - 2026-08-15
 
