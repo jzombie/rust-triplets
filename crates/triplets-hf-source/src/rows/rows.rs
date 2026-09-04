@@ -611,9 +611,11 @@ pub(crate) fn transcode_transient_shard_to_store(
                 ),
             })?;
 
-        // BufReader wraps GzDecoder (buffer decompressed output for line-by-line reading)
+        // BufReader::new(GzDecoder::new(BufReader::new(file)))
+        // Outer BufReader buffers decompressed text for line-by-line reading.
+        // Inner BufReader buffers raw disk reads before decompression.
         let mut reader: Box<dyn BufRead> = if is_gzip_path(&shard.path) {
-            Box::new(BufReader::new(GzDecoder::new(file)))
+            Box::new(BufReader::new(GzDecoder::new(BufReader::new(file))))
         } else {
             Box::new(BufReader::new(file))
         };
