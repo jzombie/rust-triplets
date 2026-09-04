@@ -5,6 +5,7 @@ use std::io::{BufRead, BufReader};
 use chrono::{DateTime, Utc};
 use flate2::read::GzDecoder;
 use rayon::prelude::*;
+use serde::de::{Deserializer as _, SeqAccess, Visitor};
 use serde_json::{Value, json};
 use simd_r_drive::storage_engine::DataStore;
 use simd_r_drive::storage_engine::traits::{DataStoreReader, DataStoreWriter};
@@ -428,6 +429,131 @@ pub(crate) fn read_row_batch(
     Ok(())
 }
 
+/// Flush a batch of key-value pairs to the row store.
+fn flush_batch(
+    source: &HuggingFaceRowSource,
+    store: &DataStore,
+    batch: &[(Vec<u8>, Vec<u8>)],
+) -> Result<(), SamplerError> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+    let refs: Vec<(&[u8], &[u8])> = batch
+        .iter()
+        .map(|(key, payload)| (key.as_slice(), payload.as_slice()))
+        .collect();
+    store
+        .batch_write(&refs)
+        .map_err(|err| SamplerError::SourceUnavailable {
+            source_id: source.config.source_id.clone(),
+            reason: format!("row-store batch write failed: {err}"),
+        })?;
+    Ok(())
+}
+
+/// Check if a file path is a `.json` file (not `.jsonl` or `.ndjson`).
+fn is_json_file(path: &std::path::Path) -> bool {
+    resolve_inner_extension(path).is_some_and(|ext| ext == "json")
+}
+
+/// Peek at the first non-whitespace byte of a buffered reader without consuming it.
+fn peek_first_non_whitespace(reader: &mut (impl BufRead + ?Sized)) -> Option<u8> {
+    loop {
+        let buf = reader.fill_buf().ok()?;
+        let &byte = buf.first()?;
+        if byte.is_ascii_whitespace() {
+            reader.consume(1);
+            continue;
+        }
+        return Some(byte);
+    }
+}
+
+/// Visitor that streams JSON array elements one at a time for O(1) memory usage.
+struct StreamingArrayVisitor<'a> {
+    source: &'a HuggingFaceRowSource,
+    shard: &'a ShardIndex,
+    served_rows: &'a mut usize,
+    batch: &'a mut Vec<(Vec<u8>, Vec<u8>)>,
+    store: &'a DataStore,
+}
+
+impl<'de> Visitor<'de> for StreamingArrayVisitor<'_> {
+    type Value = ();
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a JSON array")
+    }
+    fn visit_seq<A>(self, mut seq: A) -> Result<(), A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        while let Some(item) = seq
+            .next_element::<Value>()
+            .map_err(serde::de::Error::custom)?
+        {
+            let absolute_idx = self.shard.global_start.saturating_add(*self.served_rows);
+            // Normalize: object → pass through; scalar → wrap as {"text": "..."}
+            let line_value = if item.is_object() {
+                item
+            } else if let Some(text) = value_to_text(&item) {
+                json!({ "text": text })
+            } else {
+                continue; // skip null/empty values
+            };
+            // Parse row — explicit error mapping
+            let Some(row) = parse_row(self.source, absolute_idx, &line_value)
+                .map_err(serde::de::Error::custom)?
+            else {
+                continue;
+            };
+            let key = row_store_row_key(*self.served_rows);
+            let payload =
+                encode_row_view(self.source, &row).map_err(serde::de::Error::custom)?;
+            self.batch.push((key, payload));
+            *self.served_rows = self.served_rows.saturating_add(1);
+            if self.batch.len() >= 1024 {
+                flush_batch(self.source, self.store, self.batch)
+                    .map_err(serde::de::Error::custom)?;
+                self.batch.clear();
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Transcode a JSON array shard via streaming deserialization for O(1) memory.
+fn transcode_json_array_streaming(
+    source: &HuggingFaceRowSource,
+    shard: &ShardIndex,
+    reader: &mut dyn BufRead,
+    store: &DataStore,
+) -> Result<usize, SamplerError> {
+    let mut batch: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(1024);
+    let mut served_rows = 0usize;
+    {
+        let mut deserializer = serde_json::Deserializer::from_reader(reader);
+        let visitor = StreamingArrayVisitor {
+            source,
+            shard,
+            served_rows: &mut served_rows,
+            batch: &mut batch,
+            store,
+        };
+        deserializer
+            .deserialize_seq(visitor)
+            .map_err(|e| SamplerError::SourceInconsistent {
+                source_id: source.config.source_id.clone(),
+                details: format!(
+                    "failed streaming JSON array from shard {}: {e}",
+                    shard.path.display()
+                ),
+            })?;
+    }
+    // CRITICAL: flush remaining rows after stream ends
+    flush_batch(source, store, &batch)?;
+    Ok(served_rows)
+}
+
 pub(crate) fn transcode_transient_shard_to_store(
     source: &HuggingFaceRowSource,
     shard: &ShardIndex,
@@ -475,7 +601,7 @@ pub(crate) fn transcode_transient_shard_to_store(
     let mut served_rows = 0usize;
 
     if is_gzip_path(&shard.path) || is_transient_text(&shard.path) {
-        // Transcode .jsonl.gz / .jsonl / .ndjson → .simdr store
+        // Transcode .jsonl.gz / .jsonl / .ndjson / .json → .simdr store
         let file =
             std::fs::File::open(&shard.path).map_err(|err| SamplerError::SourceUnavailable {
                 source_id: source.config.source_id.clone(),
@@ -484,65 +610,60 @@ pub(crate) fn transcode_transient_shard_to_store(
                     shard.path.display()
                 ),
             })?;
-        let reader: Box<dyn BufRead> = if is_gzip_path(&shard.path) {
-            Box::new(BufReader::new(GzDecoder::new(file)))
+
+        // BufReader::new(GzDecoder::new(BufReader::new(file)))
+        // Outer BufReader buffers decompressed text for line-by-line reading.
+        // Inner BufReader buffers raw disk reads before decompression.
+        let mut reader: Box<dyn BufRead> = if is_gzip_path(&shard.path) {
+            Box::new(BufReader::new(GzDecoder::new(BufReader::new(file))))
         } else {
             Box::new(BufReader::new(file))
         };
-        let mut batch: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(1024);
 
-        for (local_idx, line_result) in reader.lines().enumerate() {
-            let line = line_result.map_err(|err| SamplerError::SourceUnavailable {
-                source_id: source.config.source_id.clone(),
-                reason: format!("failed reading text shard {}: {err}", shard.path.display()),
-            })?;
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
+        // Non-destructive peek: check first non-whitespace byte without consuming.
+        let is_json_array = is_json_file(&shard.path)
+            && peek_first_non_whitespace(&mut reader).is_some_and(|b| b == b'[');
 
-            // Use served_rows for absolute_idx to maintain bounded, non-overlapping IDs.
-            // local_idx is only used for error reporting in parse_non_parquet_line.
-            let absolute_idx = shard.global_start.saturating_add(served_rows);
-            let line_value = parse_non_parquet_line(source, shard, local_idx, trimmed)?;
+        if is_json_array {
+            // Streaming path — pass &mut *reader to deref Box and avoid ownership issues
+            served_rows = transcode_json_array_streaming(source, shard, &mut *reader, &store)?;
+        } else {
+            // Existing line-by-line path for JSONL/NDJSON/text/gzip.
+            let mut batch: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(1024);
 
-            let Some(row) = parse_row(source, absolute_idx, &line_value)? else {
-                continue;
-            };
-
-            let key = row_store_row_key(served_rows);
-            let payload = encode_row_view(source, &row)?;
-            batch.push((key, payload));
-            served_rows = served_rows.saturating_add(1);
-
-            // Flush batch periodically
-            if batch.len() >= 1024 {
-                let refs: Vec<(&[u8], &[u8])> = batch
-                    .iter()
-                    .map(|(key, payload)| (key.as_slice(), payload.as_slice()))
-                    .collect();
-                store
-                    .batch_write(&refs)
-                    .map_err(|err| SamplerError::SourceUnavailable {
-                        source_id: source.config.source_id.clone(),
-                        reason: format!("row-store batch write failed: {err}"),
-                    })?;
-                batch.clear();
-            }
-        }
-
-        // Flush remaining batch
-        if !batch.is_empty() {
-            let refs: Vec<(&[u8], &[u8])> = batch
-                .iter()
-                .map(|(key, payload)| (key.as_slice(), payload.as_slice()))
-                .collect();
-            store
-                .batch_write(&refs)
-                .map_err(|err| SamplerError::SourceUnavailable {
+            for (local_idx, line_result) in reader.lines().enumerate() {
+                let line = line_result.map_err(|err| SamplerError::SourceUnavailable {
                     source_id: source.config.source_id.clone(),
-                    reason: format!("row-store batch write failed: {err}"),
+                    reason: format!("failed reading text shard {}: {err}", shard.path.display()),
                 })?;
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+
+                // Use served_rows for absolute_idx to maintain bounded, non-overlapping IDs.
+                // local_idx is only used for error reporting in parse_non_parquet_line.
+                let absolute_idx = shard.global_start.saturating_add(served_rows);
+                let line_value = parse_non_parquet_line(source, shard, local_idx, trimmed)?;
+
+                let Some(row) = parse_row(source, absolute_idx, &line_value)? else {
+                    continue;
+                };
+
+                let key = row_store_row_key(served_rows);
+                let payload = encode_row_view(source, &row)?;
+                batch.push((key, payload));
+                served_rows = served_rows.saturating_add(1);
+
+                // Flush batch periodically
+                if batch.len() >= 1024 {
+                    flush_batch(source, &store, &batch)?;
+                    batch.clear();
+                }
+            }
+
+            // Flush remaining batch
+            flush_batch(source, &store, &batch)?;
         }
     } else {
         // Parquet binary decoding
@@ -585,16 +706,7 @@ pub(crate) fn transcode_transient_shard_to_store(
             }
 
             if !batch.is_empty() {
-                let refs: Vec<(&[u8], &[u8])> = batch
-                    .iter()
-                    .map(|(key, payload)| (key.as_slice(), payload.as_slice()))
-                    .collect();
-                store
-                    .batch_write(&refs)
-                    .map_err(|err| SamplerError::SourceUnavailable {
-                        source_id: source.config.source_id.clone(),
-                        reason: format!("row-store batch write failed: {err}"),
-                    })?;
+                flush_batch(source, &store, &batch)?;
             }
         }
     }

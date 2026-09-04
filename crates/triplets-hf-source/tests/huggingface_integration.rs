@@ -2349,12 +2349,12 @@ fn build_hf_sources_with_weights_extracts_weights() {
     let orig_cwd = std::env::current_dir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
 
-    let (sources, weights) = build_hf_sources_with_weights(&roots);
+    let result = build_hf_sources_with_weights(&roots);
     std::env::set_current_dir(&orig_cwd).unwrap();
-    assert_eq!(sources.len(), 2);
-    assert_eq!(weights.len(), 1);
-    assert_eq!(weights.get("src_a"), Some(&0.4));
-    assert!(!weights.contains_key("src_b"));
+    assert_eq!(result.sources.len(), 2);
+    assert_eq!(result.weights.len(), 1);
+    assert_eq!(result.weights.get("src_a"), Some(&0.4));
+    assert!(!result.weights.contains_key("src_b"));
 }
 
 #[test]
@@ -2382,12 +2382,12 @@ fn build_hf_sources_with_weights_auto_derives_source_id() {
     let orig_cwd = std::env::current_dir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
 
-    let (sources, weights) = build_hf_sources_with_weights(&roots);
+    let result = build_hf_sources_with_weights(&roots);
     std::env::set_current_dir(&orig_cwd).unwrap();
-    assert_eq!(sources.len(), 1);
+    assert_eq!(result.sources.len(), 1);
     // Auto-derived slug from "hf://org/my-dataset/default/train" → "my-dataset"
-    assert!(weights.contains_key("my-dataset"));
-    assert_eq!(weights.get("my-dataset"), Some(&1.0));
+    assert!(result.weights.contains_key("my-dataset"));
+    assert_eq!(result.weights.get("my-dataset"), Some(&1.0));
 }
 
 #[test]
@@ -2428,11 +2428,11 @@ fn build_hf_sources_with_weights_skips_invalid_uri() {
     let orig_cwd = std::env::current_dir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
 
-    let (sources, weights) = build_hf_sources_with_weights(&roots);
+    let result = build_hf_sources_with_weights(&roots);
     std::env::set_current_dir(&orig_cwd).unwrap();
     // Invalid URI is skipped, only valid source is built.
-    assert_eq!(sources.len(), 1);
-    assert_eq!(weights.get("valid"), Some(&0.5));
+    assert_eq!(result.sources.len(), 1);
+    assert_eq!(result.weights.get("valid"), Some(&0.5));
 }
 
 #[test]
@@ -2473,10 +2473,10 @@ fn build_hf_sources_with_weights_disambiguates_duplicate_slugs() {
     let orig_cwd = std::env::current_dir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
 
-    let (sources, weights) = build_hf_sources_with_weights(&roots);
+    let result = build_hf_sources_with_weights(&roots);
     std::env::set_current_dir(&orig_cwd).unwrap();
-    assert_eq!(sources.len(), 2);
+    assert_eq!(result.sources.len(), 2);
     // No duplicate slugs since dataset names differ, so no disambiguation needed.
-    assert!(weights.contains_key("a-dataset"));
-    assert!(weights.contains_key("b-dataset"));
+    assert!(result.weights.contains_key("a-dataset"));
+    assert!(result.weights.contains_key("b-dataset"));
 }

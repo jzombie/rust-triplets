@@ -1251,3 +1251,102 @@ fn fetch_remote_size_network_failure_returns_error() {
     );
     assert!(result.is_err(), "HEAD to unreachable URL should fail");
 }
+
+// ── extract_next_link_url ──────────────────────────────────────────────
+
+#[test]
+fn extract_next_link_url_absolute_url() {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        "link",
+        reqwest::header::HeaderValue::from_static(
+            "<https://huggingface.co/api/datasets/org/ds/tree/main?cursor=ABC>; rel=\"next\"",
+        ),
+    );
+    let result = extract_next_link_url(
+        &headers,
+        "https://huggingface.co/api/datasets/org/ds/tree/main?recursive=true",
+    );
+    assert_eq!(
+        result.as_deref(),
+        Some("https://huggingface.co/api/datasets/org/ds/tree/main?cursor=ABC")
+    );
+}
+
+#[test]
+fn extract_next_link_url_relative_resolved_against_request() {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        "link",
+        reqwest::header::HeaderValue::from_static(
+            "</api/datasets/org/ds/tree/main?cursor=XYZ>; rel=\"next\"",
+        ),
+    );
+    let result = extract_next_link_url(
+        &headers,
+        "http://127.0.0.1:54321/api/datasets/org/ds/tree/main?recursive=true",
+    );
+    assert_eq!(
+        result.as_deref(),
+        Some("http://127.0.0.1:54321/api/datasets/org/ds/tree/main?cursor=XYZ")
+    );
+}
+
+#[test]
+fn extract_next_link_url_split_headers() {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.append(
+        "link",
+        reqwest::header::HeaderValue::from_static("<https://example.com/prev>; rel=\"prev\""),
+    );
+    headers.append(
+        "link",
+        reqwest::header::HeaderValue::from_static("<https://example.com/next>; rel=\"next\""),
+    );
+    let result = extract_next_link_url(&headers, "https://example.com/current");
+    assert_eq!(result.as_deref(), Some("https://example.com/next"));
+}
+
+#[test]
+fn extract_next_link_url_malformed_segment_continues() {
+    let mut headers = reqwest::header::HeaderMap::new();
+    // First segment has rel="next" but no angle brackets (malformed)
+    // Second segment is valid
+    headers.append(
+        "link",
+        reqwest::header::HeaderValue::from_static(
+            "rel=\"next\" some garbage, <https://example.com/valid>; rel=\"next\"",
+        ),
+    );
+    let result = extract_next_link_url(&headers, "https://example.com/current");
+    assert_eq!(result.as_deref(), Some("https://example.com/valid"));
+}
+
+#[test]
+fn extract_next_link_url_no_link_header() {
+    let headers = reqwest::header::HeaderMap::new();
+    let result = extract_next_link_url(&headers, "https://example.com/current");
+    assert!(result.is_none());
+}
+
+#[test]
+fn extract_next_link_url_only_prev() {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        "link",
+        reqwest::header::HeaderValue::from_static("<https://example.com/prev>; rel=\"prev\""),
+    );
+    let result = extract_next_link_url(&headers, "https://example.com/current");
+    assert!(result.is_none());
+}
+
+#[test]
+fn extract_next_link_url_rel_next_without_quotes() {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        "link",
+        reqwest::header::HeaderValue::from_static("<https://example.com/next>; rel=next"),
+    );
+    let result = extract_next_link_url(&headers, "https://example.com/current");
+    assert_eq!(result.as_deref(), Some("https://example.com/next"));
+}

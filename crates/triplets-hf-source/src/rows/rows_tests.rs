@@ -5,6 +5,7 @@ use crate::test_utils::{
 };
 use crate::types::ShardIndex;
 use serde_json::json;
+use std::io::{BufReader, Read};
 use tempfile::tempdir;
 
 // ── Phase 1a: coalesce_list_field (pure function) ──────────────────────
@@ -1246,4 +1247,171 @@ fn transcode_manifest_dir_file_cleans_up() {
         !transient_path.exists(),
         "transient file in manifest dir must be cleaned up"
     );
+}
+
+// ── peek_first_non_whitespace ──────────────────────────────────────────
+
+#[test]
+fn peek_first_non_whitespace_starts_with_bracket() {
+    let data = b"[{\"id\": 1}]";
+    let mut reader = BufReader::new(&data[..]);
+    assert_eq!(peek_first_non_whitespace(&mut reader), Some(b'['));
+    // Reader position should not have advanced past the bracket
+    let mut buf = [0u8; 1];
+    reader.read_exact(&mut buf).unwrap();
+    assert_eq!(buf[0], b'[');
+}
+
+#[test]
+fn peek_first_non_whitespace_skips_leading_whitespace() {
+    let data = b"  \n\t {\"id\": 1}";
+    let mut reader = BufReader::new(&data[..]);
+    assert_eq!(peek_first_non_whitespace(&mut reader), Some(b'{'));
+}
+
+#[test]
+fn peek_first_non_whitespace_empty_input() {
+    let data: &[u8] = b"";
+    let mut reader = BufReader::new(data);
+    assert_eq!(peek_first_non_whitespace(&mut reader), None);
+}
+
+#[test]
+fn peek_first_non_whitespace_only_whitespace() {
+    let data = b"   \n  \t  ";
+    let mut reader = BufReader::new(&data[..]);
+    assert_eq!(peek_first_non_whitespace(&mut reader), None);
+}
+
+// ── JSON array streaming ───────────────────────────────────────────────
+
+#[test]
+fn transcode_json_array_streaming_empty_array() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+    let source = test_source(config);
+    let shard_path = dir.path().join("test.json");
+    std::fs::write(&shard_path, "[]").unwrap();
+    let shard = ShardIndex {
+        path: shard_path,
+        global_start: 0,
+        row_count: 0,
+        parquet_row_groups: Vec::new(),
+        remote_candidate: None,
+    };
+    let mut reader = BufReader::new(std::fs::File::open(&shard.path).unwrap());
+    let store_path = crate::shard_index::shard_store_path_for(&shard.path);
+    let store = crate::shard_indexer::get_or_open_shard_store(&source, &store_path).unwrap();
+    let served = transcode_json_array_streaming(&source, &shard, &mut reader, &store).unwrap();
+    assert_eq!(served, 0);
+}
+
+#[test]
+fn transcode_json_array_streaming_single_object() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+    let source = test_source(config);
+    let shard_path = dir.path().join("test.json");
+    std::fs::write(&shard_path, r#"[{"id": "1", "text": "hello"}]"#).unwrap();
+    let shard = ShardIndex {
+        path: shard_path,
+        global_start: 0,
+        row_count: 1,
+        parquet_row_groups: Vec::new(),
+        remote_candidate: None,
+    };
+    let mut reader = BufReader::new(std::fs::File::open(&shard.path).unwrap());
+    let store_path = crate::shard_index::shard_store_path_for(&shard.path);
+    let store = crate::shard_indexer::get_or_open_shard_store(&source, &store_path).unwrap();
+    let served = transcode_json_array_streaming(&source, &shard, &mut reader, &store).unwrap();
+    assert_eq!(served, 1);
+}
+
+#[test]
+fn transcode_json_array_streaming_multiple_objects() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+    let source = test_source(config);
+    let shard_path = dir.path().join("test.json");
+    let data = r#"[{"id":"1","text":"a"},{"id":"2","text":"b"},{"id":"3","text":"c"}]"#;
+    std::fs::write(&shard_path, data).unwrap();
+    let shard = ShardIndex {
+        path: shard_path,
+        global_start: 0,
+        row_count: 3,
+        parquet_row_groups: Vec::new(),
+        remote_candidate: None,
+    };
+    let mut reader = BufReader::new(std::fs::File::open(&shard.path).unwrap());
+    let store_path = crate::shard_index::shard_store_path_for(&shard.path);
+    let store = crate::shard_indexer::get_or_open_shard_store(&source, &store_path).unwrap();
+    let served = transcode_json_array_streaming(&source, &shard, &mut reader, &store).unwrap();
+    assert_eq!(served, 3);
+}
+
+#[test]
+fn transcode_json_array_streaming_scalar_strings() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+    let source = test_source(config);
+    let shard_path = dir.path().join("test.json");
+    std::fs::write(&shard_path, r#"["apple", "banana", "cherry"]"#).unwrap();
+    let shard = ShardIndex {
+        path: shard_path,
+        global_start: 0,
+        row_count: 3,
+        parquet_row_groups: Vec::new(),
+        remote_candidate: None,
+    };
+    let mut reader = BufReader::new(std::fs::File::open(&shard.path).unwrap());
+    let store_path = crate::shard_index::shard_store_path_for(&shard.path);
+    let store = crate::shard_indexer::get_or_open_shard_store(&source, &store_path).unwrap();
+    let served = transcode_json_array_streaming(&source, &shard, &mut reader, &store).unwrap();
+    assert_eq!(served, 3);
+}
+
+#[test]
+fn transcode_json_array_streaming_mixed_scalars_and_objects() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+    let source = test_source(config);
+    let shard_path = dir.path().join("test.json");
+    let data = r#"[{"id":"1","text":"obj"}, "scalar", 42, null, {"id":"2","text":"obj2"}]"#;
+    std::fs::write(&shard_path, data).unwrap();
+    let shard = ShardIndex {
+        path: shard_path,
+        global_start: 0,
+        row_count: 5,
+        parquet_row_groups: Vec::new(),
+        remote_candidate: None,
+    };
+    let mut reader = BufReader::new(std::fs::File::open(&shard.path).unwrap());
+    let store_path = crate::shard_index::shard_store_path_for(&shard.path);
+    let store = crate::shard_indexer::get_or_open_shard_store(&source, &store_path).unwrap();
+    let served = transcode_json_array_streaming(&source, &shard, &mut reader, &store).unwrap();
+    // null is skipped, 4 objects remain (2 objects + "scalar" + 42)
+    assert_eq!(served, 4);
+}
+
+#[test]
+fn transcode_json_array_streaming_trailing_batch_flush() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+    let source = test_source(config);
+    let shard_path = dir.path().join("test.json");
+    // Create exactly 5 items (less than batch size of 1024) to test trailing flush
+    let data = r#"[{"id":"1","text":"a"},{"id":"2","text":"b"},{"id":"3","text":"c"},{"id":"4","text":"d"},{"id":"5","text":"e"}]"#;
+    std::fs::write(&shard_path, data).unwrap();
+    let shard = ShardIndex {
+        path: shard_path,
+        global_start: 0,
+        row_count: 5,
+        parquet_row_groups: Vec::new(),
+        remote_candidate: None,
+    };
+    let mut reader = BufReader::new(std::fs::File::open(&shard.path).unwrap());
+    let store_path = crate::shard_index::shard_store_path_for(&shard.path);
+    let store = crate::shard_indexer::get_or_open_shard_store(&source, &store_path).unwrap();
+    let served = transcode_json_array_streaming(&source, &shard, &mut reader, &store).unwrap();
+    assert_eq!(served, 5);
 }
