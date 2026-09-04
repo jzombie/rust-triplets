@@ -334,7 +334,9 @@ pub fn decode_entry(data: &[u8], emb_dim: usize) -> Result<SrdRecord> {
 
 fn decode_emb_slice(data: &[u8], emb_dim: usize) -> Vec<f32> {
     data[..emb_dim * 4]
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
         .collect()
 }
