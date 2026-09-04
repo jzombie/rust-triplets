@@ -89,6 +89,10 @@ pub const HF_THROTTLE_MAX_CONCURRENT: usize = 4;
 #[allow(dead_code)]
 pub const HF_THROTTLE_MAX_RETRIES: usize = 3;
 
+/// Maximum number of pages to fetch when paginating Hub API tree responses.
+/// Prevents infinite loops from circular cursors or malformed Link headers.
+pub const HF_MAX_PAGINATION_PAGES: usize = 100;
+
 /// Base URL for the Hub API tree endpoint.
 ///
 /// Lists files in a dataset repository: `{base}/{dataset}/tree/main`.

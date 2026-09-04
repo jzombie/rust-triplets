@@ -9,21 +9,53 @@ use reqwest_drive::ClientWithMiddleware;
 use tracing::{info, warn};
 use triplets_core::source::DataSource;
 
-/// Build Hugging Face row sources from a parsed source list.
-pub fn build_hf_sources(roots: &HfListRoots) -> Vec<Box<dyn DataSource + 'static>> {
-    build_hf_sources_with_weights(roots).0
+/// Result of building Hugging Face sources from a source list.
+/// Always returns partial successes alongside failures.
+pub struct BuildResult {
+    /// Successfully initialized data sources.
+    pub sources: Vec<Box<dyn DataSource + 'static>>,
+    /// Per-source weights for weighted scheduling.
+    pub weights: HashMap<String, f32>,
+    /// Sources that failed to initialize.
+    pub failures: Vec<BuildFailure>,
+}
+
+/// Record of a single source that failed to initialize.
+pub struct BuildFailure {
+    /// Index of the failed source in the source list.
+    pub index: usize,
+    /// The `hf://` URI of the failed source.
+    pub uri: String,
+    /// Human-readable error description.
+    pub reason: String,
 }
 
 /// Build Hugging Face row sources from a parsed source list, returning
-/// both the sources and a per-source weight map.
+/// only the successfully initialized sources (legacy backward-compatible API).
+/// Logs all failures for debugging.
+pub fn build_hf_sources(roots: &HfListRoots) -> Vec<Box<dyn DataSource + 'static>> {
+    let result = build_hf_sources_with_weights(roots);
+    for f in &result.failures {
+        warn!(
+            "[triplets:hf] source skipped [{}]: {}: {}",
+            f.index, f.uri, f.reason
+        );
+    }
+    result.sources
+}
+
+/// Build Hugging Face row sources from a parsed source list, returning
+/// ALL results: successfully initialized sources, weights, and failure details.
 ///
 /// Entries with a `weight=` value in their URI are included in the returned
 /// `HashMap<String, f32>` (keyed by source ID).  Callers pass this map to
 /// `Sampler::next_triplet_batch_with_weights` for weighted scheduling.
-pub fn build_hf_sources_with_weights(
-    roots: &HfListRoots,
-) -> (Vec<Box<dyn DataSource + 'static>>, HashMap<String, f32>) {
+///
+/// Callers decide whether to abort or proceed with valid sources when
+/// `failures` is non-empty.
+pub fn build_hf_sources_with_weights(roots: &HfListRoots) -> BuildResult {
     let mut weights = HashMap::new();
+    let mut failures = Vec::new();
 
     // Phase 1: compute auto-slugs for entries that don't have an explicit source_id.
     let base_slugs: Vec<Option<String>> = roots
@@ -59,7 +91,11 @@ pub fn build_hf_sources_with_weights(
             let (dataset, config, split) = match parse_hf_uri(&source.uri) {
                 Ok(v) => v,
                 Err(err) => {
-                    warn!(uri = %source.uri, error = %err, "Skipping Hugging Face source (URI parse failure)");
+                    failures.push(BuildFailure {
+                        index: idx,
+                        uri: source.uri.clone(),
+                        reason: format!("URI parse failure: {err}"),
+                    });
                     return None;
                 }
             };
@@ -82,7 +118,11 @@ pub fn build_hf_sources_with_weights(
             let snapshot_dir = match managed_hf_list_snapshot_dir(&dataset, &config, &split, idx) {
                 Ok(dir) => dir,
                 Err(err) => {
-                    warn!(uri = %source.uri, error = %err, "Skipping Hugging Face source (snapshot dir failure)");
+                    failures.push(BuildFailure {
+                        index: idx,
+                        uri: source.uri.clone(),
+                        reason: format!("snapshot dir failure: {err}"),
+                    });
                     return None;
                 }
             };
@@ -99,21 +139,20 @@ pub fn build_hf_sources_with_weights(
                 match build_http_client(&hf) {
                     Ok(client) => shared_client = Some(client),
                     Err(err) => {
-                        warn!(
-                            uri = %source.uri,
-                            error = %err,
-                            "Skipping source due to HTTP client initialization failure"
-                        );
+                        failures.push(BuildFailure {
+                            index: idx,
+                            uri: source.uri.clone(),
+                            reason: format!("HTTP client init failure: {err}"),
+                        });
                         return None;
                     }
                 }
             }
             hf.http_client = shared_client.clone();
 
-            // Record weight if set.
-            if let Some(w) = source.weight {
-                weights.insert(hf.source_id.clone(), w);
-            }
+            // Save weight for deferred insertion after successful init.
+            let source_weight = source.weight;
+            let source_id_for_weight = hf.source_id.clone();
 
             info!(
                 source_index = idx,
@@ -129,18 +168,36 @@ pub fn build_hf_sources_with_weights(
             );
 
             match HuggingFaceRowSource::new(hf) {
-                Ok(source) => Some(Box::new(source) as Box<dyn DataSource + 'static>),
+                Ok(source) => {
+                    // Only record weight AFTER successful initialization.
+                    if let Some(w) = source_weight {
+                        weights.insert(source_id_for_weight, w);
+                    }
+                    Some(Box::new(source) as Box<dyn DataSource + 'static>)
+                }
                 Err(err) => {
-                    warn!(
-                        uri = %source.uri,
-                        error = %err,
-                        "Skipping Hugging Face source initialization"
-                    );
+                    failures.push(BuildFailure {
+                        index: idx,
+                        uri: source.uri.clone(),
+                        reason: format!("source init failure: {err}"),
+                    });
                     None
                 }
             }
         })
         .collect();
 
-    (sources, weights)
+    if !failures.is_empty() {
+        warn!(
+            "[triplets:hf] {}/{} sources failed to initialize",
+            failures.len(),
+            roots.sources.len()
+        );
+    }
+
+    BuildResult {
+        sources,
+        weights,
+        failures,
+    }
 }
