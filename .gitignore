@@ -2,6 +2,7 @@ target
 .cache
 .DS_Store
 .codegraph
+*.patch
 
 # These might can be removed now
 .sampler_store
