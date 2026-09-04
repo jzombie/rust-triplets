@@ -271,3 +271,61 @@ fn build_hf_sources_collapses_uri_parse_error() {
         });
     });
 }
+
+#[test]
+#[serial(global_state)]
+fn build_hf_sources_with_weights_weight_map_clean_on_failure() {
+    let roots = HfListRoots {
+        source_list: "inline".to_string(),
+        sources: vec![
+            HfSourceEntry {
+                // Invalid URI (only org, no dataset) — will fail to init
+                uri: "hf://onlyorg".to_string(),
+                anchor_columns: vec!["title".to_string()],
+                positive_columns: Vec::new(),
+                negative_columns: Vec::new(),
+                context_columns: Vec::new(),
+                text_columns: Vec::new(),
+                trust: None,
+                weight: Some(0.7),
+                source_id: Some("failing_source".to_string()),
+            },
+            HfSourceEntry {
+                uri: "hf://org/dataset/default/train".to_string(),
+                anchor_columns: vec!["title".to_string()],
+                positive_columns: vec!["body".to_string()],
+                negative_columns: Vec::new(),
+                context_columns: Vec::new(),
+                text_columns: Vec::new(),
+                trust: None,
+                weight: Some(0.3),
+                source_id: None,
+            },
+        ],
+    };
+
+    let temp_root = tempdir().unwrap();
+    let nl = platform_newline();
+    fs::write(
+        temp_root.path().join("Cargo.toml"),
+        format!("[package]{nl}name='tmp'{nl}version='0.0.0'{nl}"),
+    )
+    .unwrap();
+    with_current_dir(temp_root.path(), || {
+        with_env_vars(&[(crate::constants::ENV_TRIPLETS_HF_TOKEN, "")], || {
+            let result = build_hf_sources_with_weights(&roots);
+            // The valid source should be built
+            assert_eq!(result.sources.len(), 1);
+            // The failing source should have a failure record
+            assert_eq!(result.failures.len(), 1);
+            assert_eq!(result.failures[0].uri, "hf://onlyorg");
+            // CRITICAL: weight map must NOT contain the failing source's ID
+            assert!(
+                !result.weights.contains_key("failing_source"),
+                "weight map must not contain failed source"
+            );
+            // Weight map should only contain the valid source
+            assert_eq!(result.weights.len(), 1);
+        });
+    });
+}
