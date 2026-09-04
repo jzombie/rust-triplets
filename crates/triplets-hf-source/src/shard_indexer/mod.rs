@@ -1,14 +1,13 @@
 pub mod shard_indexer;
-pub(crate) use shard_indexer::{
-    candidate_store_path, open_shard_store, get_or_open_shard_store,
-    prune_store_cache_to_shards, invalidate_eligible_index,
-    enforce_disk_cap_locked, manifest_usage_bytes_locked,
-    locate_shard, locate_parquet_group,
-};
 #[cfg(test)]
 pub(crate) use shard_indexer::{
-    recompute_shard_offsets, sync_shard_state_from_disk_locked,
-    shard_signature, build_eligible_rows_from_shards, eligible_rows,
+    build_eligible_rows_from_shards, eligible_rows, recompute_shard_offsets, shard_signature,
+    sync_shard_state_from_disk_locked,
+};
+pub(crate) use shard_indexer::{
+    candidate_store_path, enforce_disk_cap_locked, get_or_open_shard_store,
+    invalidate_eligible_index, locate_parquet_group, locate_shard, manifest_usage_bytes_locked,
+    open_shard_store, prune_store_cache_to_shards,
 };
 
 #[cfg(test)]

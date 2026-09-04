@@ -1,5 +1,7 @@
 use super::*;
-use crate::constants::{ENV_TRIPLETS_HF_WHOAMI_ENDPOINT, HF_DATASETS_BASE_URL, HF_REMOTE_URL_PREFIX};
+use crate::constants::{
+    ENV_TRIPLETS_HF_WHOAMI_ENDPOINT, HF_DATASETS_BASE_URL, HF_REMOTE_URL_PREFIX,
+};
 use crate::shard_index::shard_store_path_for;
 use crate::source_core::HuggingFaceRowSource;
 use crate::test_utils::{

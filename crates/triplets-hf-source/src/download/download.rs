@@ -406,12 +406,7 @@ pub(crate) fn list_remote_candidates_from_parquet_manifest_with_runtime(
         let (body, next) = block_on_http_with_runtime(
             runtime,
             config,
-            fetch_page_with_next_url(
-                http_client,
-                &config.source_id,
-                &url,
-                "Hub tree endpoint",
-            ),
+            fetch_page_with_next_url(http_client, &config.source_id, &url, "Hub tree endpoint"),
         )?;
         let (page_candidates, page_sizes, matched) =
             parse_parquet_manifest_response(config, &body)?;

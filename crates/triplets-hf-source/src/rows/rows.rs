@@ -507,8 +507,7 @@ impl<'de> Visitor<'de> for StreamingArrayVisitor<'_> {
                 continue;
             };
             let key = row_store_row_key(*self.served_rows);
-            let payload =
-                encode_row_view(self.source, &row).map_err(serde::de::Error::custom)?;
+            let payload = encode_row_view(self.source, &row).map_err(serde::de::Error::custom)?;
             self.batch.push((key, payload));
             *self.served_rows = self.served_rows.saturating_add(1);
             if self.batch.len() >= 1024 {
@@ -738,14 +737,20 @@ pub(crate) fn transcode_transient_shard_to_store(
     }))
 }
 
-pub(crate) fn encode_row_view(source: &HuggingFaceRowSource, row: &RowView) -> Result<Vec<u8>, SamplerError> {
+pub(crate) fn encode_row_view(
+    source: &HuggingFaceRowSource,
+    row: &RowView,
+) -> Result<Vec<u8>, SamplerError> {
     serde_json::to_vec(row).map_err(|err| SamplerError::SourceUnavailable {
         source_id: source.config.source_id.clone(),
         reason: format!("failed encoding row-view payload: {err}"),
     })
 }
 
-pub(crate) fn decode_row_view(source: &HuggingFaceRowSource, bytes: &[u8]) -> Result<RowView, SamplerError> {
+pub(crate) fn decode_row_view(
+    source: &HuggingFaceRowSource,
+    bytes: &[u8],
+) -> Result<RowView, SamplerError> {
     serde_json::from_slice(bytes).map_err(|err| SamplerError::SourceUnavailable {
         source_id: source.config.source_id.clone(),
         reason: format!("failed decoding row-view payload: {err}"),
