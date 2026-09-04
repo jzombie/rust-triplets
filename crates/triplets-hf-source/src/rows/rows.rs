@@ -457,7 +457,7 @@ fn is_json_file(path: &std::path::Path) -> bool {
 }
 
 /// Peek at the first non-whitespace byte of a buffered reader without consuming it.
-fn peek_first_non_whitespace(reader: &mut (impl BufRead + ?Sized)) -> Option<u8> {
+pub(crate) fn peek_first_non_whitespace(reader: &mut (impl BufRead + ?Sized)) -> Option<u8> {
     loop {
         let buf = reader.fill_buf().ok()?;
         let &byte = buf.first()?;
@@ -507,8 +507,7 @@ impl<'de> Visitor<'de> for StreamingArrayVisitor<'_> {
                 continue;
             };
             let key = row_store_row_key(*self.served_rows);
-            let payload =
-                encode_row_view(self.source, &row).map_err(serde::de::Error::custom)?;
+            let payload = encode_row_view(self.source, &row).map_err(serde::de::Error::custom)?;
             self.batch.push((key, payload));
             *self.served_rows = self.served_rows.saturating_add(1);
             if self.batch.len() >= 1024 {
@@ -522,7 +521,7 @@ impl<'de> Visitor<'de> for StreamingArrayVisitor<'_> {
 }
 
 /// Transcode a JSON array shard via streaming deserialization for O(1) memory.
-fn transcode_json_array_streaming(
+pub(crate) fn transcode_json_array_streaming(
     source: &HuggingFaceRowSource,
     shard: &ShardIndex,
     reader: &mut dyn BufRead,
@@ -738,14 +737,20 @@ pub(crate) fn transcode_transient_shard_to_store(
     }))
 }
 
-fn encode_row_view(source: &HuggingFaceRowSource, row: &RowView) -> Result<Vec<u8>, SamplerError> {
+pub(crate) fn encode_row_view(
+    source: &HuggingFaceRowSource,
+    row: &RowView,
+) -> Result<Vec<u8>, SamplerError> {
     serde_json::to_vec(row).map_err(|err| SamplerError::SourceUnavailable {
         source_id: source.config.source_id.clone(),
         reason: format!("failed encoding row-view payload: {err}"),
     })
 }
 
-fn decode_row_view(source: &HuggingFaceRowSource, bytes: &[u8]) -> Result<RowView, SamplerError> {
+pub(crate) fn decode_row_view(
+    source: &HuggingFaceRowSource,
+    bytes: &[u8],
+) -> Result<RowView, SamplerError> {
     serde_json::from_slice(bytes).map_err(|err| SamplerError::SourceUnavailable {
         source_id: source.config.source_id.clone(),
         reason: format!("failed decoding row-view payload: {err}"),
@@ -831,7 +836,7 @@ fn coalesce_field(
 /// as `coalesce_field`).  For lists, each non-empty element becomes a
 /// separate field.  Empty/blank elements are skipped.  Returns `None`
 /// when no non-empty elements are found.
-fn coalesce_list_field(name: &str, value: &Value) -> Option<Vec<RowTextField>> {
+pub(crate) fn coalesce_list_field(name: &str, value: &Value) -> Option<Vec<RowTextField>> {
     match value {
         Value::Array(arr) => {
             let fields: Vec<RowTextField> = arr
@@ -860,7 +865,7 @@ fn coalesce_list_field(name: &str, value: &Value) -> Option<Vec<RowTextField>> {
 }
 
 /// Decode one line from a non-parquet shard into an object-like row payload.
-fn parse_non_parquet_line(
+pub(crate) fn parse_non_parquet_line(
     source: &HuggingFaceRowSource,
     shard: &ShardIndex,
     local_idx: usize,

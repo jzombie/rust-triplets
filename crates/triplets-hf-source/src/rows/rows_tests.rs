@@ -1,12 +1,20 @@
 use super::*;
-use crate::shard_index::index_single_shard;
+use crate::constants::HF_SHARD_STORE_META_ROWS_KEY;
+use crate::huggingface_source::{RowTextField, RowView};
+use crate::shard_index::{index_single_shard, shard_store_path_for};
 use crate::test_utils::{
     test_config, test_source, write_gzip_fixture, write_parquet_fixture, write_simdr_fixture,
 };
 use crate::types::ShardIndex;
+use chrono::Utc;
 use serde_json::json;
+use simd_r_drive::storage_engine::DataStore;
+use simd_r_drive::storage_engine::traits::DataStoreWriter;
+use std::fs;
 use std::io::{BufReader, Read};
 use tempfile::tempdir;
+use triplets_core::SamplerError;
+use triplets_core::data::SectionRole;
 
 // ── Phase 1a: coalesce_list_field (pure function) ──────────────────────
 
