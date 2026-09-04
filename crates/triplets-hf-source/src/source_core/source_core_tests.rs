@@ -5,12 +5,13 @@
 #![allow(deprecated)]
 
 use super::*;
+use crate::config::HuggingFaceRowsConfig;
 use crate::constants::{
     ENV_TRIPLETS_HF_WHOAMI_ENDPOINT, HF_PARQUET_MANIFEST_DIR,
     HF_RECIPE_ANCHOR_ANCHOR_WRONG_ARTICLE, HF_RECIPE_ANCHOR_CONTEXT_WRONG_ARTICLE,
     HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE, HF_REMOTE_URL_PREFIX, HF_SHARD_STORE_SOURCE_SIZE_KEY,
 };
-use crate::download::{build_http_runtime, candidate_target_path};
+use crate::download::{build_candidate_order, build_http_runtime, candidate_target_path};
 use crate::huggingface_source::{
     EligibleIndexCache, ParquetCache, RowCache, RowTextField, RowView,
 };
@@ -34,7 +35,7 @@ use std::time::{Duration, SystemTime};
 use tempfile::tempdir;
 use triplets_core::SamplerError;
 use triplets_core::config::{NegativeStrategy, SamplerConfig};
-use triplets_core::source::SourceCursor;
+use triplets_core::source::{DataSource, SourceCursor};
 use triplets_core::splits::{PersistedSamplerState, SamplerStateStore};
 use triplets_core::{DeterministicSplitStore, Sampler, SplitLabel, SplitRatios, TripletSampler};
 

@@ -175,7 +175,7 @@ fn whoami_endpoint() -> String {
 /// Extract the next pagination URL from `Link` header(s).
 /// Uses `get_all()` to handle split Link headers across multiple HTTP header lines.
 /// Resolves relative URIs against `request_url` to preserve custom endpoints.
-fn extract_next_link_url(
+pub(crate) fn extract_next_link_url(
     headers: &reqwest::header::HeaderMap,
     request_url: &str,
 ) -> Option<String> {
@@ -406,12 +406,7 @@ pub(crate) fn list_remote_candidates_from_parquet_manifest_with_runtime(
         let (body, next) = block_on_http_with_runtime(
             runtime,
             config,
-            fetch_page_with_next_url(
-                http_client,
-                &config.source_id,
-                &url,
-                "Hub tree endpoint",
-            ),
+            fetch_page_with_next_url(http_client, &config.source_id, &url, "Hub tree endpoint"),
         )?;
         let (page_candidates, page_sizes, matched) =
             parse_parquet_manifest_response(config, &body)?;
