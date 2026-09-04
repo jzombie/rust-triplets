@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ## [Unreleased]
 
+### Changed
+- Bumped `serial_test` from 3.5.0 to 4.0.1
+- Bumped `parquet` from 59.1.0 to 59.2.0
+- Bumped `thiserror` from 2.0.19 to 2.0.20
+- Bumped `clap` from 4.6.2 to 4.6.6
+- Bumped `tokio` from 1.53.0 to 1.53.1
+
 ### Fixed
 - JSON array `.json` files (e.g. `gbharti/finance-alpaca`) now stream-parse correctly
   instead of failing on newline splits.
