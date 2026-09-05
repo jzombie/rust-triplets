@@ -5682,7 +5682,7 @@ fn source_state_and_recipe_helpers_cover_remaining_branches() {
     );
 
     inner.config.chunking.max_window_tokens = 0;
-    inner.sources_with_long_sections.insert("source_a".into());
+    inner.long_section_counts.insert("source_a".into(), 1);
     assert!(!inner.source_supports_chunk_pair_recipe("source_a"));
 }
 

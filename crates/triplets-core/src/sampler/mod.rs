@@ -45,7 +45,7 @@ use crate::utils::platform_newline;
 // AUTO-RECIPE HANDLING OVERVIEW (end-to-end):
 // Stage A: Source-level injection eligibility ("should this source even get the recipe?")
 //   - `sync_records_from_cache` -> `record_has_long_anchor_or_context_section` marks
-//     `sources_with_long_sections`.
+//     `long_section_counts`.
 //   - `resolve_source_triplet_plan` -> `should_auto_inject_chunk_pair_recipe` appends
 //     `source_chunk_pair_recipe` for eligible sources.
 // Stage B: Record-level execution eligibility ("can this specific record run it now?")
@@ -298,8 +298,12 @@ struct TripletSamplerInner<S: SplitStore + EpochStateStore + SamplerStateStore +
     text_recipes: Vec<TextRecipe>,
     /// Per-source triplet recipes keyed by source id.
     source_triplet_recipes: HashMap<SourceId, Vec<TripletRecipe>>,
-    /// Sources that currently contain at least one section larger than the chunk window.
-    sources_with_long_sections: HashSet<SourceId>,
+    /// Per-source count of pooled records containing at least one section
+    /// larger than the chunk window. A source is eligible for the
+    /// auto-injected chunk-pair recipe while its count is greater than zero.
+    /// Maintained incrementally on record insert/evict (strict O(Δ)) instead
+    /// of rescanning the pool on every sync.
+    long_section_counts: HashMap<SourceId, usize>,
     /// Per-source text recipes keyed by source id.
     source_text_recipes: HashMap<SourceId, Vec<TextRecipe>>,
     /// True if triplet recipes came from config (no source defaults).
@@ -408,7 +412,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             triplet_recipes,
             text_recipes,
             source_triplet_recipes: HashMap::new(),
-            sources_with_long_sections: HashSet::new(),
+            long_section_counts: HashMap::new(),
             source_text_recipes: HashMap::new(),
             using_config_triplet_recipes,
             using_config_text_recipes,
@@ -555,6 +559,74 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         self.role_cursors
             .retain(|(record_id, _), _| valid_ids.contains(record_id));
         self.negative_backend.prune_cursors(&valid_ids);
+    }
+
+    /// Ordered removal of a record id from one source's index vector.
+    /// Empty source entries are left in place; the caller prunes them after
+    /// all evictions and additions are processed (mirroring
+    /// `rebuild_source_index`, which only contains sources with at least one
+    /// allowed-split record).
+    fn remove_id_from_source_index(&mut self, source: &SourceId, record_id: &RecordId) {
+        if let Some(ids) = self.source_record_indices.get_mut(source) {
+            if let Some(pos) = ids.iter().position(|id| id == record_id) {
+                ids.remove(pos);
+            }
+        }
+    }
+
+    /// Insert a record id into one source's index vector, preserving the
+    /// deterministic `stable_hash_str(epoch_seed, id)` sort order via binary
+    /// search. Records whose split is not allowed are not indexed, mirroring
+    /// `rebuild_source_index`. Creates the source entry when needed; the
+    /// caller keeps `source_order` sorted afterwards.
+    fn insert_id_into_source_index(
+        &mut self,
+        source: SourceId,
+        record_id: RecordId,
+        label: SplitLabel,
+        allowed: &HashSet<SplitLabel>,
+    ) {
+        if !allowed.contains(&label) {
+            return;
+        }
+        let seed = self.epoch_seed();
+        let key = stable_hash_str(seed, &record_id);
+        // Upper-bound insertion: with distinct hashes this is the unique
+        // sorted position; on a hash collision it places the id after
+        // existing equals, matching stable-sort semantics.
+        let pos = match self.source_record_indices.get(&source) {
+            Some(ids) => ids.partition_point(|id| {
+                self.records
+                    .get(id)
+                    .map(|record| stable_hash_str(seed, &record.id))
+                    .unwrap_or(0)
+                    <= key
+            }),
+            None => 0,
+        };
+        self.source_record_indices
+            .entry(source)
+            .or_default()
+            .insert(pos, record_id);
+    }
+
+    /// Increment the long-section record count for a source.
+    fn increment_long_section_count(&mut self, source: &SourceId) {
+        *self.long_section_counts.entry(source.clone()).or_default() += 1;
+    }
+
+    /// Decrement the long-section record count for a source, removing the
+    /// entry when no counted records remain.
+    fn decrement_long_section_count(&mut self, source: &SourceId) {
+        let remove = if let Some(count) = self.long_section_counts.get_mut(source) {
+            *count = count.saturating_sub(1);
+            *count == 0
+        } else {
+            false
+        };
+        if remove {
+            self.long_section_counts.remove(source);
+        }
     }
 
     fn rebuild_chunk_index(&mut self) {
@@ -731,7 +803,9 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         if self.config.chunking.max_window_tokens == 0 {
             return false;
         }
-        self.sources_with_long_sections.contains(source)
+        self.long_section_counts
+            .get(source)
+            .is_some_and(|&count| count > 0)
     }
 
     /// Stage A (source-level): decide whether to append auto recipe for `source`.
@@ -1925,52 +1999,110 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             return Ok(());
         }
 
-        // --- Process evictions ---
+        // --- Process evictions (strict O(Δ)): prune pool state and the
+        // per-source index only for IDs that truly left. IDs cleared and
+        // immediately re-added in this same sync (e.g. force-refresh
+        // returning the same records) keep their cross-batch dedup and
+        // split-label state. This preserves the
+        // `emitted_text_hashes_blocks_repeats` contract while still freeing
+        // state for evicted records.
+        let mut truly_evicted = false;
         if !evicted.is_empty() {
-            // IDs cleared and immediately re-added in this same sync (e.g.
-            // force-refresh returning the same records) keep their
-            // cross-batch dedup and split-label state. Only IDs that truly
-            // left the pool are pruned. This preserves the
-            // `emitted_text_hashes_blocks_repeats` contract while still
-            // freeing state for evicted records.
             let added_ids: HashSet<&RecordId> = added.iter().map(|record| &record.id).collect();
-            let mut truly_evicted = false;
             for evicted_id in &evicted {
                 if added_ids.contains(evicted_id) {
                     continue;
                 }
-                truly_evicted = true;
+                let Some(record) = self.records.get(evicted_id) else {
+                    continue;
+                };
+                let source = record.source.clone();
+                let is_long = self.record_has_long_anchor_or_context_section(record);
                 self.records.shift_remove(evicted_id);
                 self.emitted_text_hashes.remove(evicted_id);
                 self.split_labels.remove(evicted_id);
-            }
-            if truly_evicted {
-                self.sources_with_long_sections.clear();
-                for record in self.records.values() {
-                    if self.record_has_long_anchor_or_context_section(record) {
-                        self.sources_with_long_sections
-                            .insert(record.source.clone());
-                    }
+                self.chunk_index.remove(evicted_id);
+                self.remove_id_from_source_index(&source, evicted_id);
+                if is_long {
+                    self.decrement_long_section_count(&source);
                 }
+                truly_evicted = true;
             }
         }
 
         self.negative_backend.on_sync_start();
 
-        // --- Process additions ---
-        for record in &added {
-            let _ = self.get_or_insert_split_label(&record.id)?;
-            if self.record_has_long_anchor_or_context_section(record) {
-                self.sources_with_long_sections
-                    .insert(record.source.clone());
+        // --- Process additions (strict O(Δ log N) via binary search) ---
+        if !added.is_empty() {
+            let allowed: HashSet<SplitLabel> =
+                self.allowed_target_splits().into_iter().collect();
+            for record in &added {
+                // Re-ingested IDs (version bump for records already pooled,
+                // e.g. a wrapped source re-draining known records) must not
+                // create duplicate index entries or double-count long
+                // sections. A full rebuild derives each ID exactly once from
+                // the pool, so skip index/count work here and only refresh
+                // the stored Arc.
+                if self.records.contains_key(&record.id) {
+                    self.records.insert(record.id.clone(), Arc::clone(record));
+                    continue;
+                }
+                let label = self.get_or_insert_split_label(&record.id)?;
+                if self.record_has_long_anchor_or_context_section(record) {
+                    self.increment_long_section_count(&record.source);
+                }
+                self.records.insert(record.id.clone(), Arc::clone(record));
+                self.chunk_index
+                    .insert(record.id.clone(), record.id.clone());
+                self.insert_id_into_source_index(
+                    record.source.clone(),
+                    record.id.clone(),
+                    label,
+                    &allowed,
+                );
             }
-            self.records.insert(record.id.clone(), Arc::clone(record));
         }
 
-        // --- Rebuild indices ---
-        self.rebuild_chunk_index();
-        self.rebuild_source_index()?;
-        self.prune_cursor_state();
+        // --- Refresh derived source state (mirrors `rebuild_source_index` tail) ---
+        // Drop index entries for sources left with no allowed-split records,
+        // then refresh ordering, wrap flags, and cursors exactly as a full
+        // rebuild would.
+        let empty_sources: Vec<SourceId> = self
+            .source_record_indices
+            .iter()
+            .filter(|(_, ids)| ids.is_empty())
+            .map(|(source, _)| source.clone())
+            .collect();
+        let mut order_changed = !empty_sources.is_empty();
+        for source in &empty_sources {
+            self.source_record_indices.remove(source);
+        }
+        // New sources may have appeared via the insertions above.
+        if !order_changed {
+            for source in self.source_record_indices.keys() {
+                if !self.source_order.contains(source) {
+                    order_changed = true;
+                    break;
+                }
+            }
+        }
+        if order_changed {
+            self.source_order = self.source_record_indices.keys().cloned().collect();
+            self.source_order.sort();
+        }
+        self.refresh_source_wrapped();
+        self.source_record_cursors
+            .retain(|source, _| self.source_record_indices.contains_key(source));
+        if self.source_state_loaded {
+            if self.source_order.is_empty() {
+                self.source_cycle_idx = 0;
+            }
+            self.source_state_dirty = self.source_order.len() > 1;
+        }
+        // Cursor pruning is a no-op unless the valid pool shrank.
+        if truly_evicted {
+            self.prune_cursor_state();
+        }
 
         self.last_sync_version = new_version;
         Ok(())
@@ -1989,7 +2121,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         let evicted: HashSet<&String> = old_ids.difference(&incoming_ids).collect();
 
         self.records.clear();
-        self.sources_with_long_sections.clear();
+        self.long_section_counts.clear();
         for evicted_id in &evicted {
             self.emitted_text_hashes.remove(*evicted_id);
             self.split_labels.remove(*evicted_id);
@@ -1998,8 +2130,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         for record in snapshot {
             let _ = self.get_or_insert_split_label(&record.id)?;
             if self.record_has_long_anchor_or_context_section(&record) {
-                self.sources_with_long_sections
-                    .insert(record.source.clone());
+                self.increment_long_section_count(&record.source);
             }
             self.records.insert(record.id.clone(), Arc::clone(&record));
         }
