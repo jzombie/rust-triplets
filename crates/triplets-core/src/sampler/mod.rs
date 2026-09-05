@@ -354,6 +354,13 @@ struct TripletSamplerInner<S: SplitStore + EpochStateStore + SamplerStateStore +
     /// Last sync version watermark for incremental delta synchronization.
     last_sync_version: u64,
 
+    /// Last observed force-refresh generation. When the ingestion manager
+    /// reports a newer force-refresh generation, the next sync falls back to
+    /// a full pool resync (exact full-snapshot semantics) instead of the
+    /// O(Δ) delta path, because a force refresh replaces the cache contents
+    /// wholesale. Steady-state advances keep the delta fast path.
+    last_force_refresh_generation: u64,
+
     /// Persistent cache of split labels keyed by record id.
     /// Eliminates redundant DataStore::read() calls for split label lookups.
     split_labels: HashMap<RecordId, SplitLabel>,
@@ -433,6 +440,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             epoch: 0,
             source_wrapped: HashMap::new(),
             last_sync_version: 0,
+            last_force_refresh_generation: 0,
             split_labels: HashMap::new(),
         };
         if !sampler.using_config_text_recipes {
@@ -917,9 +925,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 None => continue,
             };
             let label = self.get_or_insert_split_label(&record_id)?;
-            map.entry(label)
-                .or_default()
-                .push((chunk_id, source));
+            map.entry(label).or_default().push((chunk_id, source));
         }
         Ok(map)
     }
@@ -1888,27 +1894,32 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         if window == 0 {
             return false;
         }
-        record
-            .sections
-            .iter()
-            .any(|s| {
-                matches!(s.role, SectionRole::Anchor | SectionRole::Context)
-                    && s.token_count > window
-            })
+        record.sections.iter().any(|s| {
+            matches!(s.role, SectionRole::Anchor | SectionRole::Context) && s.token_count > window
+        })
     }
-
     fn sync_records_from_cache(&mut self) -> Result<(), SamplerError> {
         if self.last_sync_version == 0 {
             self.full_sync_records_from_cache()?;
             return Ok(());
         }
 
+        // Force refreshes replace cache contents wholesale; fall back to a
+        // full pool resync with exact full-snapshot semantics (evicted =
+        // pool minus snapshot, dedup pruned only for records that left).
+        // Steady-state advances keep the O(Δ) delta fast path below.
+        if self.ingestion.force_refresh_generation() != self.last_force_refresh_generation {
+            self.last_force_refresh_generation = self.ingestion.force_refresh_generation();
+            self.full_sync_records_from_cache()?;
+            return Ok(());
+        }
+
         // Use sync_delta to get only added and evicted records.
         // No full snapshot, no sort, no HashSet diff — O(ΔN) path.
-        let (new_version, added, evicted) =
-            self.ingestion.sync_delta(self.last_sync_version);
+        let (new_version, added, evicted) = self.ingestion.sync_delta(self.last_sync_version);
 
         if added.is_empty() && evicted.is_empty() {
+            self.negative_backend.on_sync_start();
             self.prune_cursor_state();
             self.last_sync_version = new_version;
             return Ok(());
@@ -1916,20 +1927,36 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
 
         // --- Process evictions ---
         if !evicted.is_empty() {
+            // IDs cleared and immediately re-added in this same sync (e.g.
+            // force-refresh returning the same records) keep their
+            // cross-batch dedup and split-label state. Only IDs that truly
+            // left the pool are pruned. This preserves the
+            // `emitted_text_hashes_blocks_repeats` contract while still
+            // freeing state for evicted records.
+            let added_ids: HashSet<&RecordId> =
+                added.iter().map(|record| &record.id).collect();
+            let mut truly_evicted = false;
             for evicted_id in &evicted {
+                if added_ids.contains(evicted_id) {
+                    continue;
+                }
+                truly_evicted = true;
                 self.records.shift_remove(evicted_id);
                 self.emitted_text_hashes.remove(evicted_id);
                 self.split_labels.remove(evicted_id);
             }
-            self.sources_with_long_sections.clear();
-            for record in self.records.values() {
-                if self.record_has_long_anchor_or_context_section(record) {
-                    self.sources_with_long_sections
-                        .insert(record.source.clone());
+            if truly_evicted {
+                self.sources_with_long_sections.clear();
+                for record in self.records.values() {
+                    if self.record_has_long_anchor_or_context_section(record) {
+                        self.sources_with_long_sections
+                            .insert(record.source.clone());
+                    }
                 }
             }
-            self.negative_backend.on_sync_start();
         }
+
+        self.negative_backend.on_sync_start();
 
         // --- Process additions ---
         for record in &added {
@@ -1938,8 +1965,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 self.sources_with_long_sections
                     .insert(record.source.clone());
             }
-            self.records
-                .insert(record.id.clone(), Arc::clone(record));
+            self.records.insert(record.id.clone(), Arc::clone(record));
         }
 
         // --- Rebuild indices ---

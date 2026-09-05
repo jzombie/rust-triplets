@@ -97,6 +97,25 @@ impl RecordCache {
     /// Remove all cached records.
     pub fn clear(&self) {
         let mut inner = self.inner.write().expect("record cache poisoned");
+        // Log evictions so a subsequent `sync_delta` reports records removed
+        // by the clear (e.g. force-refresh replacing the pool) and the sampler
+        // can prune `emitted_text_hashes` / `split_labels` for IDs that truly
+        // left. The version is bumped so entries survive the
+        // `version > last_version` filter in `sync_delta`; the sampler keeps
+        // state for IDs simultaneously re-added (see `sync_records_from_cache`
+        // evicted-minus-added guard). The log stays bounded at `max_records`
+        // (same bound as `enforce_limit`).
+        if !inner.records.is_empty() {
+            inner.next_version = inner.next_version.saturating_add(1);
+            let version = inner.next_version;
+            let evicted: Vec<RecordId> = inner.records.keys().cloned().collect();
+            for id in evicted {
+                inner.eviction_log.push_back((version, id));
+            }
+            while inner.eviction_log.len() > inner.max_records {
+                inner.eviction_log.pop_front();
+            }
+        }
         inner.records.clear();
         inner.order.clear();
     }
@@ -297,6 +316,13 @@ pub struct IngestionManager {
     /// Global monotonic version counter shared across all source caches.
     /// Ensures a single, monotonic version timeline across all registered sources.
     global_next_version: u64,
+    /// Monotonic generation incremented on every force-refresh cycle (cache
+    /// clear + refill). The sampler watches this to fall back to a full
+    /// record-pool resync after force refreshes, restoring exact full-snapshot
+    /// semantics on that path while steady-state advances keep the O(Δ) delta
+    /// fast path. Reset-type clears that do NOT refill (e.g. epoch stream
+    /// cursor resets) do not touch this counter.
+    force_refresh_generation: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -327,12 +353,19 @@ impl IngestionManager {
             drain_start: 0,
             epoch_step: 0,
             global_next_version: 0,
+            force_refresh_generation: 0,
         }
     }
 
     /// Return a monotonic generation for source refresh cycles.
     pub fn source_refresh_generation(&self) -> u64 {
         self.source_refresh_generation
+    }
+
+    /// Return the force-refresh generation. Incremented once per
+    /// force-refresh cycle; see the field docs.
+    pub fn force_refresh_generation(&self) -> u64 {
+        self.force_refresh_generation
     }
 
     /// Return source ids refreshed by the most recent refresh cycle.
@@ -570,6 +603,12 @@ impl IngestionManager {
         weights: Option<&HashMap<SourceId, f32>>,
     ) {
         self.last_refreshed_sources.clear();
+        if force_refresh {
+            // Bump before clearing/refilling so a subsequent delta sync can
+            // observe that a full pool replacement happened and fall back to
+            // full-resync semantics (see `sync_records_from_cache`).
+            self.force_refresh_generation = self.force_refresh_generation.saturating_add(1);
+        }
         let mut refresh_plan = Vec::new();
         for (idx, state) in self.sources.iter_mut().enumerate() {
             if force_refresh {
@@ -1892,9 +1931,9 @@ mod tests {
                         sections: vec![RecordSection {
                             role: SectionRole::Anchor,
                             heading: None,
-                            text: format!("x{i}"),
-                            sentences: vec![format!("x{i}")],
-                token_count: 0,
+                            text: format!("{}_x{}", self.id, i),
+                            sentences: vec![format!("{}_x{}", self.id, i)],
+                            token_count: 0,
                         }],
                         meta_prefix: None,
                         label: None,
@@ -2073,14 +2112,16 @@ mod tests {
             "src_3 (w=2.0) must outpace all w=1.0 sources (totals: {totals:?})"
         );
         // Lock in the exact deterministic distribution.
-        // (Distribution changed after the cross-batch dedup fix: with proper
-        // per-record hash tracking, the sampler exhausts and force-refreshes
-        // more often, which increases the total number of refresh cycles but
-        // preserves the weighted distribution pattern. The key invariant
-        // (src_3 with w=2.0 outpaces all w=1.0 sources) is unchanged.)
+        // (Distribution changed after per-source text uniqueness: each source
+        // now emits distinct texts (`{id}_x{i}` instead of shared `x{i}`), so
+        // cross-batch text dedup no longer collides across sources and the
+        // sampler exhausts and force-refreshes less often, which reduces the
+        // total number of refresh cycles but preserves the weighted
+        // distribution pattern. The key invariant (src_3 with w=2.0 outpaces
+        // all w=1.0 sources) is unchanged.)
         assert_eq!(
             totals,
-            vec![11, 11, 11, 31, 17],
+            vec![6, 6, 6, 26, 11],
             "unequal-weights: unexpected refresh distribution"
         );
     }
