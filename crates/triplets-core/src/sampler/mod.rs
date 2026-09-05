@@ -329,7 +329,7 @@ struct TripletSamplerInner<S: SplitStore + EpochStateStore + SamplerStateStore +
     /// Marks whether source state needs persistence.
     source_state_dirty: bool,
     /// Record indices per source for round-robin within a source.
-    source_record_indices: HashMap<SourceId, Vec<usize>>,
+    source_record_indices: HashMap<SourceId, Vec<RecordId>>,
     /// Per-source cursor into `source_record_indices`.
     source_record_cursors: HashMap<SourceId, usize>,
     /// Round-robin index for triplet recipe cycling.
@@ -350,6 +350,13 @@ struct TripletSamplerInner<S: SplitStore + EpochStateStore + SamplerStateStore +
 
     /// Tracks whether each source has wrapped its cursor in the current epoch.
     source_wrapped: HashMap<SourceId, bool>,
+
+    /// Last sync version watermark for incremental delta synchronization.
+    last_sync_version: u64,
+
+    /// Persistent cache of split labels keyed by record id.
+    /// Eliminates redundant DataStore::read() calls for split label lookups.
+    split_labels: HashMap<RecordId, SplitLabel>,
 }
 
 impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSamplerInner<S> {
@@ -425,6 +432,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             text_recipe_rr_idx: 0,
             epoch: 0,
             source_wrapped: HashMap::new(),
+            last_sync_version: 0,
+            split_labels: HashMap::new(),
         };
         if !sampler.using_config_text_recipes {
             sampler.rebuild_derived_text_recipes();
@@ -440,6 +449,19 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     /// produces a distinct permutation across all seed-dependent operations.
     fn epoch_seed(&self) -> u64 {
         derive_epoch_seed(self.config.seed, self.epoch)
+    }
+
+    /// Get or compute the split label for a record, using the persistent cache.
+    fn get_or_insert_split_label(&mut self, id: &RecordId) -> Result<SplitLabel, SamplerError> {
+        if let Some(&label) = self.split_labels.get(id) {
+            return Ok(label);
+        }
+        let label = match self.split_store.label_for(id) {
+            Some(label) => label,
+            None => self.split_store.ensure(id.clone())?,
+        };
+        self.split_labels.insert(id.clone(), label);
+        Ok(label)
     }
 
     fn register_source(
@@ -537,35 +559,31 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
 
     fn rebuild_source_index(&mut self) -> Result<(), SamplerError> {
         self.source_record_indices.clear();
-        let mut label_cache: HashMap<RecordId, SplitLabel> = HashMap::new();
         let allowed = self.allowed_target_splits();
         let allowed_set: HashSet<SplitLabel> = allowed.into_iter().collect();
-        for (idx, record) in self.records.values().enumerate() {
-            let label = if let Some(label) = label_cache.get(&record.id) {
-                *label
-            } else {
-                let label = match self.split_store.label_for(&record.id) {
-                    Some(label) => label,
-                    None => self.split_store.ensure(record.id.clone())?,
-                };
-                label_cache.insert(record.id.clone(), label);
-                label
-            };
+        // Collect record IDs first to avoid borrowing issues
+        let record_ids: Vec<(RecordId, SourceId)> = self
+            .records
+            .values()
+            .map(|r| (r.id.clone(), r.source.clone()))
+            .collect();
+        for (record_id, source) in record_ids {
+            let label = self.get_or_insert_split_label(&record_id)?;
             if !allowed_set.contains(&label) {
                 continue;
             }
             self.source_record_indices
-                .entry(record.source.clone())
+                .entry(source)
                 .or_default()
-                .push(idx);
+                .push(record_id);
         }
 
         let shuffle_seed = self.epoch_seed();
-        for indices in self.source_record_indices.values_mut() {
-            indices.sort_by_key(|idx| {
+        for record_ids in self.source_record_indices.values_mut() {
+            record_ids.sort_by_key(|id| {
                 self.records
-                    .get_index(*idx)
-                    .map(|(_, record)| stable_hash_str(shuffle_seed, &record.id))
+                    .get(id)
+                    .map(|record| stable_hash_str(shuffle_seed, &record.id))
                     .unwrap_or(0)
             });
         }
@@ -884,27 +902,24 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     }
 
     fn records_by_split(
-        &self,
+        &mut self,
     ) -> Result<HashMap<SplitLabel, Vec<(RecordId, SourceId)>>, SamplerError> {
         let mut map: HashMap<SplitLabel, Vec<(RecordId, SourceId)>> = HashMap::new();
-        let mut label_cache: HashMap<RecordId, SplitLabel> = HashMap::new();
-        for (chunk_id, record_id) in &self.chunk_index {
-            let Some(record) = self.records.get(record_id) else {
-                continue;
+        // Collect chunk_index entries first to avoid borrowing issues
+        let entries: Vec<(RecordId, RecordId)> = self
+            .chunk_index
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for (chunk_id, record_id) in entries {
+            let source = match self.records.get(&record_id) {
+                Some(record) => record.source.clone(),
+                None => continue,
             };
-            let label = if let Some(label) = label_cache.get(record_id) {
-                *label
-            } else {
-                let label = match self.split_store.label_for(record_id) {
-                    Some(label) => label,
-                    None => self.split_store.ensure(record_id.clone())?,
-                };
-                label_cache.insert(record_id.clone(), label);
-                label
-            };
+            let label = self.get_or_insert_split_label(&record_id)?;
             map.entry(label)
                 .or_default()
-                .push((chunk_id.clone(), record.source.clone()));
+                .push((chunk_id, source));
         }
         Ok(map)
     }
@@ -915,46 +930,48 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         split: SplitLabel,
     ) -> Option<Arc<DataRecord>> {
         if let Some(source) = source {
-            let indices = self.source_record_indices.get(source)?;
-            if indices.is_empty() {
+            let record_ids = self.source_record_indices.get(source)?;
+            if record_ids.is_empty() {
                 return None;
             }
+            let len = record_ids.len();
             let mut cursor = *self.source_record_cursors.get(source).unwrap_or(&0);
-            let cycle = cursor / indices.len();
+            let cycle = cursor / len;
             let offset_seed = self.epoch_seed() ^ (cycle as u64);
-            let offset = (stable_hash_str(offset_seed, source) as usize) % indices.len();
+            let offset = (stable_hash_str(offset_seed, source) as usize) % len;
             let mut wrapped = false;
-            let mut selected: Option<Arc<DataRecord>> = None;
-            for _ in 0..indices.len() {
-                let pos = (cursor % indices.len()).saturating_add(offset) % indices.len();
-                let idx = indices[pos];
+            let mut selected_id: Option<RecordId> = None;
+
+            for _ in 0..len {
+                let pos = (cursor % len).saturating_add(offset) % len;
+                let record_id = &record_ids[pos];
                 cursor = cursor.saturating_add(1);
-                if cursor.is_multiple_of(indices.len()) {
+                if cursor.is_multiple_of(len) {
                     wrapped = true;
                 }
-                if let Some((_, record)) = self.records.get_index(idx) {
-                    if self.split_store.label_for(&record.id) != Some(split) {
-                        continue;
-                    }
-                    selected = Some(Arc::clone(record));
+                if self.split_labels.get(record_id) == Some(&split) {
+                    selected_id = Some(record_id.clone());
                     break;
                 }
             }
+
             self.source_record_cursors
                 .insert(source.to_string(), cursor);
             if wrapped {
                 self.mark_source_wrapped(source);
             }
-            return selected;
-        }
-        while let Some(chunk_id) = self.epoch_tracker.next_record(split) {
-            if let Some(record_id) = self.chunk_index.get(&chunk_id)
-                && let Some(record) = self.records.get(record_id)
-            {
-                return Some(Arc::clone(record));
+
+            selected_id.and_then(|id| self.records.get(&id).map(Arc::clone))
+        } else {
+            while let Some(chunk_id) = self.epoch_tracker.next_record(split) {
+                if let Some(record_id) = self.chunk_index.get(&chunk_id)
+                    && let Some(record) = self.records.get(record_id)
+                {
+                    return Some(Arc::clone(record));
+                }
             }
+            None
         }
-        None
     }
 
     fn save_sampler_state(&mut self, save_to: Option<&Path>) -> Result<(), SamplerError> {
@@ -1871,61 +1888,100 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         if window == 0 {
             return false;
         }
-        record.sections.iter().any(|section| {
-            matches!(section.role, SectionRole::Anchor | SectionRole::Context)
-                && WhitespaceTokenizer.token_count(&section.text) > window
-        })
+        record
+            .sections
+            .iter()
+            .any(|s| {
+                matches!(s.role, SectionRole::Anchor | SectionRole::Context)
+                    && s.token_count > window
+            })
     }
 
     fn sync_records_from_cache(&mut self) -> Result<(), SamplerError> {
+        if self.last_sync_version == 0 {
+            self.full_sync_records_from_cache()?;
+            return Ok(());
+        }
+
+        // Use sync_delta to get only added and evicted records.
+        // No full snapshot, no sort, no HashSet diff — O(ΔN) path.
+        let (new_version, added, evicted) =
+            self.ingestion.sync_delta(self.last_sync_version);
+
+        if added.is_empty() && evicted.is_empty() {
+            self.prune_cursor_state();
+            self.last_sync_version = new_version;
+            return Ok(());
+        }
+
+        // --- Process evictions ---
+        if !evicted.is_empty() {
+            for evicted_id in &evicted {
+                self.records.shift_remove(evicted_id);
+                self.emitted_text_hashes.remove(evicted_id);
+                self.split_labels.remove(evicted_id);
+            }
+            self.sources_with_long_sections.clear();
+            for record in self.records.values() {
+                if self.record_has_long_anchor_or_context_section(record) {
+                    self.sources_with_long_sections
+                        .insert(record.source.clone());
+                }
+            }
+            self.negative_backend.on_sync_start();
+        }
+
+        // --- Process additions ---
+        for record in &added {
+            let _ = self.get_or_insert_split_label(&record.id)?;
+            if self.record_has_long_anchor_or_context_section(record) {
+                self.sources_with_long_sections
+                    .insert(record.source.clone());
+            }
+            self.records
+                .insert(record.id.clone(), Arc::clone(record));
+        }
+
+        // --- Rebuild indices ---
+        self.rebuild_chunk_index();
+        self.rebuild_source_index()?;
+        self.prune_cursor_state();
+
+        self.last_sync_version = new_version;
+        Ok(())
+    }
+
+    /// Full snapshot sync: used only for the initial bootstrap (last_sync_version == 0).
+    /// Inserts records in ID-sorted order so subsequent delta syncs can append
+    /// new records in sorted order without breaking the IndexMap ordering.
+    fn full_sync_records_from_cache(&mut self) -> Result<(), SamplerError> {
         let mut snapshot = self.ingestion.all_records_snapshot();
         snapshot.sort_by(|a, b| a.id.cmp(&b.id));
 
         // Determine which records are being evicted BEFORE clearing self.records.
-        // Use owned strings to avoid borrowing self.records across the clear().
         let old_ids: HashSet<String> = self.records.keys().cloned().collect();
         let incoming_ids: HashSet<String> = snapshot.iter().map(|r| r.id.clone()).collect();
         let evicted: HashSet<&String> = old_ids.difference(&incoming_ids).collect();
 
-        // Replace the record pool with the current cache snapshot so that
-        // records evicted from the bounded in-memory cache no longer consume
-        // memory here.  Without this clear, stale records accumulate across
-        // cache refreshes, causing unbounded memory growth.
         self.records.clear();
-        // Rebuild the long-section set from the new record pool.  Without
-        // clearing first, sources whose records were evicted would leave
-        // stale entries, though this is bounded by num_sources in practice.
         self.sources_with_long_sections.clear();
-        // Prune emitted text hashes only for records that were actually
-        // evicted from the pool, not on every ingestion advance.  This
-        // preserves cross-batch dedup within a stable pool: with a window
-        // of 512 and batch_size of 4, only 4 records are swapped per
-        // advance, and the other 508 records' emitted hashes must survive.
-        //
-        // Old code cleared the entire set on ANY pool change, which broke
-        // cross-batch dedup on every single advance call.
         for evicted_id in &evicted {
             self.emitted_text_hashes.remove(*evicted_id);
+            self.split_labels.remove(*evicted_id);
         }
-        // Cursor state (BM25 hard-negative caches, chunk/role cursors) must
-        // never outlive a record snapshot boundary.  BM25 backend clears its
-        // negative cursors here; chunk/role cursors are pruned below in
-        // prune_cursor_state() against the new record pool.
         self.negative_backend.on_sync_start();
         for record in snapshot {
-            if self.split_store.label_for(&record.id).is_none() {
-                self.split_store.ensure(record.id.clone())?;
-            }
+            let _ = self.get_or_insert_split_label(&record.id)?;
             if self.record_has_long_anchor_or_context_section(&record) {
-                // Mark source-level eligibility for auto-injected chunk-pair recipe.
                 self.sources_with_long_sections
                     .insert(record.source.clone());
             }
-            self.records.insert(record.id.clone(), Arc::new(record));
+            self.records.insert(record.id.clone(), Arc::clone(&record));
         }
         self.prune_cursor_state();
         self.rebuild_chunk_index();
         self.rebuild_source_index()?;
+        self.last_sync_version = self.ingestion.global_version();
         Ok(())
     }
 

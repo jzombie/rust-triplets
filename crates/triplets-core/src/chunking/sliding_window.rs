@@ -146,6 +146,7 @@ mod tests {
                 heading: None,
                 text: text.into(),
                 sentences: vec![text.into()],
+                token_count: 0,
             }],
             meta_prefix: None,
             label: None,
