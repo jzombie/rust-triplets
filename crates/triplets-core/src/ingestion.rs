@@ -277,11 +277,7 @@ impl RecordCacheInner {
             .collect();
 
         // Collect evicted IDs since last_version
-        let evicted: Vec<RecordId> = self
-            .eviction_log
-            .iter()
-            .map(|(_, id)| id.clone())
-            .collect();
+        let evicted: Vec<RecordId> = self.eviction_log.iter().map(|(_, id)| id.clone()).collect();
 
         // Do NOT clear eviction_log here — retain entries for watermarks
         // that haven't called sync_delta yet. enforce_limit() handles
@@ -895,10 +891,7 @@ impl IngestionManager {
 
     /// Return a delta of records added since `last_version` and record IDs evicted since `last_version`.
     /// Queries all child caches using the unified version watermark and aggregates the results.
-    pub fn sync_delta(
-        &mut self,
-        last_version: u64,
-    ) -> (u64, Vec<Arc<DataRecord>>, Vec<RecordId>) {
+    pub fn sync_delta(&mut self, last_version: u64) -> (u64, Vec<Arc<DataRecord>>, Vec<RecordId>) {
         let mut all_added = Vec::new();
         let mut all_evicted = Vec::new();
         let mut max_version = last_version;

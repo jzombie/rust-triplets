@@ -1933,8 +1933,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             // left the pool are pruned. This preserves the
             // `emitted_text_hashes_blocks_repeats` contract while still
             // freeing state for evicted records.
-            let added_ids: HashSet<&RecordId> =
-                added.iter().map(|record| &record.id).collect();
+            let added_ids: HashSet<&RecordId> = added.iter().map(|record| &record.id).collect();
             let mut truly_evicted = false;
             for evicted_id in &evicted {
                 if added_ids.contains(evicted_id) {
