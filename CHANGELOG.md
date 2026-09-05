@@ -41,6 +41,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - Fixed 8 failing `triplets-core` tests covering the above (BM25 cursor reset,
   text/pair/triplet batch sequences, weighted-drain distribution).
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings` is clean.
+- **Per-batch split-map rebuild eliminated.** `records_by_split` output is cached
+  on the sampler behind a `pool_generation` counter that advances only on actual
+  pool-membership change (new IDs, true evictions, full resyncs); steady-state
+  batches fetch an O(1) reference instead of rebuilding the full map twice per
+  batch. The cached reference is passed to `EpochTracker::reconcile` every
+  batch, preserving its state-machine hook while hitting the unchanged-population
+  fast path.
+- **BM25 refresh uses the in-memory split cache.** The `split_fn` closure passed
+  to `on_records_refreshed` now reads `split_labels` instead of doing a
+  `DataStore::read()` per record.
 
 ## [0.26.1-alpha] - 2026-09-04
 

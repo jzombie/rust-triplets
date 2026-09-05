@@ -358,6 +358,19 @@ struct TripletSamplerInner<S: SplitStore + EpochStateStore + SamplerStateStore +
     /// Last sync version watermark for incremental delta synchronization.
     last_sync_version: u64,
 
+    /// Monotonic counter advanced only when record-pool membership actually
+    /// changes (genuinely new IDs added or IDs truly evicted). Pure version
+    /// refreshes of already-pooled IDs do not advance it, so the cached
+    /// `records_by_split` map below stays valid across steady-state advances.
+    pool_generation: u64,
+
+    /// Cached `records_by_split` output, valid while
+    /// `cached_records_by_split_gen == pool_generation`. Avoids rebuilding the
+    /// full per-split map (O(N) clones + label lookups) on every batch.
+    cached_records_by_split: Option<HashMap<SplitLabel, Vec<(RecordId, SourceId)>>>,
+    /// Pool generation the cached map was built from.
+    cached_records_by_split_gen: u64,
+
     /// Last observed force-refresh generation. When the ingestion manager
     /// reports a newer force-refresh generation, the next sync falls back to
     /// a full pool resync (exact full-snapshot semantics) instead of the
@@ -445,6 +458,9 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             source_wrapped: HashMap::new(),
             last_sync_version: 0,
             last_force_refresh_generation: 0,
+            pool_generation: 0,
+            cached_records_by_split: None,
+            cached_records_by_split_gen: 0,
             split_labels: HashMap::new(),
         };
         if !sampler.using_config_text_recipes {
@@ -970,12 +986,13 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     }
 
     fn ensure_split_has_records(&mut self, target_split: SplitLabel) -> Result<(), SamplerError> {
-        let records_by_split = self.records_by_split()?;
-        if records_by_split
-            .get(&target_split)
-            .map(|records| !records.is_empty())
-            .unwrap_or(false)
-        {
+        self.refresh_records_by_split_cache()?;
+        let has_records = self
+            .cached_records_by_split
+            .as_ref()
+            .and_then(|map| map.get(&target_split))
+            .is_some_and(|records| !records.is_empty());
+        if has_records {
             return Ok(());
         }
         Err(SamplerError::Exhausted(
@@ -983,9 +1000,15 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         ))
     }
 
-    fn records_by_split(
-        &mut self,
-    ) -> Result<HashMap<SplitLabel, Vec<(RecordId, SourceId)>>, SamplerError> {
+    /// Rebuild the cached `records_by_split` map when the record pool changed
+    /// since the last build. Steady-state batches hit the cache (O(1)) instead
+    /// of rebuilding the full map (O(N) clones + label lookups).
+    fn refresh_records_by_split_cache(&mut self) -> Result<(), SamplerError> {
+        if self.cached_records_by_split_gen == self.pool_generation
+            && self.cached_records_by_split.is_some()
+        {
+            return Ok(());
+        }
         let mut map: HashMap<SplitLabel, Vec<(RecordId, SourceId)>> = HashMap::new();
         // Collect chunk_index entries first to avoid borrowing issues
         let entries: Vec<(RecordId, RecordId)> = self
@@ -1001,7 +1024,20 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             let label = self.get_or_insert_split_label(&record_id)?;
             map.entry(label).or_default().push((chunk_id, source));
         }
-        Ok(map)
+        self.cached_records_by_split = Some(map);
+        self.cached_records_by_split_gen = self.pool_generation;
+        Ok(())
+    }
+
+    /// Owned-map convenience used by tests that hand-mutate the pool.
+    /// Production paths use [`Self::refresh_records_by_split_cache`] plus a
+    /// direct reference to avoid the per-call clone.
+    #[cfg(test)]
+    fn records_by_split(
+        &mut self,
+    ) -> Result<HashMap<SplitLabel, Vec<(RecordId, SourceId)>>, SamplerError> {
+        self.refresh_records_by_split_cache()?;
+        Ok(self.cached_records_by_split.clone().unwrap_or_default())
     }
 
     fn choose_anchor_record(
@@ -2033,6 +2069,10 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         self.negative_backend.on_sync_start();
 
         // --- Process additions (strict O(Δ log N) via binary search) ---
+        // `pool_changed` tracks actual membership change: genuinely new IDs
+        // or true evictions. Pure version refreshes of already-pooled IDs
+        // leave the pool (and the cached records_by_split map) intact.
+        let mut pool_changed = truly_evicted;
         if !added.is_empty() {
             let allowed: HashSet<SplitLabel> = self.allowed_target_splits().into_iter().collect();
             for record in &added {
@@ -2046,6 +2086,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                     self.records.insert(record.id.clone(), Arc::clone(record));
                     continue;
                 }
+                pool_changed = true;
                 let label = self.get_or_insert_split_label(&record.id)?;
                 if self.record_has_long_anchor_or_context_section(record) {
                     self.increment_long_section_count(&record.source);
@@ -2103,6 +2144,9 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             self.prune_cursor_state();
         }
 
+        if pool_changed {
+            self.pool_generation = self.pool_generation.saturating_add(1);
+        }
         self.last_sync_version = new_version;
         Ok(())
     }
@@ -2137,6 +2181,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         self.rebuild_chunk_index();
         self.rebuild_source_index()?;
         self.last_sync_version = self.ingestion.global_version();
+        // The pool was fully replaced; invalidate the cached split map.
+        self.pool_generation = self.pool_generation.saturating_add(1);
         Ok(())
     }
 
@@ -2167,15 +2213,19 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         self.negative_backend.on_records_refreshed(
             &self.records,
             max_window_tokens,
-            &|id| self.split_store.label_for(id),
+            &|id| self.split_labels.get(id).copied(),
             self.ingestion.last_refreshed_sources(),
         );
         // Epoch tracking and source-state management must run every batch regardless
         // of whether the record pool changed — reconcile advances the sampling cursor.
         self.epoch_tracker.ensure_loaded()?;
-        let records_by_split = self.records_by_split()?;
+        self.refresh_records_by_split_cache()?;
+        let cached_records_by_split = self
+            .cached_records_by_split
+            .as_ref()
+            .expect("records_by_split cache populated by refresh");
         self.epoch_tracker
-            .reconcile(target_split, &records_by_split);
+            .reconcile(target_split, cached_records_by_split);
         self.ensure_source_state()?;
         Ok(())
     }
@@ -2237,13 +2287,17 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         self.negative_backend.on_records_refreshed(
             &self.records,
             max_window_tokens,
-            &|id| self.split_store.label_for(id),
+            &|id| self.split_labels.get(id).copied(),
             self.ingestion.last_refreshed_sources(),
         );
         self.epoch_tracker.ensure_loaded()?;
-        let records_by_split = self.records_by_split()?;
+        self.refresh_records_by_split_cache()?;
+        let cached_records_by_split = self
+            .cached_records_by_split
+            .as_ref()
+            .expect("records_by_split cache populated by refresh");
         self.epoch_tracker
-            .reconcile(target_split, &records_by_split);
+            .reconcile(target_split, cached_records_by_split);
         self.ensure_source_state()?;
         Ok(())
     }
@@ -2294,13 +2348,17 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         self.negative_backend.on_records_refreshed(
             &self.records,
             max_window_tokens,
-            &|id| self.split_store.label_for(id),
+            &|id| self.split_labels.get(id).copied(),
             self.ingestion.last_refreshed_sources(),
         );
         self.epoch_tracker.ensure_loaded()?;
-        let records_by_split = self.records_by_split()?;
+        self.refresh_records_by_split_cache()?;
+        let cached_records_by_split = self
+            .cached_records_by_split
+            .as_ref()
+            .expect("records_by_split cache populated by refresh");
         self.epoch_tracker
-            .reconcile(target_split, &records_by_split);
+            .reconcile(target_split, cached_records_by_split);
         self.ensure_source_state()?;
         Ok(())
     }
