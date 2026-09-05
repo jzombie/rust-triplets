@@ -2034,8 +2034,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
 
         // --- Process additions (strict O(Δ log N) via binary search) ---
         if !added.is_empty() {
-            let allowed: HashSet<SplitLabel> =
-                self.allowed_target_splits().into_iter().collect();
+            let allowed: HashSet<SplitLabel> = self.allowed_target_splits().into_iter().collect();
             for record in &added {
                 // Re-ingested IDs (version bump for records already pooled,
                 // e.g. a wrapped source re-draining known records) must not
