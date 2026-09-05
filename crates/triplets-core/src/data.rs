@@ -528,4 +528,41 @@ mod tests {
         assert_eq!(sample.recipe, "text_recipe");
         assert!(sample.instruction.is_some());
     }
+
+    #[test]
+    fn record_section_default_has_zero_token_count_and_empty_text() {
+        let section = RecordSection::default();
+        assert_eq!(section.token_count, 0);
+        assert!(section.text.is_empty());
+        assert!(section.heading.is_none());
+        assert!(section.sentences.is_empty());
+        assert!(matches!(section.role, SectionRole::Context));
+    }
+
+    #[test]
+    fn from_text_with_role_populates_token_count() {
+        use crate::tokenizer::{Tokenizer, WhitespaceTokenizer};
+        let record = DataRecord::from_text_with_role(
+            "tok-test",
+            "src",
+            "one two three",
+            SectionRole::Anchor,
+        );
+        let expected = WhitespaceTokenizer.token_count("one two three");
+        assert_eq!(record.sections[0].token_count, expected);
+        assert!(record.meta_prefix.is_none());
+        assert!(record.label.is_none());
+    }
+
+    #[test]
+    fn from_text_sets_context_role_and_computes_token_count() {
+        use crate::tokenizer::{Tokenizer, WhitespaceTokenizer};
+        let record = DataRecord::from_text("from-txt", "src", "hello beautiful world");
+        assert!(matches!(record.sections[0].role, SectionRole::Context));
+        assert_eq!(
+            record.sections[0].token_count,
+            WhitespaceTokenizer.token_count("hello beautiful world")
+        );
+        assert_eq!(record.id.as_str(), "from-txt");
+    }
 }

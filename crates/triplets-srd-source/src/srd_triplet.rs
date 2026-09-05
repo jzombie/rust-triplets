@@ -1520,4 +1520,39 @@ mod tests {
             assert_eq!(p.anchor_text, shared_text);
         }
     }
+
+    #[test]
+    fn srd_mode_section_count_returns_correct_values() {
+        assert_eq!(SrdMode::Pair.section_count(), 2);
+        assert_eq!(SrdMode::Triplet.section_count(), 3);
+    }
+
+    #[test]
+    fn decode_entry_single_byte_returns_too_short() {
+        let result = decode_entry(&[MODE_PAIR], 2);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), SrdError::EntryTooShort));
+    }
+
+    #[test]
+    fn write_pair_entries_empty_batch_returns_ok() {
+        let tmp = TempDir::new().unwrap();
+        let store = DataStore::open(&tmp.path().join("test.bin")).unwrap();
+        let result = write_pair_entries(&store, 0, &[]);
+        assert!(
+            result.is_ok(),
+            "empty pair batch should be a no-op: {result:?}"
+        );
+    }
+
+    #[test]
+    fn write_triplet_entries_empty_batch_returns_ok() {
+        let tmp = TempDir::new().unwrap();
+        let store = DataStore::open(&tmp.path().join("test.bin")).unwrap();
+        let result = write_triplet_entries(&store, 0, &[]);
+        assert!(
+            result.is_ok(),
+            "empty triplet batch should be a no-op: {result:?}"
+        );
+    }
 }

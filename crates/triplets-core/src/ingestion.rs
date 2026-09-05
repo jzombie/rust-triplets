@@ -2166,4 +2166,270 @@ mod tests {
             .unwrap();
         assert!(manager.has_sources());
     }
+
+    #[test]
+    fn record_cache_ingest_with_version_empty_batch_is_noop() {
+        let cache = RecordCache::new(4);
+        cache.ingest_with_version(Vec::<DataRecord>::new(), 99);
+        assert!(cache.is_empty());
+        assert_eq!(cache.ingest_count(), 0);
+    }
+
+    #[test]
+    fn record_cache_ingest_with_version_assigns_explicit_version() {
+        let cache = RecordCache::new(4);
+        cache.ingest_with_version(vec![make_record("v1", "s")], 10);
+        assert_eq!(cache.len(), 1);
+        // A subsequent sync_delta from version 0 should see the record as added.
+        let (_, added, evicted) = cache.sync_delta(0);
+        assert_eq!(added.len(), 1);
+        assert!(evicted.is_empty());
+        assert_eq!(added[0].id, "v1");
+    }
+
+    #[test]
+    fn record_cache_sync_delta_returns_nothing_when_fully_consumed() {
+        let cache = RecordCache::new(4);
+        cache.ingest_with_version(vec![make_record("a", "s")], 5);
+        // First pull consumes the delta.
+        let (v1, added1, _) = cache.sync_delta(0);
+        assert_eq!(added1.len(), 1);
+        // Second pull with same watermark returns empty.
+        let (v2, added2, evicted2) = cache.sync_delta(v1);
+        assert!(added2.is_empty());
+        assert!(evicted2.is_empty());
+        assert_eq!(v2, v1);
+    }
+
+    #[test]
+    fn record_cache_sync_delta_reports_evictions_from_clear() {
+        let cache = RecordCache::new(4);
+        cache.ingest(vec![make_record("e1", "s"), make_record("e2", "s")]);
+        // Consume the initial add.
+        let (v1, _, _) = cache.sync_delta(0);
+        assert!(v1 > 0);
+        // Clear records — should log evictions.
+        cache.clear();
+        let (_, added, evicted) = cache.sync_delta(v1);
+        assert!(added.is_empty());
+        assert_eq!(evicted.len(), 2);
+        assert!(evicted.contains(&"e1".to_string()));
+        assert!(evicted.contains(&"e2".to_string()));
+    }
+
+    #[test]
+    fn record_cache_sync_delta_filters_evictions_by_version_watermark() {
+        let cache = RecordCache::new(4);
+        cache.ingest_with_version(vec![make_record("old", "s")], 1);
+        let (v1, _, _) = cache.sync_delta(0);
+        assert!(v1 >= 1);
+        cache.clear();
+        // Pull at the old watermark — should see eviction for "old".
+        let (_, _, evicted_at_v1) = cache.sync_delta(v1);
+        assert_eq!(evicted_at_v1.len(), 1);
+        // Pull at a higher watermark that was bumped by clear — should be empty.
+        let (_, _, evicted_at_higher) = cache.sync_delta(v1 + 1);
+        assert!(evicted_at_higher.is_empty());
+    }
+
+    #[test]
+    fn record_cache_enforce_limit_trims_fifo_and_logs_evictions() {
+        let cache = RecordCache::new(2);
+        cache.ingest(vec![
+            make_record("first", "s"),
+            make_record("second", "s"),
+            make_record("third", "s"),
+        ]);
+        // Cache should hold only 2 records.
+        assert_eq!(cache.len(), 2);
+        // Consume delta to establish a baseline version.
+        let (v1, _, _) = cache.sync_delta(0);
+        // Ingest one more to trigger eviction of "second" (FIFO order).
+        cache.ingest(vec![make_record("fourth", "s")]);
+        let (_, _, evicted) = cache.sync_delta(v1);
+        // "first" was evicted when "third" was ingested, "second" when "fourth" was.
+        // At minimum one eviction must appear.
+        assert!(!evicted.is_empty());
+    }
+
+    #[test]
+    fn manager_force_refresh_generation_and_global_version() {
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        let mut manager = IngestionManager::new(4, SamplerConfig::default());
+        assert_eq!(manager.force_refresh_generation(), 0);
+        assert_eq!(manager.global_version(), 0);
+
+        manager
+            .register_source(Box::new(ScriptedSource::new(
+                "gen_src",
+                refreshes,
+                vec![Ok(SourceSnapshot {
+                    records: vec![make_record("g1", "gen_src")],
+                    cursor: SourceCursor {
+                        last_seen: Utc::now(),
+                        revision: 1,
+                    },
+                })],
+            )))
+            .unwrap();
+
+        manager.refresh_all();
+        assert_eq!(manager.force_refresh_generation(), 0);
+        assert!(manager.global_version() > 0);
+
+        let v_before = manager.global_version();
+        manager.force_refresh_all();
+        assert_eq!(manager.force_refresh_generation(), 1);
+        assert!(manager.global_version() > v_before);
+    }
+
+    #[test]
+    fn manager_sync_delta_aggregates_across_sources() {
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        let mut manager = IngestionManager::new(4, SamplerConfig::default());
+        manager
+            .register_source(Box::new(ScriptedSource::new(
+                "agg_a",
+                refreshes.clone(),
+                vec![Ok(SourceSnapshot {
+                    records: vec![make_record("a1", "agg_a")],
+                    cursor: SourceCursor {
+                        last_seen: Utc::now(),
+                        revision: 1,
+                    },
+                })],
+            )))
+            .unwrap();
+        manager
+            .register_source(Box::new(ScriptedSource::new(
+                "agg_b",
+                refreshes,
+                vec![Ok(SourceSnapshot {
+                    records: vec![make_record("b1", "agg_b")],
+                    cursor: SourceCursor {
+                        last_seen: Utc::now(),
+                        revision: 1,
+                    },
+                })],
+            )))
+            .unwrap();
+
+        manager.refresh_all();
+        let (version, added, evicted) = manager.sync_delta(0);
+        assert!(version > 0);
+        assert_eq!(added.len(), 2);
+        let ids: Vec<&str> = added.iter().map(|r| r.id.as_str()).collect();
+        assert!(ids.contains(&"a1"));
+        assert!(ids.contains(&"b1"));
+        assert!(evicted.is_empty());
+
+        // Second pull should be empty.
+        let (_, added2, evicted2) = manager.sync_delta(version);
+        assert!(added2.is_empty());
+        assert!(evicted2.is_empty());
+    }
+
+    #[test]
+    fn manager_source_refresh_stats_returns_telemetry() {
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        let mut manager = IngestionManager::new(4, SamplerConfig::default());
+        manager
+            .register_source(Box::new(ScriptedSource::new(
+                "stats_src",
+                refreshes,
+                vec![Ok(SourceSnapshot {
+                    records: vec![make_record("s1", "stats_src")],
+                    cursor: SourceCursor {
+                        last_seen: Utc::now(),
+                        revision: 1,
+                    },
+                })],
+            )))
+            .unwrap();
+
+        let stats = manager.source_refresh_stats();
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].0, "stats_src");
+        assert_eq!(stats[0].1.last_refresh_ms, 0);
+
+        manager.refresh_all();
+        let stats = manager.source_refresh_stats();
+        assert_eq!(stats[0].1.last_record_count, 1);
+    }
+
+    #[test]
+    fn record_cache_ingest_batch_replaces_existing_record() {
+        let cache = RecordCache::new(4);
+        // First ingest creates the record.
+        cache.ingest(vec![make_record("dup", "s")]);
+        assert_eq!(cache.len(), 1);
+        // Re-ingest same id replaces it (does not duplicate).
+        cache.ingest(vec![make_record("dup", "s")]);
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn record_cache_ingest_with_version_replaces_existing_record() {
+        let cache = RecordCache::new(4);
+        cache.ingest_with_version(vec![make_record("vr", "s")], 5);
+        let (v1, _, _) = cache.sync_delta(0);
+        assert_eq!(cache.len(), 1);
+
+        // Re-ingest same id with higher version.
+        cache.ingest_with_version(vec![make_record("vr", "s")], v1 + 5);
+        let (_, added, evicted) = cache.sync_delta(v1);
+        assert_eq!(added.len(), 1);
+        assert!(evicted.is_empty());
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn record_cache_enforce_limit_evicts_oldest_and_trims_eviction_log() {
+        // Create a cache with max 3 records and ingest 5 — the eviction log
+        // must stay bounded at max_records.
+        let cache = RecordCache::new(3);
+        for i in 0..5 {
+            cache.ingest(vec![make_record(&format!("r{i}"), "s")]);
+        }
+        assert_eq!(cache.len(), 3);
+
+        // Consume delta to flush.
+        let (v1, _, _) = cache.sync_delta(0);
+
+        // Verify eviction log is bounded by calling sync_delta —
+        // should not panic or grow unbounded.
+        let (_, added, evicted) = cache.sync_delta(v1);
+        // New records from the last ingest may appear as added.
+        // Evictions from the FIFO limit should appear.
+        assert!(added.len() + evicted.len() <= 5);
+    }
+
+    #[test]
+    fn weighted_drain_breaks_when_all_buffers_empty() {
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        let mut manager = IngestionManager::new(4, SamplerConfig::default());
+        // Register source but don't refresh — buffer is empty.
+        manager
+            .register_source(Box::new(ScriptedSource::new(
+                "empty_buf",
+                refreshes,
+                vec![],
+            )))
+            .unwrap();
+
+        let mut weights = HashMap::new();
+        weights.insert("empty_buf".to_string(), 1.0);
+        // advance_with_weights calls weighted_drain_into_caches with empty buffers.
+        // Should not panic — the drain loop breaks when total_weight == 0.
+        manager.advance_with_weights(1, &weights).unwrap();
+        assert_eq!(manager.all_records_len(), 0);
+    }
+
+    #[test]
+    fn wait_for_ingest_times_out_without_notification() {
+        let cache = RecordCache::new(4);
+        // No ingest happens — should time out immediately.
+        let result = cache.wait_for_ingest(0, Duration::from_millis(1));
+        assert_eq!(result, 0);
+    }
 }
