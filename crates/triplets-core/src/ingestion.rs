@@ -2354,7 +2354,6 @@ mod tests {
 
         manager.refresh_all();
         let stats = manager.source_refresh_stats();
-        assert!(stats[0].1.last_refresh_ms >= 0);
         assert_eq!(stats[0].1.last_record_count, 1);
     }
 

@@ -402,12 +402,10 @@ fn insert_id_into_source_index_skips_disallowed_split() {
 
     // Should NOT be inserted because Test is not in the allowed set.
     assert!(
-        !inner
-            .source_record_indices
-            .contains_key(&"src_dis".to_string())
+        !inner.source_record_indices.contains_key("src_dis")
             || inner
                 .source_record_indices
-                .get(&"src_dis".to_string())
+                .get("src_dis")
                 .unwrap()
                 .is_empty()
     );
@@ -456,7 +454,7 @@ fn get_or_insert_split_label_caches_result() {
     // Second call should return the cached value (same label).
     let label2 = inner.get_or_insert_split_label(&"lbl_rec".into()).unwrap();
     assert_eq!(label1, label2);
-    assert!(inner.split_labels.contains_key(&"lbl_rec".to_string()));
+    assert!(inner.split_labels.contains_key("lbl_rec"));
 }
 
 #[test]
@@ -560,10 +558,7 @@ fn record_has_long_section_increments_count_on_add() {
     inner.ingestion.refresh_all();
     inner.sync_records_from_cache().unwrap();
 
-    assert_eq!(
-        inner.long_section_counts.get(&"long_src".to_string()),
-        Some(&1)
-    );
+    assert_eq!(inner.long_section_counts.get("long_src"), Some(&1));
 }
 
 #[test]
@@ -14187,7 +14182,7 @@ fn force_ingest_refresh_with_weights_for_split_no_sources_returns_ok() {
 fn select_role_parallel_returns_none_when_no_matching_sections() {
     let split = SplitRatios::default();
     let store = Arc::new(DeterministicSplitStore::new(split, 306).unwrap());
-    let mut inner = TripletSamplerInner::new(base_config(), store);
+    let inner = TripletSamplerInner::new(base_config(), store);
 
     let record = DataRecord {
         id: "role_none".into(),
@@ -14252,7 +14247,7 @@ fn record_has_at_least_two_window_chunks_returns_false_for_small_sections() {
     let store = Arc::new(DeterministicSplitStore::new(split, 308).unwrap());
     let mut config = base_config();
     config.chunking.max_window_tokens = 100;
-    let mut inner = TripletSamplerInner::new(config, store);
+    let inner = TripletSamplerInner::new(config, store);
 
     let record = DataRecord {
         id: "small_sec".into(),
@@ -14283,7 +14278,7 @@ fn record_has_at_least_two_window_chunks_returns_false_for_no_section_match() {
     let store = Arc::new(DeterministicSplitStore::new(split, 309).unwrap());
     let mut config = base_config();
     config.chunking.max_window_tokens = 100;
-    let mut inner = TripletSamplerInner::new(config, store);
+    let inner = TripletSamplerInner::new(config, store);
 
     let record = DataRecord {
         id: "no_match".into(),

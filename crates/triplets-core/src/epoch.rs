@@ -642,13 +642,15 @@ mod tests {
 
     #[test]
     fn ensure_order_handles_empty_source_bucket() {
-        let mut state = SplitEpochState::default();
+        let mut state = SplitEpochState {
+            population: vec![
+                ("r1".to_string(), "src_a".to_string()),
+                ("r2".to_string(), "src_a".to_string()),
+            ],
+            dirty_order: true,
+            ..SplitEpochState::default()
+        };
         // Population with one source that has entries, plus an empty source concept.
-        state.population = vec![
-            ("r1".to_string(), "src_a".to_string()),
-            ("r2".to_string(), "src_a".to_string()),
-        ];
-        state.dirty_order = true;
         state.ensure_order(SplitLabel::Train, 42);
         assert!(!state.order.is_empty());
         // Calling again with dirty_order=false should be a no-op
@@ -658,9 +660,11 @@ mod tests {
 
     #[test]
     fn ensure_order_clamps_offset_when_beyond_order_length() {
-        let mut state = SplitEpochState::default();
-        state.population = vec![("r1".to_string(), "src".to_string())];
-        state.dirty_order = true;
+        let mut state = SplitEpochState {
+            population: vec![("r1".to_string(), "src".to_string())],
+            dirty_order: true,
+            ..SplitEpochState::default()
+        };
         state.ensure_order(SplitLabel::Train, 1);
         // Simulate offset being beyond order length
         state.offset = 999;
