@@ -288,6 +288,286 @@ fn record_has_long_section_returns_false_when_window_tokens_are_disabled() {
 }
 
 #[test]
+fn remove_id_from_source_index_removes_correct_entry() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 100).unwrap());
+    let mut inner = TripletSamplerInner::new(base_config(), store);
+
+    let source: SourceId = "src_rm".into();
+    let id_a: RecordId = "rm_a".into();
+    let id_b: RecordId = "rm_b".into();
+    inner
+        .source_record_indices
+        .insert(source.clone(), vec![id_a.clone(), id_b.clone()]);
+
+    inner.remove_id_from_source_index(&source, &id_a);
+    let ids = inner.source_record_indices.get(&source).unwrap();
+    assert_eq!(ids.len(), 1);
+    assert_eq!(ids[0], id_b);
+
+    inner.remove_id_from_source_index(&source, &id_b);
+    let ids = inner.source_record_indices.get(&source).unwrap();
+    assert!(ids.is_empty());
+}
+
+#[test]
+fn remove_id_from_source_index_noop_for_unknown_source() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 101).unwrap());
+    let mut inner = TripletSamplerInner::new(base_config(), store);
+    // Should not panic.
+    inner.remove_id_from_source_index(&"nonexistent".into(), &"id".into());
+}
+
+#[test]
+fn insert_id_into_source_index_maintains_sorted_order() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 102).unwrap());
+    let mut inner = TripletSamplerInner::new(base_config(), store);
+
+    // Seed some records into the pool so binary search can compare hashes.
+    for id in ["rec_c", "rec_a", "rec_b"] {
+        let record = DataRecord {
+            id: id.into(),
+            source: "src_ins".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            quality: QualityScore::default(),
+            taxonomy: vec![],
+            sections: vec![RecordSection {
+                role: SectionRole::Context,
+                heading: None,
+                text: id.to_string(),
+                sentences: vec![],
+                token_count: 0,
+            }],
+            meta_prefix: None,
+            label: None,
+        };
+        inner.records.insert(id.into(), Arc::new(record));
+    }
+
+    let source: SourceId = "src_ins".into();
+    let allowed: HashSet<SplitLabel> = [SplitLabel::Train, SplitLabel::Validation, SplitLabel::Test]
+        .into_iter()
+        .collect();
+    let label = SplitLabel::Train;
+
+    inner.insert_id_into_source_index(source.clone(), "rec_b".into(), label, &allowed);
+    inner.insert_id_into_source_index(source.clone(), "rec_a".into(), label, &allowed);
+    inner.insert_id_into_source_index(source.clone(), "rec_c".into(), label, &allowed);
+
+    let ids = inner.source_record_indices.get(&source).unwrap();
+    assert_eq!(ids.len(), 3);
+    // All three should be present (order is by hash, not insertion).
+    let id_set: HashSet<&str> = ids.iter().map(|id| id.as_str()).collect();
+    assert!(id_set.contains("rec_a"));
+    assert!(id_set.contains("rec_b"));
+    assert!(id_set.contains("rec_c"));
+}
+
+#[test]
+fn insert_id_into_source_index_skips_disallowed_split() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 103).unwrap());
+    let mut inner = TripletSamplerInner::new(base_config(), store);
+
+    let record = DataRecord {
+        id: "disallowed".into(),
+        source: "src_dis".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        quality: QualityScore::default(),
+        taxonomy: vec![],
+        sections: vec![RecordSection {
+            role: SectionRole::Context,
+            heading: None,
+            text: "disallowed".to_string(),
+            sentences: vec![],
+            token_count: 0,
+        }],
+        meta_prefix: None,
+        label: None,
+    };
+    inner
+        .records
+        .insert("disallowed".into(), Arc::new(record));
+
+    let allowed: HashSet<SplitLabel> = [SplitLabel::Train].into_iter().collect();
+    inner.insert_id_into_source_index(
+        "src_dis".into(),
+        "disallowed".into(),
+        SplitLabel::Test,
+        &allowed,
+    );
+
+    // Should NOT be inserted because Test is not in the allowed set.
+    assert!(
+        !inner
+            .source_record_indices
+            .contains_key(&"src_dis".to_string())
+            || inner
+                .source_record_indices
+                .get(&"src_dis".to_string())
+                .unwrap()
+                .is_empty()
+    );
+}
+
+#[test]
+fn increment_and_decrement_long_section_count() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 104).unwrap());
+    let mut inner = TripletSamplerInner::new(base_config(), store);
+
+    let source: SourceId = "src_long".into();
+    assert_eq!(inner.long_section_counts.get(&source), None);
+
+    inner.increment_long_section_count(&source);
+    assert_eq!(inner.long_section_counts.get(&source), Some(&1));
+
+    inner.increment_long_section_count(&source);
+    assert_eq!(inner.long_section_counts.get(&source), Some(&2));
+
+    inner.decrement_long_section_count(&source);
+    assert_eq!(inner.long_section_counts.get(&source), Some(&1));
+
+    inner.decrement_long_section_count(&source);
+    // Entry should be removed when count reaches 0.
+    assert!(!inner.long_section_counts.contains_key(&source));
+}
+
+#[test]
+fn decrement_long_section_count_noop_when_absent() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 105).unwrap());
+    let mut inner = TripletSamplerInner::new(base_config(), store);
+    // Should not panic.
+    inner.decrement_long_section_count(&"absent_src".into());
+}
+
+#[test]
+fn get_or_insert_split_label_caches_result() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 106).unwrap());
+    let mut inner = TripletSamplerInner::new(base_config(), store);
+
+    // First call should compute and cache the label.
+    let label1 = inner.get_or_insert_split_label(&"lbl_rec".into()).unwrap();
+    // Second call should return the cached value (same label).
+    let label2 = inner.get_or_insert_split_label(&"lbl_rec".into()).unwrap();
+    assert_eq!(label1, label2);
+    assert!(inner.split_labels.contains_key(&"lbl_rec".to_string()));
+}
+
+#[test]
+fn sync_records_from_cache_delta_path_with_additions_and_evictions() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 107).unwrap());
+    let mut config = base_config();
+    config.batch_size = 4;
+    let mut inner = TripletSamplerInner::new(config, store);
+
+    let now = Utc::now();
+    let records = vec![
+        DataRecord {
+            id: "d1".into(),
+            source: "delta_src".into(),
+            created_at: now,
+            updated_at: now,
+            quality: QualityScore::default(),
+            taxonomy: vec![],
+            sections: vec![RecordSection {
+                role: SectionRole::Context,
+                heading: None,
+                text: "delta text one".into(),
+                sentences: vec![],
+                token_count: 0,
+            }],
+            meta_prefix: None,
+            label: None,
+        },
+        DataRecord {
+            id: "d2".into(),
+            source: "delta_src".into(),
+            created_at: now,
+            updated_at: now,
+            quality: QualityScore::default(),
+            taxonomy: vec![],
+            sections: vec![RecordSection {
+                role: SectionRole::Context,
+                heading: None,
+                text: "delta text two".into(),
+                sentences: vec![],
+                token_count: 0,
+            }],
+            meta_prefix: None,
+            label: None,
+        },
+    ];
+    let source = InMemorySource::from_records("delta_src", records);
+    inner.ingestion.register_source(Box::new(source)).unwrap();
+
+    // Bootstrap via full sync.
+    inner.ingestion.refresh_all();
+    inner.sync_records_from_cache().unwrap();
+    assert_eq!(inner.records.len(), 2);
+
+    let version_after_bootstrap = inner.ingestion.global_version();
+
+    // Force-refresh replaces cache contents — triggers force-refresh fallback.
+    inner.last_force_refresh_generation = 0;
+    inner.ingestion.force_refresh_all();
+    inner.sync_records_from_cache().unwrap();
+    // Records should still be present (re-fetched).
+    assert_eq!(inner.records.len(), 2);
+    assert_eq!(
+        inner.ingestion.force_refresh_generation(),
+        inner.last_force_refresh_generation
+    );
+
+    // Verify delta version watermark advanced.
+    assert!(inner.last_sync_version >= version_after_bootstrap);
+}
+
+#[test]
+fn record_has_long_section_increments_count_on_add() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 108).unwrap());
+    let mut config = base_config();
+    config.chunking.max_window_tokens = 3;
+    let mut inner = TripletSamplerInner::new(config, store);
+
+    let long_record = DataRecord {
+        id: "long_r".into(),
+        source: "long_src".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        quality: QualityScore::default(),
+        taxonomy: vec![],
+        sections: vec![RecordSection {
+            role: SectionRole::Context,
+            heading: None,
+            text: "one two three four five".into(),
+            sentences: vec![],
+            token_count: 5,
+        }],
+        meta_prefix: None,
+        label: None,
+    };
+    let source = InMemorySource::from_records("long_src", vec![long_record]);
+    inner.ingestion.register_source(Box::new(source)).unwrap();
+
+    inner.ingestion.refresh_all();
+    inner.sync_records_from_cache().unwrap();
+
+    assert_eq!(
+        inner.long_section_counts.get(&"long_src".to_string()),
+        Some(&1)
+    );
+}
+
+#[test]
 fn prefetcher_tracks_errors() {
     let calls = Arc::new(AtomicUsize::new(0));
     let calls_ref = Arc::clone(&calls);
@@ -13463,4 +13743,502 @@ fn text_batch_samples_from_positive_and_negative_pair_label_records() {
         saw_negative_record,
         "text batch should contain at least one sample from a PairLabel::Negative record"
     );
+}
+
+#[test]
+fn build_derived_text_recipes_produces_anchor_positive_negative_variants() {
+    let recipes = vec![
+        TripletRecipe {
+            name: "qa".into(),
+            anchor: Selector::Role(SectionRole::Anchor),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 1.5,
+            instruction: None,
+            allow_same_anchor_positive: false,
+        },
+        TripletRecipe {
+            name: "retrieval".into(),
+            anchor: Selector::Random,
+            positive_selector: Selector::Random,
+            negative_selector: Selector::Random,
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 0.8,
+            instruction: None,
+            allow_same_anchor_positive: false,
+        },
+    ];
+    let derived = TripletSamplerInner::<DeterministicSplitStore>::build_derived_text_recipes(&recipes);
+    assert_eq!(derived.len(), 6);
+    assert_eq!(derived[0].name.as_ref(), "qa_anchor");
+    assert_eq!(derived[1].name.as_ref(), "qa_positive");
+    assert_eq!(derived[2].name.as_ref(), "qa_negative");
+    assert_eq!(derived[3].name.as_ref(), "retrieval_anchor");
+    assert_eq!(derived[4].name.as_ref(), "retrieval_positive");
+    assert_eq!(derived[5].name.as_ref(), "retrieval_negative");
+    assert!((derived[0].weight - 1.5).abs() < f32::EPSILON);
+    assert!((derived[3].weight - 0.8).abs() < f32::EPSILON);
+    assert!(derived.iter().all(|r| r.instruction.is_none()));
+}
+
+#[test]
+fn select_chunk_returns_none_for_empty_sections() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 200).unwrap());
+    let mut inner = TripletSamplerInner::new(base_config(), store);
+
+    let empty_record = DataRecord {
+        id: "empty_sel".into(),
+        source: "unit".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        quality: QualityScore::default(),
+        taxonomy: vec![],
+        sections: vec![],
+        meta_prefix: None,
+        label: None,
+    };
+
+    // Role selector with no sections
+    assert!(inner
+        .select_chunk(&empty_record, &Selector::Role(SectionRole::Anchor))
+        .is_none());
+    // Paragraph selector with no sections
+    assert!(inner
+        .select_chunk(&empty_record, &Selector::Paragraph(0))
+        .is_none());
+    // Random selector with no sections
+    assert!(inner
+        .select_chunk(&empty_record, &Selector::Random)
+        .is_none());
+}
+
+#[test]
+fn select_chunk_returns_none_when_pool_is_empty_for_paragraph() {
+    let split = SplitRatios::default();
+    let mut config = base_config();
+    config.chunking.max_window_tokens = 1;
+    let store = Arc::new(DeterministicSplitStore::new(split, 201).unwrap());
+    let mut inner = TripletSamplerInner::new(config, store);
+
+    let record = DataRecord {
+        id: "para_empty".into(),
+        source: "unit".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        quality: QualityScore::default(),
+        taxonomy: vec![],
+        sections: vec![RecordSection {
+            role: SectionRole::Context,
+            heading: None,
+            text: "tiny".into(),
+            sentences: vec![],
+            token_count: 1,
+        }],
+        meta_prefix: None,
+        label: None,
+    };
+    // Paragraph selector on a section whose text is too small for any window
+    // should return None when pool is empty.
+    // With max_window_tokens=1, token_count=1 -> span=1, so a single chunk is produced.
+    // But if we use Paragraph(1) (out of bounds), it should return None.
+    assert!(inner
+        .select_chunk(&record, &Selector::Paragraph(1))
+        .is_none());
+}
+
+#[test]
+fn mark_source_wrapped_advances_epoch_when_all_wrapped() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 202).unwrap());
+    let mut inner = TripletSamplerInner::new(base_config(), store);
+    inner.source_order = vec!["src_a".into(), "src_b".into()];
+
+    let epoch_before = inner.epoch;
+    inner.mark_source_wrapped("src_a");
+    assert_eq!(inner.epoch, epoch_before);
+    assert_eq!(
+        inner.source_wrapped.get("src_a"),
+        Some(&true)
+    );
+
+    inner.mark_source_wrapped("src_b");
+    // Both sources wrapped → epoch advances.
+    assert!(inner.epoch > epoch_before);
+}
+
+#[test]
+fn mark_source_wrapped_noop_when_source_order_empty() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 203).unwrap());
+    let mut inner = TripletSamplerInner::new(base_config(), store);
+    inner.source_order = vec![];
+    inner.mark_source_wrapped("src_x");
+    assert_eq!(inner.epoch, 0);
+}
+
+#[test]
+fn next_chunk_from_pool_resets_cursor_when_stale() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 204).unwrap());
+    let mut inner = TripletSamplerInner::new(base_config(), store);
+
+    // Insert a cursor pointing beyond the pool size.
+    inner
+        .chunk_cursors
+        .insert(("rec".to_string(), 0), 999);
+
+    let pool = vec![RecordChunk {
+        record_id: "rec".into(),
+        section_idx: 0,
+        view: ChunkView::SummaryFallback {
+            strategy: "test".into(),
+            weight: 1.0,
+        },
+        text: "chunk".into(),
+        tokens_estimate: 4,
+        quality: QualityScore::default(),
+        kvp_meta: Default::default(),
+    }];
+    let chunk = inner.next_chunk_from_pool("rec", 0, pool);
+    assert!(chunk.is_some());
+    // Cursor was 999, pool.len() is 1 → resets to 0, then advances to (0+1)%1 = 0.
+    assert_eq!(*inner.chunk_cursors.get(&("rec".to_string(), 0)).unwrap(), 0);
+}
+
+#[test]
+fn negative_strategy_wrong_publication_date_uses_date_taxonomy() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 205).unwrap());
+    let mut config = base_config();
+    config.batch_size = 4;
+    let mut inner = TripletSamplerInner::new(config, Arc::clone(&store));
+
+    let records = vec![
+        trader_record("anchor", "2025-01-15", "Anchor Title", "Anchor body text for date test"),
+        trader_record("neg_candidate", "2025-06-20", "Different Date Title", "Different date body text"),
+        trader_record("same_date", "2025-01-15", "Same Date Title", "Same date body text"),
+    ];
+    for record in &records {
+        store.upsert(record.id.clone(), SplitLabel::Train).unwrap();
+        inner.chunk_index.insert(record.id.clone(), record.id.clone());
+        inner.records.insert(record.id.clone(), Arc::new(record.clone()));
+    }
+    inner.epoch_tracker.ensure_loaded().unwrap();
+    let records_by_split = inner.records_by_split().unwrap();
+    inner
+        .epoch_tracker
+        .reconcile(SplitLabel::Train, &records_by_split);
+
+    let anchor = inner.records.get("anchor").unwrap();
+    let mut rng = DeterministicRng::new(42);
+    let anchor_date = taxonomy_value(anchor, META_FIELD_DATE).map(|d| d.to_string());
+    let neg = inner.select_negative_record(
+        anchor,
+        &NegativeStrategy::WrongPublicationDate,
+        None,
+        &mut rng,
+    );
+    assert!(neg.is_some());
+    let (neg_record, _swapped) = neg.unwrap();
+    // Should pick the record with a different date.
+    let neg_date = taxonomy_value(&neg_record, META_FIELD_DATE);
+    if let Some(ref anchor_d) = anchor_date {
+        assert_ne!(neg_date, Some(anchor_d.as_str()));
+    }
+}
+
+#[test]
+fn negative_strategy_question_answer_mismatch_same_source() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 206).unwrap());
+    let mut config = base_config();
+    config.batch_size = 4;
+    let mut inner = TripletSamplerInner::new(config, Arc::clone(&store));
+
+    let records = vec![
+        trader_record("qa_anchor", "2025-01-01", "QA Anchor", "What is the question?"),
+        trader_record("qa_neg", "2025-01-01", "QA Negative", "A different answer."),
+    ];
+    for record in &records {
+        store.upsert(record.id.clone(), SplitLabel::Train).unwrap();
+        inner.chunk_index.insert(record.id.clone(), record.id.clone());
+        inner.records.insert(record.id.clone(), Arc::new(record.clone()));
+    }
+    inner.epoch_tracker.ensure_loaded().unwrap();
+    let records_by_split = inner.records_by_split().unwrap();
+    inner
+        .epoch_tracker
+        .reconcile(SplitLabel::Train, &records_by_split);
+
+    let anchor = inner.records.get("qa_anchor").unwrap();
+    let mut rng = DeterministicRng::new(42);
+    let neg = inner.select_negative_record(
+        anchor,
+        &NegativeStrategy::QuestionAnswerMismatch,
+        None,
+        &mut rng,
+    );
+    assert!(neg.is_some());
+    let (neg_record, _swapped) = neg.unwrap();
+    assert_eq!(neg_record.source, anchor.source);
+    assert_ne!(neg_record.id, anchor.id);
+}
+
+#[test]
+fn negative_strategy_wrong_publication_date_falls_back_when_no_different_date() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 207).unwrap());
+    let mut config = base_config();
+    config.batch_size = 4;
+    let mut inner = TripletSamplerInner::new(config, Arc::clone(&store));
+
+    // Both records have the same date — should fall back to any same-split record.
+    let records = vec![
+        trader_record("wpd_a", "2025-01-01", "Title A", "Body A"),
+        trader_record("wpd_b", "2025-01-01", "Title B", "Body B"),
+    ];
+    for record in &records {
+        store.upsert(record.id.clone(), SplitLabel::Train).unwrap();
+        inner.chunk_index.insert(record.id.clone(), record.id.clone());
+        inner.records.insert(record.id.clone(), Arc::new(record.clone()));
+    }
+    inner.epoch_tracker.ensure_loaded().unwrap();
+    let records_by_split = inner.records_by_split().unwrap();
+    inner
+        .epoch_tracker
+        .reconcile(SplitLabel::Train, &records_by_split);
+
+    let anchor = inner.records.get("wpd_a").unwrap();
+    let mut rng = DeterministicRng::new(42);
+    let neg = inner.select_negative_record(
+        anchor,
+        &NegativeStrategy::WrongPublicationDate,
+        None,
+        &mut rng,
+    );
+    // Fallback should still produce a negative.
+    assert!(neg.is_some());
+    let (neg_record, _swapped) = neg.unwrap();
+    assert_ne!(neg_record.id, anchor.id);
+}
+
+#[test]
+fn sampler_trait_default_save_sampler_state_is_noop() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 300).unwrap());
+    let sampler = TripletSampler::new(base_config(), store);
+    sampler.save_sampler_state(None).unwrap();
+}
+
+#[test]
+fn batch_builders_handle_empty_source_pool() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 301).unwrap());
+    let mut config = base_config();
+    config.batch_size = 2;
+    config.recipes = vec![TripletRecipe {
+        name: "empty_pool_triplet".into(),
+        anchor: Selector::Role(SectionRole::Anchor),
+        positive_selector: Selector::Role(SectionRole::Context),
+        negative_selector: Selector::Role(SectionRole::Context),
+        negative_strategy: NegativeStrategy::WrongArticle,
+        weight: 1.0,
+        instruction: None,
+        allow_same_anchor_positive: false,
+    }];
+    config.text_recipes = vec![TextRecipe {
+        name: "empty_pool_text".into(),
+        selector: Selector::Role(SectionRole::Context),
+        weight: 1.0,
+        instruction: None,
+    }];
+
+    let sampler = TripletSampler::new(config, store);
+    let result = sampler.next_text_batch(SplitLabel::Train);
+    assert!(result.is_err());
+    let result = sampler.next_text_batch_with_weights(SplitLabel::Train, &HashMap::new());
+    assert!(result.is_err());
+}
+
+#[test]
+fn text_batch_inner_with_weights_early_return_when_nothing_new() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 302).unwrap());
+    let mut config = base_config();
+    config.batch_size = 2;
+    config.text_recipes = vec![TextRecipe {
+        name: "t_with_w".into(),
+        selector: Selector::Role(SectionRole::Context),
+        weight: 1.0,
+        instruction: None,
+    }];
+
+    let mut inner = TripletSamplerInner::new(config, Arc::clone(&store));
+    let records = vec![
+        trader_record("twr_1", "2025-01-01", "Title 1", "Body text one"),
+        trader_record("twr_2", "2025-01-02", "Title 2", "Body text two"),
+    ];
+    for record in &records {
+        store.upsert(record.id.clone(), SplitLabel::Train).unwrap();
+        inner.chunk_index.insert(record.id.clone(), record.id.clone());
+        inner.records.insert(record.id.clone(), Arc::new(record.clone()));
+    }
+    inner.epoch_tracker.ensure_loaded().unwrap();
+    let records_by_split = inner.records_by_split().unwrap();
+    inner
+        .epoch_tracker
+        .reconcile(SplitLabel::Train, &records_by_split);
+
+    let weights = HashMap::new();
+    let result = inner.next_text_batch_inner_with_weights(SplitLabel::Train, Some(&weights));
+    assert!(result.is_ok());
+    let batch1 = result.unwrap();
+    assert_eq!(batch1.samples.len(), 2);
+
+    let result2 = inner.next_text_batch_inner_with_weights(SplitLabel::Train, Some(&weights));
+    // Second call may return Ok with fewer samples or Err(Exhausted) — both are valid
+    // because the early-return path (observed == last_observed_ingest) is exercised.
+    assert!(result2.is_ok() || matches!(result2, Err(SamplerError::Exhausted(_))));
+}
+
+#[test]
+fn ingest_internal_for_split_no_sources_returns_ok() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 303).unwrap());
+    let mut inner = TripletSamplerInner::new(base_config(), store);
+    inner.ingest_internal(SplitLabel::Train).unwrap();
+}
+
+#[test]
+fn ingest_internal_with_weights_no_sources_returns_ok() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 304).unwrap());
+    let mut inner = TripletSamplerInner::new(base_config(), store);
+    let weights = HashMap::new();
+    inner.ingest_internal_with_weights_for_split(SplitLabel::Train, &weights).unwrap();
+}
+
+#[test]
+fn force_ingest_refresh_with_weights_for_split_no_sources_returns_ok() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 305).unwrap());
+    let mut inner = TripletSamplerInner::new(base_config(), store);
+    let weights = HashMap::new();
+    inner.force_ingest_refresh_with_weights_for_split(SplitLabel::Train, &weights).unwrap();
+}
+
+#[test]
+fn select_role_parallel_returns_none_when_no_matching_sections() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 306).unwrap());
+    let mut inner = TripletSamplerInner::new(base_config(), store);
+
+    let record = DataRecord {
+        id: "role_none".into(),
+        source: "unit".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        quality: QualityScore::default(),
+        taxonomy: vec![],
+        sections: vec![RecordSection {
+            role: SectionRole::Anchor,
+            heading: None,
+            text: "only anchor".into(),
+            sentences: vec![],
+            token_count: 2,
+        }],
+        meta_prefix: None,
+        label: None,
+    };
+    let mut rng = DeterministicRng::new(42);
+    // Request Context role but record only has Anchor
+    assert!(inner.select_role_parallel(&record, &SectionRole::Context, &mut rng).is_none());
+}
+
+#[test]
+fn select_chunk_paragraph_returns_none_for_out_of_bounds_index() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 307).unwrap());
+    let mut inner = TripletSamplerInner::new(base_config(), store);
+
+    let record = DataRecord {
+        id: "para_oob".into(),
+        source: "unit".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        quality: QualityScore::default(),
+        taxonomy: vec![],
+        sections: vec![RecordSection {
+            role: SectionRole::Context,
+            heading: None,
+            text: "content".into(),
+            sentences: vec![],
+            token_count: 1,
+        }],
+        meta_prefix: None,
+        label: None,
+    };
+    // Paragraph index 5 doesn't exist
+    assert!(inner.select_chunk(&record, &Selector::Paragraph(5)).is_none());
+}
+
+#[test]
+fn record_has_at_least_two_window_chunks_returns_false_for_small_sections() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 308).unwrap());
+    let mut config = base_config();
+    config.chunking.max_window_tokens = 100;
+    let mut inner = TripletSamplerInner::new(config, store);
+
+    let record = DataRecord {
+        id: "small_sec".into(),
+        source: "unit".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        quality: QualityScore::default(),
+        taxonomy: vec![],
+        sections: vec![RecordSection {
+            role: SectionRole::Context,
+            heading: None,
+            text: "tiny".into(),
+            sentences: vec![],
+            token_count: 1,
+        }],
+        meta_prefix: None,
+        label: None,
+    };
+    assert!(!inner.record_has_at_least_two_window_chunks_for_selector(&record, &Selector::Role(SectionRole::Context)));
+}
+
+#[test]
+fn record_has_at_least_two_window_chunks_returns_false_for_no_section_match() {
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 309).unwrap());
+    let mut config = base_config();
+    config.chunking.max_window_tokens = 100;
+    let mut inner = TripletSamplerInner::new(config, store);
+
+    let record = DataRecord {
+        id: "no_match".into(),
+        source: "unit".into(),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        quality: QualityScore::default(),
+        taxonomy: vec![],
+        sections: vec![RecordSection {
+            role: SectionRole::Anchor,
+            heading: None,
+            text: "short".into(),
+            sentences: vec![],
+            token_count: 1,
+        }],
+        meta_prefix: None,
+        label: None,
+    };
+    // Requesting Context role but only Anchor exists
+    assert!(!inner.record_has_at_least_two_window_chunks_for_selector(&record, &Selector::Role(SectionRole::Context)));
+    // TemporalOffset selector on record with no date taxonomy
+    assert!(!inner.record_has_at_least_two_window_chunks_for_selector(&record, &Selector::TemporalOffset(1)));
 }

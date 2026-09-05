@@ -2283,4 +2283,58 @@ mod tests {
         assert_eq!(writes[0].0, 0); // start_idx
         assert_eq!(writes[0].3, vec![PairLabel::Negative]); // label
     }
+
+    // Embedder that returns vectors of wrong dimension to trigger validation error
+    struct WrongDimEmbedder {
+        dim: usize,
+    }
+    impl Embedder for WrongDimEmbedder {
+        fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+            // Return vectors of a different dimension than self.dim to trigger validation failure
+            let wrong_dim = if self.dim > 1 { self.dim - 1 } else { self.dim + 1 };
+            Ok(texts.iter().map(|_| vec![1.0; wrong_dim]).collect())
+        }
+    }
+
+    #[test]
+    fn step_pair_candidate_embed_validation_error_drops_batch() {
+        let store = MockStore::new();
+        // emb_dim=3 but WrongDimEmbedder returns 2-dim vectors
+        let mut state = make_state(store, EmbedMode::Pair, 3);
+        let embedder = WrongDimEmbedder { dim: 3 };
+        let config = SchedulerConfig::new(1, 1, 2, 100);
+
+        // anchor and candidate have different texts → candidate embed triggers validation error
+        let batch = SamplerBatch::Pairs(vec![PairEntry {
+            anchor_text: "anchor".into(),
+            candidate_text: "candidate".into(),
+            label: PairLabel::Positive,
+        }]);
+
+        let result = state.step(batch, &embedder, &config).unwrap();
+        assert_eq!(result.samples_processed, 0);
+        assert_eq!(result.samples_dropped, 1);
+        assert_eq!(state.dropped_batches, 1);
+    }
+
+    #[test]
+    fn step_triplet_pos_equals_anchor_dedup_and_embed_validation_error() {
+        let store = MockStore::new();
+        // emb_dim=3 but WrongDimEmbedder returns 2-dim vectors
+        let mut state = make_state(store, EmbedMode::Triplet, 3);
+        let embedder = WrongDimEmbedder { dim: 3 };
+        let config = SchedulerConfig::new(1, 1, 2, 100);
+
+        // pos_text == anchor_text triggers pos dedup branch (L338)
+        let batch = SamplerBatch::Triplets(vec![TripletEntry {
+            anchor_text: "shared".into(),
+            pos_text: "shared".into(),
+            neg_text: "different".into(),
+        }]);
+
+        let result = state.step(batch, &embedder, &config).unwrap();
+        assert_eq!(result.samples_processed, 0);
+        assert_eq!(result.samples_dropped, 1);
+        assert_eq!(state.dropped_batches, 1);
+    }
 }
