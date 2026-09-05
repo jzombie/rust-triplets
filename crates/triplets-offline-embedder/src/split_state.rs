@@ -2291,7 +2291,11 @@ mod tests {
     impl Embedder for WrongDimEmbedder {
         fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
             // Return vectors of a different dimension than self.dim to trigger validation failure
-            let wrong_dim = if self.dim > 1 { self.dim - 1 } else { self.dim + 1 };
+            let wrong_dim = if self.dim > 1 {
+                self.dim - 1
+            } else {
+                self.dim + 1
+            };
             Ok(texts.iter().map(|_| vec![1.0; wrong_dim]).collect())
         }
     }

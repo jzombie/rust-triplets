@@ -1539,7 +1539,10 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let store = DataStore::open(&tmp.path().join("test.bin")).unwrap();
         let result = write_pair_entries(&store, 0, &[]);
-        assert!(result.is_ok(), "empty pair batch should be a no-op: {result:?}");
+        assert!(
+            result.is_ok(),
+            "empty pair batch should be a no-op: {result:?}"
+        );
     }
 
     #[test]
@@ -1547,6 +1550,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let store = DataStore::open(&tmp.path().join("test.bin")).unwrap();
         let result = write_triplet_entries(&store, 0, &[]);
-        assert!(result.is_ok(), "empty triplet batch should be a no-op: {result:?}");
+        assert!(
+            result.is_ok(),
+            "empty triplet batch should be a no-op: {result:?}"
+        );
     }
 }

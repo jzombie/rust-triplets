@@ -348,9 +348,10 @@ fn insert_id_into_source_index_maintains_sorted_order() {
     }
 
     let source: SourceId = "src_ins".into();
-    let allowed: HashSet<SplitLabel> = [SplitLabel::Train, SplitLabel::Validation, SplitLabel::Test]
-        .into_iter()
-        .collect();
+    let allowed: HashSet<SplitLabel> =
+        [SplitLabel::Train, SplitLabel::Validation, SplitLabel::Test]
+            .into_iter()
+            .collect();
     let label = SplitLabel::Train;
 
     inner.insert_id_into_source_index(source.clone(), "rec_b".into(), label, &allowed);
@@ -389,9 +390,7 @@ fn insert_id_into_source_index_skips_disallowed_split() {
         meta_prefix: None,
         label: None,
     };
-    inner
-        .records
-        .insert("disallowed".into(), Arc::new(record));
+    inner.records.insert("disallowed".into(), Arc::new(record));
 
     let allowed: HashSet<SplitLabel> = [SplitLabel::Train].into_iter().collect();
     inner.insert_id_into_source_index(
@@ -13769,7 +13768,8 @@ fn build_derived_text_recipes_produces_anchor_positive_negative_variants() {
             allow_same_anchor_positive: false,
         },
     ];
-    let derived = TripletSamplerInner::<DeterministicSplitStore>::build_derived_text_recipes(&recipes);
+    let derived =
+        TripletSamplerInner::<DeterministicSplitStore>::build_derived_text_recipes(&recipes);
     assert_eq!(derived.len(), 6);
     assert_eq!(derived[0].name.as_ref(), "qa_anchor");
     assert_eq!(derived[1].name.as_ref(), "qa_positive");
@@ -13801,17 +13801,23 @@ fn select_chunk_returns_none_for_empty_sections() {
     };
 
     // Role selector with no sections
-    assert!(inner
-        .select_chunk(&empty_record, &Selector::Role(SectionRole::Anchor))
-        .is_none());
+    assert!(
+        inner
+            .select_chunk(&empty_record, &Selector::Role(SectionRole::Anchor))
+            .is_none()
+    );
     // Paragraph selector with no sections
-    assert!(inner
-        .select_chunk(&empty_record, &Selector::Paragraph(0))
-        .is_none());
+    assert!(
+        inner
+            .select_chunk(&empty_record, &Selector::Paragraph(0))
+            .is_none()
+    );
     // Random selector with no sections
-    assert!(inner
-        .select_chunk(&empty_record, &Selector::Random)
-        .is_none());
+    assert!(
+        inner
+            .select_chunk(&empty_record, &Selector::Random)
+            .is_none()
+    );
 }
 
 #[test]
@@ -13843,9 +13849,11 @@ fn select_chunk_returns_none_when_pool_is_empty_for_paragraph() {
     // should return None when pool is empty.
     // With max_window_tokens=1, token_count=1 -> span=1, so a single chunk is produced.
     // But if we use Paragraph(1) (out of bounds), it should return None.
-    assert!(inner
-        .select_chunk(&record, &Selector::Paragraph(1))
-        .is_none());
+    assert!(
+        inner
+            .select_chunk(&record, &Selector::Paragraph(1))
+            .is_none()
+    );
 }
 
 #[test]
@@ -13858,10 +13866,7 @@ fn mark_source_wrapped_advances_epoch_when_all_wrapped() {
     let epoch_before = inner.epoch;
     inner.mark_source_wrapped("src_a");
     assert_eq!(inner.epoch, epoch_before);
-    assert_eq!(
-        inner.source_wrapped.get("src_a"),
-        Some(&true)
-    );
+    assert_eq!(inner.source_wrapped.get("src_a"), Some(&true));
 
     inner.mark_source_wrapped("src_b");
     // Both sources wrapped → epoch advances.
@@ -13885,9 +13890,7 @@ fn next_chunk_from_pool_resets_cursor_when_stale() {
     let mut inner = TripletSamplerInner::new(base_config(), store);
 
     // Insert a cursor pointing beyond the pool size.
-    inner
-        .chunk_cursors
-        .insert(("rec".to_string(), 0), 999);
+    inner.chunk_cursors.insert(("rec".to_string(), 0), 999);
 
     let pool = vec![RecordChunk {
         record_id: "rec".into(),
@@ -13904,7 +13907,10 @@ fn next_chunk_from_pool_resets_cursor_when_stale() {
     let chunk = inner.next_chunk_from_pool("rec", 0, pool);
     assert!(chunk.is_some());
     // Cursor was 999, pool.len() is 1 → resets to 0, then advances to (0+1)%1 = 0.
-    assert_eq!(*inner.chunk_cursors.get(&("rec".to_string(), 0)).unwrap(), 0);
+    assert_eq!(
+        *inner.chunk_cursors.get(&("rec".to_string(), 0)).unwrap(),
+        0
+    );
 }
 
 #[test]
@@ -13916,14 +13922,33 @@ fn negative_strategy_wrong_publication_date_uses_date_taxonomy() {
     let mut inner = TripletSamplerInner::new(config, Arc::clone(&store));
 
     let records = vec![
-        trader_record("anchor", "2025-01-15", "Anchor Title", "Anchor body text for date test"),
-        trader_record("neg_candidate", "2025-06-20", "Different Date Title", "Different date body text"),
-        trader_record("same_date", "2025-01-15", "Same Date Title", "Same date body text"),
+        trader_record(
+            "anchor",
+            "2025-01-15",
+            "Anchor Title",
+            "Anchor body text for date test",
+        ),
+        trader_record(
+            "neg_candidate",
+            "2025-06-20",
+            "Different Date Title",
+            "Different date body text",
+        ),
+        trader_record(
+            "same_date",
+            "2025-01-15",
+            "Same Date Title",
+            "Same date body text",
+        ),
     ];
     for record in &records {
         store.upsert(record.id.clone(), SplitLabel::Train).unwrap();
-        inner.chunk_index.insert(record.id.clone(), record.id.clone());
-        inner.records.insert(record.id.clone(), Arc::new(record.clone()));
+        inner
+            .chunk_index
+            .insert(record.id.clone(), record.id.clone());
+        inner
+            .records
+            .insert(record.id.clone(), Arc::new(record.clone()));
     }
     inner.epoch_tracker.ensure_loaded().unwrap();
     let records_by_split = inner.records_by_split().unwrap();
@@ -13958,13 +13983,22 @@ fn negative_strategy_question_answer_mismatch_same_source() {
     let mut inner = TripletSamplerInner::new(config, Arc::clone(&store));
 
     let records = vec![
-        trader_record("qa_anchor", "2025-01-01", "QA Anchor", "What is the question?"),
+        trader_record(
+            "qa_anchor",
+            "2025-01-01",
+            "QA Anchor",
+            "What is the question?",
+        ),
         trader_record("qa_neg", "2025-01-01", "QA Negative", "A different answer."),
     ];
     for record in &records {
         store.upsert(record.id.clone(), SplitLabel::Train).unwrap();
-        inner.chunk_index.insert(record.id.clone(), record.id.clone());
-        inner.records.insert(record.id.clone(), Arc::new(record.clone()));
+        inner
+            .chunk_index
+            .insert(record.id.clone(), record.id.clone());
+        inner
+            .records
+            .insert(record.id.clone(), Arc::new(record.clone()));
     }
     inner.epoch_tracker.ensure_loaded().unwrap();
     let records_by_split = inner.records_by_split().unwrap();
@@ -14001,8 +14035,12 @@ fn negative_strategy_wrong_publication_date_falls_back_when_no_different_date() 
     ];
     for record in &records {
         store.upsert(record.id.clone(), SplitLabel::Train).unwrap();
-        inner.chunk_index.insert(record.id.clone(), record.id.clone());
-        inner.records.insert(record.id.clone(), Arc::new(record.clone()));
+        inner
+            .chunk_index
+            .insert(record.id.clone(), record.id.clone());
+        inner
+            .records
+            .insert(record.id.clone(), Arc::new(record.clone()));
     }
     inner.epoch_tracker.ensure_loaded().unwrap();
     let records_by_split = inner.records_by_split().unwrap();
@@ -14082,8 +14120,12 @@ fn text_batch_inner_with_weights_early_return_when_nothing_new() {
     ];
     for record in &records {
         store.upsert(record.id.clone(), SplitLabel::Train).unwrap();
-        inner.chunk_index.insert(record.id.clone(), record.id.clone());
-        inner.records.insert(record.id.clone(), Arc::new(record.clone()));
+        inner
+            .chunk_index
+            .insert(record.id.clone(), record.id.clone());
+        inner
+            .records
+            .insert(record.id.clone(), Arc::new(record.clone()));
     }
     inner.epoch_tracker.ensure_loaded().unwrap();
     let records_by_split = inner.records_by_split().unwrap();
@@ -14109,7 +14151,10 @@ fn ingest_internal_for_split_no_sources_returns_ok() {
     let store = Arc::new(DeterministicSplitStore::new(split, 303).unwrap());
     let mut inner = TripletSamplerInner::new(base_config(), store);
     let result = inner.ingest_internal(SplitLabel::Train);
-    assert!(result.is_ok(), "no-sources ingest should return Ok: {result:?}");
+    assert!(
+        result.is_ok(),
+        "no-sources ingest should return Ok: {result:?}"
+    );
 }
 
 #[test]
@@ -14119,7 +14164,10 @@ fn ingest_internal_with_weights_no_sources_returns_ok() {
     let mut inner = TripletSamplerInner::new(base_config(), store);
     let weights = HashMap::new();
     let result = inner.ingest_internal_with_weights_for_split(SplitLabel::Train, &weights);
-    assert!(result.is_ok(), "no-sources weighted ingest should return Ok: {result:?}");
+    assert!(
+        result.is_ok(),
+        "no-sources weighted ingest should return Ok: {result:?}"
+    );
 }
 
 #[test]
@@ -14129,7 +14177,10 @@ fn force_ingest_refresh_with_weights_for_split_no_sources_returns_ok() {
     let mut inner = TripletSamplerInner::new(base_config(), store);
     let weights = HashMap::new();
     let result = inner.force_ingest_refresh_with_weights_for_split(SplitLabel::Train, &weights);
-    assert!(result.is_ok(), "no-sources force-refresh should return Ok: {result:?}");
+    assert!(
+        result.is_ok(),
+        "no-sources force-refresh should return Ok: {result:?}"
+    );
 }
 
 #[test]
@@ -14157,7 +14208,11 @@ fn select_role_parallel_returns_none_when_no_matching_sections() {
     };
     let mut rng = DeterministicRng::new(42);
     // Request Context role but record only has Anchor
-    assert!(inner.select_role_parallel(&record, &SectionRole::Context, &mut rng).is_none());
+    assert!(
+        inner
+            .select_role_parallel(&record, &SectionRole::Context, &mut rng)
+            .is_none()
+    );
 }
 
 #[test]
@@ -14184,7 +14239,11 @@ fn select_chunk_paragraph_returns_none_for_out_of_bounds_index() {
         label: None,
     };
     // Paragraph index 5 doesn't exist
-    assert!(inner.select_chunk(&record, &Selector::Paragraph(5)).is_none());
+    assert!(
+        inner
+            .select_chunk(&record, &Selector::Paragraph(5))
+            .is_none()
+    );
 }
 
 #[test]
@@ -14212,7 +14271,10 @@ fn record_has_at_least_two_window_chunks_returns_false_for_small_sections() {
         meta_prefix: None,
         label: None,
     };
-    assert!(!inner.record_has_at_least_two_window_chunks_for_selector(&record, &Selector::Role(SectionRole::Context)));
+    assert!(!inner.record_has_at_least_two_window_chunks_for_selector(
+        &record,
+        &Selector::Role(SectionRole::Context)
+    ));
 }
 
 #[test]
@@ -14241,7 +14303,15 @@ fn record_has_at_least_two_window_chunks_returns_false_for_no_section_match() {
         label: None,
     };
     // Requesting Context role but only Anchor exists
-    assert!(!inner.record_has_at_least_two_window_chunks_for_selector(&record, &Selector::Role(SectionRole::Context)));
+    assert!(!inner.record_has_at_least_two_window_chunks_for_selector(
+        &record,
+        &Selector::Role(SectionRole::Context)
+    ));
     // TemporalOffset selector on record with no date taxonomy
-    assert!(!inner.record_has_at_least_two_window_chunks_for_selector(&record, &Selector::TemporalOffset(1)));
+    assert!(
+        !inner.record_has_at_least_two_window_chunks_for_selector(
+            &record,
+            &Selector::TemporalOffset(1)
+        )
+    );
 }
