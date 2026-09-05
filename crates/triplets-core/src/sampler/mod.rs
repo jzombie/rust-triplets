@@ -567,10 +567,10 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     /// `rebuild_source_index`, which only contains sources with at least one
     /// allowed-split record).
     fn remove_id_from_source_index(&mut self, source: &SourceId, record_id: &RecordId) {
-        if let Some(ids) = self.source_record_indices.get_mut(source) {
-            if let Some(pos) = ids.iter().position(|id| id == record_id) {
-                ids.remove(pos);
-            }
+        if let Some(ids) = self.source_record_indices.get_mut(source)
+            && let Some(pos) = ids.iter().position(|id| id == record_id)
+        {
+            ids.remove(pos);
         }
     }
 
