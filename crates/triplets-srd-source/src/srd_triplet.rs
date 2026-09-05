@@ -1538,13 +1538,15 @@ mod tests {
     fn write_pair_entries_empty_batch_returns_ok() {
         let tmp = TempDir::new().unwrap();
         let store = DataStore::open(&tmp.path().join("test.bin")).unwrap();
-        write_pair_entries(&store, 0, &[]).unwrap();
+        let result = write_pair_entries(&store, 0, &[]);
+        assert!(result.is_ok(), "empty pair batch should be a no-op: {result:?}");
     }
 
     #[test]
     fn write_triplet_entries_empty_batch_returns_ok() {
         let tmp = TempDir::new().unwrap();
         let store = DataStore::open(&tmp.path().join("test.bin")).unwrap();
-        write_triplet_entries(&store, 0, &[]).unwrap();
+        let result = write_triplet_entries(&store, 0, &[]);
+        assert!(result.is_ok(), "empty triplet batch should be a no-op: {result:?}");
     }
 }

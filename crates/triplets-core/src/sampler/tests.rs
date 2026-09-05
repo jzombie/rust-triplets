@@ -14108,7 +14108,8 @@ fn ingest_internal_for_split_no_sources_returns_ok() {
     let split = SplitRatios::default();
     let store = Arc::new(DeterministicSplitStore::new(split, 303).unwrap());
     let mut inner = TripletSamplerInner::new(base_config(), store);
-    inner.ingest_internal(SplitLabel::Train).unwrap();
+    let result = inner.ingest_internal(SplitLabel::Train);
+    assert!(result.is_ok(), "no-sources ingest should return Ok: {result:?}");
 }
 
 #[test]
@@ -14117,7 +14118,8 @@ fn ingest_internal_with_weights_no_sources_returns_ok() {
     let store = Arc::new(DeterministicSplitStore::new(split, 304).unwrap());
     let mut inner = TripletSamplerInner::new(base_config(), store);
     let weights = HashMap::new();
-    inner.ingest_internal_with_weights_for_split(SplitLabel::Train, &weights).unwrap();
+    let result = inner.ingest_internal_with_weights_for_split(SplitLabel::Train, &weights);
+    assert!(result.is_ok(), "no-sources weighted ingest should return Ok: {result:?}");
 }
 
 #[test]
@@ -14126,7 +14128,8 @@ fn force_ingest_refresh_with_weights_for_split_no_sources_returns_ok() {
     let store = Arc::new(DeterministicSplitStore::new(split, 305).unwrap());
     let mut inner = TripletSamplerInner::new(base_config(), store);
     let weights = HashMap::new();
-    inner.force_ingest_refresh_with_weights_for_split(SplitLabel::Train, &weights).unwrap();
+    let result = inner.force_ingest_refresh_with_weights_for_split(SplitLabel::Train, &weights);
+    assert!(result.is_ok(), "no-sources force-refresh should return Ok: {result:?}");
 }
 
 #[test]
