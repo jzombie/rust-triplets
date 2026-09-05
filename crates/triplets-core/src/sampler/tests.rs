@@ -11994,9 +11994,9 @@ fn record_bm25_text_with_zero_max_tokens_returns_full_text() {
                 heading: Some("Heading".into()),
                 text: "anchor body text with many tokens here and there and everywhere".into(),
                 sentences: vec![
-                token_count: WhitespaceTokenizer.token_count(&"anchor body text with many tokens here and there and everywhere"),
                     "anchor body text with many tokens here and there and everywhere".into(),
                 ],
+                token_count: WhitespaceTokenizer.token_count(&"anchor body text with many tokens here and there and everywhere"),
             },
             RecordSection {
                 role: SectionRole::Context,
