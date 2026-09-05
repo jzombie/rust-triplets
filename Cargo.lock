@@ -1879,7 +1879,7 @@ dependencies = [
  "rand 0.10.1",
  "reqwest",
  "reqwest-middleware",
- "simd-r-drive",
+ "simd-r-drive 0.16.3-alpha",
  "tokio",
  "tracing",
 ]
@@ -2209,7 +2209,25 @@ dependencies = [
  "dashmap",
  "indoc",
  "memmap2",
- "simd-r-drive-entry-handle",
+ "simd-r-drive-entry-handle 0.16.3-alpha",
+ "tracing",
+ "tracing-subscriber",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "simd-r-drive"
+version = "0.17.1-alpha"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5cfddef6fb90009bb7080bd38301e7cb71d73a60e223930846a2faf6399b6c8c"
+dependencies = [
+ "async-trait",
+ "clap",
+ "crc32fast",
+ "dashmap",
+ "indoc",
+ "memmap2",
+ "simd-r-drive-entry-handle 0.17.1-alpha",
  "tracing",
  "tracing-subscriber",
  "xxhash-rust",
@@ -2220,6 +2238,16 @@ name = "simd-r-drive-entry-handle"
 version = "0.16.3-alpha"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "91b54ec80fc0a705916b9931f2f1674dd44e1b0efdc10d1cc60dad6948792a77"
+dependencies = [
+ "crc32fast",
+ "memmap2",
+]
+
+[[package]]
+name = "simd-r-drive-entry-handle"
+version = "0.17.1-alpha"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a4d599cc44133f5bf2b63d7fc09adda946ec6d62be363a8e5db7440d6bacba4"
 dependencies = [
  "crc32fast",
  "memmap2",
@@ -2604,7 +2632,7 @@ dependencies = [
  "reqwest-drive",
  "serde",
  "serde_json",
- "simd-r-drive",
+ "simd-r-drive 0.17.1-alpha",
  "siphasher",
  "tempfile",
  "thiserror",
@@ -2632,7 +2660,7 @@ dependencies = [
  "rand 0.9.4",
  "rayon",
  "serde",
- "simd-r-drive",
+ "simd-r-drive 0.17.1-alpha",
  "siphasher",
  "tempfile",
  "thiserror",
@@ -2672,7 +2700,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serial_test",
- "simd-r-drive",
+ "simd-r-drive 0.17.1-alpha",
  "siphasher",
  "tempfile",
  "tokio",
@@ -2687,7 +2715,7 @@ dependencies = [
 name = "triplets-offline-embedder"
 version = "0.26.1-alpha"
 dependencies = [
- "simd-r-drive",
+ "simd-r-drive 0.17.1-alpha",
  "tempfile",
  "triplets-core",
  "triplets-offline-embedder",
@@ -2699,7 +2727,7 @@ name = "triplets-srd-source"
 version = "0.26.1-alpha"
 dependencies = [
  "chrono",
- "simd-r-drive",
+ "simd-r-drive 0.17.1-alpha",
  "tempfile",
  "thiserror",
  "triplets",

@@ -91,7 +91,10 @@ impl DataRecord {
         text: impl Into<String>,
         role: SectionRole,
     ) -> Self {
+        use crate::tokenizer::{Tokenizer, WhitespaceTokenizer};
         let now = chrono::Utc::now();
+        let text_str = text.into();
+        let token_count = WhitespaceTokenizer.token_count(&text_str);
         Self {
             id: id.into(),
             source: source.into(),
@@ -102,8 +105,9 @@ impl DataRecord {
             sections: vec![RecordSection {
                 role,
                 heading: None,
-                text: text.into(),
+                text: text_str,
                 sentences: vec![],
+                token_count,
             }],
             meta_prefix: None,
             label: None,
@@ -122,6 +126,21 @@ pub struct RecordSection {
     pub text: String,
     /// Sentence-level segmentation of `text` used by chunking strategies.
     pub sentences: Vec<Sentence>,
+    /// Precomputed token count for this section, populated during section construction.
+    #[serde(default)]
+    pub token_count: usize,
+}
+
+impl Default for RecordSection {
+    fn default() -> Self {
+        Self {
+            role: SectionRole::Context,
+            heading: None,
+            text: String::new(),
+            sentences: Vec::new(),
+            token_count: 0,
+        }
+    }
 }
 
 /// Role label for a section.
@@ -372,6 +391,7 @@ mod tests {
                 heading: Some("headline".to_string()),
                 text: "body".to_string(),
                 sentences: vec!["body".to_string()],
+                token_count: 0,
             }],
             meta_prefix: None,
             label: None,
@@ -463,6 +483,7 @@ mod tests {
             heading: Some("Title".into()),
             text: "content".into(),
             sentences: vec!["content".into()],
+            token_count: 0,
         };
         assert_eq!(section.heading, Some("Title".to_string()));
     }

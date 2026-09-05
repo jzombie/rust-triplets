@@ -98,6 +98,7 @@ mod tests {
                 heading: None,
                 text: format!("text for {id}"),
                 sentences: vec![format!("text for {id}")],
+                token_count: 0,
             }],
             meta_prefix: None,
             label: None,
