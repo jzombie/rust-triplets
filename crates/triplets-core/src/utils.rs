@@ -55,11 +55,13 @@ pub fn sentences(text: &str) -> Vec<Sentence> {
 /// Convenience helper to construct a `RecordSection` with normalized text metadata.
 /// Convenience helper to build a `RecordSection` with precomputed sentences.
 pub fn make_section(role: SectionRole, heading: Option<&str>, text: &str) -> RecordSection {
+    use crate::tokenizer::{Tokenizer, WhitespaceTokenizer};
     RecordSection {
         role,
         heading: heading.map(|h| h.to_string()),
         text: text.to_string(),
         sentences: sentences(text),
+        token_count: WhitespaceTokenizer.token_count(text),
     }
 }
 

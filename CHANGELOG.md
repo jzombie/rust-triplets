@@ -4,6 +4,55 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
 (or is loosely based on) Semantic Versioning.
 
+## [UNRELEASED]
+
+### Changed
+- Bumped `simd-r-drive` from 0.16.3-alpha to 0.17.1-alpha
+- Add throughput timing metrics (wall time spent waiting, embedding, and flushing, per step) to offline embedder loop events
+
+### Fixed
+- **Sampler ingestion sync is now incremental.** Steady-state cache advances use
+  an O(Δ) delta sync (`IngestionManager::sync_delta` over a unified global
+  version timeline) instead of cloning, sorting, and diffing the full record
+  pool on every batch. This was ~41% of `sampler-prefetch` CPU in profiles.
+- **Split-label lookups are cached persistently** (`split_labels` on the sampler
+  with a `get_or_insert_split_label` helper), so per-record `DataStore::read()`
+  calls drop to near-zero after the first sync instead of running 2–3× per
+  record per sync.
+- **Token counts are precomputed on `RecordSection`** (`#[serde(default)]`, so
+  existing serialized data still loads) instead of tokenizing record text inside
+  the sync hot path.
+- **`RecordCache` stores `Arc<DataRecord>`**, eliminating deep-clone allocations
+  on snapshot/sync.
+- **`source_record_indices` is keyed by `RecordId`** instead of positional
+  `usize` offsets into the record map, so evictions can no longer corrupt or
+  shift the index.
+- **Per-source index maintenance is incremental (strict O(Δ)).** Evictions do
+  ordered removal and additions binary-search by `stable_hash_str` order instead
+  of rebuilding + re-sorting the full index every batch; `chunk_index` is
+  maintained incrementally and long-section eligibility uses per-source
+  refcounts instead of a full-pool rescan. Force-refresh cycles (which replace
+  cache contents wholesale) fall back to full-resync semantics.
+- **Negative-backend `on_sync_start` now fires on every sync boundary**, fixing
+  stale BM25 cursor state persisting across snapshot syncs.
+- **`RecordCache::clear()` now logs evictions** (bounded, version-stamped) so
+  delta syncs report pool replacements and cross-batch text-dedup state is
+  pruned for records that truly left — fixing `Exhausted("text_recipes")`
+  failures after force refreshes while preserving dedup for re-added records.
+- Fixed 8 failing `triplets-core` tests covering the above (BM25 cursor reset,
+  text/pair/triplet batch sequences, weighted-drain distribution).
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings` is clean.
+- **Per-batch split-map rebuild eliminated.** `records_by_split` output is cached
+  on the sampler behind a `pool_generation` counter that advances only on actual
+  pool-membership change (new IDs, true evictions, full resyncs); steady-state
+  batches fetch an O(1) reference instead of rebuilding the full map twice per
+  batch. The cached reference is passed to `EpochTracker::reconcile` every
+  batch, preserving its state-machine hook while hitting the unchanged-population
+  fast path.
+- **BM25 refresh uses the in-memory split cache.** The `split_fn` closure passed
+  to `on_records_refreshed` now reads `split_labels` instead of doing a
+  `DataStore::read()` per record.
+
 ## [0.26.1-alpha] - 2026-09-04
 
 ### Changed
