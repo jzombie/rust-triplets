@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ### Changed
 - Bumped `simd-r-drive` from 0.16.3-alpha to 0.17.1-alpha
+- Add throughput timing metrics (wall time spent waiting, embedding, and flushing, per step) to offline embedder loop events
 
 ### Fixed
 - **Sampler ingestion sync is now incremental.** Steady-state cache advances use
