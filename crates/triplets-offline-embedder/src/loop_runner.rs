@@ -54,7 +54,22 @@ pub enum LoopEvent {
         /// Target max (0 = unlimited).
         max: u64,
         /// Throughput estimate.
+        ///
+        /// Cumulative average since the current stint started
+        /// (`on_stint_start`, i.e. the last flush/split-switch). Resets every
+        /// `steps_per_batch` steps, so early-stint values are noisy and the
+        /// first stint after (re)start reads optimistically high while the
+        /// prefetch queue drains. Compare with `global_samples_per_sec`.
         samples_per_sec: f64,
+        /// Global throughput since process start (all splits, net of resume
+        /// offset). Monotonic denominator — the stable long-run rate.
+        global_samples_per_sec: f64,
+        /// Wall seconds blocked in `prefetcher.next()` (sampler wait).
+        wait_secs: f64,
+        /// Wall seconds in `SplitState::step` (tokenize + teacher HTTP).
+        embed_secs: f64,
+        /// Wall seconds in `flush_batch` (0 when no flush this step).
+        flush_secs: f64,
         /// Pre-formatted ratio/deficit string from the caller.
         ratio_str: String,
         /// Steps until next scheduled flush.
@@ -176,6 +191,9 @@ where
 {
     let mut scheduler = SplitScheduler::new();
     let global_start = Instant::now();
+    // Resume offset: samples already on disk at process start. The global
+    // rate measures only samples produced by this process.
+    let global_base: u64 = states.iter().map(|s| s.total_written).sum();
 
     loop {
         // Recompute in-flight counts every iteration.
@@ -228,6 +246,7 @@ where
             .expect("split label not found");
 
         // Fetch next batch from the prefetcher.
+        let wait_start = Instant::now();
         let batch = match prefetchers
             .get_mut(&s.label)
             .expect("prefetcher for split")
@@ -244,6 +263,7 @@ where
                 return Err(e);
             }
         };
+        let wait_secs = wait_start.elapsed().as_secs_f64();
 
         if match &batch {
             SamplerBatch::Pairs(v) => v.is_empty(),
@@ -254,12 +274,15 @@ where
             continue;
         }
 
+        let embed_start = Instant::now();
         let step_result = s.step(batch, embedder, config)?;
+        let embed_secs = embed_start.elapsed().as_secs_f64();
 
         let ctrl_c = stop.load(Ordering::Relaxed);
         let hit_limit = at_sample_limit(s.max, s.total_written, s.pending.len() as u64);
         let should_flush = step_result.should_flush || ctrl_c || hit_limit;
 
+        let flush_start = Instant::now();
         if should_flush {
             let flushed_count = flush_batch(s, provider, &mut scheduler)?;
             if flushed_count > 0 {
@@ -271,6 +294,11 @@ where
                 });
             }
         }
+        let flush_secs = if should_flush {
+            flush_start.elapsed().as_secs_f64()
+        } else {
+            0.0
+        };
 
         if ctrl_c {
             flush_all_pending_states(states, provider)?;
@@ -299,6 +327,9 @@ where
             .position(|&l| l == label)
             .expect("split label not found");
         let global_in_flight = compute_global_in_flight(&counts, label_pos, in_flight);
+        let global_elapsed = global_start.elapsed().as_secs_f64();
+        let global_samples_per_sec =
+            compute_samples_per_sec(global_in_flight.saturating_sub(global_base), global_elapsed);
         let ratio_sum: f32 = ratios_vec.iter().sum();
         let ratio_str = compute_deficit_str(in_flight, global_in_flight, s.ratio, ratio_sum);
 
@@ -308,6 +339,10 @@ where
             in_flight,
             max: s.max,
             samples_per_sec,
+            global_samples_per_sec,
+            wait_secs,
+            embed_secs,
+            flush_secs,
             ratio_str,
             steps_until_flush,
             dropped: step_result.samples_dropped,

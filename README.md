@@ -596,12 +596,14 @@ impl IndexableSource for MyApiSource {
                     heading: Some("Title".into()),
                     text: format!("Primary content for record {idx}."),
                     sentences: vec![], // or: vec!["Sentence one.".into(), "Sentence two.".into()]
+                    token_count: 0,
                 },
                 RecordSection {
                     role: SectionRole::Context,
                     heading: None,
                     text: format!("Supporting context for record {idx}."),
                     sentences: vec![],
+                    token_count: 0,
                 },
             ],
             // Optional: attach a KvpPrefixSampler to inject structured key-value
@@ -1406,6 +1408,22 @@ This executes strictly **prior** to the training loop. The student model optimiz
 | **OCR & Markdown Denoiser** | Preprocessing step: strips digit-heavy OCR noise and markdown table formatting before chunking. |
 | **User-Derived Negatives** | Supply your own negatives via `negative=` column mapping on HuggingFace dict datasets. |
 | **Offline Embedding** | Offline data materialization engine for knowledge distillation; zero-copy, resumable, circuit-breaker protected. |
+
+## Troubleshooting
+
+On macOS, running many sources concurrently can exhaust file descriptors, producing:
+
+```text
+save state error: split store failure: failed to publish split store to '<PATH>': Too many open files (os error 24)
+```
+
+Workaround — increase the limit for your current shell session:
+
+```sh
+ulimit -n 65536
+```
+
+> This setting applies to the current shell only and resets when the terminal is closed.
 
 ## License
 
