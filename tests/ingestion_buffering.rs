@@ -23,6 +23,7 @@ fn create_dummy_record(id: &str) -> DataRecord {
             heading: None,
             text: "content".to_string(),
             sentences: vec!["content".to_string()],
+            token_count: 0,
         }],
         meta_prefix: None,
         label: None,

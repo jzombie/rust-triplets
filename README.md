@@ -596,12 +596,14 @@ impl IndexableSource for MyApiSource {
                     heading: Some("Title".into()),
                     text: format!("Primary content for record {idx}."),
                     sentences: vec![], // or: vec!["Sentence one.".into(), "Sentence two.".into()]
+                    token_count: 0,
                 },
                 RecordSection {
                     role: SectionRole::Context,
                     heading: None,
                     text: format!("Supporting context for record {idx}."),
                     sentences: vec![],
+                    token_count: 0,
                 },
             ],
             // Optional: attach a KvpPrefixSampler to inject structured key-value

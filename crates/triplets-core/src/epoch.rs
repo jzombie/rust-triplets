@@ -629,4 +629,84 @@ mod tests {
         let next = tracker.next_record(SplitLabel::Train).unwrap();
         assert!(next.starts_with("train_"));
     }
+
+    #[test]
+    fn reset_epoch_with_empty_population_does_not_panic() {
+        let mut state = SplitEpochState::default();
+        assert!(state.population.is_empty());
+        state.reset_epoch();
+        assert!(state.order.is_empty());
+        assert_eq!(state.offset, 0);
+        assert!(!state.dirty_order);
+    }
+
+    #[test]
+    fn ensure_order_handles_empty_source_bucket() {
+        let mut state = SplitEpochState {
+            population: vec![
+                ("r1".to_string(), "src_a".to_string()),
+                ("r2".to_string(), "src_a".to_string()),
+            ],
+            dirty_order: true,
+            ..SplitEpochState::default()
+        };
+        // Population with one source that has entries, plus an empty source concept.
+        state.ensure_order(SplitLabel::Train, 42);
+        assert!(!state.order.is_empty());
+        // Calling again with dirty_order=false should be a no-op
+        state.ensure_order(SplitLabel::Train, 42);
+        assert!(!state.order.is_empty());
+    }
+
+    #[test]
+    fn ensure_order_clamps_offset_when_beyond_order_length() {
+        let mut state = SplitEpochState {
+            population: vec![("r1".to_string(), "src".to_string())],
+            dirty_order: true,
+            ..SplitEpochState::default()
+        };
+        state.ensure_order(SplitLabel::Train, 1);
+        // Simulate offset being beyond order length
+        state.offset = 999;
+        // next_from_split should handle this
+        state.dirty_order = false;
+        // The offset clamp happens in ensure_order when dirty
+        state.dirty_order = true;
+        state.ensure_order(SplitLabel::Train, 1);
+        assert!(state.offset <= state.order.len());
+    }
+
+    #[test]
+    fn force_epoch_is_noop_when_disabled() {
+        let mut tracker = EpochTracker::new(false, None, 42);
+        tracker.force_epoch(99);
+        // No panic, no state change
+        assert!(tracker.splits.is_empty());
+    }
+
+    #[test]
+    fn ensure_loaded_marks_loaded_when_no_backend() {
+        let mut tracker = EpochTracker::new(true, None, 42);
+        assert!(!tracker.loaded);
+        tracker.ensure_loaded().unwrap();
+        assert!(tracker.loaded);
+    }
+
+    #[test]
+    fn next_record_returns_none_for_empty_population() {
+        let mut tracker = EpochTracker::new(true, None, 42);
+        tracker.ensure_loaded().unwrap();
+        // No records reconciled — should return None
+        assert!(tracker.next_record(SplitLabel::Train).is_none());
+    }
+
+    #[test]
+    fn persist_is_noop_when_no_backend() {
+        let mut tracker = EpochTracker::new(true, None, 42);
+        tracker.ensure_loaded().unwrap();
+        tracker.dirty = true;
+        // persist with no backend should clear dirty flag and return Ok
+        tracker.persist().unwrap();
+        assert!(!tracker.dirty);
+    }
 }

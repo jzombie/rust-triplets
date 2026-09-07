@@ -8,6 +8,7 @@ use triplets::SamplerError;
 use triplets::config::{NegativeStrategy, SamplerConfig, Selector, TripletRecipe};
 use triplets::data::{DataRecord, QualityScore, RecordSection, SectionRole};
 use triplets::source::{DataSource, SourceCursor, SourceSnapshot};
+use triplets::tokenizer::{Tokenizer, WhitespaceTokenizer};
 use triplets::types::RecordId;
 
 use crate::error::SrdError;
@@ -95,12 +96,14 @@ impl DataSource for SrdSource {
                             heading: None,
                             text: pair.anchor_text.clone(),
                             sentences: vec![],
+                            token_count: WhitespaceTokenizer.token_count(&pair.anchor_text),
                         },
                         RecordSection {
                             role: SectionRole::Context,
                             heading: None,
                             text: pair.candidate_text.clone(),
                             sentences: vec![],
+                            token_count: WhitespaceTokenizer.token_count(&pair.candidate_text),
                         },
                     ],
                     Some(pair.label.clone()),
@@ -112,18 +115,21 @@ impl DataSource for SrdSource {
                             heading: None,
                             text: triplet.anchor_text.clone(),
                             sentences: vec![],
+                            token_count: WhitespaceTokenizer.token_count(&triplet.anchor_text),
                         },
                         RecordSection {
                             role: SectionRole::Context,
                             heading: None,
                             text: triplet.pos_text.clone(),
                             sentences: vec![],
+                            token_count: WhitespaceTokenizer.token_count(&triplet.pos_text),
                         },
                         RecordSection {
                             role: SectionRole::Context,
                             heading: None,
                             text: triplet.neg_text.clone(),
                             sentences: vec![],
+                            token_count: WhitespaceTokenizer.token_count(&triplet.neg_text),
                         },
                     ],
                     None,
