@@ -1822,11 +1822,11 @@ checksum = "7a2d987857b319362043e95f5353c0535c1f58eec5336fdfcf626430af7def58"
 
 [[package]]
 name = "reqwest"
-version = "0.13.4"
+version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "219c5811de6525e5416c7d5d53bb656d3afdbc6c5af816e0802bcfa42dbdc1c3"
+checksum = "16a1cfa75cc186dd73d5818e510e042e40927bccc9c236b061cea97e1eb08029"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "bytes",
  "encoding_rs",
  "futures-core",
@@ -1866,9 +1866,9 @@ dependencies = [
 
 [[package]]
 name = "reqwest-drive"
-version = "0.13.4-alpha"
+version = "0.13.5-alpha"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "691b80c2d7ac9df6ed28d4587e2af8821d8ee66770761b4a4e600fe6c597d03f"
+checksum = "8a4d3ae357472a084db25c1252f19953fb872b84e3207ddc077e5b7ac4c805f5"
 dependencies = [
  "async-trait",
  "bitcode",
@@ -1879,7 +1879,7 @@ dependencies = [
  "rand 0.10.1",
  "reqwest",
  "reqwest-middleware",
- "simd-r-drive 0.16.3-alpha",
+ "simd-r-drive",
  "tokio",
  "tracing",
 ]
@@ -2199,24 +2199,6 @@ checksum = "e320a6c5ad31d271ad523dcf3ad13e2767ad8b1cb8f047f75a8aeaf8da139da2"
 
 [[package]]
 name = "simd-r-drive"
-version = "0.16.3-alpha"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "763aa09219c810fe26c60f9591fc911de2e6359537d22d431d142b86f8201862"
-dependencies = [
- "async-trait",
- "clap",
- "crc32fast",
- "dashmap",
- "indoc",
- "memmap2",
- "simd-r-drive-entry-handle 0.16.3-alpha",
- "tracing",
- "tracing-subscriber",
- "xxhash-rust",
-]
-
-[[package]]
-name = "simd-r-drive"
 version = "0.17.1-alpha"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5cfddef6fb90009bb7080bd38301e7cb71d73a60e223930846a2faf6399b6c8c"
@@ -2227,20 +2209,10 @@ dependencies = [
  "dashmap",
  "indoc",
  "memmap2",
- "simd-r-drive-entry-handle 0.17.1-alpha",
+ "simd-r-drive-entry-handle",
  "tracing",
  "tracing-subscriber",
  "xxhash-rust",
-]
-
-[[package]]
-name = "simd-r-drive-entry-handle"
-version = "0.16.3-alpha"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91b54ec80fc0a705916b9931f2f1674dd44e1b0efdc10d1cc60dad6948792a77"
-dependencies = [
- "crc32fast",
- "memmap2",
 ]
 
 [[package]]
@@ -2632,7 +2604,7 @@ dependencies = [
  "reqwest-drive",
  "serde",
  "serde_json",
- "simd-r-drive 0.17.1-alpha",
+ "simd-r-drive",
  "siphasher",
  "tempfile",
  "thiserror",
@@ -2660,7 +2632,7 @@ dependencies = [
  "rand 0.9.4",
  "rayon",
  "serde",
- "simd-r-drive 0.17.1-alpha",
+ "simd-r-drive",
  "siphasher",
  "tempfile",
  "thiserror",
@@ -2700,7 +2672,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serial_test",
- "simd-r-drive 0.17.1-alpha",
+ "simd-r-drive",
  "siphasher",
  "tempfile",
  "tokio",
@@ -2715,7 +2687,7 @@ dependencies = [
 name = "triplets-offline-embedder"
 version = "0.27.0-alpha"
 dependencies = [
- "simd-r-drive 0.17.1-alpha",
+ "simd-r-drive",
  "tempfile",
  "triplets-core",
  "triplets-offline-embedder",
@@ -2727,7 +2699,7 @@ name = "triplets-srd-source"
 version = "0.27.0-alpha"
 dependencies = [
  "chrono",
- "simd-r-drive 0.17.1-alpha",
+ "simd-r-drive",
  "tempfile",
  "thiserror",
  "triplets",
