@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
 (or is loosely based on) Semantic Versioning.
 
-## [Unreleased]
+## [0.27.1-alpha] - 2026-09-09
 
 ### Changed
 - Bumped `reqwest` from 0.13.4 to 0.13.5 and `reqwest-drive` from 0.13.4-alpha to 0.13.5-alpha
