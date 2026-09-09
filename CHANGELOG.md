@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
 (or is loosely based on) Semantic Versioning.
 
+## [0.27.1-alpha] - 2026-09-09
+
+### Changed
+- Bumped `reqwest` from 0.13.4 to 0.13.5 and `reqwest-drive` from 0.13.4-alpha to 0.13.5-alpha
+- Bumped `parquet` (and `arrow-*`) from 59.2.0 to 59.3.0 (#164)
+- Bumped `flate2` from 1.1.9 to 1.1.10 (#163)
+- Bumped `indexmap` from 2.14.0 to 2.14.2 (#162)
+
 ## [0.27.0-alpha] - 2026-09-07
 
 ### Changed
