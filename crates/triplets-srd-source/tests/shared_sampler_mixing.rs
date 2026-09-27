@@ -89,12 +89,12 @@ fn shared_sampler_apportions_by_weight_with_embeddings_on_chunks() {
     let sampler = make_sampler(7, 8);
     sampler
         .register_source(Box::new(
-            SrdSource::open(&a_path, "ds-a", DIM, SrdMode::Pair).unwrap(),
+            SrdSource::open(&a_path, "ds-a", DIM, Some(SrdMode::Pair)).unwrap(),
         ))
         .unwrap();
     sampler
         .register_source(Box::new(
-            SrdSource::open(&b_path, "ds-b", DIM, SrdMode::Pair).unwrap(),
+            SrdSource::open(&b_path, "ds-b", DIM, Some(SrdMode::Pair)).unwrap(),
         ))
         .unwrap();
     let weights: HashMap<String, f32> =
@@ -170,7 +170,7 @@ fn chunk_embeddings_match_store_ground_truth() {
     let sampler = make_sampler(3, 4);
     sampler
         .register_source(Box::new(
-            SrdSource::open(&a_path, "ds-a", DIM, SrdMode::Pair).unwrap(),
+            SrdSource::open(&a_path, "ds-a", DIM, Some(SrdMode::Pair)).unwrap(),
         ))
         .unwrap();
     let batch = sampler
@@ -210,11 +210,11 @@ fn same_seed_same_batches() {
     let build = || {
         let s = make_sampler(42, 8);
         s.register_source(Box::new(
-            SrdSource::open(&a_path, "ds-a", DIM, SrdMode::Pair).unwrap(),
+            SrdSource::open(&a_path, "ds-a", DIM, Some(SrdMode::Pair)).unwrap(),
         ))
         .unwrap();
         s.register_source(Box::new(
-            SrdSource::open(&b_path, "ds-b", DIM, SrdMode::Pair).unwrap(),
+            SrdSource::open(&b_path, "ds-b", DIM, Some(SrdMode::Pair)).unwrap(),
         ))
         .unwrap();
         s

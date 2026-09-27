@@ -566,7 +566,10 @@ impl IngestionManager {
         Ok(())
     }
 
-    fn validate_weights(&self, weights: &HashMap<SourceId, f32>) -> Result<(), SamplerError> {
+    pub(crate) fn validate_weights(
+        &self,
+        weights: &HashMap<SourceId, f32>,
+    ) -> Result<(), SamplerError> {
         let known_ids: std::collections::HashSet<&str> =
             self.sources.iter().map(|s| s.source.id()).collect();
         for (id, &w) in weights {

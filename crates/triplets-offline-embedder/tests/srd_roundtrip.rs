@@ -184,7 +184,7 @@ fn scheduler_writes_train_val_to_separate_files() {
         &dir.path().join("train/data.srd"),
         "train",
         3,
-        SrdMode::Pair,
+        Some(SrdMode::Pair),
     )
     .unwrap();
     let train_snap = train_source
@@ -193,8 +193,13 @@ fn scheduler_writes_train_val_to_separate_files() {
     assert!(!train_snap.records.is_empty(), "train must have data");
 
     // Read val via SrdSource — goes through actual file, not mock.
-    let val_source =
-        SrdSource::open(&dir.path().join("val/data.srd"), "val", 3, SrdMode::Pair).unwrap();
+    let val_source = SrdSource::open(
+        &dir.path().join("val/data.srd"),
+        "val",
+        3,
+        Some(SrdMode::Pair),
+    )
+    .unwrap();
     let val_snap = val_source
         .refresh(&SamplerConfig::default(), None, None)
         .unwrap();
@@ -260,7 +265,7 @@ fn scheduler_flush_persists_to_disk() {
         &dir.path().join("train/data.srd"),
         "verify",
         3,
-        SrdMode::Pair,
+        Some(SrdMode::Pair),
     )
     .unwrap();
     let snap = source
@@ -347,7 +352,7 @@ fn scheduler_resume_adds_to_existing_data() {
         &dir.path().join("train/data.srd"),
         "resume",
         3,
-        SrdMode::Pair,
+        Some(SrdMode::Pair),
     )
     .unwrap();
     let snap = source
@@ -401,7 +406,7 @@ fn scheduler_ctrl_c_flushes_pending_to_disk() {
         &dir.path().join("train/data.srd"),
         "ctrl_c",
         3,
-        SrdMode::Pair,
+        Some(SrdMode::Pair),
     )
     .unwrap();
     let snap = source
@@ -458,7 +463,7 @@ fn pair_write_and_read_via_srd_source() {
     }
 
     // --- scope 2: open as SrdSource and read back ---
-    let source = SrdSource::open(&store_path, "test_pair", 3, SrdMode::Pair).unwrap();
+    let source = SrdSource::open(&store_path, "test_pair", 3, Some(SrdMode::Pair)).unwrap();
     assert_eq!(source.mode(), SrdMode::Pair);
 
     let snapshot = source
@@ -508,7 +513,7 @@ fn pair_negative_label_roundtrip_via_srd_source() {
     }
 
     // --- scope 2: open as SrdSource and read back ---
-    let source = SrdSource::open(&store_path, "test_neg", 3, SrdMode::Pair).unwrap();
+    let source = SrdSource::open(&store_path, "test_neg", 3, Some(SrdMode::Pair)).unwrap();
     let snapshot = source
         .refresh(&SamplerConfig::default(), None, None)
         .unwrap();
@@ -564,7 +569,7 @@ fn triplet_write_and_read_via_srd_source() {
         assert_eq!(store.len().unwrap(), 2);
     }
 
-    let source = SrdSource::open(&store_path, "test_triplet", 4, SrdMode::Triplet).unwrap();
+    let source = SrdSource::open(&store_path, "test_triplet", 4, Some(SrdMode::Triplet)).unwrap();
     assert_eq!(source.mode(), SrdMode::Triplet);
 
     let snapshot = source
@@ -621,7 +626,7 @@ fn resume_after_partial_write() {
     }
 
     // Re-open and verify we can read the 2 existing entries.
-    let source = SrdSource::open(&store_path, "resume_test", 3, SrdMode::Pair).unwrap();
+    let source = SrdSource::open(&store_path, "resume_test", 3, Some(SrdMode::Pair)).unwrap();
     let snapshot = source
         .refresh(&SamplerConfig::default(), None, None)
         .unwrap();
@@ -677,7 +682,7 @@ fn adapter_roundtrip_through_split_state() {
         &dir.path().join("train/data.srd"),
         "adapter_test",
         3,
-        SrdMode::Pair,
+        Some(SrdMode::Pair),
     )
     .unwrap();
     let snapshot = source
@@ -739,7 +744,7 @@ fn multi_split_train_val_separate_files() {
         &dir.path().join("train/data.srd"),
         "train",
         3,
-        SrdMode::Pair,
+        Some(SrdMode::Pair),
     )
     .unwrap();
     let train_snap = train_source
@@ -748,8 +753,13 @@ fn multi_split_train_val_separate_files() {
     assert!(!train_snap.records.is_empty(), "train must have data");
 
     // Read val via SrdSource.
-    let val_source =
-        SrdSource::open(&dir.path().join("val/data.srd"), "val", 3, SrdMode::Pair).unwrap();
+    let val_source = SrdSource::open(
+        &dir.path().join("val/data.srd"),
+        "val",
+        3,
+        Some(SrdMode::Pair),
+    )
+    .unwrap();
     let val_snap = val_source
         .refresh(&SamplerConfig::default(), None, None)
         .unwrap();
@@ -816,7 +826,7 @@ fn multi_split_interleaved_flush_preserves_separation() {
         &dir.path().join("train/data.srd"),
         "train_intl",
         3,
-        SrdMode::Pair,
+        Some(SrdMode::Pair),
     )
     .unwrap();
     let train_snap = train_source
@@ -835,7 +845,7 @@ fn multi_split_interleaved_flush_preserves_separation() {
         &dir.path().join("val/data.srd"),
         "val_intl",
         3,
-        SrdMode::Pair,
+        Some(SrdMode::Pair),
     )
     .unwrap();
     let val_snap = val_source
@@ -926,7 +936,7 @@ fn multi_split_resume_preserves_separation() {
         &dir.path().join("train/data.srd"),
         "train_r",
         3,
-        SrdMode::Pair,
+        Some(SrdMode::Pair),
     )
     .unwrap();
     let train_snap = train_source
@@ -937,8 +947,13 @@ fn multi_split_resume_preserves_separation() {
         assert!(rec.sections[0].text.starts_with("train_"));
     }
 
-    let val_source =
-        SrdSource::open(&dir.path().join("val/data.srd"), "val_r", 3, SrdMode::Pair).unwrap();
+    let val_source = SrdSource::open(
+        &dir.path().join("val/data.srd"),
+        "val_r",
+        3,
+        Some(SrdMode::Pair),
+    )
+    .unwrap();
     let val_snap = val_source
         .refresh(&SamplerConfig::default(), None, None)
         .unwrap();
@@ -991,15 +1006,20 @@ fn multi_split_vectors_not_swapped() {
         &dir.path().join("train/data.srd"),
         "train_v",
         3,
-        SrdMode::Pair,
+        Some(SrdMode::Pair),
     )
     .unwrap();
     let train_snap = train_source
         .refresh(&SamplerConfig::default(), None, None)
         .unwrap();
 
-    let val_source =
-        SrdSource::open(&dir.path().join("val/data.srd"), "val_v", 3, SrdMode::Pair).unwrap();
+    let val_source = SrdSource::open(
+        &dir.path().join("val/data.srd"),
+        "val_v",
+        3,
+        Some(SrdMode::Pair),
+    )
+    .unwrap();
     let val_snap = val_source
         .refresh(&SamplerConfig::default(), None, None)
         .unwrap();

@@ -15,6 +15,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - **`SrdSource` populates all section embeddings** (anchor + candidate/positive/
   negative) from its store vectors, so sampled pairs carry exact store vectors
   on every chunk with no side lookups.
+- **Single `SrdSource::open` with explicit mode choice.** `mode: None` detects
+  from entry 0 in the same open (no probe handle); `mode: Some(m)` pins the
+  mode for empty stores and is verified against entry 0 otherwise — a mismatch
+  returns loud `SrdError::ModeMismatch` (empty stores give `EmptyStore`).
+  One open per dataset, ever.
 - **Native weighted source selection (deficit round-robin).** `TripletSampler`
   apportions batch picks across sources by the per-call weight map: each draw
   credits every eligible source its weight quantum and serves the highest
@@ -50,6 +55,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
   golden tests pass unmodified in behavior). `SplitStore::label_for/upsert/
   ensure` now take `&RecordKey`/`RecordKey`; `FileSplitStore` persisted label
   keys are namespaced the same way (epoch/sampler-state formats unchanged).
+- **Weight maps are validated up front on every batch call.** A non-empty map
+  with an unregistered source id (or negative weight) returns loud
+  `InvalidWeight` — including the uniform single-unknown case that used to
+  slip through validation and sample as if unweighted.
 
 ## [0.27.1-alpha] - 2026-09-09
 

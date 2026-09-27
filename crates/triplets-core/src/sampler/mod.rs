@@ -3429,6 +3429,11 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     ) -> Result<B, SamplerError> {
         let mut inner = self.inner.lock().unwrap();
         inner.ensure_split_allowed(split)?;
+        // Validate weight keys up front, on every path: a typo'd source id
+        // must fail loudly, never silently sample as if unweighted.
+        if !weights.is_empty() {
+            inner.ingestion.validate_weights(weights)?;
+        }
         // Load persisted state BEFORE bumping step so the restored step
         // counter is reflected before we increment it for this call.
         inner.ensure_ingestion_cursors_loaded()?;

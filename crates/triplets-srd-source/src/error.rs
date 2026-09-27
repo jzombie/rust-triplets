@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::srd_triplet::SrdMode;
+
 /// Error type for simd-r-drive triplet encoding/decoding operations.
 #[derive(Debug, Error)]
 pub enum SrdError {
@@ -72,4 +74,17 @@ pub enum SrdError {
     /// Underlying I/O error.
     #[error(transparent)]
     Io(#[from] std::io::Error),
+
+    /// Store holds no entries (nothing to detect a mode from).
+    #[error("SRD store is empty")]
+    EmptyStore,
+
+    /// Explicit open mode does not match the stored entries.
+    #[error("SRD mode mismatch: opened as {expected:?}, store holds {found:?}")]
+    ModeMismatch {
+        /// Mode passed to `open`.
+        expected: SrdMode,
+        /// Mode decoded from entry 0.
+        found: SrdMode,
+    },
 }

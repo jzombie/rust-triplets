@@ -565,6 +565,84 @@ fn decrement_long_section_count_noop_when_absent() {
 }
 
 #[test]
+fn unknown_weight_source_ids_fail_loudly() {
+    // A typo'd source id in the weight map must error — never silently
+    // sample as if unweighted. Covers both the uniform single-unknown case
+    // (which used to slip through validation) and the non-uniform case.
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 106).unwrap());
+    let mut config = base_config();
+    config.batch_size = 4;
+    config.allowed_splits = vec![SplitLabel::Train];
+    config.split = split;
+    config.recipes = vec![TripletRecipe {
+        name: "weight_probe".into(),
+        anchor: Selector::Role(SectionRole::Anchor),
+        positive_selector: Selector::Role(SectionRole::Context),
+        negative_selector: Selector::Role(SectionRole::Context),
+        negative_strategy: NegativeStrategy::WrongArticle,
+        weight: 1.0,
+        instruction: None,
+        allow_same_anchor_positive: false,
+    }];
+    config.text_recipes = Vec::new();
+    let sampler = TripletSampler::new(config, Arc::clone(&store));
+    let records: Vec<DataRecord> = (0..4)
+        .map(|i| {
+            let mut r = trader_record(
+                &format!("w_{i}"),
+                "2025-01-01",
+                &format!("Weight title {i}"),
+                &format!("Weight body text number {i}"),
+            );
+            r.source = "weight_src".into();
+            r.taxonomy = vec!["weight_src".into()];
+            r
+        })
+        .collect();
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "weight_src",
+            records,
+        )))
+        .unwrap();
+
+    // Uniform map with an unregistered id: must fail, not sample.
+    let uniform_unknown: HashMap<SourceId, f32> = [("nope".to_string(), 1.0)].into_iter().collect();
+    assert!(
+        matches!(
+            sampler.next_pair_batch_with_weights_for_split(SplitLabel::Train, &uniform_unknown),
+            Err(SamplerError::InvalidWeight { .. })
+        ),
+        "uniform map with unknown source id must fail loudly"
+    );
+
+    // Non-uniform map with an unregistered id: must fail.
+    let mixed_unknown: HashMap<SourceId, f32> =
+        [("weight_src".to_string(), 1.0), ("nope".to_string(), 0.5)]
+            .into_iter()
+            .collect();
+    assert!(
+        matches!(
+            sampler.next_pair_batch_with_weights_for_split(SplitLabel::Train, &mixed_unknown),
+            Err(SamplerError::InvalidWeight { .. })
+        ),
+        "non-uniform map with unknown source id must fail loudly"
+    );
+
+    // Sanity: the registered source alone still batches.
+    let valid: HashMap<SourceId, f32> = [("weight_src".to_string(), 1.0)].into_iter().collect();
+    let batch = sampler
+        .next_pair_batch_with_weights_for_split(SplitLabel::Train, &valid)
+        .unwrap();
+    assert_eq!(batch.pairs.len(), 4);
+}
+
+#[test]
 fn get_or_insert_split_label_caches_result() {
     let split = SplitRatios::default();
     let store = Arc::new(DeterministicSplitStore::new(split, 106).unwrap());
@@ -6405,8 +6483,8 @@ fn temporal_neighbor_auto_pair_and_weighted_retry_paths_are_covered() {
     };
     let retry_store = Arc::new(DeterministicSplitStore::new(split, 103).unwrap());
     let sampler = TripletSampler::new(failing_config, retry_store);
-    let weights = HashMap::from([("missing_source".to_string(), 1.0f32)]);
-
+    // Empty maps: retry path exhausts without records (no sources).
+    let weights = HashMap::new();
     let pair_err = sampler
         .next_pair_batch_with_weights_for_split(SplitLabel::Train, &weights)
         .expect_err("pair retry path should exhaust without records");
@@ -6421,6 +6499,30 @@ fn temporal_neighbor_auto_pair_and_weighted_retry_paths_are_covered() {
         .next_triplet_batch_with_weights_for_split(SplitLabel::Train, &weights)
         .expect_err("triplet retry path should exhaust without records");
     assert!(matches!(triplet_err, SamplerError::Exhausted(_)));
+
+    // Unregistered source ids fail loudly instead of sampling unweighted.
+    let unknown = HashMap::from([("missing_source".to_string(), 1.0f32)]);
+    assert!(
+        matches!(
+            sampler.next_pair_batch_with_weights_for_split(SplitLabel::Train, &unknown),
+            Err(SamplerError::InvalidWeight { .. })
+        ),
+        "unknown weight source must fail loudly (pairs)"
+    );
+    assert!(
+        matches!(
+            sampler.next_text_batch_with_weights_for_split(SplitLabel::Train, &unknown),
+            Err(SamplerError::InvalidWeight { .. })
+        ),
+        "unknown weight source must fail loudly (text)"
+    );
+    assert!(
+        matches!(
+            sampler.next_triplet_batch_with_weights_for_split(SplitLabel::Train, &unknown),
+            Err(SamplerError::InvalidWeight { .. })
+        ),
+        "unknown weight source must fail loudly (triplets)"
+    );
 }
 
 #[test]
