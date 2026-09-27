@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
 (or is loosely based on) Semantic Versioning.
 
-## [Unreleased]
+## [0.28.0-alpha] - TBD
 
 ### Changed
 - Bumped `parquet` from 59.1.0 to 60.0.0 (#166, semver-major)

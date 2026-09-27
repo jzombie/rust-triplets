@@ -2598,7 +2598,7 @@ dependencies = [
 
 [[package]]
 name = "triplets"
-version = "0.27.1-alpha"
+version = "0.28.0-alpha"
 dependencies = [
  "bitcode",
  "bm25",
@@ -2631,7 +2631,7 @@ dependencies = [
 
 [[package]]
 name = "triplets-core"
-version = "0.27.1-alpha"
+version = "0.28.0-alpha"
 dependencies = [
  "bitcode",
  "bm25",
@@ -2656,7 +2656,7 @@ dependencies = [
 
 [[package]]
 name = "triplets-debug"
-version = "0.27.1-alpha"
+version = "0.28.0-alpha"
 dependencies = [
  "cache-manager",
  "chrono",
@@ -2672,7 +2672,7 @@ dependencies = [
 
 [[package]]
 name = "triplets-hf-source"
-version = "0.27.1-alpha"
+version = "0.28.0-alpha"
 dependencies = [
  "cache-manager",
  "chrono",
@@ -2698,7 +2698,7 @@ dependencies = [
 
 [[package]]
 name = "triplets-offline-embedder"
-version = "0.27.1-alpha"
+version = "0.28.0-alpha"
 dependencies = [
  "simd-r-drive",
  "tempfile",
@@ -2709,7 +2709,7 @@ dependencies = [
 
 [[package]]
 name = "triplets-srd-source"
-version = "0.27.1-alpha"
+version = "0.28.0-alpha"
 dependencies = [
  "chrono",
  "simd-r-drive",
