@@ -15,14 +15,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - **`SrdSource` populates all section embeddings** (anchor + candidate/positive/
   negative) from its store vectors, so sampled pairs carry exact store vectors
   on every chunk with no side lookups.
-- **`MixedSrdSampler` (`triplets-srd-source::mixer`).** Exact batch mixtures over
-  N baked SRD dataset splits: one sampler per store (all selection stays in
-  triplets) plus largest-remainder row counts per batch. `next_batch` loops
-  per-source samplers until each share is filled; a shortfall (sampler stopped
-  yielding) is a loud `ShortBatch` error, never a truncated batch. Rows come
-  out as `(text, embedding)` with vectors attached — no store handles, no index
-  resolution, no id parsing downstream. Samplers run continuously (no epoch
-  rebuilds); determinism comes from construction seeds.
+- **Native weighted source selection (deficit round-robin).** `TripletSampler`
+  apportions batch picks across sources by the per-call weight map: each draw
+  credits every eligible source its weight quantum and serves the highest
+  deficit, deducting the round total. Deterministic (no RNG — same state, same
+  choice), exact over each weight cycle (0.75/0.25 yields exactly 6/2 anchors
+  per 8-row batch). Uniform/empty maps take the legacy uniform-cycling path
+  bit-identically, so existing deterministic sequences are unchanged. One
+  shared sampler with N registered sources is now the mixing topology — no
+  outer wrappers, cross-source negatives and global dedup intact.
 - **`RecordChunk.source` is required** (no `#[serde(default)]`): a chunk without
   a source resolves split lookups against the wrong identity, so deserialization
   without it fails loudly instead of defaulting to `""`.
