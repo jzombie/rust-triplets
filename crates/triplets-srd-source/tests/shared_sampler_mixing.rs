@@ -15,7 +15,8 @@ use simd_r_drive::storage_engine::DataStore;
 use tempfile::TempDir;
 use triplets::{DeterministicSplitStore, SamplerConfig, SplitLabel, SplitRatios, TripletSampler};
 use triplets_srd_source::{
-    PairLabel, SrdMode, SrdPairWriteEntry, SrdSource, batch_read_entries, write_pair_entries,
+    PairLabel, SrdMode, SrdPairWriteEntry, SrdSource, SrdTripletWriteEntry, batch_read_entries,
+    write_pair_entries, write_triplet_entries,
 };
 
 const DIM: usize = 8;
@@ -240,4 +241,100 @@ fn same_seed_same_batches() {
             );
         }
     }
+}
+
+/// Write one triplet-mode SRD store with dataset-tagged texts on all three
+/// slots (anchor slot may hold any of the three chunks after swaps).
+fn write_triplet_store(path: &Path, dataset: &str, base: f32) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    let store = DataStore::open(path).unwrap();
+    let vecs = |b: f32| -> Vec<Vec<f32>> {
+        (0..N_ENTRIES)
+            .map(|i| vec![base + b + i as f32 * 0.01 + 0.1; DIM])
+            .collect()
+    };
+    let texts = |tag: &str| -> Vec<String> {
+        (0..N_ENTRIES)
+            .map(|i| format!("{dataset} {tag} {i}"))
+            .collect()
+    };
+    let (av, pv, nv) = (vecs(0.0), vecs(100.0), vecs(200.0));
+    let (at, pt, nt) = (texts("t-anchor"), texts("t-pos"), texts("t-neg"));
+    let entries: Vec<SrdTripletWriteEntry> = av
+        .iter()
+        .zip(at.iter())
+        .zip(pv.iter().zip(pt.iter()))
+        .zip(nv.iter().zip(nt.iter()))
+        .map(
+            |(((aav, aat), (ppv, ppt)), (nnv, nnt))| SrdTripletWriteEntry {
+                anchor_vec: aav,
+                anchor_text: aat,
+                pos_vec: ppv,
+                pos_text: ppt,
+                neg_vec: nnv,
+                neg_text: nnt,
+            },
+        )
+        .collect();
+    write_triplet_entries(&store, 0, &entries).unwrap();
+}
+
+#[test]
+fn triplet_batches_apportion_anchors_by_weight() {
+    let tmp = TempDir::new().unwrap();
+    let a_path = tmp.path().join("ds-a").join("data.srd");
+    let b_path = tmp.path().join("ds-b").join("data.srd");
+    write_triplet_store(&a_path, "a", 0.0);
+    write_triplet_store(&b_path, "b", 1000.0);
+
+    let sampler = make_sampler(7, 8);
+    sampler
+        .register_source(Box::new(
+            SrdSource::open(&a_path, "ds-a", DIM, Some(SrdMode::Triplet)).unwrap(),
+        ))
+        .unwrap();
+    sampler
+        .register_source(Box::new(
+            SrdSource::open(&b_path, "ds-b", DIM, Some(SrdMode::Triplet)).unwrap(),
+        ))
+        .unwrap();
+    let weights: HashMap<String, f32> =
+        [("ds-a".to_string(), 0.75), ("ds-b".to_string(), 0.25)].into();
+
+    // Anchor slots carry their dataset tag regardless of swaps (all three
+    // slots tagged); count anchors per dataset over ten batches.
+    let mut a_anchors = 0usize;
+    let mut total = 0usize;
+    for _ in 0..10 {
+        let batch = sampler
+            .next_triplet_batch_with_weights_for_split(SplitLabel::Train, &weights)
+            .unwrap();
+        assert_eq!(batch.triplets.len(), 8);
+        for t in &batch.triplets {
+            total += 1;
+            assert!(
+                t.anchor.embedding.is_some(),
+                "anchor chunk carries embedding"
+            );
+            if t.anchor.text.starts_with("a ") {
+                a_anchors += 1;
+            } else {
+                assert!(
+                    t.anchor.text.starts_with("b "),
+                    "unexpected anchor text {:?}",
+                    t.anchor.text
+                );
+            }
+        }
+    }
+    // 61/80 measured: DRR draws apportion exactly, but Phase 2/3 filtering
+    // plus pad_with_reuse (duplicate fill to batch_size) adds +-1 noise.
+    // The band pins weighted apportionment without overfitting the noise.
+    let share = a_anchors as f32 / total as f32;
+    assert!(
+        (0.60..0.90).contains(&share),
+        "DRR apportions ~3:1 anchors, ds-a share = {share:.2} ({a_anchors}/{total})"
+    );
 }
