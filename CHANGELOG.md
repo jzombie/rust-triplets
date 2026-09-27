@@ -58,6 +58,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
   golden tests pass unmodified in behavior). `SplitStore::label_for/upsert/
   ensure` now take `&RecordKey`/`RecordKey`; `FileSplitStore` persisted label
   keys are namespaced the same way (epoch/sampler-state formats unchanged).
+- **Batch dedup keys are source-qualified.** Per-batch `seen` sets keyed
+  `(anchor, positive, negative)` bare record ids dropped valid triplets when
+  two datasets shared ids, skewing mixtures via duplicate-fill. Keys are now
+  `(RecordKey, RecordKey, RecordKey)` in all pair/triplet batch paths.
 - **Weight maps are validated up front on every batch call.** A non-empty map
   with an unregistered source id (or negative weight) returns loud
   `InvalidWeight` — including the uniform single-unknown case that used to

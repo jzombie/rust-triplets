@@ -39,7 +39,7 @@ use crate::splits::{
     EpochStateStore, PersistedSamplerState, SamplerStateStore, SplitLabel, SplitStore,
 };
 use crate::tokenizer::{Tokenizer, WhitespaceTokenizer};
-use crate::types::{RecipeKey, RecordId, RecordKey, SourceId};
+use crate::types::{RecipeKey, RecordKey, SourceId};
 use crate::utils::platform_newline;
 
 // AUTO-RECIPE HANDLING OVERVIEW (end-to-end):
@@ -2541,9 +2541,9 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 }
                 if let Some((recipe, triplet)) = triplet {
                     let key = (
-                        triplet.anchor.record_id.clone(),
-                        triplet.positive.record_id.clone(),
-                        triplet.negative.record_id.clone(),
+                        RecordKey::of_chunk(&triplet.anchor),
+                        RecordKey::of_chunk(&triplet.positive),
+                        RecordKey::of_chunk(&triplet.negative),
                     );
                     if seen.insert(key) {
                         let SampleTriplet {
@@ -2654,9 +2654,9 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             recipe_steps = recipe_steps.saturating_add(attempts_used);
             if let Some((recipe, triplet)) = triplet {
                 let key = (
-                    triplet.anchor.record_id.clone(),
-                    triplet.positive.record_id.clone(),
-                    triplet.negative.record_id.clone(),
+                    RecordKey::of_chunk(&triplet.anchor),
+                    RecordKey::of_chunk(&triplet.positive),
+                    RecordKey::of_chunk(&triplet.negative),
                 );
                 if seen.insert(key) {
                     let SampleTriplet {
@@ -2950,9 +2950,9 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 }
                 if let Some(triplet) = triplet {
                     let key = (
-                        triplet.anchor.record_id.clone(),
-                        triplet.positive.record_id.clone(),
-                        triplet.negative.record_id.clone(),
+                        RecordKey::of_chunk(&triplet.anchor),
+                        RecordKey::of_chunk(&triplet.positive),
+                        RecordKey::of_chunk(&triplet.negative),
                     );
                     if seen.insert(key) {
                         triplets.push(triplet);
@@ -2977,7 +2977,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
 
         // ── Declarations for multi-source parallel path ────────────────────────
         let mut triplets: Vec<SampleTriplet> = Vec::new();
-        let mut seen: HashSet<(RecordId, RecordId, RecordId)> = HashSet::new();
+        let mut seen: HashSet<(RecordKey, RecordKey, RecordKey)> = HashSet::new();
         let mut source_steps = 0usize;
         let mut cycle = (self.source_cycle_idx / sources.len()) as u64;
         let mut source_idx = self.source_cycle_idx % sources.len();
@@ -3153,9 +3153,9 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 instruction: sc.recipe.instruction.as_ref().map(|s| s.to_string()),
             };
             let key = (
-                triplet.anchor.record_id.clone(),
-                triplet.positive.record_id.clone(),
-                triplet.negative.record_id.clone(),
+                RecordKey::of_chunk(&triplet.anchor),
+                RecordKey::of_chunk(&triplet.positive),
+                RecordKey::of_chunk(&triplet.negative),
             );
             if seen.insert(key) && triplets.len() < self.config.batch_size {
                 triplets.push(triplet);

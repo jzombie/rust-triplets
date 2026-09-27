@@ -13,6 +13,7 @@ use super::*;
 use crate::chunking::ChunkingAlgorithm;
 use crate::config::{ChunkingStrategy, NegativeStrategy, Selector, TextRecipe, TripletRecipe};
 use crate::metrics::chunk_proximity_score;
+use crate::types::RecordId;
 
 /// Primary source id used by sampler unit tests.
 pub const PRIMARY_SOURCE_ID: &str = "source_a";
@@ -380,6 +381,39 @@ fn overlapping_ids_across_sources_coexist_in_shared_pool() {
     assert!(
         seen_a && seen_b,
         "both overlapping-id sources must be sampled"
+    );
+}
+
+#[test]
+fn select_weighted_source_apportions_exactly() {
+    // DRR itself is exact and seed-independent: 0.75/0.25 over 8 draws must
+    // yield exactly A,A,B,A,A,A,B,A. No sampling pipeline involved — pure
+    // function of deficits + indices, so no noise can enter.
+    let split = SplitRatios::default();
+    let store = Arc::new(DeterministicSplitStore::new(split, 110).unwrap());
+    let mut inner = TripletSamplerInner::new(base_config(), store);
+    inner.source_order = vec!["w_a".into(), "w_b".into()];
+    inner
+        .source_record_indices
+        .insert("w_a".into(), vec![RecordKey::new("w_a", "0")]);
+    inner
+        .source_record_indices
+        .insert("w_b".into(), vec![RecordKey::new("w_b", "0")]);
+    let weights: HashMap<SourceId, f32> = [("w_a".to_string(), 0.75), ("w_b".to_string(), 0.25)]
+        .into_iter()
+        .collect();
+    let order = inner.source_order.clone();
+    let seq: Vec<String> = (0..8)
+        .map(|_| {
+            inner
+                .select_weighted_source(&order, &weights)
+                .expect("eligible sources exist")
+        })
+        .collect();
+    assert_eq!(
+        seq,
+        vec!["w_a", "w_a", "w_b", "w_a", "w_a", "w_a", "w_b", "w_a"],
+        "DRR must apportion exactly 3:1"
     );
 }
 
@@ -797,9 +831,9 @@ fn weighted_sampling_honors_frequency_and_splits_jointly() {
         [("freq_a".to_string(), 0.75), ("freq_b".to_string(), 0.25)]
             .into_iter()
             .collect();
-    // Ten 8-row Train batches = 40 anchor draws = 10 full DRR cycles →
-    // exactly 30 A + 10 B anchors → 60 A + 20 B rows, every one Train.
-    // Then one Validation batch and one Test batch, same frequency deal.
+    // Ten 8-row Train batches at 3:1, then one Validation batch and one
+    // Test batch, same weights. Split purity is asserted exactly per row;
+    // frequency is asserted as a band (see below).
     let mut a_rows = 0usize;
     let mut total = 0usize;
     for _ in 0..10 {
@@ -823,6 +857,12 @@ fn weighted_sampling_honors_frequency_and_splits_jointly() {
             }
         }
     }
+    // Frequency is exact end to end here: DRR draws apportion 3:1
+    // deterministically, and source-qualified dedup keys mean no valid
+    // triplet is ever dropped, so no pad_with_reuse fill skews the count.
+    // Split purity above stays exact for the same reason.
+    // Exact: DRR draws apportion 3:1 deterministically, and dedup keys
+    // are source-qualified so no valid triplet is ever dropped.
     assert_eq!((a_rows, total), (120, 160), "DRR apportions exactly 3:1");
     for split_label in [SplitLabel::Validation, SplitLabel::Test] {
         let batch = sampler
