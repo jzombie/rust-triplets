@@ -807,14 +807,6 @@ fn weighted_sampling_honors_frequency_and_splits_jointly() {
             .next_pair_batch_with_weights_for_split(SplitLabel::Train, &weights)
             .unwrap();
         assert_eq!(batch.pairs.len(), 8);
-        eprintln!(
-            "PROBE batch: {:?}",
-            batch
-                .pairs
-                .iter()
-                .map(|p| (p.anchor.text.clone(), p.positive.text.clone()))
-                .collect::<Vec<_>>()
-        );
         for p in &batch.pairs {
             for chunk in [&p.anchor, &p.positive] {
                 total += 1;
