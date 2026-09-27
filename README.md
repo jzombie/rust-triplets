@@ -597,6 +597,7 @@ impl IndexableSource for MyApiSource {
                     text: format!("Primary content for record {idx}."),
                     sentences: vec![], // or: vec!["Sentence one.".into(), "Sentence two.".into()]
                     token_count: 0,
+                    embedding: None,
                 },
                 RecordSection {
                     role: SectionRole::Context,
@@ -604,6 +605,7 @@ impl IndexableSource for MyApiSource {
                     text: format!("Supporting context for record {idx}."),
                     sentences: vec![],
                     token_count: 0,
+                    embedding: None,
                 },
             ],
             // Optional: attach a KvpPrefixSampler to inject structured key-value
@@ -635,6 +637,112 @@ sampler.register_source(Box::new(adapter)).unwrap();
 
 Adjust per-source sampling frequency to handle class imbalance or dataset quality differences.
 
+```rust
+use std::collections::HashMap;
+use std::sync::Arc;
+use triplets::data::{DataRecord, QualityScore, RecordSection, SectionRole};
+use triplets::source::InMemorySource;
+use triplets::{
+    DeterministicSplitStore, NegativeStrategy, SamplerConfig, Selector, SplitLabel, SplitRatios,
+    TripletRecipe, TripletSampler,
+};
+
+fn record(source: &str, id: &str, anchor: &str, context: &str) -> DataRecord {
+    let now = chrono::Utc::now();
+    DataRecord {
+        id: id.into(),
+        source: source.into(),
+        created_at: now,
+        updated_at: now,
+        quality: QualityScore::default(),
+        taxonomy: vec![],
+        sections: vec![
+            RecordSection {
+                role: SectionRole::Anchor,
+                heading: None,
+                text: anchor.into(),
+                sentences: vec![],
+                token_count: 0,
+                embedding: None,
+            },
+            RecordSection {
+                role: SectionRole::Context,
+                heading: None,
+                text: context.into(),
+                sentences: vec![],
+                token_count: 0,
+                embedding: None,
+            },
+        ],
+        meta_prefix: None,
+        label: None,
+    }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let ratios = SplitRatios { train: 1.0, validation: 0.0, test: 0.0 };
+    let sampler = TripletSampler::new(
+        SamplerConfig {
+            seed: 7,
+            batch_size: 8,
+            allowed_splits: vec![SplitLabel::Train],
+            split: ratios,
+            recipes: vec![TripletRecipe {
+                name: "probe".into(),
+                anchor: Selector::Role(SectionRole::Anchor),
+                positive_selector: Selector::Role(SectionRole::Context),
+                negative_selector: Selector::Role(SectionRole::Context),
+                negative_strategy: NegativeStrategy::WrongArticle,
+                weight: 1.0,
+                instruction: None,
+                allow_same_anchor_positive: false,
+            }],
+            ..Default::default()
+        },
+        Arc::new(DeterministicSplitStore::new(ratios, 7)?),
+    );
+    for source in ["dataset_a", "dataset_b"] {
+        let records: Vec<DataRecord> = (0..4)
+            .map(|i| {
+                record(
+                    source,
+                    &format!("{i}"),
+                    &format!("{source} anchor {i}"),
+                    &format!("{source} context {i}"),
+                )
+            })
+            .collect();
+        sampler.register_source(Box::new(InMemorySource::from_records(source, records)))?;
+    }
+
+    let mut weights = HashMap::new();
+    weights.insert("dataset_a".to_string(), 0.75);
+    weights.insert("dataset_b".to_string(), 0.25);
+
+    let batch = sampler.next_triplet_batch_with_weights_for_split(SplitLabel::Train, &weights)?;
+    assert_eq!(batch.triplets.len(), 8);
+    Ok(())
+}
+```
+
+**How it works.** Source choice is deficit round-robin over the weight map:
+each draw credits every eligible source its weight quantum and serves the
+highest deficit, deducting the round total. This is deterministic (no RNG —
+same pool state, same sequence) and exact over each weight cycle rather than
+statistical: weights `{a: 0.75, b: 0.25}` yield exactly 3:1 anchors, so every
+10 anchors hold exactly 7 A + 3 B rows.
+
+**Map rules.**
+
+- Keys are source ids (`DataSource::id`). Unlisted sources get quantum 1.0.
+- Unknown ids and negative weights fail loudly (`InvalidWeight`) — a typo'd
+  id never silently samples as unweighted. Non-finite quanta count as 0.
+- Empty or all-equal maps skip weighting entirely and keep legacy uniform
+  cycling bit-identically.
+- Weights also steer ingestion (which records enter the rolling window); see
+  `ingest_with_weights_fallback`. Batch apportionment and ingestion
+  composition are independent mechanisms.
+
 ```rust,no_run
 use std::sync::Arc;
 use std::collections::HashMap;
@@ -663,7 +771,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Override the mixing ratio for this batch: pull from the high-quality
     // CSV source 70% of the time and the local docs 30% of the time.
-    // Sources not listed here fall back to uniform sampling.
     let mut weights = HashMap::new();
     weights.insert("hf_finance".to_string(), 0.7);
     weights.insert("docs".to_string(), 0.3);

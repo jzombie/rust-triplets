@@ -4,7 +4,7 @@ use crate::data::DataRecord;
 use crate::errors::SamplerError;
 use crate::hash::derive_epoch_seed;
 use crate::source::{DataSource, SourceCursor, SourceSnapshot};
-use crate::types::{RecordId, SourceId};
+use crate::types::{RecordId, RecordKey, SourceId};
 use chrono::Utc;
 use indexmap::IndexMap;
 use std::collections::HashMap;
@@ -566,7 +566,10 @@ impl IngestionManager {
         Ok(())
     }
 
-    fn validate_weights(&self, weights: &HashMap<SourceId, f32>) -> Result<(), SamplerError> {
+    pub(crate) fn validate_weights(
+        &self,
+        weights: &HashMap<SourceId, f32>,
+    ) -> Result<(), SamplerError> {
         let known_ids: std::collections::HashSet<&str> =
             self.sources.iter().map(|s| s.source.id()).collect();
         for (id, &w) in weights {
@@ -889,9 +892,12 @@ impl IngestionManager {
         !self.sources.is_empty()
     }
 
-    /// Return a delta of records added since `last_version` and record IDs evicted since `last_version`.
-    /// Queries all child caches using the unified version watermark and aggregates the results.
-    pub fn sync_delta(&mut self, last_version: u64) -> (u64, Vec<Arc<DataRecord>>, Vec<RecordId>) {
+    /// Return a delta of records added since `last_version` and record keys
+    /// evicted since `last_version`. Evicted ids are scoped to their source
+    /// here (per-source caches key by bare id, which is only unique within
+    /// one source). Queries all child caches using the unified version
+    /// watermark and aggregates the results.
+    pub fn sync_delta(&mut self, last_version: u64) -> (u64, Vec<Arc<DataRecord>>, Vec<RecordKey>) {
         let mut all_added = Vec::new();
         let mut all_evicted = Vec::new();
         let mut max_version = last_version;
@@ -902,7 +908,11 @@ impl IngestionManager {
                 max_version = new_version;
             }
             all_added.extend(added);
-            all_evicted.extend(evicted);
+            all_evicted.extend(
+                evicted
+                    .into_iter()
+                    .map(|id| RecordKey::new(state.source.id(), id)),
+            );
         }
 
         (max_version, all_added, all_evicted)
@@ -958,6 +968,7 @@ mod tests {
                 text: id.to_string(),
                 sentences: vec![id.to_string()],
                 token_count: 0,
+                embedding: None,
             }],
             meta_prefix: None,
             label: None,
@@ -1927,6 +1938,7 @@ mod tests {
                             text: format!("{}_x{}", self.id, i),
                             sentences: vec![format!("{}_x{}", self.id, i)],
                             token_count: 0,
+                            embedding: None,
                         }],
                         meta_prefix: None,
                         label: None,
