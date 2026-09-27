@@ -296,6 +296,94 @@ fn record_has_long_section_returns_false_when_window_tokens_are_disabled() {
 }
 
 #[test]
+fn overlapping_ids_across_sources_coexist_in_shared_pool() {
+    // Two sources emitting identical bare ids ("0".."3") must coexist in one
+    // sampler: 6 pool records, and batches draw from both. Pre-composite
+    // keys, the second source silently overwrote the first.
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 109).unwrap());
+    let mut config = base_config();
+    config.batch_size = 4;
+    config.ingestion_max_records = 64;
+    config.allowed_splits = vec![SplitLabel::Train];
+    config.split = split;
+    config.recipes = vec![TripletRecipe {
+        name: "overlap_probe".into(),
+        anchor: Selector::Role(SectionRole::Anchor),
+        positive_selector: Selector::Role(SectionRole::Context),
+        negative_selector: Selector::Role(SectionRole::Context),
+        negative_strategy: NegativeStrategy::WrongArticle,
+        weight: 1.0,
+        instruction: None,
+        allow_same_anchor_positive: false,
+    }];
+    config.text_recipes = Vec::new();
+    let sampler = TripletSampler::new(config, Arc::clone(&store));
+    for source in ["collide_a", "collide_b"] {
+        let records: Vec<DataRecord> = (0..4)
+            .map(|i| {
+                let mut r = trader_record(
+                    &format!("{i}"),
+                    "2025-01-01",
+                    &format!("{source} title {i}"),
+                    &format!("{source} body text number {i}"),
+                );
+                r.source = source.to_string();
+                r.taxonomy = vec![source.to_string()];
+                r
+            })
+            .collect();
+        sampler
+            .register_source(Box::new(InMemorySource::from_records(source, records)))
+            .unwrap();
+    }
+    sampler
+        .inner
+        .lock()
+        .unwrap()
+        .ingest_internal(SplitLabel::Train)
+        .unwrap();
+    {
+        let inner = sampler.inner.lock().unwrap();
+        assert_eq!(inner.records.len(), 8, "both sources' records coexist");
+        assert!(
+            inner
+                .records
+                .contains_key(&RecordKey::new("collide_a", "2"))
+        );
+        assert!(
+            inner
+                .records
+                .contains_key(&RecordKey::new("collide_b", "2"))
+        );
+    }
+    // And both are actually sampled.
+    let mut seen_a = false;
+    let mut seen_b = false;
+    for _ in 0..4 {
+        let batch = sampler
+            .next_pair_batch_with_weights_for_split(SplitLabel::Train, &HashMap::new())
+            .unwrap();
+        for p in &batch.pairs {
+            if p.anchor.text.starts_with("collide_a ") {
+                seen_a = true;
+            }
+            if p.anchor.text.starts_with("collide_b ") {
+                seen_b = true;
+            }
+        }
+    }
+    assert!(
+        seen_a && seen_b,
+        "both overlapping-id sources must be sampled"
+    );
+}
+
+#[test]
 fn late_registered_source_is_cycled_without_rebuild() {
     // A source registered after ingestion started must reach round-robin via
     // the incremental delta path — source_order updates in
@@ -640,6 +728,128 @@ fn unknown_weight_source_ids_fail_loudly() {
         .next_pair_batch_with_weights_for_split(SplitLabel::Train, &valid)
         .unwrap();
     assert_eq!(batch.pairs.len(), 4);
+}
+
+#[test]
+fn weighted_sampling_honors_frequency_and_splits_jointly() {
+    // The real claim, in one test: two sources with REAL three-way splits,
+    // weights 3:1. Every sampled row must carry its requested split (split
+    // correctness) AND the datasets must divide 3:1 (frequency). No
+    // degenerate all-val sources, no hand-waved halves: attribution uses
+    // the chunks' own (source, record_id), checked against the upsert map
+    // this test built.
+    let split = SplitRatios {
+        train: 0.6,
+        validation: 0.2,
+        test: 0.2,
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 108).unwrap());
+    let mut config = base_config();
+    config.batch_size = 8;
+    config.ingestion_max_records = 128;
+    config.allowed_splits = vec![SplitLabel::Train, SplitLabel::Validation, SplitLabel::Test];
+    config.split = split;
+    config.recipes = vec![TripletRecipe {
+        name: "joint_probe".into(),
+        anchor: Selector::Role(SectionRole::Anchor),
+        positive_selector: Selector::Role(SectionRole::Context),
+        negative_selector: Selector::Role(SectionRole::Context),
+        negative_strategy: NegativeStrategy::WrongArticle,
+        weight: 1.0,
+        instruction: None,
+        allow_same_anchor_positive: false,
+    }];
+    config.text_recipes = Vec::new();
+    let sampler = TripletSampler::new(config, Arc::clone(&store));
+
+    // idx % 3 assigns Train/Validation/Test in BOTH sources; the map below
+    // is the ground truth every sampled row is checked against.
+    let mut split_of_key = std::collections::HashMap::new();
+    for source in ["freq_a", "freq_b"] {
+        let records: Vec<DataRecord> = (0..12)
+            .map(|i| {
+                let mut r = trader_record(
+                    &format!("{i}"),
+                    "2025-01-01",
+                    &format!("{source} title {i}"),
+                    &format!("{source} body text number {i}"),
+                );
+                r.source = source.to_string();
+                r.taxonomy = vec![source.to_string()];
+                r
+            })
+            .collect();
+        for r in &records {
+            let label = match r.id.parse::<usize>().unwrap() % 3 {
+                0 => SplitLabel::Train,
+                1 => SplitLabel::Validation,
+                _ => SplitLabel::Test,
+            };
+            store.upsert(RecordKey::new(source, &r.id), label).unwrap();
+            split_of_key.insert(RecordKey::new(source, &r.id), label);
+        }
+        sampler
+            .register_source(Box::new(InMemorySource::from_records(source, records)))
+            .unwrap();
+    }
+
+    let weights: HashMap<SourceId, f32> =
+        [("freq_a".to_string(), 0.75), ("freq_b".to_string(), 0.25)]
+            .into_iter()
+            .collect();
+    // Ten 8-row Train batches = 40 anchor draws = 10 full DRR cycles →
+    // exactly 30 A + 10 B anchors → 60 A + 20 B rows, every one Train.
+    // Then one Validation batch and one Test batch, same frequency deal.
+    let mut a_rows = 0usize;
+    let mut total = 0usize;
+    for _ in 0..10 {
+        let batch = sampler
+            .next_pair_batch_with_weights_for_split(SplitLabel::Train, &weights)
+            .unwrap();
+        assert_eq!(batch.pairs.len(), 8);
+        eprintln!(
+            "PROBE batch: {:?}",
+            batch
+                .pairs
+                .iter()
+                .map(|p| (p.anchor.text.clone(), p.positive.text.clone()))
+                .collect::<Vec<_>>()
+        );
+        for p in &batch.pairs {
+            for chunk in [&p.anchor, &p.positive] {
+                total += 1;
+                let key = RecordKey::of_chunk(chunk);
+                assert_eq!(
+                    split_of_key.get(&key),
+                    Some(&SplitLabel::Train),
+                    "split boundary violated: row {:?} is not Train",
+                    (key.source.clone(), key.id.clone())
+                );
+                if key.source == "freq_a" {
+                    a_rows += 1;
+                }
+            }
+        }
+    }
+    assert_eq!((a_rows, total), (120, 160), "DRR apportions exactly 3:1");
+    for split_label in [SplitLabel::Validation, SplitLabel::Test] {
+        let batch = sampler
+            .next_pair_batch_with_weights_for_split(split_label, &weights)
+            .unwrap();
+        assert_eq!(batch.pairs.len(), 8);
+        for p in &batch.pairs {
+            for chunk in [&p.anchor, &p.positive] {
+                let key = RecordKey::of_chunk(chunk);
+                assert_eq!(
+                    split_of_key.get(&key),
+                    Some(&split_label),
+                    "split boundary violated: row {:?} is not {:?}",
+                    (key.source.clone(), key.id.clone()),
+                    split_label
+                );
+            }
+        }
+    }
 }
 
 #[test]
