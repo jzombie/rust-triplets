@@ -291,15 +291,17 @@ mod tests {
 
     /// Write `n` pair entries into `<dir>/<split>/data.srd`, creating it.
     /// Anchor/candidate texts differ (the sampler rejects identical pairs).
-    fn write_test_store(dir: &Path, split: &str, n: usize) {
+    /// Both carry `tag` so rows stay attributable in tests (anchor slot may
+    /// hold the candidate chunk under the ~50% swap).
+    fn write_test_store(dir: &Path, split: &str, tag: &str, n: usize) {
         let split_dir = dir.join(split);
         std::fs::create_dir_all(&split_dir).unwrap();
         let store = DataStore::open(&split_dir.join("data.srd")).unwrap();
         let vecs: Vec<Vec<f32>> = (0..n)
             .map(|i| vec![i as f32 * 0.01 + 0.1; TEST_EMB_DIM])
             .collect();
-        let texts: Vec<String> = (0..n).map(|i| format!("anchor text {i}")).collect();
-        let cands: Vec<String> = (0..n).map(|i| format!("candidate text {i}")).collect();
+        let texts: Vec<String> = (0..n).map(|i| format!("{tag} anchor text {i}")).collect();
+        let cands: Vec<String> = (0..n).map(|i| format!("{tag} candidate text {i}")).collect();
         let entries: Vec<SrdPairWriteEntry> = vecs
             .iter()
             .zip(texts.iter())
@@ -317,8 +319,8 @@ mod tests {
 
     fn make_dataset(parent: &Path, name: &str, n_train: usize, n_val: usize) -> PathBuf {
         let dir = parent.join(name);
-        write_test_store(&dir, "train", n_train);
-        write_test_store(&dir, "val", n_val.max(1));
+        write_test_store(&dir, "train", name, n_train);
+        write_test_store(&dir, "val", name, n_val.max(1));
         dir
     }
 
@@ -357,9 +359,14 @@ mod tests {
             assert_eq!(r.embedding.len(), TEST_EMB_DIM);
             assert!(!r.text.is_empty());
         }
-        // Counts follow largest-remainder exactly.
-        let counts = split_rows(8, &[0.75, 0.25]);
-        assert_eq!(counts.iter().sum::<usize>(), 8);
+        // Exact per-source counts: rows are tagged by dataset, so the
+        // 0.75/0.25 split over 8 rows must yield exactly 6 ds-a + 2 ds-b.
+        let expected = split_rows(8, &[0.75, 0.25]);
+        assert_eq!(expected, vec![6, 2]);
+        let got_a = rows.iter().filter(|r| r.text.starts_with("ds-a ")).count();
+        let got_b = rows.iter().filter(|r| r.text.starts_with("ds-b ")).count();
+        assert_eq!(got_a, expected[0], "ds-a rows");
+        assert_eq!(got_b, expected[1], "ds-b rows");
     }
 
     #[test]
@@ -444,7 +451,7 @@ mod tests {
         let empty_parent = tmp.path().join("empty-ds");
         std::fs::create_dir_all(empty_parent.join("train")).unwrap();
         DataStore::open(&empty_parent.join("train").join("data.srd")).unwrap();
-        write_test_store(&empty_parent, "val", 2);
+        write_test_store(&empty_parent, "val", "empty-ds", 2);
         assert!(matches!(
             MixedSrdSampler::open(
                 &[empty_parent],
