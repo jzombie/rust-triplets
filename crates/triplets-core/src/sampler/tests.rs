@@ -296,6 +296,98 @@ fn record_has_long_section_returns_false_when_window_tokens_are_disabled() {
 }
 
 #[test]
+fn late_registered_source_is_cycled_without_rebuild() {
+    // A source registered after ingestion started must reach round-robin via
+    // the incremental delta path — source_order updates in
+    // sync_records_from_cache, no full rebuild. Records from the late source
+    // would otherwise sit in memory, unreachable.
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 77).unwrap());
+    let mut config = base_config();
+    config.batch_size = 4;
+    config.ingestion_max_records = 64;
+    config.allowed_splits = vec![SplitLabel::Train];
+    config.split = split;
+    config.recipes = vec![TripletRecipe {
+        name: "late_recipe".into(),
+        anchor: Selector::Role(SectionRole::Anchor),
+        positive_selector: Selector::Role(SectionRole::Context),
+        negative_selector: Selector::Role(SectionRole::Context),
+        negative_strategy: NegativeStrategy::WrongArticle,
+        weight: 1.0,
+        instruction: None,
+        allow_same_anchor_positive: false,
+    }];
+    config.text_recipes = Vec::new();
+    let sampler = TripletSampler::new(config, Arc::clone(&store));
+
+    let make_records = |source: &str, tag: &str| -> Vec<DataRecord> {
+        (0..4)
+            .map(|i| {
+                let mut r = trader_record(
+                    &format!("{tag}_{i}"),
+                    "2025-01-01",
+                    &format!("{tag} title {i}"),
+                    &format!("{tag} body text number {i}"),
+                );
+                r.source = source.to_string();
+                r.taxonomy = vec![source.to_string()];
+                r
+            })
+            .collect()
+    };
+
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "late_a",
+            make_records("late_a", "alpha"),
+        )))
+        .unwrap();
+    let first = sampler
+        .next_pair_batch_with_weights_for_split(SplitLabel::Train, &HashMap::new())
+        .unwrap();
+    assert!(!first.pairs.is_empty());
+    assert!(
+        first
+            .pairs
+            .iter()
+            .all(|p| p.anchor.text.starts_with("alpha ")),
+        "pre-registration batches come only from the first source"
+    );
+
+    // Register a second source mid-stream; steady-state ingestion advances
+    // (delta path, caches non-empty) rather than full-refreshing.
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "late_b",
+            make_records("late_b", "beta"),
+        )))
+        .unwrap();
+    let mut saw_beta = false;
+    for _ in 0..8 {
+        let batch = sampler
+            .next_pair_batch_with_weights_for_split(SplitLabel::Train, &HashMap::new())
+            .unwrap();
+        if batch
+            .pairs
+            .iter()
+            .any(|p| p.anchor.text.starts_with("beta "))
+        {
+            saw_beta = true;
+            break;
+        }
+    }
+    assert!(
+        saw_beta,
+        "late-registered source must be reached by round-robin without rebuild"
+    );
+}
+
+#[test]
 fn remove_id_from_source_index_removes_correct_entry() {
     let split = SplitRatios::default();
     let store = Arc::new(DeterministicSplitStore::new(split, 100).unwrap());

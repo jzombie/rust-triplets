@@ -17,10 +17,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
   on every chunk with no side lookups.
 - **`MixedSrdSampler` (`triplets-srd-source::mixer`).** Exact batch mixtures over
   N baked SRD dataset splits: one sampler per store (all selection stays in
-  triplets) plus largest-remainder row counts per batch. Rows come out as
-  `(text, embedding)` with vectors attached — no store handles, no index
+  triplets) plus largest-remainder row counts per batch. `next_batch` loops
+  per-source samplers until each share is filled; a shortfall (sampler stopped
+  yielding) is a loud `ShortBatch` error, never a truncated batch. Rows come
+  out as `(text, embedding)` with vectors attached — no store handles, no index
   resolution, no id parsing downstream. Samplers run continuously (no epoch
   rebuilds); determinism comes from construction seeds.
+- **`RecordChunk.source` is required** (no `#[serde(default)]`): a chunk without
+  a source resolves split lookups against the wrong identity, so deserialization
+  without it fails loudly instead of defaulting to `""`.
+
+### Changed
+- **BREAKING: `FileSplitStore` storage version bumped 1 → 2.** Persisted split
+  label keys are namespaced by source (`split:<source>\0<id>`). v1 stores are
+  rejected loudly at open (version mismatch) instead of silently missing their
+  explicit assignments. No dual-read fallback is kept (pre-1.0: rebuild the
+  store rather than carrying legacy shims). Epoch/sampler-state formats
+  unchanged. SRD baked-data files are unaffected (encoding untouched).
 
 ### Fixed
 - **Record identity is composite (`RecordKey { source, id }`) throughout the

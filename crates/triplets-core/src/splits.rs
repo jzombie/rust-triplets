@@ -1540,6 +1540,29 @@ mod tests {
     }
 
     #[test]
+    fn file_store_ignores_pre_composite_legacy_label_keys() {
+        // Stores populated before keys were namespaced persist assignments
+        // under `split:<id>`. Those keys are dead: label_for reads only the
+        // canonical namespaced layout, and the STORE_VERSION bump rejects
+        // such stores loudly at open. This pins the no-fallback behavior —
+        // a legacy key must never resolve.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("labels.bin");
+        let store = FileSplitStore::open(&path, SplitRatios::default(), 42).unwrap();
+
+        let key = RecordKey::new("src", "legacy_record");
+        let mut legacy_key = Vec::new();
+        legacy_key.extend_from_slice(SPLIT_PREFIX);
+        legacy_key.extend_from_slice(b"legacy_record");
+        store.store.write(&legacy_key, b"1").unwrap();
+        assert_eq!(
+            store.label_for(&key),
+            Some(derive_label_for_key(&key, 42, SplitRatios::default())),
+            "pre-composite legacy keys must not resolve"
+        );
+    }
+
+    #[test]
     fn ensure_parent_dir_allows_plain_file_names() {
         ensure_parent_dir(Path::new("split_store_local.bin")).unwrap();
         let coerced = coerce_store_path(PathBuf::from("explicit_store.bin"));

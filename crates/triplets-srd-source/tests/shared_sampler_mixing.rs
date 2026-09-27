@@ -3,11 +3,9 @@
 //! plumbing. Embeddings ride the pipeline; consumers read them straight off
 //! the sampled pairs.
 //!
-//! NOTE on mixture semantics (measured): a shared sampler cycles sources
-//! uniformly at batch-selection time; per-source weights shape ingestion, not
-//! batch picks. Exact batch mixtures are the training loop's job (per-source
-//! samplers + counts). This test pins the uniform behavior so a change is
-//! caught, not silently absorbed.
+//! Also proves native source weighting: one shared sampler over two stores
+//! with weights {0.75, 0.25} apportions anchors exactly 3:1 via deficit
+//! round-robin (deterministic, seed-independent choice order).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -81,7 +79,7 @@ fn make_sampler(seed: u64, batch_size: usize) -> TripletSampler<DeterministicSpl
 }
 
 #[test]
-fn shared_sampler_cycles_sources_uniformly_with_embeddings_on_chunks() {
+fn shared_sampler_apportions_by_weight_with_embeddings_on_chunks() {
     let tmp = TempDir::new().unwrap();
     let a_path = tmp.path().join("ds-a").join("data.srd");
     let b_path = tmp.path().join("ds-b").join("data.srd");
@@ -150,13 +148,15 @@ fn shared_sampler_cycles_sources_uniformly_with_embeddings_on_chunks() {
             }
         }
     }
-    // Anchor picks cycle sources uniformly (measured 40/80); weights shape
-    // ingestion, not batch picks. Pin the uniformity so a behavior change
-    // is caught, not silently absorbed.
+    // Anchor picks follow deficit round-robin exactly 3:1 (4 draws per
+    // 8-row batch → 3 A + 1 B anchors → 6 A + 2 B rows; both chunks of a
+    // pair belong to the anchor's dataset). Ten batches = 40 draws = 10
+    // full DRR cycles → exactly 60/20.
     let share = a_count as f32 / total as f32;
-    assert!(
-        (0.35..0.65).contains(&share),
-        "shared sampler cycles uniformly, ds-a chunk share = {share:.2} ({a_count}/{total})"
+    assert_eq!(
+        (a_count, total),
+        (120, 160),
+        "DRR apportions exactly 3:1, ds-a chunk share = {share:.2}"
     );
 }
 

@@ -5,15 +5,12 @@
 
 /// Error types for SRD operations.
 pub mod error;
-/// Exact batch mixtures over multiple baked SRD dataset splits.
-pub mod mixer;
 /// Low-level source backed by a simd-r-drive data store.
 pub mod srd_source;
 /// Entry encoding/decoding and batch I/O for pair and triplet modes.
 pub mod srd_triplet;
 
 pub use error::SrdError;
-pub use mixer::{MixedRow, MixedSrdSampler};
 pub use srd_source::SrdSource;
 pub use srd_triplet::{
     FLAG_LABEL_NEGATIVE, SrdMode, SrdPairRecord, SrdPairWriteEntry, SrdRecord, SrdTripletRecord,

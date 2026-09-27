@@ -292,6 +292,15 @@ struct TripletSamplerInner<S: SplitStore + EpochStateStore + SamplerStateStore +
     /// Composite keys (not bare ids) so overlapping ids from different
     /// sources coexist instead of overwriting each other.
     records: IndexMap<RecordKey, Arc<DataRecord>>,
+    /// Deficit counters for weighted source selection (smooth weighted
+    /// round-robin over `source_order`). Only engaged when the caller passes
+    /// explicit non-uniform per-source weights; uniform/empty maps take the
+    /// legacy uniform-cycling path bit-identically. New sources start at 0.0
+    /// via entry-or-insert (no sync hook needed); stale entries are pruned
+    /// with the source index. Intentionally NOT persisted: deficits
+    /// self-correct within a few draws, and no consumer persists sampler
+    /// state across processes with weights engaged.
+    source_deficits: HashMap<SourceId, f32>,
     /// Deterministic RNG for per-batch shuffles and sampling.
     rng: DeterministicRng,
     /// Config-level triplet recipes used when sources do not supply their own.
@@ -448,6 +457,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             chunk_index: HashMap::new(),
             source_order: Vec::new(),
             source_cycle_idx: 0,
+            source_deficits: HashMap::new(),
             source_state_loaded: false,
             ingestion_cursors_loaded: false,
             source_state_dirty: false,
@@ -674,6 +684,9 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         self.source_order = self.source_record_indices.keys().cloned().collect();
         self.source_order.sort();
         self.refresh_source_wrapped();
+        // Drop deficit counters for sources that left the pool.
+        self.source_deficits
+            .retain(|s, _| self.source_record_indices.contains_key(s));
 
         self.source_record_cursors
             .retain(|source, _| self.source_record_indices.contains_key(source));
@@ -709,6 +722,69 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         let seed = self.epoch_seed() ^ cycle;
         sources.sort_by_key(|source| stable_hash_str(seed, source));
         sources
+    }
+
+    /// True when `weights` carries no selective signal: empty or all equal.
+    /// Uniform maps take the legacy uniform-cycling path bit-identically.
+    fn weights_are_selective(weights: &HashMap<SourceId, f32>) -> bool {
+        if weights.is_empty() {
+            return false;
+        }
+        let first = *weights.values().next().unwrap();
+        weights.values().any(|&w| w != first)
+    }
+
+    /// Effective quantum for `source`: its weight when finite and
+    /// non-negative, else 0. Unlisted sources default to 1.0 (mirrors the
+    /// ingestion drain).
+    fn weight_quantum(weights: &HashMap<SourceId, f32>, source: &str) -> f32 {
+        weights.get(source).copied().unwrap_or(1.0).max(0.0)
+    }
+
+    /// Weighted source choice: smooth weighted round-robin over `candidates`.
+    /// Credits each eligible source its weight quantum, picks the highest
+    /// deficit, deducts the round total. Deterministic given pool + deficits
+    /// (no RNG): same state, same choice. New sources start at 0.0 via
+    /// entry-or-insert. Returns `None` when no candidate has records.
+    fn select_weighted_source(
+        &mut self,
+        candidates: &[SourceId],
+        weights: &HashMap<SourceId, f32>,
+    ) -> Option<SourceId> {
+        let eligible: Vec<&SourceId> = candidates
+            .iter()
+            .filter(|s| {
+                self.source_record_indices
+                    .get(*s)
+                    .map(|v| !v.is_empty())
+                    .unwrap_or(false)
+            })
+            .collect();
+        if eligible.is_empty() {
+            return None;
+        }
+        let mut total = 0.0f32;
+        for source in &eligible {
+            let q = Self::weight_quantum(weights, source);
+            total += q;
+            *self.source_deficits.entry((*source).clone()).or_insert(0.0) += q;
+        }
+        if total <= 0.0 {
+            return None;
+        }
+        let mut best: Option<(f32, SourceId)> = None;
+        for source in &eligible {
+            let d = self.source_deficits.get(*source).copied().unwrap_or(0.0);
+            if best.as_ref().map(|(bd, _)| d > *bd).unwrap_or(true) {
+                best = Some((d, (*source).clone()));
+            }
+        }
+        let (_, source) = best?;
+        *self
+            .source_deficits
+            .get_mut(&source)
+            .expect("deficit credited above") -= total;
+        Some(source)
     }
 
     fn ensure_source_state(&mut self) -> Result<(), SamplerError> {
@@ -2125,6 +2201,9 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             self.source_order = self.source_record_indices.keys().cloned().collect();
             self.source_order.sort();
         }
+        // Drop deficit counters for sources that left the pool.
+        self.source_deficits
+            .retain(|s, _| self.source_record_indices.contains_key(s));
         self.refresh_source_wrapped();
         self.source_record_cursors
             .retain(|source, _| self.source_record_indices.contains_key(source));
@@ -2532,6 +2611,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         let mut cycle = (self.source_cycle_idx / sources.len()) as u64;
         let mut source_idx = self.source_cycle_idx % sources.len();
         let mut cycle_sources = self.shuffled_source_cycle(cycle);
+        // Explicit non-uniform weights engage deficit round-robin source
+        // choice; uniform/empty maps keep legacy uniform cycling bit-identical.
+        let weighted: Option<&HashMap<SourceId, f32>> = match weights {
+            Some(w) if Self::weights_are_selective(w) => Some(w),
+            _ => None,
+        };
         let mut recipe_orders: HashMap<RecipeKey, Vec<usize>> = HashMap::new();
         let mut recipe_positions: HashMap<RecipeKey, usize> = HashMap::new();
         let mut recipe_steps = 0usize;
@@ -2547,7 +2632,18 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             if pairs.len() >= self.config.batch_size {
                 break;
             }
-            let source = cycle_sources[source_idx].as_str();
+            let weighted_source;
+            let source = if let Some(w) = weighted {
+                match self.select_weighted_source(&sources, w) {
+                    Some(s) => {
+                        weighted_source = s;
+                        weighted_source.as_str()
+                    }
+                    None => break,
+                }
+            } else {
+                cycle_sources[source_idx].as_str()
+            };
             let (triplet, attempts_used) = self.sample_source_triplet_candidate(
                 source,
                 target_split,
@@ -2715,11 +2811,28 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             .max(1);
         let attempts = self.config.batch_size * 4 * sources.len() * max_recipe_len;
         let mut rng = std::mem::replace(&mut self.rng, DeterministicRng::new(0));
+        // Explicit non-uniform weights engage deficit round-robin source
+        // choice; uniform/empty maps keep legacy uniform cycling bit-identical.
+        let weighted: Option<&HashMap<SourceId, f32>> = match weights {
+            Some(w) if Self::weights_are_selective(w) => Some(w),
+            _ => None,
+        };
         for _ in 0..attempts {
             if samples.len() >= self.config.batch_size {
                 break;
             }
-            let source = cycle_sources[idx].as_str();
+            let weighted_source;
+            let source = if let Some(w) = weighted {
+                match self.select_weighted_source(&sources, w) {
+                    Some(s) => {
+                        weighted_source = s;
+                        weighted_source.as_str()
+                    }
+                    None => break,
+                }
+            } else {
+                cycle_sources[idx].as_str()
+            };
             let recipes = self.text_recipes_for_source(source).to_vec();
             if recipes.is_empty() {
                 idx += 1;
@@ -2869,6 +2982,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         let mut cycle = (self.source_cycle_idx / sources.len()) as u64;
         let mut source_idx = self.source_cycle_idx % sources.len();
         let mut cycle_sources = self.shuffled_source_cycle(cycle);
+        // Explicit non-uniform weights engage deficit round-robin source
+        // choice; uniform/empty maps keep legacy uniform cycling bit-identical.
+        let weighted: Option<&HashMap<SourceId, f32>> = match weights {
+            Some(w) if Self::weights_are_selective(w) => Some(w),
+            _ => None,
+        };
         let mut recipe_steps = 0usize;
         let max_recipe_len = sources
             .iter()
@@ -2894,7 +3013,18 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             if slot_plans.len() >= target_slots {
                 break;
             }
-            let source = cycle_sources[source_idx].as_str();
+            let weighted_source;
+            let source = if let Some(w) = weighted {
+                match self.select_weighted_source(&sources, w) {
+                    Some(s) => {
+                        weighted_source = s;
+                        weighted_source.as_str()
+                    }
+                    None => break,
+                }
+            } else {
+                cycle_sources[source_idx].as_str()
+            };
             let (recipes, _) = self.resolve_source_triplet_plan(source);
             if !recipes.is_empty() {
                 let fork_seed = rng.next_u64();

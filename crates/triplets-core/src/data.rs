@@ -172,7 +172,9 @@ pub struct RecordChunk {
     /// Source that produced the parent record. Together with `record_id` this
     /// forms the chunk's [`RecordKey`](crate::types::RecordKey): a structured
     /// field populated from the parent record, never parsed from strings.
-    #[serde(default)]
+    /// Required (no `#[serde(default)]`): a chunk without a source resolves
+    /// split lookups against the wrong identity — that must fail loudly at
+    /// the boundary, not default to `""`.
     pub source: SourceId,
     /// Index of the source section in `DataRecord.sections`.
     pub section_idx: usize,
@@ -592,5 +594,19 @@ mod tests {
             WhitespaceTokenizer.token_count("hello beautiful world")
         );
         assert_eq!(record.id.as_str(), "from-txt");
+    }
+
+    #[test]
+    fn chunk_without_source_fails_deserialization_loudly() {
+        // A chunk with no source would resolve split lookups against the
+        // wrong identity ("", id). Deserialization must reject it — never
+        // default to an empty source.
+        let mut value = serde_json::to_value(sample_chunk("x")).unwrap();
+        value.as_object_mut().unwrap().remove("source");
+        let err = serde_json::from_value::<RecordChunk>(value).unwrap_err();
+        assert!(
+            err.to_string().contains("source"),
+            "missing source must fail loudly, got: {err}"
+        );
     }
 }
