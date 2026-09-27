@@ -42,6 +42,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
   unchanged. SRD baked-data files are unaffected (encoding untouched).
 - Bumped `parquet` from 59.1.0 to 60.0.0 (#166, semver-major)
 - Bumped `clap` from 4.6.6 to 4.6.7 (#167)
+- Bumped `rustls` from 0.23.36 to 0.23.45 (RUSTSEC-2026-0285)
 
 ### Fixed
 - **Record identity is composite (`RecordKey { source, id }`) throughout the
