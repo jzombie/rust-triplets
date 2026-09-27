@@ -1967,8 +1967,16 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         section_idx: usize,
         section: &RecordSection,
     ) -> Vec<RecordChunk> {
-        self.chunker
-            .materialize(&self.config.chunking, record, section_idx, section)
+        let mut chunks =
+            self.chunker
+                .materialize(&self.config.chunking, record, section_idx, section);
+        // Propagate the section's precomputed embedding (if any) into every
+        // chunk materialized from it. The chunker stays agnostic; Arc makes
+        // this a pointer copy, never a vector copy.
+        for chunk in &mut chunks {
+            chunk.embedding = section.embedding.clone();
+        }
+        chunks
     }
 
     fn build_derived_text_recipes(recipes: &[TripletRecipe]) -> Vec<TextRecipe> {

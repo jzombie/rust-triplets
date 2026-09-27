@@ -208,6 +208,7 @@ mod tests {
             tokens_estimate: 1,
             quality: crate::data::QualityScore::default(),
             kvp_meta: Default::default(),
+            embedding: None,
         }
     }
 

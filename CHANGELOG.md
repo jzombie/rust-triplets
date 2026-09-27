@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
 (or is loosely based on) Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+- **Precomputed-embedding channel through the sampler.** `RecordSection.embedding`
+  and `RecordChunk.embedding` (`Option<Arc<[f32]>>`, `#[serde(skip)]` — transient,
+  re-ingested on resume, never persisted or compared). The sampler stamps every
+  materialized chunk from its parent section in `materialize_chunks`, so chunking
+  backends stay agnostic and vectors ride the pipeline as Arc pointer copies.
+- **`SrdSource` populates all section embeddings** (anchor + candidate/positive/
+  negative) from its store vectors, so sampled pairs carry exact store vectors
+  on every chunk with no side lookups.
+- **`MixedSrdSampler` (`triplets-srd-source::mixer`).** Exact batch mixtures over
+  N baked SRD dataset splits: one sampler per store (all selection stays in
+  triplets) plus largest-remainder row counts per batch. Rows come out as
+  `(text, embedding)` with vectors attached — no store handles, no index
+  resolution, no id parsing downstream. Samplers run continuously (no epoch
+  rebuilds); determinism comes from construction seeds.
+
+### Fixed
+- **`SrdSource` record ids are now `{source_id}::{index}`** (triplets'
+  `{source}::{record}` convention). Bare entry indices collided in the sampler's
+  single `IndexMap<RecordId, _>` pool when several `SrdSource`s shared one
+  sampler — the later source silently overwrote the earlier one's records.
+  Ids are opaque; nothing parses them (vectors ride the embedding channel).
+
 ## [0.27.1-alpha] - 2026-09-09
 
 ### Changed
