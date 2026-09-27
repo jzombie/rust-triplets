@@ -24,7 +24,7 @@ use crate::srd_triplet::{self, SrdMode, SrdRecord};
 /// (as a string). Entry indices are unique within one store; identity across
 /// stores is the sampler's job (composite keys), not the id string's — so
 /// nothing parses or decorates these ids. Entry vectors ride the
-/// [`RecordSection`](triplets::data::RecordSection) embedding channel.
+/// [`RecordSection`] embedding channel.
 pub struct SrdSource {
     store: DataStore,
     source_id: String,
