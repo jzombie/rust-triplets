@@ -665,7 +665,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Override the mixing ratio for this batch: pull from the high-quality
     // CSV source 70% of the time and the local docs 30% of the time.
-    // Sources not listed here fall back to uniform sampling.
+    // Apportionment is deficit round-robin: deterministic and exact over
+    // each weight cycle (no variance, no RNG), so every 10 anchors hold
+    // exactly 7 CSV + 3 docs rows. Sources not listed here get quantum 1.0.
+    // Empty or all-equal maps keep legacy uniform cycling bit-identically.
     let mut weights = HashMap::new();
     weights.insert("hf_finance".to_string(), 0.7);
     weights.insert("docs".to_string(), 0.3);

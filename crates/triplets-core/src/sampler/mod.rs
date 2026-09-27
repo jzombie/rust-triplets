@@ -3448,6 +3448,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     }
 
     /// Return a weighted pair batch for `split` using per-source weights.
+    ///
+    /// Source choice is deficit round-robin over the map: deterministic and
+    /// exact over each weight cycle (0.75/0.25 yields exactly 3:1 anchors).
+    /// Unlisted sources get quantum 1.0; non-finite/negative quanta count as
+    /// 0. Empty or all-equal maps keep legacy uniform cycling bit-identically.
+    /// Weights also steer ingestion; see `ingest_with_weights_fallback`.
     pub fn next_pair_batch_with_weights_for_split(
         &self,
         split: SplitLabel,
@@ -3459,6 +3465,11 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     }
 
     /// Return a weighted text batch for `split` using per-source weights.
+    ///
+    /// Source choice is deficit round-robin over the map: deterministic and
+    /// exact over each weight cycle. Unlisted sources get quantum 1.0;
+    /// non-finite/negative quanta count as 0. Empty or all-equal maps keep
+    /// legacy uniform cycling bit-identically.
     pub fn next_text_batch_with_weights_for_split(
         &self,
         split: SplitLabel,
@@ -3470,6 +3481,11 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     }
 
     /// Return a weighted triplet batch for `split` using per-source weights.
+    ///
+    /// Source choice is deficit round-robin over the map: deterministic and
+    /// exact over each weight cycle. Unlisted sources get quantum 1.0;
+    /// non-finite/negative quanta count as 0. Empty or all-equal maps keep
+    /// legacy uniform cycling bit-identically.
     pub fn next_triplet_batch_with_weights_for_split(
         &self,
         split: SplitLabel,
