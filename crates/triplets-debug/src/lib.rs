@@ -1873,6 +1873,7 @@ mod tests {
                                 text: "anchor".to_string(),
                                 sentences: vec!["anchor".to_string()],
                                 token_count: 0,
+                                embedding: None,
                             },
                             RecordSection {
                                 role: SectionRole::Context,
@@ -1880,6 +1881,7 @@ mod tests {
                                 text: "context".to_string(),
                                 sentences: vec!["context".to_string()],
                                 token_count: 0,
+                                embedding: None,
                             },
                         ],
                         meta_prefix: None,
@@ -2285,6 +2287,7 @@ mod tests {
             )]
             .into_iter()
             .collect(),
+            embedding: None,
         };
         let positive = RecordChunk {
             record_id: "source_a::rec2".to_string(),
@@ -2297,6 +2300,7 @@ mod tests {
             tokens_estimate: 6,
             quality: triplets_core::data::QualityScore { trust: 0.8 },
             kvp_meta: Default::default(),
+            embedding: None,
         };
         let negative = RecordChunk {
             record_id: "source_b::rec3".to_string(),
@@ -2310,6 +2314,7 @@ mod tests {
             tokens_estimate: 7,
             quality: triplets_core::data::QualityScore { trust: 0.5 },
             kvp_meta: Default::default(),
+            embedding: None,
         };
 
         let triplet_batch = TripletBatch {

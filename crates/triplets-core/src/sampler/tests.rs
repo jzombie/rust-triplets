@@ -147,6 +147,7 @@ fn strategy_reason_and_chunk_key_cover_all_variants() {
         tokens_estimate: 8,
         quality: QualityScore { trust: 1.0 },
         kvp_meta: Default::default(),
+        embedding: None,
     };
     let key_window = triplet_chunk_key(&base);
     assert!(key_window.contains("|w|2"));
@@ -248,6 +249,7 @@ fn select_chunk_random_handles_empty_and_non_empty_sections() {
             text: "one two three four five six".into(),
             sentences: vec!["one two three four five six".into()],
             token_count: WhitespaceTokenizer.token_count("one two three four five six"),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -279,6 +281,7 @@ fn record_has_long_section_returns_false_when_window_tokens_are_disabled() {
             text: "one two three four five six seven eight".into(),
             sentences: vec!["one two three four five six seven eight".into()],
             token_count: WhitespaceTokenizer.token_count("one two three four five six seven eight"),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -340,6 +343,7 @@ fn insert_id_into_source_index_maintains_sorted_order() {
                 text: id.to_string(),
                 sentences: vec![],
                 token_count: 0,
+                embedding: None,
             }],
             meta_prefix: None,
             label: None,
@@ -386,6 +390,7 @@ fn insert_id_into_source_index_skips_disallowed_split() {
             text: "disallowed".to_string(),
             sentences: vec![],
             token_count: 0,
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -480,6 +485,7 @@ fn sync_records_from_cache_delta_path_with_additions_and_evictions() {
                 text: "delta text one".into(),
                 sentences: vec![],
                 token_count: 0,
+                embedding: None,
             }],
             meta_prefix: None,
             label: None,
@@ -497,6 +503,7 @@ fn sync_records_from_cache_delta_path_with_additions_and_evictions() {
                 text: "delta text two".into(),
                 sentences: vec![],
                 token_count: 0,
+                embedding: None,
             }],
             meta_prefix: None,
             label: None,
@@ -548,6 +555,7 @@ fn record_has_long_section_increments_count_on_add() {
             text: "one two three four five".into(),
             sentences: vec![],
             token_count: 5,
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -778,6 +786,7 @@ fn sample_record() -> DataRecord {
                 text: "Sample title".into(),
                 sentences: vec!["Sample title".into()],
                 token_count: WhitespaceTokenizer.token_count("Sample title"),
+                embedding: None,
             },
             RecordSection {
                 role: SectionRole::Context,
@@ -789,6 +798,7 @@ fn sample_record() -> DataRecord {
                 token_count: WhitespaceTokenizer.token_count(
                     "This is the introduction paragraph with enough words for sampling.",
                 ),
+                embedding: None,
             },
         ],
         meta_prefix: None,
@@ -821,6 +831,7 @@ fn trader_record(id: &str, date: &str, title: &str, body: &str) -> DataRecord {
                 text: title.into(),
                 sentences: vec![title.into()],
                 token_count: WhitespaceTokenizer.token_count(title),
+                embedding: None,
             },
             RecordSection {
                 role: SectionRole::Context,
@@ -828,6 +839,7 @@ fn trader_record(id: &str, date: &str, title: &str, body: &str) -> DataRecord {
                 text: body.into(),
                 sentences: vec![body.into()],
                 token_count: WhitespaceTokenizer.token_count(body),
+                embedding: None,
             },
         ],
         meta_prefix: None,
@@ -853,6 +865,7 @@ fn text_columns_record(id: &str, common_text: &str) -> DataRecord {
                 text: common_text.into(),
                 sentences: vec![common_text.into()],
                 token_count: WhitespaceTokenizer.token_count(common_text),
+                embedding: None,
             },
             RecordSection {
                 role: SectionRole::Context,
@@ -860,6 +873,7 @@ fn text_columns_record(id: &str, common_text: &str) -> DataRecord {
                 text: common_text.into(),
                 sentences: vec![common_text.into()],
                 token_count: WhitespaceTokenizer.token_count(common_text),
+                embedding: None,
             },
         ],
         meta_prefix: None,
@@ -1443,6 +1457,7 @@ fn qa_pair_record(id: &str, question: &str, answer: &str) -> DataRecord {
                 text: question.into(),
                 sentences: vec![question.into()],
                 token_count: WhitespaceTokenizer.token_count(question),
+                embedding: None,
             },
             RecordSection {
                 role: SectionRole::Context,
@@ -1450,6 +1465,7 @@ fn qa_pair_record(id: &str, question: &str, answer: &str) -> DataRecord {
                 text: answer.into(),
                 sentences: vec![answer.into()],
                 token_count: WhitespaceTokenizer.token_count(answer),
+                embedding: None,
             },
         ],
         meta_prefix: None,
@@ -1534,6 +1550,7 @@ fn chunk_view_carries_window_index() {
             text: section_text.into(),
             sentences: vec![section_text.into()],
             token_count: WhitespaceTokenizer.token_count(section_text),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -1591,6 +1608,7 @@ fn chunk_windows_follow_stride_for_large_sections() {
                 "iota kappa lambda mu.".into(),
             ],
             token_count: 0,
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -1658,6 +1676,7 @@ fn chunk_windows_materialize_all_configured_overlaps() {
             text: section_text.into(),
             sentences: vec![section_text.into()],
             token_count: WhitespaceTokenizer.token_count(section_text),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -1708,6 +1727,7 @@ impl ChunkingAlgorithm for FixedChunker {
             tokens_estimate: 1,
             quality: record.quality,
             kvp_meta: Default::default(),
+            embedding: None,
         }]
     }
 }
@@ -1735,6 +1755,7 @@ impl ChunkingAlgorithm for MarkerChunker {
                 tokens_estimate: 2,
                 quality: record.quality,
                 kvp_meta: Default::default(),
+                embedding: None,
             },
             RecordChunk {
                 record_id: record.id.clone(),
@@ -1748,6 +1769,7 @@ impl ChunkingAlgorithm for MarkerChunker {
                 tokens_estimate: 2,
                 quality: record.quality,
                 kvp_meta: Default::default(),
+                embedding: None,
             },
         ]
     }
@@ -1774,6 +1796,7 @@ fn sampler_uses_custom_chunking_algorithm_when_provided() {
             text: section_text.into(),
             sentences: vec![section_text.into()],
             token_count: WhitespaceTokenizer.token_count(section_text),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -1833,6 +1856,7 @@ fn runtime_batches_do_not_bypass_custom_chunker() {
             text: "alpha beta gamma delta".into(),
             sentences: vec!["alpha beta gamma delta".into()],
             token_count: WhitespaceTokenizer.token_count("alpha beta gamma delta"),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -1911,6 +1935,7 @@ fn chunk_weight_windows_use_trust_and_floor() {
         tokens_estimate: 10,
         quality: QualityScore { trust: 1.0 },
         kvp_meta: Default::default(),
+        embedding: None,
     };
     assert_eq!(
         sampler.inner.lock().unwrap().chunk_weight(&base_chunk),
@@ -1948,6 +1973,7 @@ fn summary_fallback_weight_is_clamped() {
         tokens_estimate: 10,
         quality: QualityScore::default(),
         kvp_meta: Default::default(),
+        embedding: None,
     };
     assert_eq!(
         sampler.inner.lock().unwrap().chunk_weight(&summary_chunk),
@@ -1975,6 +2001,7 @@ fn chunk_weight_applies_trust_scaling() {
         tokens_estimate: 10,
         quality: QualityScore { trust: 0.5 },
         kvp_meta: Default::default(),
+        embedding: None,
     };
 
     let weight = sampler.inner.lock().unwrap().chunk_weight(&trusted_chunk);
@@ -2012,6 +2039,7 @@ fn triplet_weight_averages_chunk_weights() {
         tokens_estimate: 10,
         quality: QualityScore::default(),
         kvp_meta: Default::default(),
+        embedding: None,
     };
     let positive = RecordChunk {
         record_id: "b".into(),
@@ -2025,6 +2053,7 @@ fn triplet_weight_averages_chunk_weights() {
         tokens_estimate: 10,
         quality: QualityScore::default(),
         kvp_meta: Default::default(),
+        embedding: None,
     };
     let negative = RecordChunk {
         record_id: "c".into(),
@@ -2038,6 +2067,7 @@ fn triplet_weight_averages_chunk_weights() {
         tokens_estimate: 10,
         quality: QualityScore::default(),
         kvp_meta: Default::default(),
+        embedding: None,
     };
 
     let avg = sampler
@@ -2081,6 +2111,7 @@ fn non_auto_triplet_negative_weight_uses_trust_only() {
         tokens_estimate: 10,
         quality: QualityScore::default(),
         kvp_meta: Default::default(),
+        embedding: None,
     };
     let positive = RecordChunk {
         record_id: "b".into(),
@@ -2094,6 +2125,7 @@ fn non_auto_triplet_negative_weight_uses_trust_only() {
         tokens_estimate: 10,
         quality: QualityScore::default(),
         kvp_meta: Default::default(),
+        embedding: None,
     };
     let negative = RecordChunk {
         record_id: "c".into(),
@@ -2107,6 +2139,7 @@ fn non_auto_triplet_negative_weight_uses_trust_only() {
         tokens_estimate: 10,
         quality: QualityScore::default(),
         kvp_meta: Default::default(),
+        embedding: None,
     };
 
     let avg = sampler
@@ -2150,6 +2183,7 @@ fn non_auto_triplet_weight_applies_anchor_positive_proximity() {
         tokens_estimate: 10,
         quality: QualityScore::default(),
         kvp_meta: Default::default(),
+        embedding: None,
     };
     let positive = RecordChunk {
         record_id: "r".into(),
@@ -2163,6 +2197,7 @@ fn non_auto_triplet_weight_applies_anchor_positive_proximity() {
         tokens_estimate: 10,
         quality: QualityScore::default(),
         kvp_meta: Default::default(),
+        embedding: None,
     };
     let negative = RecordChunk {
         record_id: "n".into(),
@@ -2176,6 +2211,7 @@ fn non_auto_triplet_weight_applies_anchor_positive_proximity() {
         tokens_estimate: 10,
         quality: QualityScore::default(),
         kvp_meta: Default::default(),
+        embedding: None,
     };
 
     let avg = sampler
@@ -2224,6 +2260,7 @@ fn non_auto_triplet_weight_tracks_positive_window_index() {
         tokens_estimate: 10,
         quality: QualityScore::default(),
         kvp_meta: Default::default(),
+        embedding: None,
     };
     let negative = RecordChunk {
         record_id: "n".into(),
@@ -2237,6 +2274,7 @@ fn non_auto_triplet_weight_tracks_positive_window_index() {
         tokens_estimate: 10,
         quality: QualityScore::default(),
         kvp_meta: Default::default(),
+        embedding: None,
     };
 
     // [(positive_index, expected_proximity, expected_weight)]
@@ -2261,6 +2299,7 @@ fn non_auto_triplet_weight_tracks_positive_window_index() {
             tokens_estimate: 10,
             quality: QualityScore::default(),
             kvp_meta: Default::default(),
+            embedding: None,
         };
 
         let proximity = chunk_proximity_score(&anchor, &positive);
@@ -2320,6 +2359,7 @@ fn auto_chunk_pair_triplet_weight_uses_proximity_inside_chunk_weight() {
         tokens_estimate: 10,
         quality: QualityScore::default(),
         kvp_meta: Default::default(),
+        embedding: None,
     };
     let positive = RecordChunk {
         record_id: "r".into(),
@@ -2333,6 +2373,7 @@ fn auto_chunk_pair_triplet_weight_uses_proximity_inside_chunk_weight() {
         tokens_estimate: 10,
         quality: QualityScore::default(),
         kvp_meta: Default::default(),
+        embedding: None,
     };
 
     let negative = RecordChunk {
@@ -2347,6 +2388,7 @@ fn auto_chunk_pair_triplet_weight_uses_proximity_inside_chunk_weight() {
         tokens_estimate: 10,
         quality: QualityScore::default(),
         kvp_meta: Default::default(),
+        embedding: None,
     };
 
     let weight = sampler.inner.lock().unwrap().triplet_chunk_weight(
@@ -2393,6 +2435,7 @@ fn non_adjacent_auto_window_pair_proximity_is_not_half() {
             sentences: vec!["one two three four five six seven eight nine ten".into()],
             token_count: WhitespaceTokenizer
                 .token_count("one two three four five six seven eight nine ten"),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -2506,6 +2549,7 @@ fn text_pair_and_triplet_chunks_all_come_from_materialize_pool() {
             text: context_text.into(),
             sentences: vec![context_text.into()],
             token_count: WhitespaceTokenizer.token_count(context_text),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -2637,6 +2681,7 @@ fn end_to_end_text_weighting_uses_chunk_offsets() {
             text: "one two three four".into(),
             sentences: vec!["one two three four".into()],
             token_count: WhitespaceTokenizer.token_count("one two three four"),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -3603,6 +3648,7 @@ fn cross_batch_text_dedup_survives_window_advance() {
                 text: shared_body.into(),
                 sentences: vec![shared_body.into()],
                 token_count: WhitespaceTokenizer.token_count(shared_body),
+                embedding: None,
             }],
             meta_prefix: None,
             label: None,
@@ -3813,6 +3859,7 @@ fn cycles_through_section_windows_before_repeating() {
             text: "one two three four".into(),
             sentences: vec!["one two three four".into()],
             token_count: WhitespaceTokenizer.token_count("one two three four"),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -3886,6 +3933,7 @@ fn first_chunk_offset_is_deterministic_and_nonzero_when_hash_demands_it() {
                 text: "one two three four five six".into(),
                 sentences: vec!["one two three four five six".into()],
                 token_count: WhitespaceTokenizer.token_count("one two three four five six"),
+                embedding: None,
             }],
             meta_prefix: None,
             label: None,
@@ -3977,6 +4025,7 @@ fn first_role_section_offset_is_deterministic_and_nonzero_when_hash_demands_it()
                     text: "alpha".into(),
                     sentences: vec!["alpha".into()],
                     token_count: WhitespaceTokenizer.token_count("alpha"),
+                    embedding: None,
                 },
                 RecordSection {
                     role: SectionRole::Context,
@@ -3984,6 +4033,7 @@ fn first_role_section_offset_is_deterministic_and_nonzero_when_hash_demands_it()
                     text: "beta".into(),
                     sentences: vec!["beta".into()],
                     token_count: WhitespaceTokenizer.token_count("beta"),
+                    embedding: None,
                 },
                 RecordSection {
                     role: SectionRole::Context,
@@ -3991,6 +4041,7 @@ fn first_role_section_offset_is_deterministic_and_nonzero_when_hash_demands_it()
                     text: "gamma".into(),
                     sentences: vec!["gamma".into()],
                     token_count: WhitespaceTokenizer.token_count("gamma"),
+                    embedding: None,
                 },
             ],
             meta_prefix: None,
@@ -4056,6 +4107,7 @@ fn reentry_same_epoch_restarts_from_same_chunk_offset() {
         tokens_estimate: 2,
         quality: QualityScore::default(),
         kvp_meta: Default::default(),
+        embedding: None,
     };
     let pool = vec![mk_chunk(0, "zero"), mk_chunk(1, "one"), mk_chunk(2, "two")];
 
@@ -4104,6 +4156,7 @@ fn reentry_after_epoch_change_can_restart_from_different_chunk_offset() {
         tokens_estimate: 2,
         quality: QualityScore::default(),
         kvp_meta: Default::default(),
+        embedding: None,
     };
     let pool = vec![mk_chunk(0, "zero"), mk_chunk(1, "one"), mk_chunk(2, "two")];
 
@@ -4650,6 +4703,7 @@ fn role_reentry_same_epoch_restarts_from_same_section_offset() {
                 text: "alpha".into(),
                 sentences: vec!["alpha".into()],
                 token_count: WhitespaceTokenizer.token_count("alpha"),
+                embedding: None,
             },
             RecordSection {
                 role: SectionRole::Context,
@@ -4657,6 +4711,7 @@ fn role_reentry_same_epoch_restarts_from_same_section_offset() {
                 text: "beta".into(),
                 sentences: vec!["beta".into()],
                 token_count: WhitespaceTokenizer.token_count("beta"),
+                embedding: None,
             },
             RecordSection {
                 role: SectionRole::Context,
@@ -4664,6 +4719,7 @@ fn role_reentry_same_epoch_restarts_from_same_section_offset() {
                 text: "gamma".into(),
                 sentences: vec!["gamma".into()],
                 token_count: WhitespaceTokenizer.token_count("gamma"),
+                embedding: None,
             },
         ],
         meta_prefix: None,
@@ -4728,6 +4784,7 @@ fn role_reentry_after_epoch_change_can_restart_from_different_section_offset() {
                 text: "alpha".into(),
                 sentences: vec!["alpha".into()],
                 token_count: WhitespaceTokenizer.token_count("alpha"),
+                embedding: None,
             },
             RecordSection {
                 role: SectionRole::Context,
@@ -4735,6 +4792,7 @@ fn role_reentry_after_epoch_change_can_restart_from_different_section_offset() {
                 text: "beta".into(),
                 sentences: vec!["beta".into()],
                 token_count: WhitespaceTokenizer.token_count("beta"),
+                embedding: None,
             },
             RecordSection {
                 role: SectionRole::Context,
@@ -4742,6 +4800,7 @@ fn role_reentry_after_epoch_change_can_restart_from_different_section_offset() {
                 text: "gamma".into(),
                 sentences: vec!["gamma".into()],
                 token_count: WhitespaceTokenizer.token_count("gamma"),
+                embedding: None,
             },
         ],
         meta_prefix: None,
@@ -5530,6 +5589,7 @@ fn selector_edge_cases_cover_internal_branches() {
                 text: "one two three four five six".into(),
                 sentences: vec!["one two three four five six".into()],
                 token_count: WhitespaceTokenizer.token_count("one two three four five six"),
+                embedding: None,
             },
             RecordSection {
                 role: SectionRole::Context,
@@ -5537,6 +5597,7 @@ fn selector_edge_cases_cover_internal_branches() {
                 text: String::new(),
                 sentences: Vec::new(),
                 token_count: 0,
+                embedding: None,
             },
         ],
         meta_prefix: None,
@@ -5585,6 +5646,7 @@ fn selector_edge_cases_cover_internal_branches() {
             text: "headline only".into(),
             sentences: vec!["headline only".into()],
             token_count: WhitespaceTokenizer.token_count("headline only"),
+            embedding: None,
         }],
         ..record.clone()
     };
@@ -5610,6 +5672,7 @@ fn selector_edge_cases_cover_internal_branches() {
         text: "neighbor chunk text".into(),
         sentences: vec!["neighbor chunk text".into()],
         token_count: WhitespaceTokenizer.token_count("neighbor chunk text"),
+        embedding: None,
     }];
 
     store.upsert(record.id.clone(), SplitLabel::Train).unwrap();
@@ -9111,6 +9174,7 @@ fn oversampling_advances_cursors_on_large_records() {
             text: "One Two Three".into(),
             sentences: vec!["One Two Three".into()],
             token_count: WhitespaceTokenizer.token_count("One Two Three"),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -9132,6 +9196,7 @@ fn oversampling_advances_cursors_on_large_records() {
                 text: char.to_string(),
                 sentences: vec![char.to_string()],
                 token_count: 0,
+                embedding: None,
             }],
             meta_prefix: None,
             label: None,
@@ -9398,6 +9463,7 @@ fn adds_dynamic_chunk_pair_recipe_for_long_section_sources() {
                     text: "Headline one".into(),
                     sentences: vec!["Headline one".into()],
                     token_count: WhitespaceTokenizer.token_count("Headline one"),
+                    embedding: None,
                 },
                 RecordSection {
                     role: SectionRole::Context,
@@ -9405,6 +9471,7 @@ fn adds_dynamic_chunk_pair_recipe_for_long_section_sources() {
                     text: "one two three four".into(),
                     sentences: vec!["one two three four".into()],
                     token_count: WhitespaceTokenizer.token_count("one two three four"),
+                    embedding: None,
                 },
             ],
             meta_prefix: None,
@@ -9424,6 +9491,7 @@ fn adds_dynamic_chunk_pair_recipe_for_long_section_sources() {
                     text: "Headline two".into(),
                     sentences: vec!["Headline two".into()],
                     token_count: WhitespaceTokenizer.token_count("Headline two"),
+                    embedding: None,
                 },
                 RecordSection {
                     role: SectionRole::Context,
@@ -9431,6 +9499,7 @@ fn adds_dynamic_chunk_pair_recipe_for_long_section_sources() {
                     text: "alpha beta gamma delta".into(),
                     sentences: vec!["alpha beta gamma delta".into()],
                     token_count: WhitespaceTokenizer.token_count("alpha beta gamma delta"),
+                    embedding: None,
                 },
             ],
             meta_prefix: None,
@@ -9524,6 +9593,7 @@ fn does_not_add_dynamic_chunk_pair_recipe_when_all_sections_fit_window() {
                     text: "Headline one".into(),
                     sentences: vec!["Headline one".into()],
                     token_count: WhitespaceTokenizer.token_count("Headline one"),
+                    embedding: None,
                 },
                 RecordSection {
                     role: SectionRole::Context,
@@ -9531,6 +9601,7 @@ fn does_not_add_dynamic_chunk_pair_recipe_when_all_sections_fit_window() {
                     text: "one two".into(),
                     sentences: vec!["one two".into()],
                     token_count: WhitespaceTokenizer.token_count("one two"),
+                    embedding: None,
                 },
             ],
             meta_prefix: None,
@@ -9550,6 +9621,7 @@ fn does_not_add_dynamic_chunk_pair_recipe_when_all_sections_fit_window() {
                     text: "Headline two".into(),
                     sentences: vec!["Headline two".into()],
                     token_count: WhitespaceTokenizer.token_count("Headline two"),
+                    embedding: None,
                 },
                 RecordSection {
                     role: SectionRole::Context,
@@ -9557,6 +9629,7 @@ fn does_not_add_dynamic_chunk_pair_recipe_when_all_sections_fit_window() {
                     text: "alpha beta".into(),
                     sentences: vec!["alpha beta".into()],
                     token_count: WhitespaceTokenizer.token_count("alpha beta"),
+                    embedding: None,
                 },
             ],
             meta_prefix: None,
@@ -9629,6 +9702,7 @@ fn adds_dynamic_chunk_pair_recipe_even_with_global_config_recipes() {
                     text: "Headline one".into(),
                     sentences: vec!["Headline one".into()],
                     token_count: WhitespaceTokenizer.token_count("Headline one"),
+                    embedding: None,
                 },
                 RecordSection {
                     role: SectionRole::Context,
@@ -9636,6 +9710,7 @@ fn adds_dynamic_chunk_pair_recipe_even_with_global_config_recipes() {
                     text: "one two three four".into(),
                     sentences: vec!["one two three four".into()],
                     token_count: WhitespaceTokenizer.token_count("one two three four"),
+                    embedding: None,
                 },
             ],
             meta_prefix: None,
@@ -9655,6 +9730,7 @@ fn adds_dynamic_chunk_pair_recipe_even_with_global_config_recipes() {
                     text: "Headline two".into(),
                     sentences: vec!["Headline two".into()],
                     token_count: WhitespaceTokenizer.token_count("Headline two"),
+                    embedding: None,
                 },
                 RecordSection {
                     role: SectionRole::Context,
@@ -9662,6 +9738,7 @@ fn adds_dynamic_chunk_pair_recipe_even_with_global_config_recipes() {
                     text: "alpha beta gamma delta".into(),
                     sentences: vec!["alpha beta gamma delta".into()],
                     token_count: WhitespaceTokenizer.token_count("alpha beta gamma delta"),
+                    embedding: None,
                 },
             ],
             meta_prefix: None,
@@ -9746,6 +9823,7 @@ fn auto_injected_recipe_uses_distinct_context_chunks_for_anchor_and_positive() {
                 text: "one two three four".into(),
                 sentences: vec!["one two three four".into()],
                 token_count: WhitespaceTokenizer.token_count("one two three four"),
+                embedding: None,
             }],
             meta_prefix: None,
             label: None,
@@ -9763,6 +9841,7 @@ fn auto_injected_recipe_uses_distinct_context_chunks_for_anchor_and_positive() {
                 text: "other".into(),
                 sentences: vec!["other".into()],
                 token_count: WhitespaceTokenizer.token_count("other"),
+                embedding: None,
             }],
             meta_prefix: None,
             label: None,
@@ -9861,6 +9940,7 @@ fn auto_injected_recipe_never_uses_identical_anchor_and_positive_chunks() {
                 text: "one two three four".into(),
                 sentences: vec!["one two three four".into()],
                 token_count: WhitespaceTokenizer.token_count("one two three four"),
+                embedding: None,
             }],
             meta_prefix: None,
             label: None,
@@ -9878,6 +9958,7 @@ fn auto_injected_recipe_never_uses_identical_anchor_and_positive_chunks() {
                 text: "alpha beta gamma delta".into(),
                 sentences: vec!["alpha beta gamma delta".into()],
                 token_count: WhitespaceTokenizer.token_count("alpha beta gamma delta"),
+                embedding: None,
             }],
             meta_prefix: None,
             label: None,
@@ -9948,6 +10029,7 @@ fn auto_injected_recipe_uses_window_chunks_for_anchor_and_positive() {
                 sentences: vec!["one two three four five six seven eight nine ten".into()],
                 token_count: WhitespaceTokenizer
                     .token_count("one two three four five six seven eight nine ten"),
+                embedding: None,
             }],
             meta_prefix: None,
             label: None,
@@ -9966,6 +10048,7 @@ fn auto_injected_recipe_uses_window_chunks_for_anchor_and_positive() {
                 sentences: vec!["alpha beta gamma delta epsilon zeta eta theta iota kappa".into()],
                 token_count: WhitespaceTokenizer
                     .token_count("alpha beta gamma delta epsilon zeta eta theta iota kappa"),
+                embedding: None,
             }],
             meta_prefix: None,
             label: None,
@@ -10055,6 +10138,7 @@ fn auto_injected_recipe_keeps_all_components_in_requested_split() {
                     text: ctx_text.clone(),
                     sentences: vec![ctx_text],
                     token_count,
+                    embedding: None,
                 }],
                 meta_prefix: None,
                 label: None,
@@ -10136,6 +10220,7 @@ fn same_selector_triplet_returns_none_when_only_one_chunk_exists() {
             text: "one two".into(),
             sentences: vec!["one two".into()],
             token_count: WhitespaceTokenizer.token_count("one two"),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -10154,6 +10239,7 @@ fn same_selector_triplet_returns_none_when_only_one_chunk_exists() {
             text: "alpha beta".into(),
             sentences: vec!["alpha beta".into()],
             token_count: WhitespaceTokenizer.token_count("alpha beta"),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -11100,6 +11186,7 @@ fn instruction_propagates_from_recipe_to_sample_triplet() {
                 text: anchor.into(),
                 sentences: vec![anchor.into()],
                 token_count: WhitespaceTokenizer.token_count(anchor),
+                embedding: None,
             },
             RecordSection {
                 role: SectionRole::Context,
@@ -11107,6 +11194,7 @@ fn instruction_propagates_from_recipe_to_sample_triplet() {
                 text: context.into(),
                 sentences: vec![context.into()],
                 token_count: WhitespaceTokenizer.token_count(context),
+                embedding: None,
             },
         ],
         meta_prefix: None,
@@ -11169,6 +11257,7 @@ fn allow_same_anchor_positive_permits_identical_text_triplet() {
                 text: text.into(),
                 sentences: vec![text.into()],
                 token_count: WhitespaceTokenizer.token_count(text),
+                embedding: None,
             },
             RecordSection {
                 role: SectionRole::Context,
@@ -11176,6 +11265,7 @@ fn allow_same_anchor_positive_permits_identical_text_triplet() {
                 text: text.into(), // identical to anchor
                 sentences: vec![text.into()],
                 token_count: 0,
+                embedding: None,
             },
         ],
         meta_prefix: None,
@@ -11614,6 +11704,7 @@ fn select_chunk_parallel_paragraph_selector_returns_chunk_or_none() {
             text: "one two three four five".into(),
             sentences: vec!["one two three four five".into()],
             token_count: WhitespaceTokenizer.token_count("one two three four five"),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -11674,6 +11765,7 @@ fn select_chunk_parallel_random_selector_handles_empty_and_non_empty() {
             text: "alpha beta gamma delta epsilon".into(),
             sentences: vec!["alpha beta gamma delta epsilon".into()],
             token_count: WhitespaceTokenizer.token_count("alpha beta gamma delta epsilon"),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -11737,6 +11829,7 @@ fn select_chunk_parallel_temporal_offset_returns_chunk_from_neighbor() {
             text: "neighbor context text here".into(),
             sentences: vec!["neighbor context text here".into()],
             token_count: WhitespaceTokenizer.token_count("neighbor context text here"),
+            embedding: None,
         }];
         r
     };
@@ -11794,6 +11887,7 @@ fn select_role_parallel_returns_none_when_no_matching_role() {
             text: "anchor text here".into(),
             sentences: vec!["anchor text here".into()],
             token_count: WhitespaceTokenizer.token_count("anchor text here"),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -11860,6 +11954,7 @@ fn select_role_parallel_returns_none_when_all_pools_are_empty() {
             text: "".into(), // empty → no tokens → empty pool
             sentences: vec![],
             token_count: WhitespaceTokenizer.token_count(""),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -11904,6 +11999,7 @@ fn decorate_chunk_parallel_truncation_paths() {
             text: "word1 word2".into(),
             sentences: vec!["word1 word2".into()],
             token_count: WhitespaceTokenizer.token_count("word1 word2"),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -11957,6 +12053,7 @@ fn decorate_chunk_parallel_truncation_paths() {
             sentences: vec!["word1 word2 word3 word4 word5 word6 word7 word8".into()],
             token_count: WhitespaceTokenizer
                 .token_count("word1 word2 word3 word4 word5 word6 word7 word8"),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -12015,6 +12112,7 @@ fn decorate_chunk_no_truncation_when_window_is_zero() {
             text: "body token one two three".into(),
             sentences: vec!["body token one two three".into()],
             token_count: WhitespaceTokenizer.token_count("body token one two three"),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -12040,6 +12138,7 @@ fn decorate_chunk_no_truncation_when_window_is_zero() {
         tokens_estimate: 5,
         quality: QualityScore::default(),
         kvp_meta: Default::default(),
+        embedding: None,
     };
 
     inner.decorate_chunk_seeded(&record, &mut chunk);
@@ -12087,6 +12186,7 @@ fn select_anchor_positive_parallel_returns_none_when_retries_exhausted() {
             text: "unique text word".into(), // short: fits in one window
             sentences: vec!["unique text word".into()],
             token_count: WhitespaceTokenizer.token_count("unique text word"),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -12278,6 +12378,7 @@ fn record_bm25_text_with_zero_max_tokens_returns_full_text() {
                 ],
                 token_count: WhitespaceTokenizer
                     .token_count("anchor body text with many tokens here and there and everywhere"),
+                embedding: None,
             },
             RecordSection {
                 role: SectionRole::Context,
@@ -12286,6 +12387,7 @@ fn record_bm25_text_with_zero_max_tokens_returns_full_text() {
                 sentences: vec!["context section body words more and more content".into()],
                 token_count: WhitespaceTokenizer
                     .token_count("context section body words more and more content"),
+                embedding: None,
             },
         ],
         meta_prefix: None,
@@ -12369,6 +12471,7 @@ fn for_split_non_exhausted_error_propagates_immediately() {
         text: "some context text".into(),
         sentences: vec!["some context text".into()],
         token_count: WhitespaceTokenizer.token_count("some context text"),
+        embedding: None,
     };
     let record = DataRecord {
         id: record_id.clone(),
@@ -13404,6 +13507,7 @@ fn same_record_negative_selector_picks_from_context() {
                     "Two driven jocks help fax my big quiz.".into(),
                 ],
                 token_count: 0,
+                embedding: None,
             },
             RecordSection {
                 role: SectionRole::Context,
@@ -13412,6 +13516,7 @@ fn same_record_negative_selector_picks_from_context() {
                 sentences: vec!["Context section text for negative selection".into()],
                 token_count: WhitespaceTokenizer
                     .token_count("Context section text for negative selection"),
+                embedding: None,
             },
         ],
         meta_prefix: None,
@@ -13541,6 +13646,7 @@ fn same_record_and_wrong_article_recipes_coexist() {
                     text: format!("Anchor text for {id}"),
                     sentences: vec![format!("Anchor text for {id}")],
                     token_count: 0,
+                    embedding: None,
                 },
                 RecordSection {
                     role: SectionRole::Context,
@@ -13548,6 +13654,7 @@ fn same_record_and_wrong_article_recipes_coexist() {
                     text: format!("positive_{id}"),
                     sentences: vec![format!("positive_{id}")],
                     token_count: 0,
+                    embedding: None,
                 },
                 RecordSection {
                     role: SectionRole::Context,
@@ -13555,6 +13662,7 @@ fn same_record_and_wrong_article_recipes_coexist() {
                     text: format!("negative_{id}"),
                     sentences: vec![format!("negative_{id}")],
                     token_count: 0,
+                    embedding: None,
                 },
             ],
             meta_prefix: None,
@@ -13649,6 +13757,7 @@ fn text_batch_samples_from_positive_and_negative_pair_label_records() {
                     text: title.into(),
                     sentences: vec![title.into()],
                     token_count: WhitespaceTokenizer.token_count(title),
+                    embedding: None,
                 },
                 RecordSection {
                     role: SectionRole::Context,
@@ -13656,6 +13765,7 @@ fn text_batch_samples_from_positive_and_negative_pair_label_records() {
                     text: body.into(),
                     sentences: vec![body.into()],
                     token_count: WhitespaceTokenizer.token_count(body),
+                    embedding: None,
                 },
             ],
             meta_prefix: None,
@@ -13836,6 +13946,7 @@ fn select_chunk_returns_none_when_pool_is_empty_for_paragraph() {
             text: "tiny".into(),
             sentences: vec![],
             token_count: 1,
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -13898,6 +14009,7 @@ fn next_chunk_from_pool_resets_cursor_when_stale() {
         tokens_estimate: 4,
         quality: QualityScore::default(),
         kvp_meta: Default::default(),
+        embedding: None,
     }];
     let chunk = inner.next_chunk_from_pool("rec", 0, pool);
     assert!(chunk.is_some());
@@ -14197,6 +14309,7 @@ fn select_role_parallel_returns_none_when_no_matching_sections() {
             text: "only anchor".into(),
             sentences: vec![],
             token_count: 2,
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -14229,6 +14342,7 @@ fn select_chunk_paragraph_returns_none_for_out_of_bounds_index() {
             text: "content".into(),
             sentences: vec![],
             token_count: 1,
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -14262,6 +14376,7 @@ fn record_has_at_least_two_window_chunks_returns_false_for_small_sections() {
             text: "tiny".into(),
             sentences: vec![],
             token_count: 1,
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -14293,6 +14408,7 @@ fn record_has_at_least_two_window_chunks_returns_false_for_no_section_match() {
             text: "short".into(),
             sentences: vec![],
             token_count: 1,
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,

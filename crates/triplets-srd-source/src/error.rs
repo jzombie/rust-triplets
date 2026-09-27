@@ -72,4 +72,42 @@ pub enum SrdError {
     /// Underlying I/O error.
     #[error(transparent)]
     Io(#[from] std::io::Error),
+
+    /// Mixing: no dataset dirs given.
+    #[error("mixing needs at least one dataset dir")]
+    EmptyMix,
+
+    /// Mixing: one weight per dir is required.
+    #[error("mixing needs one weight per dir: {weights} weights for {dirs} dirs")]
+    WeightCountMismatch {
+        /// Number of weights provided.
+        weights: usize,
+        /// Number of dataset dirs provided.
+        dirs: usize,
+    },
+
+    /// Mixing: weights must be finite, non-negative, and sum to a positive value.
+    #[error("mixing weights must be finite, non-negative, and sum to a positive value")]
+    BadWeights,
+
+    /// Mixing: only train/validation splits are supported.
+    #[error("mixing only supports train/validation splits")]
+    BadSplit,
+
+    /// Mixing: split store is empty.
+    #[error("{split} split store is empty: {dir}")]
+    EmptySplit {
+        /// Split name (`train` or `val`).
+        split: &'static str,
+        /// Dataset dir holding the empty store.
+        dir: String,
+    },
+
+    /// Mixing: sampled chunk carries no embedding.
+    #[error("mixing sampled a chunk with no embedding (source provides no vectors)")]
+    MissingEmbedding,
+
+    /// Mixing: underlying sampler failure.
+    #[error(transparent)]
+    Sampler(#[from] triplets::SamplerError),
 }

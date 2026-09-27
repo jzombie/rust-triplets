@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::Utc;
@@ -19,9 +20,12 @@ use crate::srd_triplet::{self, SrdMode, SrdRecord};
 /// Each entry in the store maps to a [`DataRecord`] with 2 sections (pair mode)
 /// or 3 sections (triplet mode), determined by the entry's mode byte.
 ///
-/// The `record_id` on each produced [`DataRecord`] is the entry's u64 index
-/// (as a string), enabling downstream consumers to look up precomputed
-/// embeddings from the same store.
+/// The `record_id` on each produced [`DataRecord`] is `{source_id}::{index}`
+/// (triplets' `{source}::{record}` convention): entry indices are only unique
+/// within one store, so the source scope keeps records from different stores
+/// distinct when several `SrdSource`s share one sampler. The id is opaque —
+/// nothing parses it; entry vectors ride the
+/// [`RecordSection`](triplets::data::RecordSection) embedding channel instead.
 pub struct SrdSource {
     store: DataStore,
     source_id: String,
@@ -87,7 +91,7 @@ impl DataSource for SrdSource {
         let now = Utc::now();
         let mut records = Vec::with_capacity(entries.len());
         for (offset, record) in indices.iter().zip(entries.iter()) {
-            let id: RecordId = (*offset as u64).to_string();
+            let id: RecordId = format!("{}::{offset}", self.source_id);
             let (sections, label) = match record {
                 SrdRecord::Pair(pair) => (
                     vec![
@@ -97,6 +101,7 @@ impl DataSource for SrdSource {
                             text: pair.anchor_text.clone(),
                             sentences: vec![],
                             token_count: WhitespaceTokenizer.token_count(&pair.anchor_text),
+                            embedding: Some(Arc::from(pair.anchor_emb.as_slice())),
                         },
                         RecordSection {
                             role: SectionRole::Context,
@@ -104,6 +109,7 @@ impl DataSource for SrdSource {
                             text: pair.candidate_text.clone(),
                             sentences: vec![],
                             token_count: WhitespaceTokenizer.token_count(&pair.candidate_text),
+                            embedding: Some(Arc::from(pair.candidate_emb.as_slice())),
                         },
                     ],
                     Some(pair.label.clone()),
@@ -116,6 +122,7 @@ impl DataSource for SrdSource {
                             text: triplet.anchor_text.clone(),
                             sentences: vec![],
                             token_count: WhitespaceTokenizer.token_count(&triplet.anchor_text),
+                            embedding: Some(Arc::from(triplet.anchor_emb.as_slice())),
                         },
                         RecordSection {
                             role: SectionRole::Context,
@@ -123,6 +130,7 @@ impl DataSource for SrdSource {
                             text: triplet.pos_text.clone(),
                             sentences: vec![],
                             token_count: WhitespaceTokenizer.token_count(&triplet.pos_text),
+                            embedding: Some(Arc::from(triplet.pos_emb.as_slice())),
                         },
                         RecordSection {
                             role: SectionRole::Context,
@@ -130,6 +138,7 @@ impl DataSource for SrdSource {
                             text: triplet.neg_text.clone(),
                             sentences: vec![],
                             token_count: WhitespaceTokenizer.token_count(&triplet.neg_text),
+                            embedding: Some(Arc::from(triplet.neg_emb.as_slice())),
                         },
                     ],
                     None,
@@ -319,7 +328,7 @@ mod tests {
     }
 
     #[test]
-    fn record_id_matches_entry_index() {
+    fn record_id_scopes_entry_index_by_source() {
         let dir = TempDir::new().unwrap();
         make_pair_store(&dir, 5);
         let source = SrdSource::open(
@@ -334,7 +343,7 @@ mod tests {
         let snapshot = source.refresh(&config, None, None).unwrap();
 
         for (i, record) in snapshot.records.iter().enumerate() {
-            assert_eq!(record.id, i.to_string());
+            assert_eq!(record.id, format!("test::{i}"));
         }
     }
 
@@ -402,23 +411,23 @@ mod tests {
         // First page: limit=2
         let snapshot1 = source.refresh(&config, None, Some(2)).unwrap();
         assert_eq!(snapshot1.records.len(), 2);
-        assert_eq!(snapshot1.records[0].id, "0");
-        assert_eq!(snapshot1.records[1].id, "1");
+        assert_eq!(snapshot1.records[0].id, "test::0");
+        assert_eq!(snapshot1.records[1].id, "test::1");
 
         // Second page: use cursor from first page
         let snapshot2 = source
             .refresh(&config, Some(&snapshot1.cursor), Some(2))
             .unwrap();
         assert_eq!(snapshot2.records.len(), 2);
-        assert_eq!(snapshot2.records[0].id, "2");
-        assert_eq!(snapshot2.records[1].id, "3");
+        assert_eq!(snapshot2.records[0].id, "test::2");
+        assert_eq!(snapshot2.records[1].id, "test::3");
 
         // Third page: remaining entry
         let snapshot3 = source
             .refresh(&config, Some(&snapshot2.cursor), Some(2))
             .unwrap();
         assert_eq!(snapshot3.records.len(), 1);
-        assert_eq!(snapshot3.records[0].id, "4");
+        assert_eq!(snapshot3.records[0].id, "test::4");
     }
 
     #[test]
