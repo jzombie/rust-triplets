@@ -6,10 +6,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ## [0.28.0-alpha] - TBD
 
-### Changed
-- Bumped `parquet` from 59.1.0 to 60.0.0 (#166, semver-major)
-- Bumped `clap` from 4.6.6 to 4.6.7 (#167)
-
 ### Added
 - **Precomputed-embedding channel through the sampler.** `RecordSection.embedding`
   and `RecordChunk.embedding` (`Option<Arc<[f32]>>`, `#[serde(skip)]` — transient,
@@ -44,6 +40,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
   explicit assignments. No dual-read fallback is kept (pre-1.0: rebuild the
   store rather than carrying legacy shims). Epoch/sampler-state formats
   unchanged. SRD baked-data files are unaffected (encoding untouched).
+- Bumped `parquet` from 59.1.0 to 60.0.0 (#166, semver-major)
+- Bumped `clap` from 4.6.6 to 4.6.7 (#167)
 
 ### Fixed
 - **Record identity is composite (`RecordKey { source, id }`) throughout the
