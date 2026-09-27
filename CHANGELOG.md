@@ -4,6 +4,62 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
 (or is loosely based on) Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+- **Precomputed-embedding channel through the sampler.** `RecordSection.embedding`
+  and `RecordChunk.embedding` (`Option<Arc<[f32]>>`, `#[serde(skip)]` — transient,
+  re-ingested on resume, never persisted or compared). The sampler stamps every
+  materialized chunk from its parent section in `materialize_chunks`, so chunking
+  backends stay agnostic and vectors ride the pipeline as Arc pointer copies.
+- **`SrdSource` populates all section embeddings** (anchor + candidate/positive/
+  negative) from its store vectors, so sampled pairs carry exact store vectors
+  on every chunk with no side lookups.
+- **Single `SrdSource::open` with explicit mode choice.** `mode: None` detects
+  from entry 0 in the same open (no probe handle); `mode: Some(m)` pins the
+  mode for empty stores and is verified against entry 0 otherwise — a mismatch
+  returns loud `SrdError::ModeMismatch` (empty stores give `EmptyStore`).
+  One open per dataset, ever.
+- **Native weighted source selection (deficit round-robin).** `TripletSampler`
+  apportions batch picks across sources by the per-call weight map: each draw
+  credits every eligible source its weight quantum and serves the highest
+  deficit, deducting the round total. Deterministic (no RNG — same state, same
+  choice), exact over each weight cycle (0.75/0.25 yields exactly 6/2 anchors
+  per 8-row batch). Uniform/empty maps take the legacy uniform-cycling path
+  bit-identically, so existing deterministic sequences are unchanged. One
+  shared sampler with N registered sources is now the mixing topology — no
+  outer wrappers, cross-source negatives and global dedup intact.
+- **`RecordChunk.source` is required** (no `#[serde(default)]`): a chunk without
+  a source resolves split lookups against the wrong identity, so deserialization
+  without it fails loudly instead of defaulting to `""`.
+
+### Changed
+- **BREAKING: `FileSplitStore` storage version bumped 1 → 2.** Persisted split
+  label keys are namespaced by source (`split:<source>\0<id>`). v1 stores are
+  rejected loudly at open (version mismatch) instead of silently missing their
+  explicit assignments. No dual-read fallback is kept (pre-1.0: rebuild the
+  store rather than carrying legacy shims). Epoch/sampler-state formats
+  unchanged. SRD baked-data files are unaffected (encoding untouched).
+
+### Fixed
+- **Record identity is composite (`RecordKey { source, id }`) throughout the
+  sampler.** Pools, chunk index, split labels, dedup sets, ingestion deltas,
+  and BM25 state key by source + id instead of the bare id string, so same-id
+  records from different sources coexist instead of the later source silently
+  overwriting the earlier one's pool entries. Backends keep their native ids
+  (no decoration, no parsing — nothing touches the id string); the composite
+  derives from each record's own `source` + `id` fields, and sampled chunks
+  carry a structured `source` field for the same purpose. Split derivation,
+  orderings, and cursor offsets hash the id part exactly as before, so
+  deterministic sequences are unchanged for existing corpora (all 512 core
+  golden tests pass unmodified in behavior). `SplitStore::label_for/upsert/
+  ensure` now take `&RecordKey`/`RecordKey`; `FileSplitStore` persisted label
+  keys are namespaced the same way (epoch/sampler-state formats unchanged).
+- **Weight maps are validated up front on every batch call.** A non-empty map
+  with an unregistered source id (or negative weight) returns loud
+  `InvalidWeight` — including the uniform single-unknown case that used to
+  slip through validation and sample as if unweighted.
+
 ## [0.27.1-alpha] - 2026-09-09
 
 ### Changed

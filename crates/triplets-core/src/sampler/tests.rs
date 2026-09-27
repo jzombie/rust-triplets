@@ -105,8 +105,8 @@ fn role_helpers_and_taxonomy_value_cover_branches() {
     assert!(roles_match(&SectionRole::Anchor, &SectionRole::Anchor));
     assert!(!roles_match(&SectionRole::Anchor, &SectionRole::Context));
 
-    let key = role_cursor_key(&"rec-1".to_string(), &SectionRole::Anchor);
-    assert_eq!(key.0, "rec-1");
+    let key = role_cursor_key(&RecordKey::new("unit", "rec-1"), &SectionRole::Anchor);
+    assert_eq!(key.0, RecordKey::new("unit", "rec-1"));
     assert_eq!(key.1, role_label(&SectionRole::Anchor));
     assert_ne!(
         role_label(&SectionRole::Anchor),
@@ -138,6 +138,7 @@ fn strategy_reason_and_chunk_key_cover_all_variants() {
     let base = RecordChunk {
         record_id: "r1".into(),
         section_idx: 0,
+        source: String::new(),
         view: ChunkView::Window {
             index: 2,
             overlap: 0,
@@ -147,6 +148,7 @@ fn strategy_reason_and_chunk_key_cover_all_variants() {
         tokens_estimate: 8,
         quality: QualityScore { trust: 1.0 },
         kvp_meta: Default::default(),
+        embedding: None,
     };
     let key_window = triplet_chunk_key(&base);
     assert!(key_window.contains("|w|2"));
@@ -192,7 +194,11 @@ fn next_chunk_from_pool_returns_none_for_empty_pool() {
     let store = Arc::new(DeterministicSplitStore::new(split, 17).unwrap());
     let mut inner = TripletSamplerInner::new(base_config(), store);
 
-    assert!(inner.next_chunk_from_pool("rec", 0, Vec::new()).is_none());
+    assert!(
+        inner
+            .next_chunk_from_pool(&RecordKey::new("", "rec"), 0, Vec::new())
+            .is_none()
+    );
 }
 
 #[test]
@@ -248,6 +254,7 @@ fn select_chunk_random_handles_empty_and_non_empty_sections() {
             text: "one two three four five six".into(),
             sentences: vec!["one two three four five six".into()],
             token_count: WhitespaceTokenizer.token_count("one two three four five six"),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -279,6 +286,7 @@ fn record_has_long_section_returns_false_when_window_tokens_are_disabled() {
             text: "one two three four five six seven eight".into(),
             sentences: vec!["one two three four five six seven eight".into()],
             token_count: WhitespaceTokenizer.token_count("one two three four five six seven eight"),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -288,24 +296,116 @@ fn record_has_long_section_returns_false_when_window_tokens_are_disabled() {
 }
 
 #[test]
+fn late_registered_source_is_cycled_without_rebuild() {
+    // A source registered after ingestion started must reach round-robin via
+    // the incremental delta path — source_order updates in
+    // sync_records_from_cache, no full rebuild. Records from the late source
+    // would otherwise sit in memory, unreachable.
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 77).unwrap());
+    let mut config = base_config();
+    config.batch_size = 4;
+    config.ingestion_max_records = 64;
+    config.allowed_splits = vec![SplitLabel::Train];
+    config.split = split;
+    config.recipes = vec![TripletRecipe {
+        name: "late_recipe".into(),
+        anchor: Selector::Role(SectionRole::Anchor),
+        positive_selector: Selector::Role(SectionRole::Context),
+        negative_selector: Selector::Role(SectionRole::Context),
+        negative_strategy: NegativeStrategy::WrongArticle,
+        weight: 1.0,
+        instruction: None,
+        allow_same_anchor_positive: false,
+    }];
+    config.text_recipes = Vec::new();
+    let sampler = TripletSampler::new(config, Arc::clone(&store));
+
+    let make_records = |source: &str, tag: &str| -> Vec<DataRecord> {
+        (0..4)
+            .map(|i| {
+                let mut r = trader_record(
+                    &format!("{tag}_{i}"),
+                    "2025-01-01",
+                    &format!("{tag} title {i}"),
+                    &format!("{tag} body text number {i}"),
+                );
+                r.source = source.to_string();
+                r.taxonomy = vec![source.to_string()];
+                r
+            })
+            .collect()
+    };
+
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "late_a",
+            make_records("late_a", "alpha"),
+        )))
+        .unwrap();
+    let first = sampler
+        .next_pair_batch_with_weights_for_split(SplitLabel::Train, &HashMap::new())
+        .unwrap();
+    assert!(!first.pairs.is_empty());
+    assert!(
+        first
+            .pairs
+            .iter()
+            .all(|p| p.anchor.text.starts_with("alpha ")),
+        "pre-registration batches come only from the first source"
+    );
+
+    // Register a second source mid-stream; steady-state ingestion advances
+    // (delta path, caches non-empty) rather than full-refreshing.
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "late_b",
+            make_records("late_b", "beta"),
+        )))
+        .unwrap();
+    let mut saw_beta = false;
+    for _ in 0..8 {
+        let batch = sampler
+            .next_pair_batch_with_weights_for_split(SplitLabel::Train, &HashMap::new())
+            .unwrap();
+        if batch
+            .pairs
+            .iter()
+            .any(|p| p.anchor.text.starts_with("beta "))
+        {
+            saw_beta = true;
+            break;
+        }
+    }
+    assert!(
+        saw_beta,
+        "late-registered source must be reached by round-robin without rebuild"
+    );
+}
+
+#[test]
 fn remove_id_from_source_index_removes_correct_entry() {
     let split = SplitRatios::default();
     let store = Arc::new(DeterministicSplitStore::new(split, 100).unwrap());
     let mut inner = TripletSamplerInner::new(base_config(), store);
 
     let source: SourceId = "src_rm".into();
-    let id_a: RecordId = "rm_a".into();
-    let id_b: RecordId = "rm_b".into();
+    let key_a = RecordKey::new(source.clone(), "rm_a");
+    let key_b = RecordKey::new(source.clone(), "rm_b");
     inner
         .source_record_indices
-        .insert(source.clone(), vec![id_a.clone(), id_b.clone()]);
+        .insert(source.clone(), vec![key_a.clone(), key_b.clone()]);
 
-    inner.remove_id_from_source_index(&source, &id_a);
+    inner.remove_id_from_source_index(&source, &key_a);
     let ids = inner.source_record_indices.get(&source).unwrap();
     assert_eq!(ids.len(), 1);
-    assert_eq!(ids[0], id_b);
+    assert_eq!(ids[0], key_b);
 
-    inner.remove_id_from_source_index(&source, &id_b);
+    inner.remove_id_from_source_index(&source, &key_b);
     let ids = inner.source_record_indices.get(&source).unwrap();
     assert!(ids.is_empty());
 }
@@ -316,7 +416,7 @@ fn remove_id_from_source_index_noop_for_unknown_source() {
     let store = Arc::new(DeterministicSplitStore::new(split, 101).unwrap());
     let mut inner = TripletSamplerInner::new(base_config(), store);
     // Should not panic.
-    inner.remove_id_from_source_index(&"nonexistent".into(), &"id".into());
+    inner.remove_id_from_source_index(&"nonexistent".into(), &RecordKey::new("nonexistent", "id"));
 }
 
 #[test]
@@ -340,11 +440,14 @@ fn insert_id_into_source_index_maintains_sorted_order() {
                 text: id.to_string(),
                 sentences: vec![],
                 token_count: 0,
+                embedding: None,
             }],
             meta_prefix: None,
             label: None,
         };
-        inner.records.insert(id.into(), Arc::new(record));
+        inner
+            .records
+            .insert(RecordKey::from(&record), Arc::new(record));
     }
 
     let source: SourceId = "src_ins".into();
@@ -354,14 +457,29 @@ fn insert_id_into_source_index_maintains_sorted_order() {
             .collect();
     let label = SplitLabel::Train;
 
-    inner.insert_id_into_source_index(source.clone(), "rec_b".into(), label, &allowed);
-    inner.insert_id_into_source_index(source.clone(), "rec_a".into(), label, &allowed);
-    inner.insert_id_into_source_index(source.clone(), "rec_c".into(), label, &allowed);
+    inner.insert_id_into_source_index(
+        source.clone(),
+        RecordKey::new(source.clone(), "rec_b"),
+        label,
+        &allowed,
+    );
+    inner.insert_id_into_source_index(
+        source.clone(),
+        RecordKey::new(source.clone(), "rec_a"),
+        label,
+        &allowed,
+    );
+    inner.insert_id_into_source_index(
+        source.clone(),
+        RecordKey::new(source.clone(), "rec_c"),
+        label,
+        &allowed,
+    );
 
     let ids = inner.source_record_indices.get(&source).unwrap();
     assert_eq!(ids.len(), 3);
     // All three should be present (order is by hash, not insertion).
-    let id_set: HashSet<&str> = ids.iter().map(|id| id.as_str()).collect();
+    let id_set: HashSet<&str> = ids.iter().map(|key| key.id.as_str()).collect();
     assert!(id_set.contains("rec_a"));
     assert!(id_set.contains("rec_b"));
     assert!(id_set.contains("rec_c"));
@@ -386,16 +504,19 @@ fn insert_id_into_source_index_skips_disallowed_split() {
             text: "disallowed".to_string(),
             sentences: vec![],
             token_count: 0,
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
     };
-    inner.records.insert("disallowed".into(), Arc::new(record));
+    inner
+        .records
+        .insert(RecordKey::from(&record), Arc::new(record));
 
     let allowed: HashSet<SplitLabel> = [SplitLabel::Train].into_iter().collect();
     inner.insert_id_into_source_index(
         "src_dis".into(),
-        "disallowed".into(),
+        RecordKey::new("src_dis", "disallowed"),
         SplitLabel::Test,
         &allowed,
     );
@@ -444,17 +565,96 @@ fn decrement_long_section_count_noop_when_absent() {
 }
 
 #[test]
+fn unknown_weight_source_ids_fail_loudly() {
+    // A typo'd source id in the weight map must error — never silently
+    // sample as if unweighted. Covers both the uniform single-unknown case
+    // (which used to slip through validation) and the non-uniform case.
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 106).unwrap());
+    let mut config = base_config();
+    config.batch_size = 4;
+    config.allowed_splits = vec![SplitLabel::Train];
+    config.split = split;
+    config.recipes = vec![TripletRecipe {
+        name: "weight_probe".into(),
+        anchor: Selector::Role(SectionRole::Anchor),
+        positive_selector: Selector::Role(SectionRole::Context),
+        negative_selector: Selector::Role(SectionRole::Context),
+        negative_strategy: NegativeStrategy::WrongArticle,
+        weight: 1.0,
+        instruction: None,
+        allow_same_anchor_positive: false,
+    }];
+    config.text_recipes = Vec::new();
+    let sampler = TripletSampler::new(config, Arc::clone(&store));
+    let records: Vec<DataRecord> = (0..4)
+        .map(|i| {
+            let mut r = trader_record(
+                &format!("w_{i}"),
+                "2025-01-01",
+                &format!("Weight title {i}"),
+                &format!("Weight body text number {i}"),
+            );
+            r.source = "weight_src".into();
+            r.taxonomy = vec!["weight_src".into()];
+            r
+        })
+        .collect();
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "weight_src",
+            records,
+        )))
+        .unwrap();
+
+    // Uniform map with an unregistered id: must fail, not sample.
+    let uniform_unknown: HashMap<SourceId, f32> = [("nope".to_string(), 1.0)].into_iter().collect();
+    assert!(
+        matches!(
+            sampler.next_pair_batch_with_weights_for_split(SplitLabel::Train, &uniform_unknown),
+            Err(SamplerError::InvalidWeight { .. })
+        ),
+        "uniform map with unknown source id must fail loudly"
+    );
+
+    // Non-uniform map with an unregistered id: must fail.
+    let mixed_unknown: HashMap<SourceId, f32> =
+        [("weight_src".to_string(), 1.0), ("nope".to_string(), 0.5)]
+            .into_iter()
+            .collect();
+    assert!(
+        matches!(
+            sampler.next_pair_batch_with_weights_for_split(SplitLabel::Train, &mixed_unknown),
+            Err(SamplerError::InvalidWeight { .. })
+        ),
+        "non-uniform map with unknown source id must fail loudly"
+    );
+
+    // Sanity: the registered source alone still batches.
+    let valid: HashMap<SourceId, f32> = [("weight_src".to_string(), 1.0)].into_iter().collect();
+    let batch = sampler
+        .next_pair_batch_with_weights_for_split(SplitLabel::Train, &valid)
+        .unwrap();
+    assert_eq!(batch.pairs.len(), 4);
+}
+
+#[test]
 fn get_or_insert_split_label_caches_result() {
     let split = SplitRatios::default();
     let store = Arc::new(DeterministicSplitStore::new(split, 106).unwrap());
     let mut inner = TripletSamplerInner::new(base_config(), store);
 
     // First call should compute and cache the label.
-    let label1 = inner.get_or_insert_split_label(&"lbl_rec".into()).unwrap();
+    let key = RecordKey::new("lbl_src", "lbl_rec");
+    let label1 = inner.get_or_insert_split_label(&key).unwrap();
     // Second call should return the cached value (same label).
-    let label2 = inner.get_or_insert_split_label(&"lbl_rec".into()).unwrap();
+    let label2 = inner.get_or_insert_split_label(&key).unwrap();
     assert_eq!(label1, label2);
-    assert!(inner.split_labels.contains_key("lbl_rec"));
+    assert!(inner.split_labels.contains_key(&key));
 }
 
 #[test]
@@ -480,6 +680,7 @@ fn sync_records_from_cache_delta_path_with_additions_and_evictions() {
                 text: "delta text one".into(),
                 sentences: vec![],
                 token_count: 0,
+                embedding: None,
             }],
             meta_prefix: None,
             label: None,
@@ -497,6 +698,7 @@ fn sync_records_from_cache_delta_path_with_additions_and_evictions() {
                 text: "delta text two".into(),
                 sentences: vec![],
                 token_count: 0,
+                embedding: None,
             }],
             meta_prefix: None,
             label: None,
@@ -548,6 +750,7 @@ fn record_has_long_section_increments_count_on_add() {
             text: "one two three four five".into(),
             sentences: vec![],
             token_count: 5,
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -778,6 +981,7 @@ fn sample_record() -> DataRecord {
                 text: "Sample title".into(),
                 sentences: vec!["Sample title".into()],
                 token_count: WhitespaceTokenizer.token_count("Sample title"),
+                embedding: None,
             },
             RecordSection {
                 role: SectionRole::Context,
@@ -789,6 +993,7 @@ fn sample_record() -> DataRecord {
                 token_count: WhitespaceTokenizer.token_count(
                     "This is the introduction paragraph with enough words for sampling.",
                 ),
+                embedding: None,
             },
         ],
         meta_prefix: None,
@@ -821,6 +1026,7 @@ fn trader_record(id: &str, date: &str, title: &str, body: &str) -> DataRecord {
                 text: title.into(),
                 sentences: vec![title.into()],
                 token_count: WhitespaceTokenizer.token_count(title),
+                embedding: None,
             },
             RecordSection {
                 role: SectionRole::Context,
@@ -828,6 +1034,7 @@ fn trader_record(id: &str, date: &str, title: &str, body: &str) -> DataRecord {
                 text: body.into(),
                 sentences: vec![body.into()],
                 token_count: WhitespaceTokenizer.token_count(body),
+                embedding: None,
             },
         ],
         meta_prefix: None,
@@ -853,6 +1060,7 @@ fn text_columns_record(id: &str, common_text: &str) -> DataRecord {
                 text: common_text.into(),
                 sentences: vec![common_text.into()],
                 token_count: WhitespaceTokenizer.token_count(common_text),
+                embedding: None,
             },
             RecordSection {
                 role: SectionRole::Context,
@@ -860,6 +1068,7 @@ fn text_columns_record(id: &str, common_text: &str) -> DataRecord {
                 text: common_text.into(),
                 sentences: vec![common_text.into()],
                 token_count: WhitespaceTokenizer.token_count(common_text),
+                embedding: None,
             },
         ],
         meta_prefix: None,
@@ -1021,7 +1230,8 @@ fn kvp_prefix_is_applied_to_non_initial_windows_from_long_sections() {
     let kvp_long_id = (0u32..)
         .find_map(|i| {
             let id = format!("kvp_long_{i}");
-            (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+            (store.label_for(&RecordKey::new(PRIMARY_SOURCE_ID, &id)) == Some(SplitLabel::Train))
+                .then_some(id)
         })
         .unwrap();
 
@@ -1107,7 +1317,7 @@ fn exhaustion_retry_limit_returns_exhausted() {
     let exhaust_id = (0u32..)
         .find_map(|i| {
             let id = format!("exhaust_{i}");
-            (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+            (store.label_for(&RecordKey::new("unit", &id)) == Some(SplitLabel::Train)).then_some(id)
         })
         .unwrap();
     let mut config = base_config();
@@ -1156,7 +1366,8 @@ fn single_source_failure_does_not_fail_batch_when_other_source_has_data() {
         (0u32..)
             .find_map(|i| {
                 let id = format!("{prefix}_{i}");
-                (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                (store.label_for(&RecordKey::new("healthy_source", &id)) == Some(SplitLabel::Train))
+                    .then_some(id)
             })
             .unwrap()
     };
@@ -1218,7 +1429,8 @@ fn triplet_batch_is_padded_to_batch_size_when_unique_pool_is_small() {
         (0u32..)
             .find_map(|i| {
                 let id = format!("{prefix}_{i}");
-                (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                (store.label_for(&RecordKey::new("pad_source", &id)) == Some(SplitLabel::Train))
+                    .then_some(id)
             })
             .unwrap()
     };
@@ -1271,7 +1483,8 @@ fn pair_batch_is_padded_to_batch_size_when_unique_pool_is_small() {
         (0u32..)
             .find_map(|i| {
                 let id = format!("{prefix}_{i}");
-                (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                (store.label_for(&RecordKey::new("pair_source", &id)) == Some(SplitLabel::Train))
+                    .then_some(id)
             })
             .unwrap()
     };
@@ -1323,7 +1536,8 @@ fn text_batch_is_padded_to_batch_size_when_unique_pool_is_small() {
     let text_a = (0u32..)
         .find_map(|i| {
             let id = format!("text_a_{i}");
-            (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+            (store.label_for(&RecordKey::new("text_source", &id)) == Some(SplitLabel::Train))
+                .then_some(id)
         })
         .unwrap();
 
@@ -1366,7 +1580,8 @@ fn failed_source_is_retried_on_next_batch_call() {
         (0u32..)
             .find_map(|i| {
                 let id = format!("{prefix}_{i}");
-                (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                (store.label_for(&RecordKey::new("steady_source", &id)) == Some(SplitLabel::Train))
+                    .then_some(id)
             })
             .unwrap()
     };
@@ -1443,6 +1658,7 @@ fn qa_pair_record(id: &str, question: &str, answer: &str) -> DataRecord {
                 text: question.into(),
                 sentences: vec![question.into()],
                 token_count: WhitespaceTokenizer.token_count(question),
+                embedding: None,
             },
             RecordSection {
                 role: SectionRole::Context,
@@ -1450,6 +1666,7 @@ fn qa_pair_record(id: &str, question: &str, answer: &str) -> DataRecord {
                 text: answer.into(),
                 sentences: vec![answer.into()],
                 token_count: WhitespaceTokenizer.token_count(answer),
+                embedding: None,
             },
         ],
         meta_prefix: None,
@@ -1534,6 +1751,7 @@ fn chunk_view_carries_window_index() {
             text: section_text.into(),
             sentences: vec![section_text.into()],
             token_count: WhitespaceTokenizer.token_count(section_text),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -1591,6 +1809,7 @@ fn chunk_windows_follow_stride_for_large_sections() {
                 "iota kappa lambda mu.".into(),
             ],
             token_count: 0,
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -1658,6 +1877,7 @@ fn chunk_windows_materialize_all_configured_overlaps() {
             text: section_text.into(),
             sentences: vec![section_text.into()],
             token_count: WhitespaceTokenizer.token_count(section_text),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -1700,6 +1920,7 @@ impl ChunkingAlgorithm for FixedChunker {
         vec![RecordChunk {
             record_id: record.id.clone(),
             section_idx,
+            source: String::new(),
             view: ChunkView::SummaryFallback {
                 strategy: "fixed".into(),
                 weight: 0.7,
@@ -1708,6 +1929,7 @@ impl ChunkingAlgorithm for FixedChunker {
             tokens_estimate: 1,
             quality: record.quality,
             kvp_meta: Default::default(),
+            embedding: None,
         }]
     }
 }
@@ -1726,6 +1948,7 @@ impl ChunkingAlgorithm for MarkerChunker {
             RecordChunk {
                 record_id: record.id.clone(),
                 section_idx,
+                source: String::new(),
                 view: ChunkView::Window {
                     index: 0,
                     overlap: 0,
@@ -1735,10 +1958,12 @@ impl ChunkingAlgorithm for MarkerChunker {
                 tokens_estimate: 2,
                 quality: record.quality,
                 kvp_meta: Default::default(),
+                embedding: None,
             },
             RecordChunk {
                 record_id: record.id.clone(),
                 section_idx,
+                source: String::new(),
                 view: ChunkView::Window {
                     index: 1,
                     overlap: 0,
@@ -1748,6 +1973,7 @@ impl ChunkingAlgorithm for MarkerChunker {
                 tokens_estimate: 2,
                 quality: record.quality,
                 kvp_meta: Default::default(),
+                embedding: None,
             },
         ]
     }
@@ -1774,6 +2000,7 @@ fn sampler_uses_custom_chunking_algorithm_when_provided() {
             text: section_text.into(),
             sentences: vec![section_text.into()],
             token_count: WhitespaceTokenizer.token_count(section_text),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -1833,6 +2060,7 @@ fn runtime_batches_do_not_bypass_custom_chunker() {
             text: "alpha beta gamma delta".into(),
             sentences: vec!["alpha beta gamma delta".into()],
             token_count: WhitespaceTokenizer.token_count("alpha beta gamma delta"),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -1902,6 +2130,7 @@ fn chunk_weight_windows_use_trust_and_floor() {
     let base_chunk = RecordChunk {
         record_id: "unit".into(),
         section_idx: 0,
+        source: String::new(),
         view: ChunkView::Window {
             index: 3,
             overlap: 0,
@@ -1911,6 +2140,7 @@ fn chunk_weight_windows_use_trust_and_floor() {
         tokens_estimate: 10,
         quality: QualityScore { trust: 1.0 },
         kvp_meta: Default::default(),
+        embedding: None,
     };
     assert_eq!(
         sampler.inner.lock().unwrap().chunk_weight(&base_chunk),
@@ -1940,6 +2170,7 @@ fn summary_fallback_weight_is_clamped() {
     let summary_chunk = RecordChunk {
         record_id: "unit".into(),
         section_idx: 0,
+        source: String::new(),
         view: ChunkView::SummaryFallback {
             strategy: "head".into(),
             weight: 0.4,
@@ -1948,6 +2179,7 @@ fn summary_fallback_weight_is_clamped() {
         tokens_estimate: 10,
         quality: QualityScore::default(),
         kvp_meta: Default::default(),
+        embedding: None,
     };
     assert_eq!(
         sampler.inner.lock().unwrap().chunk_weight(&summary_chunk),
@@ -1966,6 +2198,7 @@ fn chunk_weight_applies_trust_scaling() {
     let trusted_chunk = RecordChunk {
         record_id: "unit".into(),
         section_idx: 0,
+        source: String::new(),
         view: ChunkView::Window {
             index: 0,
             overlap: 0,
@@ -1975,6 +2208,7 @@ fn chunk_weight_applies_trust_scaling() {
         tokens_estimate: 10,
         quality: QualityScore { trust: 0.5 },
         kvp_meta: Default::default(),
+        embedding: None,
     };
 
     let weight = sampler.inner.lock().unwrap().chunk_weight(&trusted_chunk);
@@ -2003,6 +2237,7 @@ fn triplet_weight_averages_chunk_weights() {
     let anchor = RecordChunk {
         record_id: "a".into(),
         section_idx: 0,
+        source: String::new(),
         view: ChunkView::Window {
             index: 0,
             overlap: 0,
@@ -2012,10 +2247,12 @@ fn triplet_weight_averages_chunk_weights() {
         tokens_estimate: 10,
         quality: QualityScore::default(),
         kvp_meta: Default::default(),
+        embedding: None,
     };
     let positive = RecordChunk {
         record_id: "b".into(),
         section_idx: 0,
+        source: String::new(),
         view: ChunkView::Window {
             index: 0,
             overlap: 0,
@@ -2025,10 +2262,12 @@ fn triplet_weight_averages_chunk_weights() {
         tokens_estimate: 10,
         quality: QualityScore::default(),
         kvp_meta: Default::default(),
+        embedding: None,
     };
     let negative = RecordChunk {
         record_id: "c".into(),
         section_idx: 0,
+        source: String::new(),
         view: ChunkView::Window {
             index: 0,
             overlap: 0,
@@ -2038,6 +2277,7 @@ fn triplet_weight_averages_chunk_weights() {
         tokens_estimate: 10,
         quality: QualityScore::default(),
         kvp_meta: Default::default(),
+        embedding: None,
     };
 
     let avg = sampler
@@ -2072,6 +2312,7 @@ fn non_auto_triplet_negative_weight_uses_trust_only() {
     let anchor = RecordChunk {
         record_id: "a".into(),
         section_idx: 0,
+        source: String::new(),
         view: ChunkView::Window {
             index: 0,
             overlap: 0,
@@ -2081,10 +2322,12 @@ fn non_auto_triplet_negative_weight_uses_trust_only() {
         tokens_estimate: 10,
         quality: QualityScore::default(),
         kvp_meta: Default::default(),
+        embedding: None,
     };
     let positive = RecordChunk {
         record_id: "b".into(),
         section_idx: 0,
+        source: String::new(),
         view: ChunkView::Window {
             index: 0,
             overlap: 0,
@@ -2094,10 +2337,12 @@ fn non_auto_triplet_negative_weight_uses_trust_only() {
         tokens_estimate: 10,
         quality: QualityScore::default(),
         kvp_meta: Default::default(),
+        embedding: None,
     };
     let negative = RecordChunk {
         record_id: "c".into(),
         section_idx: 0,
+        source: String::new(),
         view: ChunkView::Window {
             index: 9,
             overlap: 0,
@@ -2107,6 +2352,7 @@ fn non_auto_triplet_negative_weight_uses_trust_only() {
         tokens_estimate: 10,
         quality: QualityScore::default(),
         kvp_meta: Default::default(),
+        embedding: None,
     };
 
     let avg = sampler
@@ -2141,6 +2387,7 @@ fn non_auto_triplet_weight_applies_anchor_positive_proximity() {
     let anchor = RecordChunk {
         record_id: "r".into(),
         section_idx: 0,
+        source: String::new(),
         view: ChunkView::Window {
             index: 0,
             overlap: 0,
@@ -2150,10 +2397,12 @@ fn non_auto_triplet_weight_applies_anchor_positive_proximity() {
         tokens_estimate: 10,
         quality: QualityScore::default(),
         kvp_meta: Default::default(),
+        embedding: None,
     };
     let positive = RecordChunk {
         record_id: "r".into(),
         section_idx: 0,
+        source: String::new(),
         view: ChunkView::Window {
             index: 3,
             overlap: 0,
@@ -2163,10 +2412,12 @@ fn non_auto_triplet_weight_applies_anchor_positive_proximity() {
         tokens_estimate: 10,
         quality: QualityScore::default(),
         kvp_meta: Default::default(),
+        embedding: None,
     };
     let negative = RecordChunk {
         record_id: "n".into(),
         section_idx: 0,
+        source: String::new(),
         view: ChunkView::Window {
             index: 9,
             overlap: 0,
@@ -2176,6 +2427,7 @@ fn non_auto_triplet_weight_applies_anchor_positive_proximity() {
         tokens_estimate: 10,
         quality: QualityScore::default(),
         kvp_meta: Default::default(),
+        embedding: None,
     };
 
     let avg = sampler
@@ -2215,6 +2467,7 @@ fn non_auto_triplet_weight_tracks_positive_window_index() {
     let anchor = RecordChunk {
         record_id: "r".into(),
         section_idx: 0,
+        source: String::new(),
         view: ChunkView::Window {
             index: 0,
             overlap: 0,
@@ -2224,10 +2477,12 @@ fn non_auto_triplet_weight_tracks_positive_window_index() {
         tokens_estimate: 10,
         quality: QualityScore::default(),
         kvp_meta: Default::default(),
+        embedding: None,
     };
     let negative = RecordChunk {
         record_id: "n".into(),
         section_idx: 0,
+        source: String::new(),
         view: ChunkView::Window {
             index: 9,
             overlap: 0,
@@ -2237,6 +2492,7 @@ fn non_auto_triplet_weight_tracks_positive_window_index() {
         tokens_estimate: 10,
         quality: QualityScore::default(),
         kvp_meta: Default::default(),
+        embedding: None,
     };
 
     // [(positive_index, expected_proximity, expected_weight)]
@@ -2252,6 +2508,7 @@ fn non_auto_triplet_weight_tracks_positive_window_index() {
         let positive = RecordChunk {
             record_id: "r".into(),
             section_idx: 0,
+            source: String::new(),
             view: ChunkView::Window {
                 index: *positive_index,
                 overlap: 0,
@@ -2261,6 +2518,7 @@ fn non_auto_triplet_weight_tracks_positive_window_index() {
             tokens_estimate: 10,
             quality: QualityScore::default(),
             kvp_meta: Default::default(),
+            embedding: None,
         };
 
         let proximity = chunk_proximity_score(&anchor, &positive);
@@ -2311,6 +2569,7 @@ fn auto_chunk_pair_triplet_weight_uses_proximity_inside_chunk_weight() {
     let anchor = RecordChunk {
         record_id: "r".into(),
         section_idx: 0,
+        source: String::new(),
         view: ChunkView::Window {
             index: 0,
             overlap: 0,
@@ -2320,10 +2579,12 @@ fn auto_chunk_pair_triplet_weight_uses_proximity_inside_chunk_weight() {
         tokens_estimate: 10,
         quality: QualityScore::default(),
         kvp_meta: Default::default(),
+        embedding: None,
     };
     let positive = RecordChunk {
         record_id: "r".into(),
         section_idx: 0,
+        source: String::new(),
         view: ChunkView::Window {
             index: 1,
             overlap: 0,
@@ -2333,11 +2594,13 @@ fn auto_chunk_pair_triplet_weight_uses_proximity_inside_chunk_weight() {
         tokens_estimate: 10,
         quality: QualityScore::default(),
         kvp_meta: Default::default(),
+        embedding: None,
     };
 
     let negative = RecordChunk {
         record_id: "r".into(),
         section_idx: 0,
+        source: String::new(),
         view: ChunkView::Window {
             index: 2,
             overlap: 0,
@@ -2347,6 +2610,7 @@ fn auto_chunk_pair_triplet_weight_uses_proximity_inside_chunk_weight() {
         tokens_estimate: 10,
         quality: QualityScore::default(),
         kvp_meta: Default::default(),
+        embedding: None,
     };
 
     let weight = sampler.inner.lock().unwrap().triplet_chunk_weight(
@@ -2393,6 +2657,7 @@ fn non_adjacent_auto_window_pair_proximity_is_not_half() {
             sentences: vec!["one two three four five six seven eight nine ten".into()],
             token_count: WhitespaceTokenizer
                 .token_count("one two three four five six seven eight nine ten"),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -2486,7 +2751,8 @@ fn text_pair_and_triplet_chunks_all_come_from_materialize_pool() {
         (0u32..)
             .find_map(|i| {
                 let id = format!("{prefix}_{i}");
-                (pool_store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                (pool_store.label_for(&RecordKey::new("unit", &id)) == Some(SplitLabel::Train))
+                    .then_some(id)
             })
             .unwrap()
     };
@@ -2506,6 +2772,7 @@ fn text_pair_and_triplet_chunks_all_come_from_materialize_pool() {
             text: context_text.into(),
             sentences: vec![context_text.into()],
             token_count: WhitespaceTokenizer.token_count(context_text),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -2620,7 +2887,7 @@ fn end_to_end_text_weighting_uses_chunk_offsets() {
     let weighted_id = (0u32..)
         .find_map(|i| {
             let id = format!("weighted_record_{i}");
-            (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+            (store.label_for(&RecordKey::new("unit", &id)) == Some(SplitLabel::Train)).then_some(id)
         })
         .unwrap();
     let sampler = TripletSampler::new(config, store);
@@ -2637,6 +2904,7 @@ fn end_to_end_text_weighting_uses_chunk_offsets() {
             text: "one two three four".into(),
             sentences: vec!["one two three four".into()],
             token_count: WhitespaceTokenizer.token_count("one two three four"),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -2671,7 +2939,7 @@ fn end_to_end_text_weighting_respects_splits() {
     let find_id = |label: SplitLabel, prefix: &str| -> String {
         for i in 0..2000 {
             let id = format!("{prefix}_{i}");
-            if store.ensure(id.clone()).unwrap() == label {
+            if store.ensure(RecordKey::new("split_weighted", &id)).unwrap() == label {
                 return id;
             }
         }
@@ -2735,7 +3003,7 @@ fn end_to_end_text_weighting_respects_splits() {
             .lock()
             .unwrap()
             .split_store
-            .label_for(&sample.chunk.record_id)
+            .label_for(&RecordKey::of_chunk(&sample.chunk))
             .unwrap();
         labels.insert(label);
         assert_eq!(label, SplitLabel::Train, "text sample leaked across splits");
@@ -2941,8 +3209,14 @@ fn split_order_is_train_val_test_for_text_batches() {
     // Verify every sample is Train-split
     let inner = fixture.sampler.inner.lock().unwrap();
     for id in &record_ids {
+        let key = inner
+            .records
+            .keys()
+            .find(|k| &k.id == id)
+            .cloned()
+            .expect("sampled record pooled");
         assert_eq!(
-            inner.split_store.label_for(id),
+            inner.split_store.label_for(&key),
             Some(SplitLabel::Train),
             "record {id} is not Train-split"
         );
@@ -3323,7 +3597,7 @@ fn readable_triplet_examples_by_mode() {
     let mut inner = sampler.inner.lock().unwrap();
     let anchor = inner
         .records
-        .get("readable_anchor")
+        .get(&RecordKey::new("readable_source", "readable_anchor"))
         .cloned()
         .expect("anchor should be present after ingest");
 
@@ -3479,7 +3753,7 @@ fn bm25_not_rng_only_when_only_anchor_text_changes() {
         let mut inner = sampler.inner.lock().unwrap();
         let anchor = inner
             .records
-            .get("readable_anchor")
+            .get(&RecordKey::new("readable_source", "readable_anchor"))
             .cloned()
             .expect("anchor should exist");
 
@@ -3580,7 +3854,7 @@ fn cross_batch_text_dedup_survives_window_advance() {
         if record_ids.len() >= 12 {
             break;
         }
-        if store.label_for(&id) == Some(SplitLabel::Train) {
+        if store.label_for(&RecordKey::new("shared_source", &id)) == Some(SplitLabel::Train) {
             record_ids.push(id);
         }
     }
@@ -3603,6 +3877,7 @@ fn cross_batch_text_dedup_survives_window_advance() {
                 text: shared_body.into(),
                 sentences: vec![shared_body.into()],
                 token_count: WhitespaceTokenizer.token_count(shared_body),
+                embedding: None,
             }],
             meta_prefix: None,
             label: None,
@@ -3813,6 +4088,7 @@ fn cycles_through_section_windows_before_repeating() {
             text: "one two three four".into(),
             sentences: vec!["one two three four".into()],
             token_count: WhitespaceTokenizer.token_count("one two three four"),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -3886,6 +4162,7 @@ fn first_chunk_offset_is_deterministic_and_nonzero_when_hash_demands_it() {
                 text: "one two three four five six".into(),
                 sentences: vec!["one two three four five six".into()],
                 token_count: WhitespaceTokenizer.token_count("one two three four five six"),
+                embedding: None,
             }],
             meta_prefix: None,
             label: None,
@@ -3977,6 +4254,7 @@ fn first_role_section_offset_is_deterministic_and_nonzero_when_hash_demands_it()
                     text: "alpha".into(),
                     sentences: vec!["alpha".into()],
                     token_count: WhitespaceTokenizer.token_count("alpha"),
+                    embedding: None,
                 },
                 RecordSection {
                     role: SectionRole::Context,
@@ -3984,6 +4262,7 @@ fn first_role_section_offset_is_deterministic_and_nonzero_when_hash_demands_it()
                     text: "beta".into(),
                     sentences: vec!["beta".into()],
                     token_count: WhitespaceTokenizer.token_count("beta"),
+                    embedding: None,
                 },
                 RecordSection {
                     role: SectionRole::Context,
@@ -3991,6 +4270,7 @@ fn first_role_section_offset_is_deterministic_and_nonzero_when_hash_demands_it()
                     text: "gamma".into(),
                     sentences: vec!["gamma".into()],
                     token_count: WhitespaceTokenizer.token_count("gamma"),
+                    embedding: None,
                 },
             ],
             meta_prefix: None,
@@ -4047,6 +4327,7 @@ fn reentry_same_epoch_restarts_from_same_chunk_offset() {
     let mk_chunk = |index: usize, text: &str| RecordChunk {
         record_id: "reentry_record".into(),
         section_idx: 0,
+        source: String::new(),
         view: ChunkView::Window {
             index,
             overlap: 0,
@@ -4056,20 +4337,21 @@ fn reentry_same_epoch_restarts_from_same_chunk_offset() {
         tokens_estimate: 2,
         quality: QualityScore::default(),
         kvp_meta: Default::default(),
+        embedding: None,
     };
     let pool = vec![mk_chunk(0, "zero"), mk_chunk(1, "one"), mk_chunk(2, "two")];
 
     let first = inner
-        .next_chunk_from_pool("reentry_record", 0, pool.clone())
+        .next_chunk_from_pool(&RecordKey::new("", "reentry_record"), 0, pool.clone())
         .unwrap();
 
     // Simulate record dropping out of the in-memory window.
     inner
         .chunk_cursors
-        .remove(&("reentry_record".to_string(), 0));
+        .remove(&(RecordKey::new("", "reentry_record"), 0));
 
     let restarted = inner
-        .next_chunk_from_pool("reentry_record", 0, pool)
+        .next_chunk_from_pool(&RecordKey::new("", "reentry_record"), 0, pool)
         .unwrap();
 
     assert_eq!(restarted.text, first.text);
@@ -4095,6 +4377,7 @@ fn reentry_after_epoch_change_can_restart_from_different_chunk_offset() {
     let mk_chunk = |index: usize, text: &str| RecordChunk {
         record_id: "reentry_record".into(),
         section_idx: 0,
+        source: String::new(),
         view: ChunkView::Window {
             index,
             overlap: 0,
@@ -4104,21 +4387,22 @@ fn reentry_after_epoch_change_can_restart_from_different_chunk_offset() {
         tokens_estimate: 2,
         quality: QualityScore::default(),
         kvp_meta: Default::default(),
+        embedding: None,
     };
     let pool = vec![mk_chunk(0, "zero"), mk_chunk(1, "one"), mk_chunk(2, "two")];
 
     let first_epoch0 = inner
-        .next_chunk_from_pool("reentry_record", 0, pool.clone())
+        .next_chunk_from_pool(&RecordKey::new("", "reentry_record"), 0, pool.clone())
         .unwrap();
 
     // Simulate record eviction + later re-entry after source epoch advanced.
     inner
         .chunk_cursors
-        .remove(&("reentry_record".to_string(), 0));
+        .remove(&(RecordKey::new("", "reentry_record"), 0));
     inner.epoch = inner.epoch.saturating_add(1);
 
     let first_epoch1 = inner
-        .next_chunk_from_pool("reentry_record", 0, pool)
+        .next_chunk_from_pool(&RecordKey::new("", "reentry_record"), 0, pool)
         .unwrap();
 
     assert_ne!(first_epoch1.text, first_epoch0.text);
@@ -4152,7 +4436,7 @@ fn kvp_date_formats_can_differ_within_same_triplet_across_all_splits() {
     let find_id = |label: SplitLabel, prefix: &str| -> String {
         for i in 0..5000 {
             let id = format!("{prefix}_{i}");
-            if store.ensure(id.clone()).unwrap() == label {
+            if store.ensure(RecordKey::new("tt", &id)).unwrap() == label {
                 return id;
             }
         }
@@ -4204,9 +4488,21 @@ fn kvp_date_formats_can_differ_within_same_triplet_across_all_splits() {
         let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
         let triplet = &batch.triplets[0];
 
-        seen_splits.insert(store.label_for(&triplet.anchor.record_id).unwrap());
-        seen_splits.insert(store.label_for(&triplet.positive.record_id).unwrap());
-        seen_splits.insert(store.label_for(&triplet.negative.record_id).unwrap());
+        seen_splits.insert(
+            store
+                .label_for(&RecordKey::of_chunk(&triplet.anchor))
+                .unwrap(),
+        );
+        seen_splits.insert(
+            store
+                .label_for(&RecordKey::of_chunk(&triplet.positive))
+                .unwrap(),
+        );
+        seen_splits.insert(
+            store
+                .label_for(&RecordKey::of_chunk(&triplet.negative))
+                .unwrap(),
+        );
 
         let dates = [
             extract_date_prefix(&triplet.anchor.text),
@@ -4251,7 +4547,7 @@ fn kvp_date_formats_can_differ_between_anchor_and_positive_across_all_splits() {
     let find_id = |label: SplitLabel, prefix: &str| -> String {
         for i in 0..5000 {
             let id = format!("{prefix}_{i}");
-            if store.ensure(id.clone()).unwrap() == label {
+            if store.ensure(RecordKey::new("tt", &id)).unwrap() == label {
                 return id;
             }
         }
@@ -4314,9 +4610,21 @@ fn kvp_date_formats_can_differ_between_anchor_and_positive_across_all_splits() {
         let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
         let triplet = &batch.triplets[0];
 
-        seen_splits.insert(store.label_for(&triplet.anchor.record_id).unwrap());
-        seen_splits.insert(store.label_for(&triplet.positive.record_id).unwrap());
-        seen_splits.insert(store.label_for(&triplet.negative.record_id).unwrap());
+        seen_splits.insert(
+            store
+                .label_for(&RecordKey::of_chunk(&triplet.anchor))
+                .unwrap(),
+        );
+        seen_splits.insert(
+            store
+                .label_for(&RecordKey::of_chunk(&triplet.positive))
+                .unwrap(),
+        );
+        seen_splits.insert(
+            store
+                .label_for(&RecordKey::of_chunk(&triplet.negative))
+                .unwrap(),
+        );
 
         let anchor_date = extract_date_prefix(&triplet.anchor.text);
         let positive_date = extract_date_prefix(&triplet.positive.text);
@@ -4370,7 +4678,7 @@ fn kvp_prefix_signatures_are_not_constant_across_triplets_with_all_splits() {
     let find_id = |label: SplitLabel, prefix: &str| -> String {
         for i in 0..5000 {
             let id = format!("{prefix}_{i}");
-            if store.ensure(id.clone()).unwrap() == label {
+            if store.ensure(RecordKey::new("tt", &id)).unwrap() == label {
                 return id;
             }
         }
@@ -4424,9 +4732,21 @@ fn kvp_prefix_signatures_are_not_constant_across_triplets_with_all_splits() {
         let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
         let triplet = &batch.triplets[0];
 
-        seen_splits.insert(store.label_for(&triplet.anchor.record_id).unwrap());
-        seen_splits.insert(store.label_for(&triplet.positive.record_id).unwrap());
-        seen_splits.insert(store.label_for(&triplet.negative.record_id).unwrap());
+        seen_splits.insert(
+            store
+                .label_for(&RecordKey::of_chunk(&triplet.anchor))
+                .unwrap(),
+        );
+        seen_splits.insert(
+            store
+                .label_for(&RecordKey::of_chunk(&triplet.positive))
+                .unwrap(),
+        );
+        seen_splits.insert(
+            store
+                .label_for(&RecordKey::of_chunk(&triplet.negative))
+                .unwrap(),
+        );
 
         let anchor = extract_meta_prefix(&triplet.anchor.text);
         let positive = extract_meta_prefix(&triplet.positive.text);
@@ -4466,7 +4786,7 @@ fn triplets_cover_kvp_behaviors_across_all_splits() {
     let find_id = |label: SplitLabel, prefix: &str| -> String {
         for i in 0..5000 {
             let id = format!("{prefix}_{i}");
-            if store.ensure(id.clone()).unwrap() == label {
+            if store.ensure(RecordKey::new("tt", &id)).unwrap() == label {
                 return id;
             }
         }
@@ -4544,9 +4864,15 @@ fn triplets_cover_kvp_behaviors_across_all_splits() {
         let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
         let triplet = &batch.triplets[0];
 
-        let anchor_split = store.label_for(&triplet.anchor.record_id).unwrap();
-        let positive_split = store.label_for(&triplet.positive.record_id).unwrap();
-        let negative_split = store.label_for(&triplet.negative.record_id).unwrap();
+        let anchor_split = store
+            .label_for(&RecordKey::of_chunk(&triplet.anchor))
+            .unwrap();
+        let positive_split = store
+            .label_for(&RecordKey::of_chunk(&triplet.positive))
+            .unwrap();
+        let negative_split = store
+            .label_for(&RecordKey::of_chunk(&triplet.negative))
+            .unwrap();
         seen_splits.insert(anchor_split);
         seen_splits.insert(positive_split);
         seen_splits.insert(negative_split);
@@ -4650,6 +4976,7 @@ fn role_reentry_same_epoch_restarts_from_same_section_offset() {
                 text: "alpha".into(),
                 sentences: vec!["alpha".into()],
                 token_count: WhitespaceTokenizer.token_count("alpha"),
+                embedding: None,
             },
             RecordSection {
                 role: SectionRole::Context,
@@ -4657,6 +4984,7 @@ fn role_reentry_same_epoch_restarts_from_same_section_offset() {
                 text: "beta".into(),
                 sentences: vec!["beta".into()],
                 token_count: WhitespaceTokenizer.token_count("beta"),
+                embedding: None,
             },
             RecordSection {
                 role: SectionRole::Context,
@@ -4664,6 +4992,7 @@ fn role_reentry_same_epoch_restarts_from_same_section_offset() {
                 text: "gamma".into(),
                 sentences: vec!["gamma".into()],
                 token_count: WhitespaceTokenizer.token_count("gamma"),
+                embedding: None,
             },
         ],
         meta_prefix: None,
@@ -4677,10 +5006,10 @@ fn role_reentry_same_epoch_restarts_from_same_section_offset() {
     // Simulate record dropping out and coming back in the same epoch.
     inner
         .role_cursors
-        .remove(&(record.id.clone(), role_label(&SectionRole::Context)));
+        .remove(&(RecordKey::from(&record), role_label(&SectionRole::Context)));
     inner
         .chunk_cursors
-        .retain(|(record_id, _), _| record_id != &record.id);
+        .retain(|(record_key, _), _| record_key != &RecordKey::from(&record));
 
     let restarted = inner
         .select_by_role(&record, &SectionRole::Context)
@@ -4728,6 +5057,7 @@ fn role_reentry_after_epoch_change_can_restart_from_different_section_offset() {
                 text: "alpha".into(),
                 sentences: vec!["alpha".into()],
                 token_count: WhitespaceTokenizer.token_count("alpha"),
+                embedding: None,
             },
             RecordSection {
                 role: SectionRole::Context,
@@ -4735,6 +5065,7 @@ fn role_reentry_after_epoch_change_can_restart_from_different_section_offset() {
                 text: "beta".into(),
                 sentences: vec!["beta".into()],
                 token_count: WhitespaceTokenizer.token_count("beta"),
+                embedding: None,
             },
             RecordSection {
                 role: SectionRole::Context,
@@ -4742,6 +5073,7 @@ fn role_reentry_after_epoch_change_can_restart_from_different_section_offset() {
                 text: "gamma".into(),
                 sentences: vec!["gamma".into()],
                 token_count: WhitespaceTokenizer.token_count("gamma"),
+                embedding: None,
             },
         ],
         meta_prefix: None,
@@ -4755,10 +5087,10 @@ fn role_reentry_after_epoch_change_can_restart_from_different_section_offset() {
     // Simulate record eviction + re-entry after source epoch advances.
     inner
         .role_cursors
-        .remove(&(record.id.clone(), role_label(&SectionRole::Context)));
+        .remove(&(RecordKey::from(&record), role_label(&SectionRole::Context)));
     inner
         .chunk_cursors
-        .retain(|(record_id, _), _| record_id != &record.id);
+        .retain(|(record_key, _), _| record_key != &RecordKey::from(&record));
     inner.epoch = inner.epoch.saturating_add(1);
 
     let first_epoch1 = inner
@@ -4896,7 +5228,15 @@ fn source_defined_recipes_fill_config_gap() {
         ),
     ];
     for record in &records {
-        store.upsert(record.id.clone(), SplitLabel::Train).unwrap();
+        // Upsert under the normalized identity: ingestion re-scopes records
+        // to the registering source ("recipe_source" here), and split labels
+        // resolve against that key.
+        store
+            .upsert(
+                RecordKey::new("recipe_source", record.id.clone()),
+                SplitLabel::Train,
+            )
+            .unwrap();
     }
     let sampler = TripletSampler::new(config, store);
     sampler
@@ -5314,7 +5654,9 @@ fn weighted_recipe_selection_zero_weight_recipe_never_appears_in_batch() {
         (0u32..)
             .find_map(|i| {
                 let id = format!("{prefix}_{i}");
-                (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                (store.label_for(&RecordKey::new(PRIMARY_SOURCE_ID, &id))
+                    == Some(SplitLabel::Train))
+                .then_some(id)
             })
             .unwrap()
     };
@@ -5397,7 +5739,9 @@ fn weighted_recipe_selection_frequency_matches_weight_ratio() {
         (0u32..)
             .find_map(|i| {
                 let id = format!("{prefix}_{i}");
-                (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                (store.label_for(&RecordKey::new(PRIMARY_SOURCE_ID, &id))
+                    == Some(SplitLabel::Train))
+                .then_some(id)
             })
             .unwrap()
     };
@@ -5530,6 +5874,7 @@ fn selector_edge_cases_cover_internal_branches() {
                 text: "one two three four five six".into(),
                 sentences: vec!["one two three four five six".into()],
                 token_count: WhitespaceTokenizer.token_count("one two three four five six"),
+                embedding: None,
             },
             RecordSection {
                 role: SectionRole::Context,
@@ -5537,6 +5882,7 @@ fn selector_edge_cases_cover_internal_branches() {
                 text: String::new(),
                 sentences: Vec::new(),
                 token_count: 0,
+                embedding: None,
             },
         ],
         meta_prefix: None,
@@ -5585,6 +5931,7 @@ fn selector_edge_cases_cover_internal_branches() {
             text: "headline only".into(),
             sentences: vec!["headline only".into()],
             token_count: WhitespaceTokenizer.token_count("headline only"),
+            embedding: None,
         }],
         ..record.clone()
     };
@@ -5610,18 +5957,25 @@ fn selector_edge_cases_cover_internal_branches() {
         text: "neighbor chunk text".into(),
         sentences: vec!["neighbor chunk text".into()],
         token_count: WhitespaceTokenizer.token_count("neighbor chunk text"),
+        embedding: None,
     }];
 
-    store.upsert(record.id.clone(), SplitLabel::Train).unwrap();
     store
-        .upsert(neighbor.id.clone(), SplitLabel::Train)
+        .upsert(
+            RecordKey::new(record.source.clone(), record.id.clone()),
+            SplitLabel::Train,
+        )
         .unwrap();
+    store
+        .upsert(RecordKey::from(&neighbor), SplitLabel::Train)
+        .unwrap();
+    inner.records.insert(
+        RecordKey::new(record.source.clone(), record.id.clone()),
+        Arc::new(record.clone()),
+    );
     inner
         .records
-        .insert(record.id.clone(), Arc::new(record.clone()));
-    inner
-        .records
-        .insert(neighbor.id.clone(), Arc::new(neighbor.clone()));
+        .insert(RecordKey::from(&neighbor), Arc::new(neighbor.clone()));
 
     let temporal_chunk = inner
         .select_chunk(&record, &Selector::TemporalOffset(1))
@@ -5641,13 +5995,20 @@ fn empty_recipe_configs_error_when_sampling_without_sources() {
 
     let mut inner = TripletSamplerInner::new(config, Arc::clone(&store));
     let record = sample_record();
-    store.upsert(record.id.clone(), SplitLabel::Train).unwrap();
-    inner
-        .records
-        .insert(record.id.clone(), Arc::new(record.clone()));
-    inner
-        .chunk_index
-        .insert(record.id.clone(), record.id.clone());
+    store
+        .upsert(
+            RecordKey::new(record.source.clone(), record.id.clone()),
+            SplitLabel::Train,
+        )
+        .unwrap();
+    inner.records.insert(
+        RecordKey::new(record.source.clone(), record.id.clone()),
+        Arc::new(record.clone()),
+    );
+    inner.chunk_index.insert(
+        RecordKey::new(record.source.clone(), record.id.clone()),
+        RecordKey::new(record.source.clone(), record.id.clone()),
+    );
 
     let pair_err = inner
         .next_pair_batch_inner_with_weights(SplitLabel::Train, None)
@@ -5720,11 +6081,20 @@ fn source_less_batch_builders_sample_from_primed_epoch_tracker() {
             ),
         ];
         for record in records {
-            store.upsert(record.id.clone(), SplitLabel::Train).unwrap();
-            inner
-                .chunk_index
-                .insert(record.id.clone(), record.id.clone());
-            inner.records.insert(record.id.clone(), Arc::new(record));
+            store
+                .upsert(
+                    RecordKey::new(record.source.clone(), record.id.clone()),
+                    SplitLabel::Train,
+                )
+                .unwrap();
+            inner.chunk_index.insert(
+                RecordKey::new(record.source.clone(), record.id.clone()),
+                RecordKey::new(record.source.clone(), record.id.clone()),
+            );
+            inner.records.insert(
+                RecordKey::new(record.source.clone(), record.id.clone()),
+                Arc::new(record),
+            );
         }
         inner.epoch_tracker.ensure_loaded().unwrap();
         let records_by_split = inner.records_by_split().unwrap();
@@ -5811,11 +6181,20 @@ fn source_less_batch_builders_report_last_recipe_when_sampling_exhausts() {
             "Solo",
             "Only record body",
         );
-        store.upsert(record.id.clone(), SplitLabel::Train).unwrap();
-        inner
-            .chunk_index
-            .insert(record.id.clone(), record.id.clone());
-        inner.records.insert(record.id.clone(), Arc::new(record));
+        store
+            .upsert(
+                RecordKey::new(record.source.clone(), record.id.clone()),
+                SplitLabel::Train,
+            )
+            .unwrap();
+        inner.chunk_index.insert(
+            RecordKey::new(record.source.clone(), record.id.clone()),
+            RecordKey::new(record.source.clone(), record.id.clone()),
+        );
+        inner.records.insert(
+            RecordKey::new(record.source.clone(), record.id.clone()),
+            Arc::new(record),
+        );
         inner.epoch_tracker.ensure_loaded().unwrap();
         let records_by_split = inner.records_by_split().unwrap();
         inner
@@ -5966,19 +6345,24 @@ fn records_by_split_and_anchor_selection_cover_edge_cases() {
     let mut inner = TripletSamplerInner::new(base_config(), Arc::clone(&store));
 
     let record = trader_record("source_a::record_a", "2025-01-01", "Alpha", "Body alpha");
+    let record_key = RecordKey::from(&record);
     inner
         .records
-        .insert(record.id.clone(), Arc::new(record.clone()));
+        .insert(record_key.clone(), Arc::new(record.clone()));
     inner
         .chunk_index
-        .insert(record.id.clone(), record.id.clone());
-    inner
-        .chunk_index
-        .insert("dangling_chunk".into(), "missing_record".into());
+        .insert(record_key.clone(), record_key.clone());
+    inner.chunk_index.insert(
+        RecordKey::new("source_a", "dangling_chunk"),
+        RecordKey::new("source_a", "missing_record"),
+    );
 
     let by_split = inner.records_by_split().unwrap();
     assert_eq!(by_split.get(&SplitLabel::Train).map(Vec::len), Some(1));
-    assert_eq!(store.label_for(&record.id), Some(SplitLabel::Train));
+    assert_eq!(
+        store.label_for(&RecordKey::from(&record)),
+        Some(SplitLabel::Train)
+    );
 
     assert!(
         inner
@@ -5997,14 +6381,16 @@ fn records_by_split_and_anchor_selection_cover_edge_cases() {
 
     let validation_record = trader_record("source_b::record_b", "2025-01-02", "Beta", "Body beta");
     store
-        .upsert(validation_record.id.clone(), SplitLabel::Validation)
+        .upsert(RecordKey::from(&validation_record), SplitLabel::Validation)
         .unwrap();
-    inner
-        .records
-        .insert(validation_record.id.clone(), Arc::new(validation_record));
-    inner
-        .source_record_indices
-        .insert("source_b".into(), vec!["source_b::record_b".into()]);
+    inner.records.insert(
+        RecordKey::from(&validation_record),
+        Arc::new(validation_record),
+    );
+    inner.source_record_indices.insert(
+        "source_b".into(),
+        vec![RecordKey::new("source_a", "source_b::record_b")],
+    );
     inner.source_order = vec!["source_b".into()];
     inner.source_wrapped.insert("source_b".into(), false);
 
@@ -6041,16 +6427,18 @@ fn temporal_neighbor_auto_pair_and_weighted_retry_paths_are_covered() {
     let mut neighbor = record_with_offset("neighbor_record", anchor.created_at, 86_400);
     neighbor.source = "source_b".into();
     neighbor.taxonomy = vec!["shared_taxonomy".into()];
-    store.upsert(anchor.id.clone(), SplitLabel::Train).unwrap();
     store
-        .upsert(neighbor.id.clone(), SplitLabel::Train)
+        .upsert(RecordKey::from(&anchor), SplitLabel::Train)
+        .unwrap();
+    store
+        .upsert(RecordKey::from(&neighbor), SplitLabel::Train)
         .unwrap();
     inner
         .records
-        .insert(anchor.id.clone(), Arc::new(anchor.clone()));
+        .insert(RecordKey::from(&anchor), Arc::new(anchor.clone()));
     inner
         .records
-        .insert(neighbor.id.clone(), Arc::new(neighbor.clone()));
+        .insert(RecordKey::from(&neighbor), Arc::new(neighbor.clone()));
 
     let selected = inner
         .select_temporal_neighbor(&anchor, 1)
@@ -6095,8 +6483,8 @@ fn temporal_neighbor_auto_pair_and_weighted_retry_paths_are_covered() {
     };
     let retry_store = Arc::new(DeterministicSplitStore::new(split, 103).unwrap());
     let sampler = TripletSampler::new(failing_config, retry_store);
-    let weights = HashMap::from([("missing_source".to_string(), 1.0f32)]);
-
+    // Empty maps: retry path exhausts without records (no sources).
+    let weights = HashMap::new();
     let pair_err = sampler
         .next_pair_batch_with_weights_for_split(SplitLabel::Train, &weights)
         .expect_err("pair retry path should exhaust without records");
@@ -6111,6 +6499,30 @@ fn temporal_neighbor_auto_pair_and_weighted_retry_paths_are_covered() {
         .next_triplet_batch_with_weights_for_split(SplitLabel::Train, &weights)
         .expect_err("triplet retry path should exhaust without records");
     assert!(matches!(triplet_err, SamplerError::Exhausted(_)));
+
+    // Unregistered source ids fail loudly instead of sampling unweighted.
+    let unknown = HashMap::from([("missing_source".to_string(), 1.0f32)]);
+    assert!(
+        matches!(
+            sampler.next_pair_batch_with_weights_for_split(SplitLabel::Train, &unknown),
+            Err(SamplerError::InvalidWeight { .. })
+        ),
+        "unknown weight source must fail loudly (pairs)"
+    );
+    assert!(
+        matches!(
+            sampler.next_text_batch_with_weights_for_split(SplitLabel::Train, &unknown),
+            Err(SamplerError::InvalidWeight { .. })
+        ),
+        "unknown weight source must fail loudly (text)"
+    );
+    assert!(
+        matches!(
+            sampler.next_triplet_batch_with_weights_for_split(SplitLabel::Train, &unknown),
+            Err(SamplerError::InvalidWeight { .. })
+        ),
+        "unknown weight source must fail loudly (triplets)"
+    );
 }
 
 #[test]
@@ -6134,7 +6546,7 @@ fn wrong_article_falls_back_within_same_split() {
     let find_id = |label: SplitLabel, prefix: &str| -> String {
         for i in 0..5000 {
             let id = format!("{prefix}_{i}");
-            if store.ensure(id.clone()).unwrap() == label {
+            if store.ensure(RecordKey::new("tt", &id)).unwrap() == label {
                 return id;
             }
         }
@@ -6183,13 +6595,23 @@ fn wrong_article_falls_back_within_same_split() {
     let mut inner = sampler.inner.lock().unwrap();
     let mut seen_splits = std::collections::HashSet::new();
     for anchor_id in anchor_ids {
-        let anchor = inner.records.get(&anchor_id).cloned().expect("anchor");
+        let anchor = inner
+            .records
+            .get(&RecordKey::new("tt", anchor_id))
+            .cloned()
+            .expect("anchor");
         let (negative, _fallback) = inner
             .select_negative_record_seeded(&anchor, &NegativeStrategy::WrongArticle, None)
             .expect("negative");
         assert_ne!(negative.id, anchor.id);
-        let anchor_label = inner.split_store.label_for(&anchor.id).unwrap();
-        let negative_label = inner.split_store.label_for(&negative.id).unwrap();
+        let anchor_label = inner
+            .split_store
+            .label_for(&RecordKey::from(anchor))
+            .unwrap();
+        let negative_label = inner
+            .split_store
+            .label_for(&RecordKey::from(negative))
+            .unwrap();
         seen_splits.insert(anchor_label);
         assert_eq!(negative_label, anchor_label);
     }
@@ -6218,7 +6640,8 @@ fn bm25_hard_negative_respects_same_source_split_pool() {
         (0u32..)
             .find_map(|i| {
                 let id = format!("{prefix}_{i}");
-                (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                (store.label_for(&RecordKey::new("tt", &id)) == Some(SplitLabel::Train))
+                    .then_some(id)
             })
             .unwrap()
     };
@@ -6266,8 +6689,14 @@ fn bm25_hard_negative_respects_same_source_split_pool() {
 
     let _ = fallback_used;
     assert_ne!(negative.id, anchor.id);
-    assert_eq!(store.label_for(&anchor.id), Some(SplitLabel::Train));
-    assert_eq!(store.label_for(&negative.id), Some(SplitLabel::Train));
+    assert_eq!(
+        store.label_for(&RecordKey::new("tt", anchor.id.clone())),
+        Some(SplitLabel::Train)
+    );
+    assert_eq!(
+        store.label_for(&RecordKey::new("tt", negative.id.clone())),
+        Some(SplitLabel::Train)
+    );
 }
 
 #[cfg(feature = "bm25-mining")]
@@ -6292,7 +6721,8 @@ fn bm25_negative_is_lexically_closer_than_uniform_pool_baseline() {
         (0u32..)
             .find_map(|i| {
                 let id = format!("{prefix}_{i}");
-                (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                (store.label_for(&RecordKey::new("tt", &id)) == Some(SplitLabel::Train))
+                    .then_some(id)
             })
             .unwrap()
     };
@@ -6339,7 +6769,7 @@ fn bm25_negative_is_lexically_closer_than_uniform_pool_baseline() {
     // and consistent pool filtering below.
     let ingested_anchor = inner
         .records
-        .get(&anchor.id)
+        .get(&RecordKey::new("tt", &anchor.id))
         .cloned()
         .expect("anchor must be present in ingested records");
     let (_selected_negative, _fallback) = inner
@@ -6358,7 +6788,7 @@ fn bm25_negative_is_lexically_closer_than_uniform_pool_baseline() {
                 && candidate.id != ingested_anchor.id
                 && inner
                     .split_store
-                    .label_for(&candidate.id)
+                    .label_for(&RecordKey::from(*candidate))
                     .map(|label| label == SplitLabel::Train)
                     .unwrap_or(false)
         })
@@ -6441,7 +6871,8 @@ fn custom_recipe_still_respects_strategy_pool_with_bm25() {
         (0u32..)
             .find_map(|i| {
                 let id = format!("{prefix}_{i}");
-                (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                (store.label_for(&RecordKey::new("tt", &id)) == Some(SplitLabel::Train))
+                    .then_some(id)
             })
             .unwrap()
     };
@@ -6523,7 +6954,7 @@ fn bm25_ranked_candidates_never_cross_split_boundaries() {
     let find_id = |label: SplitLabel, prefix: &str| -> String {
         for i in 0..8000 {
             let id = format!("{prefix}_{i}");
-            if store.ensure(id.clone()).unwrap() == label {
+            if store.ensure(RecordKey::new("tt", &id)).unwrap() == label {
                 return id;
             }
         }
@@ -6572,24 +7003,28 @@ fn bm25_ranked_candidates_never_cross_split_boundaries() {
 
     let mut inner = sampler.inner.lock().unwrap();
     for anchor_id in anchors {
-        let anchor = inner.records.get(&anchor_id).cloned().expect("anchor");
+        let anchor = inner
+            .records
+            .get(&RecordKey::new("tt", anchor_id))
+            .cloned()
+            .expect("anchor");
         let (negative, _fallback) = inner
             .select_negative_record_seeded(&anchor, &NegativeStrategy::WrongArticle, None)
             .expect("negative should exist");
 
         let anchor_label = inner
             .split_store
-            .label_for(&anchor.id)
+            .label_for(&RecordKey::from(&anchor))
             .expect("anchor split label");
         let negative_label = inner
             .split_store
-            .label_for(&negative.id)
+            .label_for(&RecordKey::from(&negative))
             .expect("negative split label");
         assert_eq!(negative_label, anchor_label);
 
-        let ranked: Vec<RecordId> = inner
+        let ranked: Vec<RecordKey> = inner
             .bm25_backend_mut()
-            .hard_negatives_get(&anchor.id)
+            .hard_negatives_get(&anchor)
             .expect("bm25 cache entry for anchor");
         assert!(!ranked.is_empty());
         for candidate_id in &ranked {
@@ -6687,7 +7122,7 @@ fn bm25_ranked_candidates_match_raw_bm25_engine() {
     let mut inner = sampler.inner.lock().unwrap();
     let anchor = inner
         .records
-        .get("readable_anchor")
+        .get(&RecordKey::new("readable_source", "readable_anchor"))
         .cloned()
         .expect("anchor should be present");
 
@@ -6695,7 +7130,7 @@ fn bm25_ranked_candidates_match_raw_bm25_engine() {
 
     // Collect all indexed record IDs into an owned Vec so we can access
     // `inner.records` inside the mapping closure without a borrow conflict.
-    let meta_record_ids: Vec<RecordId> = inner
+    let meta_record_ids: Vec<RecordKey> = inner
         .bm25_backend_mut()
         .index_meta_record_ids()
         .expect("bm25 global index should be built");
@@ -6731,12 +7166,12 @@ fn bm25_ranked_candidates_match_raw_bm25_engine() {
             .then_with(|| a.document.id.cmp(&b.document.id))
     });
 
-    let mut expected: Vec<RecordId> = Vec::new();
+    let mut expected: Vec<RecordKey> = Vec::new();
     for result in raw {
         let Some(record_id) = meta_record_ids.get(result.document.id) else {
             continue;
         };
-        if *record_id != anchor.id {
+        if record_id.id != anchor.id {
             expected.push(record_id.clone());
         }
     }
@@ -6771,7 +7206,8 @@ fn bm25_ranking_ignores_kvp_meta_prefix_tags() {
         (0u32..)
             .find_map(|i| {
                 let id = format!("{prefix}_{i}");
-                (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                (store.label_for(&RecordKey::new("kvp_source", &id)) == Some(SplitLabel::Train))
+                    .then_some(id)
             })
             .unwrap()
     };
@@ -6830,7 +7266,7 @@ fn bm25_ranking_ignores_kvp_meta_prefix_tags() {
     let mut inner = sampler.inner.lock().unwrap();
     let anchor = inner
         .records
-        .get(&anchor_id)
+        .get(&RecordKey::new("kvp_source", &anchor_id))
         .cloned()
         .expect("anchor should exist");
 
@@ -6840,7 +7276,8 @@ fn bm25_ranking_ignores_kvp_meta_prefix_tags() {
         "expected BM25 to return ranked candidates"
     );
     assert_eq!(
-        ranked[0], plain_id,
+        ranked[0].id.clone(),
+        plain_id,
         "BM25 top candidate should be driven by plain section text, not KVP meta-prefix tags"
     );
 }
@@ -6877,7 +7314,8 @@ fn bm25_triplets_never_reuse_text_across_slots() {
         (0u32..)
             .find_map(|i| {
                 let id = format!("{prefix}_{i}");
-                (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                (store.label_for(&RecordKey::new("tt", &id)) == Some(SplitLabel::Train))
+                    .then_some(id)
             })
             .unwrap()
     };
@@ -6932,9 +7370,10 @@ fn bm25_cursor_pruning_runs_even_when_other_cursors_are_empty() {
     assert!(inner.chunk_cursors.is_empty());
     assert!(inner.role_cursors.is_empty());
 
-    inner
-        .bm25_backend_mut()
-        .negative_cursors_insert(("stale_anchor".to_string(), SplitLabel::Train), 7);
+    inner.bm25_backend_mut().negative_cursors_insert(
+        (RecordKey::new("stale", "stale_anchor"), SplitLabel::Train),
+        7,
+    );
     assert_eq!(inner.bm25_backend_mut().negative_cursors_len(), 1);
 
     // With no records loaded, every cursor entry is stale and must be removed.
@@ -6959,7 +7398,8 @@ fn bm25_cursor_state_is_cleared_on_each_record_snapshot_sync() {
     let sync_id = (0u32..)
         .find_map(|i| {
             let id = format!("strict_sync_anchor_{i}");
-            (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+            (store.label_for(&RecordKey::new("strict_sync_source", &id)) == Some(SplitLabel::Train))
+                .then_some(id)
         })
         .unwrap();
     let sampler = TripletSampler::new(base_config(), Arc::clone(&store));
@@ -6973,9 +7413,13 @@ fn bm25_cursor_state_is_cleared_on_each_record_snapshot_sync() {
     let mut inner = sampler.inner.lock().unwrap();
     inner.ingest_internal(SplitLabel::Train).unwrap();
 
-    inner
-        .bm25_backend_mut()
-        .negative_cursors_insert((sync_id.clone(), SplitLabel::Train), 42);
+    inner.bm25_backend_mut().negative_cursors_insert(
+        (
+            RecordKey::new("strict_sync_source", sync_id.clone()),
+            SplitLabel::Train,
+        ),
+        42,
+    );
     assert_eq!(inner.bm25_backend_mut().negative_cursors_len(), 1);
 
     // Strict contract: every snapshot sync clears BM25 cursor state, even if
@@ -7002,10 +7446,14 @@ fn chunk_and_role_cursors_are_pruned_when_records_are_removed() {
 
     inner
         .chunk_cursors
-        .insert(("stale_record".to_string(), 0_usize), 3_usize);
-    inner
-        .role_cursors
-        .insert(("stale_record".to_string(), "Anchor".to_string()), 5_usize);
+        .insert((RecordKey::new("stale", "stale_record"), 0_usize), 3_usize);
+    inner.role_cursors.insert(
+        (
+            RecordKey::new("stale", "stale_record"),
+            "Anchor".to_string(),
+        ),
+        5_usize,
+    );
     assert_eq!(inner.chunk_cursors.len(), 1);
     assert_eq!(inner.role_cursors.len(), 1);
 
@@ -7025,20 +7473,25 @@ fn chunk_and_role_cursors_are_pruned_when_records_are_removed() {
     record.id = "valid_record".to_string();
     inner
         .records
-        .insert("valid_record".to_string(), Arc::new(record));
+        .insert(RecordKey::new("unit", "valid_record"), Arc::new(record));
 
     inner
         .chunk_cursors
-        .insert(("valid_record".to_string(), 0_usize), 3_usize);
+        .insert((RecordKey::new("unit", "valid_record"), 0_usize), 3_usize);
     inner
         .chunk_cursors
-        .insert(("another_stale".to_string(), 0_usize), 7_usize);
-    inner
-        .role_cursors
-        .insert(("valid_record".to_string(), "Anchor".to_string()), 5_usize);
-    inner
-        .role_cursors
-        .insert(("another_stale".to_string(), "Anchor".to_string()), 9_usize);
+        .insert((RecordKey::new("stale", "another_stale"), 0_usize), 7_usize);
+    inner.role_cursors.insert(
+        (RecordKey::new("unit", "valid_record"), "Anchor".to_string()),
+        5_usize,
+    );
+    inner.role_cursors.insert(
+        (
+            RecordKey::new("stale", "another_stale"),
+            "Anchor".to_string(),
+        ),
+        9_usize,
+    );
     assert_eq!(inner.chunk_cursors.len(), 2);
     assert_eq!(inner.role_cursors.len(), 2);
 
@@ -7058,12 +7511,12 @@ fn chunk_and_role_cursors_are_pruned_when_records_are_removed() {
     assert!(
         inner
             .chunk_cursors
-            .contains_key(&("valid_record".to_string(), 0_usize))
+            .contains_key(&(RecordKey::new("unit", "valid_record"), 0_usize))
     );
     assert!(
         inner
             .role_cursors
-            .contains_key(&("valid_record".to_string(), "Anchor".to_string()))
+            .contains_key(&(RecordKey::new("unit", "valid_record"), "Anchor".to_string()))
     );
 }
 
@@ -7082,7 +7535,8 @@ fn chunk_and_role_cursors_are_pruned_across_cache_sync() {
     let sync_id = (0u32..)
         .find_map(|i| {
             let id = format!("strict_sync_anchor_{i}");
-            (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+            (store.label_for(&RecordKey::new("strict_sync_source", &id)) == Some(SplitLabel::Train))
+                .then_some(id)
         })
         .unwrap();
     let sampler = TripletSampler::new(base_config(), Arc::clone(&store));
@@ -7097,21 +7551,37 @@ fn chunk_and_role_cursors_are_pruned_across_cache_sync() {
     inner.ingest_internal(SplitLabel::Train).unwrap();
 
     // Verify sync_id is present in the record pool.
-    assert!(inner.records.contains_key(&sync_id));
+    assert!(
+        inner
+            .records
+            .contains_key(&RecordKey::new("strict_sync_source", &sync_id))
+    );
 
     // Insert cursor entries for both a valid record and a stale record.
+    inner.chunk_cursors.insert(
+        (
+            RecordKey::new("strict_sync_source", sync_id.clone()),
+            0_usize,
+        ),
+        3_usize,
+    );
     inner
         .chunk_cursors
-        .insert((sync_id.clone(), 0_usize), 3_usize);
-    inner
-        .chunk_cursors
-        .insert(("stale_record".to_string(), 0_usize), 7_usize);
-    inner
-        .role_cursors
-        .insert((sync_id.clone(), "Anchor".to_string()), 5_usize);
-    inner
-        .role_cursors
-        .insert(("stale_record".to_string(), "Anchor".to_string()), 9_usize);
+        .insert((RecordKey::new("stale", "stale_record"), 0_usize), 7_usize);
+    inner.role_cursors.insert(
+        (
+            RecordKey::new("strict_sync_source", sync_id.clone()),
+            "Anchor".to_string(),
+        ),
+        5_usize,
+    );
+    inner.role_cursors.insert(
+        (
+            RecordKey::new("stale", "stale_record"),
+            "Anchor".to_string(),
+        ),
+        9_usize,
+    );
     assert_eq!(inner.chunk_cursors.len(), 2);
     assert_eq!(inner.role_cursors.len(), 2);
 
@@ -7129,26 +7599,23 @@ fn chunk_and_role_cursors_are_pruned_across_cache_sync() {
         1,
         "role_cursors should keep valid entry and drop stale one"
     );
-    assert!(
-        inner
-            .chunk_cursors
-            .contains_key(&(sync_id.clone(), 0_usize))
-    );
-    assert!(
-        inner
-            .role_cursors
-            .contains_key(&(sync_id.clone(), "Anchor".to_string()))
-    );
+    assert!(inner.chunk_cursors.contains_key(&(
+        RecordKey::new("strict_sync_source", sync_id.clone()),
+        0_usize
+    )));
+    assert!(inner.role_cursors.contains_key(&(
+        RecordKey::new("strict_sync_source", sync_id.clone()),
+        "Anchor".to_string()
+    )));
     assert!(
         !inner
             .chunk_cursors
-            .contains_key(&("stale_record".to_string(), 0_usize))
+            .contains_key(&(RecordKey::new("stale", "stale_record"), 0_usize))
     );
-    assert!(
-        !inner
-            .role_cursors
-            .contains_key(&("stale_record".to_string(), "Anchor".to_string()))
-    );
+    assert!(!inner.role_cursors.contains_key(&(
+        RecordKey::new("stale", "stale_record"),
+        "Anchor".to_string()
+    )));
 }
 
 #[test]
@@ -7172,7 +7639,7 @@ fn wrong_publication_date_falls_back_within_same_split() {
     let find_id = |label: SplitLabel, prefix: &str| -> String {
         for i in 0..5000 {
             let id = format!("{prefix}_{i}");
-            if store.ensure(id.clone()).unwrap() == label {
+            if store.ensure(RecordKey::new("tt", &id)).unwrap() == label {
                 return id;
             }
         }
@@ -7221,13 +7688,23 @@ fn wrong_publication_date_falls_back_within_same_split() {
     let mut inner = sampler.inner.lock().unwrap();
     let mut seen_splits = std::collections::HashSet::new();
     for anchor_id in anchor_ids {
-        let anchor = inner.records.get(&anchor_id).cloned().expect("anchor");
+        let anchor = inner
+            .records
+            .get(&RecordKey::new("tt", anchor_id))
+            .cloned()
+            .expect("anchor");
         let (negative, _fallback) = inner
             .select_negative_record_seeded(&anchor, &NegativeStrategy::WrongPublicationDate, None)
             .expect("negative");
         assert_ne!(negative.id, anchor.id);
-        let anchor_label = inner.split_store.label_for(&anchor.id).unwrap();
-        let negative_label = inner.split_store.label_for(&negative.id).unwrap();
+        let anchor_label = inner
+            .split_store
+            .label_for(&RecordKey::from(anchor))
+            .unwrap();
+        let negative_label = inner
+            .split_store
+            .label_for(&RecordKey::from(negative))
+            .unwrap();
         seen_splits.insert(anchor_label);
         assert_eq!(negative_label, anchor_label);
     }
@@ -7255,7 +7732,7 @@ fn qa_mismatch_falls_back_within_same_split() {
     let find_id = |label: SplitLabel, prefix: &str| -> String {
         for i in 0..5000 {
             let id = format!("{prefix}_{i}");
-            if store.ensure(id.clone()).unwrap() == label {
+            if store.ensure(RecordKey::new("qa", &id)).unwrap() == label {
                 return id;
             }
         }
@@ -7310,13 +7787,23 @@ fn qa_mismatch_falls_back_within_same_split() {
     let mut inner = sampler.inner.lock().unwrap();
     let mut seen_splits = std::collections::HashSet::new();
     for anchor_id in anchor_ids {
-        let anchor = inner.records.get(&anchor_id).cloned().expect("anchor");
+        let anchor = inner
+            .records
+            .get(&RecordKey::new("qa", anchor_id))
+            .cloned()
+            .expect("anchor");
         let (negative, _fallback) = inner
             .select_negative_record_seeded(&anchor, &NegativeStrategy::QuestionAnswerMismatch, None)
             .expect("negative");
         assert_ne!(negative.id, anchor.id);
-        let anchor_label = inner.split_store.label_for(&anchor.id).unwrap();
-        let negative_label = inner.split_store.label_for(&negative.id).unwrap();
+        let anchor_label = inner
+            .split_store
+            .label_for(&RecordKey::from(anchor))
+            .unwrap();
+        let negative_label = inner
+            .split_store
+            .label_for(&RecordKey::from(negative))
+            .unwrap();
         seen_splits.insert(anchor_label);
         assert_eq!(negative_label, anchor_label);
     }
@@ -7335,7 +7822,7 @@ fn negative_selection_never_falls_back_across_splits() {
     let find_id = |label: SplitLabel, prefix: &str| -> String {
         for i in 0..2000 {
             let id = format!("{prefix}_{i}");
-            if store.ensure(id.clone()).unwrap() == label {
+            if store.ensure(RecordKey::new("tt", &id)).unwrap() == label {
                 return id;
             }
         }
@@ -7400,7 +7887,7 @@ fn fallback_triplet_negative_never_matches_anchor() {
     let find_id = |label: SplitLabel, prefix: &str| -> String {
         for i in 0..5000 {
             let id = format!("{prefix}_{i}");
-            if store.ensure(id.clone()).unwrap() == label {
+            if store.ensure(RecordKey::new("tt", &id)).unwrap() == label {
                 return id;
             }
         }
@@ -7487,14 +7974,14 @@ fn fallback_triplet_negative_never_matches_anchor() {
             .lock()
             .unwrap()
             .split_store
-            .label_for(&triplet.anchor.record_id)
+            .label_for(&RecordKey::of_chunk(&triplet.anchor))
             .unwrap();
         let negative_label = sampler
             .inner
             .lock()
             .unwrap()
             .split_store
-            .label_for(&triplet.negative.record_id)
+            .label_for(&RecordKey::of_chunk(&triplet.negative))
             .unwrap();
 
         seen_splits.insert(anchor_label);
@@ -7524,7 +8011,7 @@ fn triplets_never_cross_split_boundaries() {
     let find_id = |label: SplitLabel, prefix: &str| -> String {
         for i in 0..5000 {
             let id = format!("{prefix}_{i}");
-            if store.ensure(id.clone()).unwrap() == label {
+            if store.ensure(RecordKey::new("tt", &id)).unwrap() == label {
                 return id;
             }
         }
@@ -7600,9 +8087,15 @@ fn triplets_never_cross_split_boundaries() {
     for _ in 0..40 {
         let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
         for triplet in batch.triplets {
-            let anchor = store.label_for(&triplet.anchor.record_id).unwrap();
-            let positive = store.label_for(&triplet.positive.record_id).unwrap();
-            let negative = store.label_for(&triplet.negative.record_id).unwrap();
+            let anchor = store
+                .label_for(&RecordKey::of_chunk(&triplet.anchor))
+                .unwrap();
+            let positive = store
+                .label_for(&RecordKey::of_chunk(&triplet.positive))
+                .unwrap();
+            let negative = store
+                .label_for(&RecordKey::of_chunk(&triplet.negative))
+                .unwrap();
             assert_eq!(anchor, positive, "anchor and positive must share split");
             assert_eq!(anchor, negative, "negative must stay in anchor split");
         }
@@ -7621,7 +8114,7 @@ fn split_specific_batch_apis_return_exact_size_and_requested_split_only() {
     let find_id = |label: SplitLabel, prefix: &str| -> String {
         for i in 0..10000 {
             let id = format!("{prefix}_{i}");
-            if store.ensure(id.clone()).unwrap() == label {
+            if store.ensure(RecordKey::new("tt", &id)).unwrap() == label {
                 return id;
             }
         }
@@ -7678,11 +8171,13 @@ fn split_specific_batch_apis_return_exact_size_and_requested_split_only() {
         assert_eq!(pair_batch.pairs.len(), 2);
         for pair in &pair_batch.pairs {
             assert_eq!(
-                store.label_for(&pair.anchor.record_id).unwrap(),
+                store.label_for(&RecordKey::of_chunk(&pair.anchor)).unwrap(),
                 requested_split
             );
             assert_eq!(
-                store.label_for(&pair.positive.record_id).unwrap(),
+                store
+                    .label_for(&RecordKey::of_chunk(&pair.positive))
+                    .unwrap(),
                 requested_split
             );
         }
@@ -7691,7 +8186,9 @@ fn split_specific_batch_apis_return_exact_size_and_requested_split_only() {
         assert_eq!(text_batch.samples.len(), 2);
         for sample in &text_batch.samples {
             assert_eq!(
-                store.label_for(&sample.chunk.record_id).unwrap(),
+                store
+                    .label_for(&RecordKey::of_chunk(&sample.chunk))
+                    .unwrap(),
                 requested_split
             );
         }
@@ -7702,15 +8199,21 @@ fn split_specific_batch_apis_return_exact_size_and_requested_split_only() {
         assert_eq!(triplet_batch.triplets.len(), 2);
         for triplet in &triplet_batch.triplets {
             assert_eq!(
-                store.label_for(&triplet.anchor.record_id).unwrap(),
+                store
+                    .label_for(&RecordKey::of_chunk(&triplet.anchor))
+                    .unwrap(),
                 requested_split
             );
             assert_eq!(
-                store.label_for(&triplet.positive.record_id).unwrap(),
+                store
+                    .label_for(&RecordKey::of_chunk(&triplet.positive))
+                    .unwrap(),
                 requested_split
             );
             assert_eq!(
-                store.label_for(&triplet.negative.record_id).unwrap(),
+                store
+                    .label_for(&RecordKey::of_chunk(&triplet.negative))
+                    .unwrap(),
                 requested_split
             );
         }
@@ -7729,7 +8232,7 @@ fn split_specific_triplet_api_keeps_anchor_positive_negative_in_same_split() {
     let find_id = |label: SplitLabel, prefix: &str| -> String {
         for i in 0..10000 {
             let id = format!("{prefix}_{i}");
-            if store.ensure(id.clone()).unwrap() == label {
+            if store.ensure(RecordKey::new("tt", &id)).unwrap() == label {
                 return id;
             }
         }
@@ -7788,9 +8291,15 @@ fn split_specific_triplet_api_keeps_anchor_positive_negative_in_same_split() {
             .unwrap();
         assert_eq!(batch.triplets.len(), 3);
         for triplet in &batch.triplets {
-            let anchor = store.label_for(&triplet.anchor.record_id).unwrap();
-            let positive = store.label_for(&triplet.positive.record_id).unwrap();
-            let negative = store.label_for(&triplet.negative.record_id).unwrap();
+            let anchor = store
+                .label_for(&RecordKey::of_chunk(&triplet.anchor))
+                .unwrap();
+            let positive = store
+                .label_for(&RecordKey::of_chunk(&triplet.positive))
+                .unwrap();
+            let negative = store
+                .label_for(&RecordKey::of_chunk(&triplet.negative))
+                .unwrap();
             assert_eq!(anchor, requested_split);
             assert_eq!(positive, requested_split);
             assert_eq!(negative, requested_split);
@@ -7863,7 +8372,8 @@ fn triplet_sampling_produces_anchor_positive_and_negative() {
         (0u32..)
             .find_map(|i| {
                 let id = format!("{prefix}_{i}");
-                (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                (store.label_for(&RecordKey::new("tt", &id)) == Some(SplitLabel::Train))
+                    .then_some(id)
             })
             .unwrap()
     };
@@ -7908,7 +8418,7 @@ fn refresh_limit_caps_records_per_source() {
     let ids: Vec<String> = (0u32..)
         .filter_map(|i| {
             let id = format!("record_{i}");
-            (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+            (store.label_for(&RecordKey::new("unit", &id)) == Some(SplitLabel::Train)).then_some(id)
         })
         .take(10)
         .collect();
@@ -8010,7 +8520,8 @@ fn triplet_batch_dedupes_identical_triplets() {
         (0u32..)
             .find_map(|i| {
                 let id = format!("{prefix}_{i}");
-                (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                (store.label_for(&RecordKey::new("tt", &id)) == Some(SplitLabel::Train))
+                    .then_some(id)
             })
             .unwrap()
     };
@@ -8061,7 +8572,8 @@ fn text_batch_dedupes_identical_chunks() {
         (0u32..)
             .find_map(|i| {
                 let id = format!("{prefix}_{i}");
-                (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                (store.label_for(&RecordKey::new("tt", &id)) == Some(SplitLabel::Train))
+                    .then_some(id)
             })
             .unwrap()
     };
@@ -8126,7 +8638,8 @@ fn text_batch_prevents_duplicate_text_per_record_from_text_columns() {
         (0u32..)
             .find_map(|i| {
                 let id = format!("{prefix}_{i}");
-                (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                (store.label_for(&RecordKey::new("tt", &id)) == Some(SplitLabel::Train))
+                    .then_some(id)
             })
             .unwrap()
     };
@@ -8561,7 +9074,8 @@ fn epoch_sampling_visits_each_record_before_repeat() {
         (0u32..)
             .find_map(|i| {
                 let id = format!("{prefix}_{i}");
-                (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                (store.label_for(&RecordKey::new("tt", &id)) == Some(SplitLabel::Train))
+                    .then_some(id)
             })
             .unwrap()
     };
@@ -8630,7 +9144,8 @@ fn epoch_sampling_persists_between_runs() {
         (0u32..)
             .find_map(|i| {
                 let id = format!("{prefix}_{i}");
-                (probe_store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                (probe_store.label_for(&RecordKey::new("tt", &id)) == Some(SplitLabel::Train))
+                    .then_some(id)
             })
             .unwrap()
     };
@@ -8729,7 +9244,8 @@ fn epoch_sampling_handles_new_records_after_restart() {
         (0u32..)
             .find_map(|i| {
                 let id = format!("{prefix}_{i}");
-                (probe_store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                (probe_store.label_for(&RecordKey::new("tt", &id)) == Some(SplitLabel::Train))
+                    .then_some(id)
             })
             .unwrap()
     };
@@ -9111,6 +9627,7 @@ fn oversampling_advances_cursors_on_large_records() {
             text: "One Two Three".into(),
             sentences: vec!["One Two Three".into()],
             token_count: WhitespaceTokenizer.token_count("One Two Three"),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -9132,6 +9649,7 @@ fn oversampling_advances_cursors_on_large_records() {
                 text: char.to_string(),
                 sentences: vec![char.to_string()],
                 token_count: 0,
+                embedding: None,
             }],
             meta_prefix: None,
             label: None,
@@ -9221,7 +9739,9 @@ fn text_sampling_balances_sources_without_epoch_tracker() {
         (0u32..)
             .find_map(|i| {
                 let id = format!("{prefix}_{i}");
-                (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                (store.label_for(&RecordKey::new("qa_factual_source", &id))
+                    == Some(SplitLabel::Train))
+                .then_some(id)
             })
             .unwrap()
     };
@@ -9286,7 +9806,7 @@ fn chunk_sampling_respects_split_boundaries() {
     let find_id = |label: SplitLabel, prefix: &str| -> String {
         for i in 0..2000 {
             let id = format!("{prefix}_{i}");
-            if store.ensure(id.clone()).unwrap() == label {
+            if store.ensure(RecordKey::new("tt", &id)).unwrap() == label {
                 return id;
             }
         }
@@ -9343,7 +9863,7 @@ fn chunk_sampling_respects_split_boundaries() {
             .lock()
             .unwrap()
             .split_store
-            .label_for(&sample.chunk.record_id)
+            .label_for(&RecordKey::of_chunk(&sample.chunk))
             .unwrap();
         assert_eq!(label, SplitLabel::Train);
     }
@@ -9398,6 +9918,7 @@ fn adds_dynamic_chunk_pair_recipe_for_long_section_sources() {
                     text: "Headline one".into(),
                     sentences: vec!["Headline one".into()],
                     token_count: WhitespaceTokenizer.token_count("Headline one"),
+                    embedding: None,
                 },
                 RecordSection {
                     role: SectionRole::Context,
@@ -9405,6 +9926,7 @@ fn adds_dynamic_chunk_pair_recipe_for_long_section_sources() {
                     text: "one two three four".into(),
                     sentences: vec!["one two three four".into()],
                     token_count: WhitespaceTokenizer.token_count("one two three four"),
+                    embedding: None,
                 },
             ],
             meta_prefix: None,
@@ -9424,6 +9946,7 @@ fn adds_dynamic_chunk_pair_recipe_for_long_section_sources() {
                     text: "Headline two".into(),
                     sentences: vec!["Headline two".into()],
                     token_count: WhitespaceTokenizer.token_count("Headline two"),
+                    embedding: None,
                 },
                 RecordSection {
                     role: SectionRole::Context,
@@ -9431,6 +9954,7 @@ fn adds_dynamic_chunk_pair_recipe_for_long_section_sources() {
                     text: "alpha beta gamma delta".into(),
                     sentences: vec!["alpha beta gamma delta".into()],
                     token_count: WhitespaceTokenizer.token_count("alpha beta gamma delta"),
+                    embedding: None,
                 },
             ],
             meta_prefix: None,
@@ -9503,7 +10027,8 @@ fn does_not_add_dynamic_chunk_pair_recipe_when_all_sections_fit_window() {
         (0u32..)
             .find_map(|i| {
                 let id = format!("{prefix}_{i}");
-                (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                (store.label_for(&RecordKey::new("recipe_source", &id)) == Some(SplitLabel::Train))
+                    .then_some(id)
             })
             .unwrap()
     };
@@ -9524,6 +10049,7 @@ fn does_not_add_dynamic_chunk_pair_recipe_when_all_sections_fit_window() {
                     text: "Headline one".into(),
                     sentences: vec!["Headline one".into()],
                     token_count: WhitespaceTokenizer.token_count("Headline one"),
+                    embedding: None,
                 },
                 RecordSection {
                     role: SectionRole::Context,
@@ -9531,6 +10057,7 @@ fn does_not_add_dynamic_chunk_pair_recipe_when_all_sections_fit_window() {
                     text: "one two".into(),
                     sentences: vec!["one two".into()],
                     token_count: WhitespaceTokenizer.token_count("one two"),
+                    embedding: None,
                 },
             ],
             meta_prefix: None,
@@ -9550,6 +10077,7 @@ fn does_not_add_dynamic_chunk_pair_recipe_when_all_sections_fit_window() {
                     text: "Headline two".into(),
                     sentences: vec!["Headline two".into()],
                     token_count: WhitespaceTokenizer.token_count("Headline two"),
+                    embedding: None,
                 },
                 RecordSection {
                     role: SectionRole::Context,
@@ -9557,6 +10085,7 @@ fn does_not_add_dynamic_chunk_pair_recipe_when_all_sections_fit_window() {
                     text: "alpha beta".into(),
                     sentences: vec!["alpha beta".into()],
                     token_count: WhitespaceTokenizer.token_count("alpha beta"),
+                    embedding: None,
                 },
             ],
             meta_prefix: None,
@@ -9629,6 +10158,7 @@ fn adds_dynamic_chunk_pair_recipe_even_with_global_config_recipes() {
                     text: "Headline one".into(),
                     sentences: vec!["Headline one".into()],
                     token_count: WhitespaceTokenizer.token_count("Headline one"),
+                    embedding: None,
                 },
                 RecordSection {
                     role: SectionRole::Context,
@@ -9636,6 +10166,7 @@ fn adds_dynamic_chunk_pair_recipe_even_with_global_config_recipes() {
                     text: "one two three four".into(),
                     sentences: vec!["one two three four".into()],
                     token_count: WhitespaceTokenizer.token_count("one two three four"),
+                    embedding: None,
                 },
             ],
             meta_prefix: None,
@@ -9655,6 +10186,7 @@ fn adds_dynamic_chunk_pair_recipe_even_with_global_config_recipes() {
                     text: "Headline two".into(),
                     sentences: vec!["Headline two".into()],
                     token_count: WhitespaceTokenizer.token_count("Headline two"),
+                    embedding: None,
                 },
                 RecordSection {
                     role: SectionRole::Context,
@@ -9662,6 +10194,7 @@ fn adds_dynamic_chunk_pair_recipe_even_with_global_config_recipes() {
                     text: "alpha beta gamma delta".into(),
                     sentences: vec!["alpha beta gamma delta".into()],
                     token_count: WhitespaceTokenizer.token_count("alpha beta gamma delta"),
+                    embedding: None,
                 },
             ],
             meta_prefix: None,
@@ -9726,7 +10259,8 @@ fn auto_injected_recipe_uses_distinct_context_chunks_for_anchor_and_positive() {
         (0u32..)
             .find_map(|i| {
                 let id = format!("{prefix}_{i}");
-                (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                (store.label_for(&RecordKey::new("recipe_source", &id)) == Some(SplitLabel::Train))
+                    .then_some(id)
             })
             .unwrap()
     };
@@ -9746,6 +10280,7 @@ fn auto_injected_recipe_uses_distinct_context_chunks_for_anchor_and_positive() {
                 text: "one two three four".into(),
                 sentences: vec!["one two three four".into()],
                 token_count: WhitespaceTokenizer.token_count("one two three four"),
+                embedding: None,
             }],
             meta_prefix: None,
             label: None,
@@ -9763,6 +10298,7 @@ fn auto_injected_recipe_uses_distinct_context_chunks_for_anchor_and_positive() {
                 text: "other".into(),
                 sentences: vec!["other".into()],
                 token_count: WhitespaceTokenizer.token_count("other"),
+                embedding: None,
             }],
             meta_prefix: None,
             label: None,
@@ -9841,7 +10377,8 @@ fn auto_injected_recipe_never_uses_identical_anchor_and_positive_chunks() {
         (0u32..)
             .find_map(|i| {
                 let id = format!("{prefix}_{i}");
-                (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                (store.label_for(&RecordKey::new("recipe_source", &id)) == Some(SplitLabel::Train))
+                    .then_some(id)
             })
             .unwrap()
     };
@@ -9861,6 +10398,7 @@ fn auto_injected_recipe_never_uses_identical_anchor_and_positive_chunks() {
                 text: "one two three four".into(),
                 sentences: vec!["one two three four".into()],
                 token_count: WhitespaceTokenizer.token_count("one two three four"),
+                embedding: None,
             }],
             meta_prefix: None,
             label: None,
@@ -9878,6 +10416,7 @@ fn auto_injected_recipe_never_uses_identical_anchor_and_positive_chunks() {
                 text: "alpha beta gamma delta".into(),
                 sentences: vec!["alpha beta gamma delta".into()],
                 token_count: WhitespaceTokenizer.token_count("alpha beta gamma delta"),
+                embedding: None,
             }],
             meta_prefix: None,
             label: None,
@@ -9948,6 +10487,7 @@ fn auto_injected_recipe_uses_window_chunks_for_anchor_and_positive() {
                 sentences: vec!["one two three four five six seven eight nine ten".into()],
                 token_count: WhitespaceTokenizer
                     .token_count("one two three four five six seven eight nine ten"),
+                embedding: None,
             }],
             meta_prefix: None,
             label: None,
@@ -9966,6 +10506,7 @@ fn auto_injected_recipe_uses_window_chunks_for_anchor_and_positive() {
                 sentences: vec!["alpha beta gamma delta epsilon zeta eta theta iota kappa".into()],
                 token_count: WhitespaceTokenizer
                     .token_count("alpha beta gamma delta epsilon zeta eta theta iota kappa"),
+                embedding: None,
             }],
             meta_prefix: None,
             label: None,
@@ -10024,10 +10565,11 @@ fn auto_injected_recipe_keeps_all_components_in_requested_split() {
 
     // Not a manual split assignment: this only searches for record ids whose
     // deterministic split-store derivation already maps to `label`.
+    // Records register under "recipe_source" below, so derivation uses it.
     let find_id = |label: SplitLabel, prefix: &str| -> String {
         for i in 0..20000 {
             let id = format!("{prefix}_{i}");
-            if store.ensure(id.clone()).unwrap() == label {
+            if store.ensure(RecordKey::new("recipe_source", &id)).unwrap() == label {
                 return id;
             }
         }
@@ -10039,7 +10581,12 @@ fn auto_injected_recipe_keeps_all_components_in_requested_split() {
     for split_label in [SplitLabel::Train, SplitLabel::Validation, SplitLabel::Test] {
         for idx in 0..2 {
             let id = find_id(split_label, &format!("auto_split_{split_label:?}_{idx}"));
-            assert_eq!(store.label_for(&id).unwrap(), split_label);
+            assert_eq!(
+                store
+                    .label_for(&RecordKey::new("recipe_source", &id))
+                    .unwrap(),
+                split_label
+            );
             let ctx_text = format!("ctx {split_label:?} {idx} one two three four");
             let token_count = WhitespaceTokenizer.token_count(&ctx_text);
             records.push(DataRecord {
@@ -10055,6 +10602,7 @@ fn auto_injected_recipe_keeps_all_components_in_requested_split() {
                     text: ctx_text.clone(),
                     sentences: vec![ctx_text],
                     token_count,
+                    embedding: None,
                 }],
                 meta_prefix: None,
                 label: None,
@@ -10085,9 +10633,15 @@ fn auto_injected_recipe_keeps_all_components_in_requested_split() {
                 AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME
             );
 
-            let anchor_split = store.label_for(&triplet.anchor.record_id).unwrap();
-            let positive_split = store.label_for(&triplet.positive.record_id).unwrap();
-            let negative_split = store.label_for(&triplet.negative.record_id).unwrap();
+            let anchor_split = store
+                .label_for(&RecordKey::of_chunk(&triplet.anchor))
+                .unwrap();
+            let positive_split = store
+                .label_for(&RecordKey::of_chunk(&triplet.positive))
+                .unwrap();
+            let negative_split = store
+                .label_for(&RecordKey::of_chunk(&triplet.negative))
+                .unwrap();
 
             assert_eq!(anchor_split, requested_split);
             assert_eq!(positive_split, requested_split);
@@ -10136,6 +10690,7 @@ fn same_selector_triplet_returns_none_when_only_one_chunk_exists() {
             text: "one two".into(),
             sentences: vec!["one two".into()],
             token_count: WhitespaceTokenizer.token_count("one two"),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -10154,6 +10709,7 @@ fn same_selector_triplet_returns_none_when_only_one_chunk_exists() {
             text: "alpha beta".into(),
             sentences: vec!["alpha beta".into()],
             token_count: WhitespaceTokenizer.token_count("alpha beta"),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -10161,10 +10717,10 @@ fn same_selector_triplet_returns_none_when_only_one_chunk_exists() {
 
     inner
         .records
-        .insert(anchor.id.clone(), Arc::new(anchor.clone()));
+        .insert(RecordKey::from(&anchor), Arc::new(anchor.clone()));
     inner
         .records
-        .insert(negative.id.clone(), Arc::new(negative.clone()));
+        .insert(RecordKey::from(&negative), Arc::new(negative.clone()));
     inner.rebuild_chunk_index();
 
     let recipe = TripletRecipe {
@@ -10216,7 +10772,7 @@ fn sampler_allows_concurrent_batch_requests() {
     let records: Vec<DataRecord> = (0u32..)
         .filter_map(|i| {
             let id = format!("concurrent_{i}");
-            (store.label_for(&id) == Some(SplitLabel::Train)).then(|| {
+            (store.label_for(&RecordKey::new("unit", &id)) == Some(SplitLabel::Train)).then(|| {
                 let mut r = sample_record();
                 r.id = id;
                 // Override the context section text so each record is unique.
@@ -10362,16 +10918,17 @@ fn sampler_for_prefetch_tests() -> Arc<TripletSampler<DeterministicSplitStore>> 
     let records: Vec<DataRecord> = (0u32..)
         .filter_map(|i| {
             let id = format!("prefetch_{i}");
-            (store.label_for(&id) == Some(SplitLabel::Train)).then(|| {
-                let mut record = trader_record(
-                    &id,
-                    "2025-01-01",
-                    &format!("Prefetch title {i}"),
-                    &format!("Prefetch body {i}"),
-                );
-                record.source = "prefetch_source".to_string();
-                record
-            })
+            (store.label_for(&RecordKey::new("prefetch_source", &id)) == Some(SplitLabel::Train))
+                .then(|| {
+                    let mut record = trader_record(
+                        &id,
+                        "2025-01-01",
+                        &format!("Prefetch title {i}"),
+                        &format!("Prefetch body {i}"),
+                    );
+                    record.source = "prefetch_source".to_string();
+                    record
+                })
         })
         .take(4)
         .collect();
@@ -10475,7 +11032,7 @@ fn different_epochs_produce_different_record_orderings() {
                 &format!("Body {i} with enough context for sampling"),
             )
         })
-        .filter(|r| store.label_for(&r.id) == Some(SplitLabel::Train))
+        .filter(|r| store.label_for(&RecordKey::from(r)) == Some(SplitLabel::Train))
         .collect();
     let n_train = records.len();
 
@@ -10590,7 +11147,7 @@ fn resumed_sampler_uses_persisted_epoch_seed() {
                 &format!("Body {i} with enough context for sampling"),
             )
         })
-        .filter(|r| probe_store.label_for(&r.id) == Some(SplitLabel::Train))
+        .filter(|r| probe_store.label_for(&RecordKey::from(r)) == Some(SplitLabel::Train))
         .collect();
     let n_train = records.len();
     // n_draws must be ≤ n_train to stay within cycle-0.
@@ -10728,7 +11285,7 @@ fn triplet_rejects_negative_with_duplicate_text_content() {
     let unique_id = (0u32..)
         .find_map(|i| {
             let id = format!("content_unique_{i}");
-            (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+            (store.label_for(&RecordKey::new("tt", &id)) == Some(SplitLabel::Train)).then_some(id)
         })
         .unwrap();
     let sampler = TripletSampler::new(config, store);
@@ -10794,7 +11351,7 @@ fn wrong_publication_date_covers_some_none_branch_with_undated_candidates() {
     let find_train_id = |prefix: &str| -> String {
         for i in 0..10_000_u32 {
             let id = format!("{prefix}_{i}");
-            if store.label_for(&id) == Some(SplitLabel::Train) {
+            if store.label_for(&RecordKey::new(PRIMARY_SOURCE_ID, &id)) == Some(SplitLabel::Train) {
                 return id;
             }
         }
@@ -10838,7 +11395,11 @@ fn wrong_publication_date_covers_some_none_branch_with_undated_candidates() {
         .unwrap();
 
     let mut inner = sampler.inner.lock().unwrap();
-    let anchor = inner.records.get(&anchor_id).cloned().expect("anchor");
+    let anchor = inner
+        .records
+        .get(&RecordKey::new(PRIMARY_SOURCE_ID, anchor_id))
+        .cloned()
+        .expect("anchor");
     // cand_no_date is eligible (Some, None); cand_same is excluded (same date).
     let (neg, _) = inner
         .select_negative_record_seeded(&anchor, &NegativeStrategy::WrongPublicationDate, None)
@@ -10862,7 +11423,7 @@ fn wrong_publication_date_covers_none_some_and_none_none_branches() {
     let find_train_id = |prefix: &str| -> String {
         for i in 0..10_000_u32 {
             let id = format!("{prefix}_{i}");
-            if store.label_for(&id) == Some(SplitLabel::Train) {
+            if store.label_for(&RecordKey::new(PRIMARY_SOURCE_ID, &id)) == Some(SplitLabel::Train) {
                 return id;
             }
         }
@@ -10909,7 +11470,11 @@ fn wrong_publication_date_covers_none_some_and_none_none_branches() {
         .unwrap();
 
     let mut inner = sampler.inner.lock().unwrap();
-    let anchor = inner.records.get(&anchor_id).cloned().expect("anchor");
+    let anchor = inner
+        .records
+        .get(&RecordKey::new(PRIMARY_SOURCE_ID, anchor_id))
+        .cloned()
+        .expect("anchor");
     // Only cand_dated is eligible: (None, Some) => true.
     // cand_no_date is excluded: (None, None) => false.
     let (neg, _) = inner
@@ -10934,7 +11499,7 @@ fn temporal_offset_selector_finds_nearest_chronological_neighbor() {
     let find_train_id = |prefix: &str| -> String {
         for i in 0..10_000_u32 {
             let id = format!("{prefix}_{i}");
-            if store.label_for(&id) == Some(SplitLabel::Train) {
+            if store.label_for(&RecordKey::new(PRIMARY_SOURCE_ID, &id)) == Some(SplitLabel::Train) {
                 return id;
             }
         }
@@ -10974,7 +11539,11 @@ fn temporal_offset_selector_finds_nearest_chronological_neighbor() {
         .unwrap();
 
     let inner = sampler.inner.lock().unwrap();
-    let anchor = inner.records.get(&base_id).cloned().expect("anchor");
+    let anchor = inner
+        .records
+        .get(&RecordKey::new(PRIMARY_SOURCE_ID, &base_id))
+        .cloned()
+        .expect("anchor");
     // Requesting offset_days=7: target = base + 7 days. id_7d is an exact match.
     let neighbor = inner.select_temporal_neighbor(&anchor, 7);
     assert!(neighbor.is_some(), "should find a temporal neighbor");
@@ -11001,7 +11570,7 @@ fn temporal_offset_selector_never_crosses_split_boundaries() {
     let find_id_for_split = |label: SplitLabel, prefix: &str| -> String {
         for i in 0..10_000_u32 {
             let id = format!("{prefix}_{i}");
-            if store.label_for(&id) == Some(label) {
+            if store.label_for(&RecordKey::new(PRIMARY_SOURCE_ID, &id)) == Some(label) {
                 return id;
             }
         }
@@ -11044,7 +11613,11 @@ fn temporal_offset_selector_never_crosses_split_boundaries() {
         .unwrap();
 
     let inner = sampler.inner.lock().unwrap();
-    let anchor = inner.records.get(&anchor_id).cloned().expect("anchor");
+    let anchor = inner
+        .records
+        .get(&RecordKey::new(PRIMARY_SOURCE_ID, anchor_id))
+        .cloned()
+        .expect("anchor");
 
     // target = base + 1 day. val_rec is an exact match but must be excluded (wrong split).
     // train_rec is 2 days off but must be selected (only same-split candidate).
@@ -11100,6 +11673,7 @@ fn instruction_propagates_from_recipe_to_sample_triplet() {
                 text: anchor.into(),
                 sentences: vec![anchor.into()],
                 token_count: WhitespaceTokenizer.token_count(anchor),
+                embedding: None,
             },
             RecordSection {
                 role: SectionRole::Context,
@@ -11107,6 +11681,7 @@ fn instruction_propagates_from_recipe_to_sample_triplet() {
                 text: context.into(),
                 sentences: vec![context.into()],
                 token_count: WhitespaceTokenizer.token_count(context),
+                embedding: None,
             },
         ],
         meta_prefix: None,
@@ -11169,6 +11744,7 @@ fn allow_same_anchor_positive_permits_identical_text_triplet() {
                 text: text.into(),
                 sentences: vec![text.into()],
                 token_count: WhitespaceTokenizer.token_count(text),
+                embedding: None,
             },
             RecordSection {
                 role: SectionRole::Context,
@@ -11176,6 +11752,7 @@ fn allow_same_anchor_positive_permits_identical_text_triplet() {
                 text: text.into(), // identical to anchor
                 sentences: vec![text.into()],
                 token_count: 0,
+                embedding: None,
             },
         ],
         meta_prefix: None,
@@ -11288,7 +11865,8 @@ fn bm25_ranked_candidates_are_scoped_to_anchor_source() {
         (0u32..)
             .find_map(|i| {
                 let id = format!("{prefix}_{i}");
-                (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                (store.label_for(&RecordKey::new("source_alpha", &id)) == Some(SplitLabel::Train))
+                    .then_some(id)
             })
             .unwrap()
     };
@@ -11362,17 +11940,20 @@ fn bm25_ranked_candidates_are_scoped_to_anchor_source() {
         "ranked candidates must not be empty — same-source record should be found"
     );
     for id in &ranked {
-        let record = inner.records.get(id).expect("ranked id must be in records");
+        let record = inner
+            .records
+            .get(id)
+            .expect("ranked key must be in records");
         assert_eq!(
             record.source, "source_alpha",
-            "BM25 ranked candidate '{id}' came from source '{}' but anchor is in \
+            "BM25 ranked candidate '{id:?}' came from source '{}' but anchor is in \
              'source_alpha' — cross-source leak detected (regression)",
             record.source,
         );
     }
     // Confirm the other-source record is definitely not in the ranked list.
     assert!(
-        !ranked.contains(&other_source_id),
+        !ranked.contains(&RecordKey::new("source_beta", &other_source_id)),
         "other-source record must not appear in BM25 ranked candidates for anchor \
          in a different source (global search regression)"
     );
@@ -11440,7 +12021,11 @@ fn bm25_fallback_counter_increments_when_no_bm25_candidates_match() {
         .unwrap();
 
     let mut inner = sampler.inner.lock().unwrap();
-    let anchor = inner.records.get(anchor_id).cloned().expect("anchor");
+    let anchor = inner
+        .records
+        .get(&RecordKey::new(PRIMARY_SOURCE_ID, anchor_id))
+        .cloned()
+        .expect("anchor");
 
     // ── call 1: query with terms absent from all indexed documents ────────────
     // BM25 returns no results → fallback is taken.
@@ -11552,7 +12137,11 @@ fn bm25_query_uses_raw_chunk_text_not_decorated_text() {
         .unwrap();
 
     let mut inner = sampler.inner.lock().unwrap();
-    let anchor_rec = inner.records.get("bm25_raw_query_anchor").cloned().unwrap();
+    let anchor_rec = inner
+        .records
+        .get(&RecordKey::new(PRIMARY_SOURCE_ID, "bm25_raw_query_anchor"))
+        .cloned()
+        .unwrap();
 
     // Call with the raw body text (no prefix) — correct behaviour.
     let (selected_raw, _) = inner
@@ -11614,6 +12203,7 @@ fn select_chunk_parallel_paragraph_selector_returns_chunk_or_none() {
             text: "one two three four five".into(),
             sentences: vec!["one two three four five".into()],
             token_count: WhitespaceTokenizer.token_count("one two three four five"),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -11674,6 +12264,7 @@ fn select_chunk_parallel_random_selector_handles_empty_and_non_empty() {
             text: "alpha beta gamma delta epsilon".into(),
             sentences: vec!["alpha beta gamma delta epsilon".into()],
             token_count: WhitespaceTokenizer.token_count("alpha beta gamma delta epsilon"),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -11710,7 +12301,7 @@ fn select_chunk_parallel_temporal_offset_returns_chunk_from_neighbor() {
     let find_train = |prefix: &str| -> String {
         for i in 0..10_000u32 {
             let id = format!("{prefix}_{i}");
-            if store.label_for(&id) == Some(SplitLabel::Train) {
+            if store.label_for(&RecordKey::new(PRIMARY_SOURCE_ID, &id)) == Some(SplitLabel::Train) {
                 return id;
             }
         }
@@ -11737,6 +12328,7 @@ fn select_chunk_parallel_temporal_offset_returns_chunk_from_neighbor() {
             text: "neighbor context text here".into(),
             sentences: vec!["neighbor context text here".into()],
             token_count: WhitespaceTokenizer.token_count("neighbor context text here"),
+            embedding: None,
         }];
         r
     };
@@ -11757,7 +12349,7 @@ fn select_chunk_parallel_temporal_offset_returns_chunk_from_neighbor() {
     let inner = sampler.inner.lock().unwrap();
     let anchor = inner
         .records
-        .get(&anchor_id)
+        .get(&RecordKey::new(PRIMARY_SOURCE_ID, &anchor_id))
         .cloned()
         .expect("anchor record");
     let mut rng = DeterministicRng::new(9999);
@@ -11794,6 +12386,7 @@ fn select_role_parallel_returns_none_when_no_matching_role() {
             text: "anchor text here".into(),
             sentences: vec!["anchor text here".into()],
             token_count: WhitespaceTokenizer.token_count("anchor text here"),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -11860,6 +12453,7 @@ fn select_role_parallel_returns_none_when_all_pools_are_empty() {
             text: "".into(), // empty → no tokens → empty pool
             sentences: vec![],
             token_count: WhitespaceTokenizer.token_count(""),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -11904,6 +12498,7 @@ fn decorate_chunk_parallel_truncation_paths() {
             text: "word1 word2".into(),
             sentences: vec!["word1 word2".into()],
             token_count: WhitespaceTokenizer.token_count("word1 word2"),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -11957,6 +12552,7 @@ fn decorate_chunk_parallel_truncation_paths() {
             sentences: vec!["word1 word2 word3 word4 word5 word6 word7 word8".into()],
             token_count: WhitespaceTokenizer
                 .token_count("word1 word2 word3 word4 word5 word6 word7 word8"),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -12015,6 +12611,7 @@ fn decorate_chunk_no_truncation_when_window_is_zero() {
             text: "body token one two three".into(),
             sentences: vec!["body token one two three".into()],
             token_count: WhitespaceTokenizer.token_count("body token one two three"),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -12031,6 +12628,7 @@ fn decorate_chunk_no_truncation_when_window_is_zero() {
     let mut chunk = RecordChunk {
         record_id: "no_trunc_rec".into(),
         section_idx: 0,
+        source: String::new(),
         view: ChunkView::Window {
             index: 0,
             overlap: 0,
@@ -12040,6 +12638,7 @@ fn decorate_chunk_no_truncation_when_window_is_zero() {
         tokens_estimate: 5,
         quality: QualityScore::default(),
         kvp_meta: Default::default(),
+        embedding: None,
     };
 
     inner.decorate_chunk_seeded(&record, &mut chunk);
@@ -12087,6 +12686,7 @@ fn select_anchor_positive_parallel_returns_none_when_retries_exhausted() {
             text: "unique text word".into(), // short: fits in one window
             sentences: vec!["unique text word".into()],
             token_count: WhitespaceTokenizer.token_count("unique text word"),
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -12244,7 +12844,11 @@ fn bm25_query_text_over_token_limit_is_truncated_before_search() {
     );
 
     let mut inner = sampler.inner.lock().unwrap();
-    let anchor = inner.records.get("bm25_trunc_0").cloned().expect("anchor");
+    let anchor = inner
+        .records
+        .get(&RecordKey::new(PRIMARY_SOURCE_ID, "bm25_trunc_0"))
+        .cloned()
+        .expect("anchor");
 
     // The long query triggers the truncation branch; the call must not panic.
     let _result = inner.select_negative_record_seeded(
@@ -12278,6 +12882,7 @@ fn record_bm25_text_with_zero_max_tokens_returns_full_text() {
                 ],
                 token_count: WhitespaceTokenizer
                     .token_count("anchor body text with many tokens here and there and everywhere"),
+                embedding: None,
             },
             RecordSection {
                 role: SectionRole::Context,
@@ -12286,6 +12891,7 @@ fn record_bm25_text_with_zero_max_tokens_returns_full_text() {
                 sentences: vec!["context section body words more and more content".into()],
                 token_count: WhitespaceTokenizer
                     .token_count("context section body words more and more content"),
+                embedding: None,
             },
         ],
         meta_prefix: None,
@@ -12369,6 +12975,7 @@ fn for_split_non_exhausted_error_propagates_immediately() {
         text: "some context text".into(),
         sentences: vec!["some context text".into()],
         token_count: WhitespaceTokenizer.token_count("some context text"),
+        embedding: None,
     };
     let record = DataRecord {
         id: record_id.clone(),
@@ -12383,13 +12990,15 @@ fn for_split_non_exhausted_error_propagates_immediately() {
     };
     {
         let mut inner = sampler.inner.lock().unwrap();
-        inner
-            .records
-            .insert(record_id.clone(), std::sync::Arc::new(record));
+        inner.records.insert(
+            RecordKey::new("unit", record_id.clone()),
+            std::sync::Arc::new(record),
+        );
         // chunk_index maps chunk_id → record_id; use the same id for both.
-        inner
-            .chunk_index
-            .insert(record_id.clone(), record_id.clone());
+        inner.chunk_index.insert(
+            RecordKey::new("unit", record_id.clone()),
+            RecordKey::new("unit", record_id.clone()),
+        );
         // source_order is intentionally left empty.
     }
 
@@ -13404,6 +14013,7 @@ fn same_record_negative_selector_picks_from_context() {
                     "Two driven jocks help fax my big quiz.".into(),
                 ],
                 token_count: 0,
+                embedding: None,
             },
             RecordSection {
                 role: SectionRole::Context,
@@ -13412,6 +14022,7 @@ fn same_record_negative_selector_picks_from_context() {
                 sentences: vec!["Context section text for negative selection".into()],
                 token_count: WhitespaceTokenizer
                     .token_count("Context section text for negative selection"),
+                embedding: None,
             },
         ],
         meta_prefix: None,
@@ -13513,7 +14124,9 @@ fn same_record_and_wrong_article_recipes_coexist() {
         (0u32..)
             .find_map(|i| {
                 let id = format!("{prefix}_{i}");
-                (store.label_for(&id) == Some(SplitLabel::Train)).then_some(id)
+                (store.label_for(&RecordKey::new(PRIMARY_SOURCE_ID, &id))
+                    == Some(SplitLabel::Train))
+                .then_some(id)
             })
             .unwrap()
     };
@@ -13541,6 +14154,7 @@ fn same_record_and_wrong_article_recipes_coexist() {
                     text: format!("Anchor text for {id}"),
                     sentences: vec![format!("Anchor text for {id}")],
                     token_count: 0,
+                    embedding: None,
                 },
                 RecordSection {
                     role: SectionRole::Context,
@@ -13548,6 +14162,7 @@ fn same_record_and_wrong_article_recipes_coexist() {
                     text: format!("positive_{id}"),
                     sentences: vec![format!("positive_{id}")],
                     token_count: 0,
+                    embedding: None,
                 },
                 RecordSection {
                     role: SectionRole::Context,
@@ -13555,6 +14170,7 @@ fn same_record_and_wrong_article_recipes_coexist() {
                     text: format!("negative_{id}"),
                     sentences: vec![format!("negative_{id}")],
                     token_count: 0,
+                    embedding: None,
                 },
             ],
             meta_prefix: None,
@@ -13649,6 +14265,7 @@ fn text_batch_samples_from_positive_and_negative_pair_label_records() {
                     text: title.into(),
                     sentences: vec![title.into()],
                     token_count: WhitespaceTokenizer.token_count(title),
+                    embedding: None,
                 },
                 RecordSection {
                     role: SectionRole::Context,
@@ -13656,6 +14273,7 @@ fn text_batch_samples_from_positive_and_negative_pair_label_records() {
                     text: body.into(),
                     sentences: vec![body.into()],
                     token_count: WhitespaceTokenizer.token_count(body),
+                    embedding: None,
                 },
             ],
             meta_prefix: None,
@@ -13692,11 +14310,20 @@ fn text_batch_samples_from_positive_and_negative_pair_label_records() {
     );
 
     for record in [pos_record.clone(), neg_record.clone()] {
-        store.upsert(record.id.clone(), SplitLabel::Train).unwrap();
-        inner
-            .chunk_index
-            .insert(record.id.clone(), record.id.clone());
-        inner.records.insert(record.id.clone(), Arc::new(record));
+        store
+            .upsert(
+                RecordKey::new(record.source.clone(), record.id.clone()),
+                SplitLabel::Train,
+            )
+            .unwrap();
+        inner.chunk_index.insert(
+            RecordKey::new(record.source.clone(), record.id.clone()),
+            RecordKey::new(record.source.clone(), record.id.clone()),
+        );
+        inner.records.insert(
+            RecordKey::new(record.source.clone(), record.id.clone()),
+            Arc::new(record),
+        );
     }
     inner.epoch_tracker.ensure_loaded().unwrap();
     let records_by_split = inner.records_by_split().unwrap();
@@ -13720,7 +14347,7 @@ fn text_batch_samples_from_positive_and_negative_pair_label_records() {
     let mut saw_positive_record = false;
     let mut saw_negative_record = false;
     for sample in &text_batch.samples {
-        if let Some(record) = inner.records.get(&sample.chunk.record_id) {
+        if let Some(record) = inner.records.get(&RecordKey::of_chunk(&sample.chunk)) {
             match record.label {
                 Some(PairLabel::Positive) => saw_positive_record = true,
                 Some(PairLabel::Negative) => saw_negative_record = true,
@@ -13836,6 +14463,7 @@ fn select_chunk_returns_none_when_pool_is_empty_for_paragraph() {
             text: "tiny".into(),
             sentences: vec![],
             token_count: 1,
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -13885,11 +14513,14 @@ fn next_chunk_from_pool_resets_cursor_when_stale() {
     let mut inner = TripletSamplerInner::new(base_config(), store);
 
     // Insert a cursor pointing beyond the pool size.
-    inner.chunk_cursors.insert(("rec".to_string(), 0), 999);
+    inner
+        .chunk_cursors
+        .insert((RecordKey::new("", "rec"), 0), 999);
 
     let pool = vec![RecordChunk {
         record_id: "rec".into(),
         section_idx: 0,
+        source: String::new(),
         view: ChunkView::SummaryFallback {
             strategy: "test".into(),
             weight: 1.0,
@@ -13898,12 +14529,16 @@ fn next_chunk_from_pool_resets_cursor_when_stale() {
         tokens_estimate: 4,
         quality: QualityScore::default(),
         kvp_meta: Default::default(),
+        embedding: None,
     }];
-    let chunk = inner.next_chunk_from_pool("rec", 0, pool);
+    let chunk = inner.next_chunk_from_pool(&RecordKey::new("", "rec"), 0, pool);
     assert!(chunk.is_some());
     // Cursor was 999, pool.len() is 1 → resets to 0, then advances to (0+1)%1 = 0.
     assert_eq!(
-        *inner.chunk_cursors.get(&("rec".to_string(), 0)).unwrap(),
+        *inner
+            .chunk_cursors
+            .get(&(RecordKey::new("", "rec"), 0))
+            .unwrap(),
         0
     );
 }
@@ -13937,13 +14572,20 @@ fn negative_strategy_wrong_publication_date_uses_date_taxonomy() {
         ),
     ];
     for record in &records {
-        store.upsert(record.id.clone(), SplitLabel::Train).unwrap();
-        inner
-            .chunk_index
-            .insert(record.id.clone(), record.id.clone());
-        inner
-            .records
-            .insert(record.id.clone(), Arc::new(record.clone()));
+        store
+            .upsert(
+                RecordKey::new(record.source.clone(), record.id.clone()),
+                SplitLabel::Train,
+            )
+            .unwrap();
+        inner.chunk_index.insert(
+            RecordKey::new(record.source.clone(), record.id.clone()),
+            RecordKey::new(record.source.clone(), record.id.clone()),
+        );
+        inner.records.insert(
+            RecordKey::new(record.source.clone(), record.id.clone()),
+            Arc::new(record.clone()),
+        );
     }
     inner.epoch_tracker.ensure_loaded().unwrap();
     let records_by_split = inner.records_by_split().unwrap();
@@ -13951,7 +14593,10 @@ fn negative_strategy_wrong_publication_date_uses_date_taxonomy() {
         .epoch_tracker
         .reconcile(SplitLabel::Train, &records_by_split);
 
-    let anchor = inner.records.get("anchor").unwrap();
+    let anchor = inner
+        .records
+        .get(&RecordKey::new(PRIMARY_SOURCE_ID, "anchor"))
+        .unwrap();
     let mut rng = DeterministicRng::new(42);
     let anchor_date = taxonomy_value(anchor, META_FIELD_DATE).map(|d| d.to_string());
     let neg = inner.select_negative_record(
@@ -13987,13 +14632,20 @@ fn negative_strategy_question_answer_mismatch_same_source() {
         trader_record("qa_neg", "2025-01-01", "QA Negative", "A different answer."),
     ];
     for record in &records {
-        store.upsert(record.id.clone(), SplitLabel::Train).unwrap();
-        inner
-            .chunk_index
-            .insert(record.id.clone(), record.id.clone());
-        inner
-            .records
-            .insert(record.id.clone(), Arc::new(record.clone()));
+        store
+            .upsert(
+                RecordKey::new(record.source.clone(), record.id.clone()),
+                SplitLabel::Train,
+            )
+            .unwrap();
+        inner.chunk_index.insert(
+            RecordKey::new(record.source.clone(), record.id.clone()),
+            RecordKey::new(record.source.clone(), record.id.clone()),
+        );
+        inner.records.insert(
+            RecordKey::new(record.source.clone(), record.id.clone()),
+            Arc::new(record.clone()),
+        );
     }
     inner.epoch_tracker.ensure_loaded().unwrap();
     let records_by_split = inner.records_by_split().unwrap();
@@ -14001,7 +14653,10 @@ fn negative_strategy_question_answer_mismatch_same_source() {
         .epoch_tracker
         .reconcile(SplitLabel::Train, &records_by_split);
 
-    let anchor = inner.records.get("qa_anchor").unwrap();
+    let anchor = inner
+        .records
+        .get(&RecordKey::new(PRIMARY_SOURCE_ID, "qa_anchor"))
+        .unwrap();
     let mut rng = DeterministicRng::new(42);
     let neg = inner.select_negative_record(
         anchor,
@@ -14029,13 +14684,20 @@ fn negative_strategy_wrong_publication_date_falls_back_when_no_different_date() 
         trader_record("wpd_b", "2025-01-01", "Title B", "Body B"),
     ];
     for record in &records {
-        store.upsert(record.id.clone(), SplitLabel::Train).unwrap();
-        inner
-            .chunk_index
-            .insert(record.id.clone(), record.id.clone());
-        inner
-            .records
-            .insert(record.id.clone(), Arc::new(record.clone()));
+        store
+            .upsert(
+                RecordKey::new(record.source.clone(), record.id.clone()),
+                SplitLabel::Train,
+            )
+            .unwrap();
+        inner.chunk_index.insert(
+            RecordKey::new(record.source.clone(), record.id.clone()),
+            RecordKey::new(record.source.clone(), record.id.clone()),
+        );
+        inner.records.insert(
+            RecordKey::new(record.source.clone(), record.id.clone()),
+            Arc::new(record.clone()),
+        );
     }
     inner.epoch_tracker.ensure_loaded().unwrap();
     let records_by_split = inner.records_by_split().unwrap();
@@ -14043,7 +14705,10 @@ fn negative_strategy_wrong_publication_date_falls_back_when_no_different_date() 
         .epoch_tracker
         .reconcile(SplitLabel::Train, &records_by_split);
 
-    let anchor = inner.records.get("wpd_a").unwrap();
+    let anchor = inner
+        .records
+        .get(&RecordKey::new(PRIMARY_SOURCE_ID, "wpd_a"))
+        .unwrap();
     let mut rng = DeterministicRng::new(42);
     let neg = inner.select_negative_record(
         anchor,
@@ -14114,13 +14779,20 @@ fn text_batch_inner_with_weights_early_return_when_nothing_new() {
         trader_record("twr_2", "2025-01-02", "Title 2", "Body text two"),
     ];
     for record in &records {
-        store.upsert(record.id.clone(), SplitLabel::Train).unwrap();
-        inner
-            .chunk_index
-            .insert(record.id.clone(), record.id.clone());
-        inner
-            .records
-            .insert(record.id.clone(), Arc::new(record.clone()));
+        store
+            .upsert(
+                RecordKey::new(record.source.clone(), record.id.clone()),
+                SplitLabel::Train,
+            )
+            .unwrap();
+        inner.chunk_index.insert(
+            RecordKey::new(record.source.clone(), record.id.clone()),
+            RecordKey::new(record.source.clone(), record.id.clone()),
+        );
+        inner.records.insert(
+            RecordKey::new(record.source.clone(), record.id.clone()),
+            Arc::new(record.clone()),
+        );
     }
     inner.epoch_tracker.ensure_loaded().unwrap();
     let records_by_split = inner.records_by_split().unwrap();
@@ -14197,6 +14869,7 @@ fn select_role_parallel_returns_none_when_no_matching_sections() {
             text: "only anchor".into(),
             sentences: vec![],
             token_count: 2,
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -14229,6 +14902,7 @@ fn select_chunk_paragraph_returns_none_for_out_of_bounds_index() {
             text: "content".into(),
             sentences: vec![],
             token_count: 1,
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -14262,6 +14936,7 @@ fn record_has_at_least_two_window_chunks_returns_false_for_small_sections() {
             text: "tiny".into(),
             sentences: vec![],
             token_count: 1,
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,
@@ -14293,6 +14968,7 @@ fn record_has_at_least_two_window_chunks_returns_false_for_no_section_match() {
             text: "short".into(),
             sentences: vec![],
             token_count: 1,
+            embedding: None,
         }],
         meta_prefix: None,
         label: None,

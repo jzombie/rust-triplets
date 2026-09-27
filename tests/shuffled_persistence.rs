@@ -14,8 +14,9 @@ use triplets::source::InMemorySource;
 use triplets::splits::{EpochStateStore, PersistedSamplerState, SamplerStateStore};
 use triplets::utils::make_section;
 use triplets::{
-    DataRecord, FileSplitStore, NegativeStrategy, QualityScore, RecordId, Sampler, SamplerConfig,
-    SectionRole, Selector, SplitLabel, SplitRatios, SplitStore, TripletRecipe, TripletSampler,
+    DataRecord, FileSplitStore, NegativeStrategy, QualityScore, RecordId, RecordKey, Sampler,
+    SamplerConfig, SectionRole, Selector, SplitLabel, SplitRatios, SplitStore, TripletRecipe,
+    TripletSampler,
 };
 
 fn build_record(source: &str, suffix: &str, day_offset: u32) -> DataRecord {
@@ -385,14 +386,19 @@ fn save_sampler_state_some_preserves_split_assignments_in_mirror_store() {
     let mut forced_id = None;
     for idx in 0..10_000 {
         let candidate = format!("forced_record_{idx}");
-        if probe_store.label_for(&candidate) != Some(SplitLabel::Validation) {
+        if probe_store.label_for(&RecordKey::new("test", &candidate))
+            != Some(SplitLabel::Validation)
+        {
             forced_id = Some(candidate);
             break;
         }
     }
     let forced_id = forced_id.expect("should find id whose derived label is not validation");
+    let forced_key = RecordKey::new("test", &forced_id);
 
     let mut split_key = b"split:".to_vec();
+    split_key.extend_from_slice(b"test");
+    split_key.push(0);
     split_key.extend_from_slice(forced_id.as_bytes());
     let datastore = DataStore::open(&source_store_path).unwrap();
     datastore.write(&split_key, b"1").unwrap();
@@ -400,7 +406,7 @@ fn save_sampler_state_some_preserves_split_assignments_in_mirror_store() {
     let source_store = FileSplitStore::open(&source_store_path, split, 73).unwrap();
 
     assert_eq!(
-        source_store.label_for(&forced_id),
+        source_store.label_for(&forced_key),
         Some(SplitLabel::Validation)
     );
 
@@ -421,7 +427,7 @@ fn save_sampler_state_some_preserves_split_assignments_in_mirror_store() {
 
     let mirror_store = FileSplitStore::open(&mirror_store_path, split, 73).unwrap();
     assert_eq!(
-        mirror_store.label_for(&forced_id),
+        mirror_store.label_for(&forced_key),
         Some(SplitLabel::Validation)
     );
 }

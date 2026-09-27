@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::Utc;
@@ -20,8 +21,10 @@ use crate::srd_triplet::{self, SrdMode, SrdRecord};
 /// or 3 sections (triplet mode), determined by the entry's mode byte.
 ///
 /// The `record_id` on each produced [`DataRecord`] is the entry's u64 index
-/// (as a string), enabling downstream consumers to look up precomputed
-/// embeddings from the same store.
+/// (as a string). Entry indices are unique within one store; identity across
+/// stores is the sampler's job (composite keys), not the id string's — so
+/// nothing parses or decorates these ids. Entry vectors ride the
+/// [`RecordSection`](triplets::data::RecordSection) embedding channel.
 pub struct SrdSource {
     store: DataStore,
     source_id: String,
@@ -31,23 +34,48 @@ pub struct SrdSource {
 }
 
 impl SrdSource {
-    /// Open a simd-r-drive store with an explicit mode.
+    /// Open a simd-r-drive store.
     ///
-    /// The `mode` parameter must match the data already written to the store
-    /// (or the mode that will be used for writes). This avoids inferring
-    /// schema from the data itself, which is unsafe on empty stores.
+    /// - `mode: None` detects the mode from entry 0 (single open, no probe
+    ///   handle). Errors on empty stores — nothing to detect from.
+    /// - `mode: Some(m)` pins the mode explicitly, required for empty stores
+    ///   (schema cannot be inferred from nothing). Non-empty stores are
+    ///   verified: a mismatch with `m` returns `SrdError::ModeMismatch`
+    ///   instead of opening, so sampling can never silently run with the
+    ///   wrong recipes.
     pub fn open(
         path: &Path,
         source_id: impl Into<String>,
         emb_dim: usize,
-        mode: SrdMode,
+        mode: Option<SrdMode>,
     ) -> Result<Self, SrdError> {
         let store = DataStore::open_existing(path)?;
-        let count = store.len()? as u64;
+        let count = store.len()?;
+        let detected = if count > 0 {
+            let entries = srd_triplet::batch_read_entries(&store, &[0], emb_dim)?;
+            match entries.into_iter().next() {
+                Some(SrdRecord::Pair(_)) => Some(SrdMode::Pair),
+                Some(SrdRecord::Triplet(_)) => Some(SrdMode::Triplet),
+                None => None,
+            }
+        } else {
+            None
+        };
+        let mode = match (mode, detected) {
+            (Some(m), Some(d)) if m != d => {
+                return Err(SrdError::ModeMismatch {
+                    expected: m,
+                    found: d,
+                });
+            }
+            (Some(m), _) => m,
+            (None, Some(d)) => d,
+            (None, None) => return Err(SrdError::EmptyStore),
+        };
         Ok(Self {
             store,
             source_id: source_id.into(),
-            entry_count: AtomicU64::new(count),
+            entry_count: AtomicU64::new(count as u64),
             mode,
             emb_dim,
         })
@@ -56,6 +84,16 @@ impl SrdSource {
     /// The detected mode of this store.
     pub fn mode(&self) -> SrdMode {
         self.mode
+    }
+
+    /// Number of entries in this store.
+    pub fn len(&self) -> usize {
+        self.entry_count.load(Ordering::Relaxed) as usize
+    }
+
+    /// Whether this store holds no entries.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
@@ -97,6 +135,7 @@ impl DataSource for SrdSource {
                             text: pair.anchor_text.clone(),
                             sentences: vec![],
                             token_count: WhitespaceTokenizer.token_count(&pair.anchor_text),
+                            embedding: Some(Arc::from(pair.anchor_emb.as_slice())),
                         },
                         RecordSection {
                             role: SectionRole::Context,
@@ -104,6 +143,7 @@ impl DataSource for SrdSource {
                             text: pair.candidate_text.clone(),
                             sentences: vec![],
                             token_count: WhitespaceTokenizer.token_count(&pair.candidate_text),
+                            embedding: Some(Arc::from(pair.candidate_emb.as_slice())),
                         },
                     ],
                     Some(pair.label.clone()),
@@ -116,6 +156,7 @@ impl DataSource for SrdSource {
                             text: triplet.anchor_text.clone(),
                             sentences: vec![],
                             token_count: WhitespaceTokenizer.token_count(&triplet.anchor_text),
+                            embedding: Some(Arc::from(triplet.anchor_emb.as_slice())),
                         },
                         RecordSection {
                             role: SectionRole::Context,
@@ -123,6 +164,7 @@ impl DataSource for SrdSource {
                             text: triplet.pos_text.clone(),
                             sentences: vec![],
                             token_count: WhitespaceTokenizer.token_count(&triplet.pos_text),
+                            embedding: Some(Arc::from(triplet.pos_emb.as_slice())),
                         },
                         RecordSection {
                             role: SectionRole::Context,
@@ -130,6 +172,7 @@ impl DataSource for SrdSource {
                             text: triplet.neg_text.clone(),
                             sentences: vec![],
                             token_count: WhitespaceTokenizer.token_count(&triplet.neg_text),
+                            embedding: Some(Arc::from(triplet.neg_emb.as_slice())),
                         },
                     ],
                     None,
@@ -277,7 +320,7 @@ mod tests {
             &dir.path().join("data.srd"),
             "test",
             TEST_EMB_DIM,
-            SrdMode::Pair,
+            Some(SrdMode::Pair),
         )
         .unwrap();
         assert_eq!(source.mode(), SrdMode::Pair);
@@ -301,7 +344,7 @@ mod tests {
             &dir.path().join("data.srd"),
             "test",
             TEST_EMB_DIM,
-            SrdMode::Triplet,
+            Some(SrdMode::Triplet),
         )
         .unwrap();
         assert_eq!(source.mode(), SrdMode::Triplet);
@@ -326,7 +369,7 @@ mod tests {
             &dir.path().join("data.srd"),
             "test",
             TEST_EMB_DIM,
-            SrdMode::Pair,
+            Some(SrdMode::Pair),
         )
         .unwrap();
 
@@ -346,7 +389,7 @@ mod tests {
             &dir.path().join("data.srd"),
             "test",
             TEST_EMB_DIM,
-            SrdMode::Pair,
+            Some(SrdMode::Pair),
         )
         .unwrap();
 
@@ -369,7 +412,7 @@ mod tests {
             &dir.path().join("data.srd"),
             "test",
             TEST_EMB_DIM,
-            SrdMode::Triplet,
+            Some(SrdMode::Triplet),
         )
         .unwrap();
 
@@ -393,7 +436,7 @@ mod tests {
             &dir.path().join("data.srd"),
             "test",
             TEST_EMB_DIM,
-            SrdMode::Pair,
+            Some(SrdMode::Pair),
         )
         .unwrap();
 
@@ -432,7 +475,7 @@ mod tests {
             &dir.path().join("data.srd"),
             "test",
             TEST_EMB_DIM,
-            SrdMode::Pair,
+            Some(SrdMode::Pair),
         )
         .unwrap();
         assert_eq!(source.mode(), SrdMode::Pair);
@@ -450,7 +493,7 @@ mod tests {
             &dir.path().join("data.srd"),
             "test",
             TEST_EMB_DIM,
-            SrdMode::Pair,
+            Some(SrdMode::Pair),
         )
         .unwrap();
 
@@ -467,7 +510,7 @@ mod tests {
             &dir.path().join("data.srd"),
             "test",
             TEST_EMB_DIM,
-            SrdMode::Pair,
+            Some(SrdMode::Pair),
         )
         .unwrap();
 
@@ -488,7 +531,7 @@ mod tests {
             &dir.path().join("data.srd"),
             "test",
             TEST_EMB_DIM,
-            SrdMode::Triplet,
+            Some(SrdMode::Triplet),
         )
         .unwrap();
 
@@ -510,7 +553,7 @@ mod tests {
             &dir.path().join("data.srd"),
             "my_source",
             TEST_EMB_DIM,
-            SrdMode::Pair,
+            Some(SrdMode::Pair),
         )
         .unwrap();
 
@@ -528,7 +571,7 @@ mod tests {
             std::path::Path::new("/nonexistent/path/data.srd"),
             "test",
             TEST_EMB_DIM,
-            SrdMode::Pair,
+            Some(SrdMode::Pair),
         );
         assert!(result.is_err());
     }
@@ -541,7 +584,7 @@ mod tests {
             &dir.path().join("data.srd"),
             "test",
             TEST_EMB_DIM,
-            SrdMode::Pair,
+            Some(SrdMode::Pair),
         )
         .unwrap();
 
@@ -552,5 +595,67 @@ mod tests {
         };
         let snapshot = source.refresh(&config, Some(&cursor), None).unwrap();
         assert!(snapshot.records.is_empty());
+    }
+
+    #[test]
+    fn open_with_wrong_mode_is_rejected() {
+        let dir = TempDir::new().unwrap();
+        make_pair_store(&dir, 3);
+        let err = match SrdSource::open(
+            &dir.path().join("data.srd"),
+            "test",
+            TEST_EMB_DIM,
+            Some(SrdMode::Triplet),
+        ) {
+            Ok(_) => panic!("wrong mode must fail loudly"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(err, SrdError::ModeMismatch { .. }),
+            "wrong mode must fail loudly, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn open_detects_pair_and_triplet_modes() {
+        let pair_dir = TempDir::new().unwrap();
+        make_pair_store(&pair_dir, 3);
+        let pair_src = SrdSource::open(
+            &pair_dir.path().join("data.srd"),
+            "test",
+            TEST_EMB_DIM,
+            None,
+        )
+        .unwrap();
+        assert_eq!(pair_src.mode(), SrdMode::Pair);
+        assert_eq!(pair_src.len(), 3);
+        assert!(!pair_src.is_empty());
+
+        let trip_dir = TempDir::new().unwrap();
+        make_triplet_store(&trip_dir, 2);
+        let trip_src = SrdSource::open(
+            &trip_dir.path().join("data.srd"),
+            "test",
+            TEST_EMB_DIM,
+            None,
+        )
+        .unwrap();
+        assert_eq!(trip_src.mode(), SrdMode::Triplet);
+        assert_eq!(trip_src.len(), 2);
+    }
+
+    #[test]
+    fn open_rejects_empty_store_without_explicit_mode() {
+        let dir = TempDir::new().unwrap();
+        let store = DataStore::open(&dir.path().join("data.srd")).unwrap();
+        drop(store);
+        let err = match SrdSource::open(&dir.path().join("data.srd"), "test", TEST_EMB_DIM, None) {
+            Ok(_) => panic!("empty store must fail loudly"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(err, SrdError::EmptyStore),
+            "empty store must fail loudly, got: {err:?}"
+        );
     }
 }

@@ -148,7 +148,10 @@ pub mod splits {
     /// Prefix marker for bitcode-encoded payloads.
     pub const BITCODE_PREFIX: u8 = b'B';
     /// Version tag for split-store metadata compatibility checks.
-    pub const STORE_VERSION: u8 = 1;
+    /// Bumped to 2 when persisted split-label keys were namespaced by source
+    /// (`split:<source>\0<id>`): v1 stores are rejected loudly at open instead
+    /// of silently missing their explicit assignments.
+    pub const STORE_VERSION: u8 = 2;
     /// Canonical split iteration order used when storing/loading all splits.
     pub const ALL_SPLITS: [SplitLabel; 3] =
         [SplitLabel::Train, SplitLabel::Validation, SplitLabel::Test];
