@@ -199,6 +199,7 @@ mod tests {
         RecordChunk {
             record_id: record_id.to_string(),
             section_idx,
+            source: String::new(),
             view: ChunkView::Window {
                 index,
                 overlap: 0,

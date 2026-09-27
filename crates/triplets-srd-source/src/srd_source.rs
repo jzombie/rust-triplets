@@ -20,12 +20,11 @@ use crate::srd_triplet::{self, SrdMode, SrdRecord};
 /// Each entry in the store maps to a [`DataRecord`] with 2 sections (pair mode)
 /// or 3 sections (triplet mode), determined by the entry's mode byte.
 ///
-/// The `record_id` on each produced [`DataRecord`] is `{source_id}::{index}`
-/// (triplets' `{source}::{record}` convention): entry indices are only unique
-/// within one store, so the source scope keeps records from different stores
-/// distinct when several `SrdSource`s share one sampler. The id is opaque —
-/// nothing parses it; entry vectors ride the
-/// [`RecordSection`](triplets::data::RecordSection) embedding channel instead.
+/// The `record_id` on each produced [`DataRecord`] is the entry's u64 index
+/// (as a string). Entry indices are unique within one store; identity across
+/// stores is the sampler's job (composite keys), not the id string's — so
+/// nothing parses or decorates these ids. Entry vectors ride the
+/// [`RecordSection`](triplets::data::RecordSection) embedding channel.
 pub struct SrdSource {
     store: DataStore,
     source_id: String,
@@ -91,7 +90,7 @@ impl DataSource for SrdSource {
         let now = Utc::now();
         let mut records = Vec::with_capacity(entries.len());
         for (offset, record) in indices.iter().zip(entries.iter()) {
-            let id: RecordId = format!("{}::{offset}", self.source_id);
+            let id: RecordId = (*offset as u64).to_string();
             let (sections, label) = match record {
                 SrdRecord::Pair(pair) => (
                     vec![
@@ -328,7 +327,7 @@ mod tests {
     }
 
     #[test]
-    fn record_id_scopes_entry_index_by_source() {
+    fn record_id_matches_entry_index() {
         let dir = TempDir::new().unwrap();
         make_pair_store(&dir, 5);
         let source = SrdSource::open(
@@ -343,7 +342,7 @@ mod tests {
         let snapshot = source.refresh(&config, None, None).unwrap();
 
         for (i, record) in snapshot.records.iter().enumerate() {
-            assert_eq!(record.id, format!("test::{i}"));
+            assert_eq!(record.id, i.to_string());
         }
     }
 
@@ -411,23 +410,23 @@ mod tests {
         // First page: limit=2
         let snapshot1 = source.refresh(&config, None, Some(2)).unwrap();
         assert_eq!(snapshot1.records.len(), 2);
-        assert_eq!(snapshot1.records[0].id, "test::0");
-        assert_eq!(snapshot1.records[1].id, "test::1");
+        assert_eq!(snapshot1.records[0].id, "0");
+        assert_eq!(snapshot1.records[1].id, "1");
 
         // Second page: use cursor from first page
         let snapshot2 = source
             .refresh(&config, Some(&snapshot1.cursor), Some(2))
             .unwrap();
         assert_eq!(snapshot2.records.len(), 2);
-        assert_eq!(snapshot2.records[0].id, "test::2");
-        assert_eq!(snapshot2.records[1].id, "test::3");
+        assert_eq!(snapshot2.records[0].id, "2");
+        assert_eq!(snapshot2.records[1].id, "3");
 
         // Third page: remaining entry
         let snapshot3 = source
             .refresh(&config, Some(&snapshot2.cursor), Some(2))
             .unwrap();
         assert_eq!(snapshot3.records.len(), 1);
-        assert_eq!(snapshot3.records[0].id, "test::4");
+        assert_eq!(snapshot3.records[0].id, "4");
     }
 
     #[test]

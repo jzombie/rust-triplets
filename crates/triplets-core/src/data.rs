@@ -167,8 +167,13 @@ pub enum SectionRole {
 /// A chunked view over a section.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RecordChunk {
-    /// Parent record id this chunk belongs to.
+    /// Parent record id this chunk belongs to (unique within [`RecordChunk::source`]).
     pub record_id: RecordId,
+    /// Source that produced the parent record. Together with `record_id` this
+    /// forms the chunk's [`RecordKey`](crate::types::RecordKey): a structured
+    /// field populated from the parent record, never parsed from strings.
+    #[serde(default)]
+    pub source: SourceId,
     /// Index of the source section in `DataRecord.sections`.
     pub section_idx: usize,
     /// Chunk view metadata (window position or summary fallback).
@@ -327,6 +332,7 @@ mod tests {
         RecordChunk {
             record_id: id.to_string(),
             section_idx: 0,
+            source: String::new(),
             view: ChunkView::SummaryFallback {
                 strategy: "test".to_string(),
                 weight: 1.0,

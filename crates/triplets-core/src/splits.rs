@@ -18,7 +18,7 @@ use crate::constants::splits::{
 };
 use crate::data::RecordId;
 use crate::errors::SamplerError;
-use crate::types::SourceId;
+use crate::types::{RecordKey, SourceId};
 
 /// Logical dataset partitions used during sampling.
 #[derive(
@@ -128,16 +128,18 @@ pub struct PersistedSamplerState {
 
 /// Split assignment backend.
 ///
-/// Implementations map `RecordId` values to split labels deterministically.
+/// Implementations map composite [`RecordKey`] values to split labels
+/// deterministically. Keys (not bare ids) so same-id records from different
+/// sources are assigned independently.
 pub trait SplitStore: Send + Sync {
-    /// Return split label for `id` if known/derivable.
-    fn label_for(&self, id: &RecordId) -> Option<SplitLabel>;
-    /// Persist an explicit split assignment for `id`.
-    fn upsert(&self, id: RecordId, label: SplitLabel) -> Result<(), SamplerError>;
+    /// Return split label for `key` if known/derivable.
+    fn label_for(&self, key: &RecordKey) -> Option<SplitLabel>;
+    /// Persist an explicit split assignment for `key`.
+    fn upsert(&self, key: RecordKey, label: SplitLabel) -> Result<(), SamplerError>;
     /// Return configured split ratios.
     fn ratios(&self) -> SplitRatios;
-    /// Return the split label for `id`, creating/deriving one when needed.
-    fn ensure(&self, id: RecordId) -> Result<SplitLabel, SamplerError>;
+    /// Return the split label for `key`, creating/deriving one when needed.
+    fn ensure(&self, key: RecordKey) -> Result<SplitLabel, SamplerError>;
 }
 
 /// Persistence backend for epoch metadata and epoch hash orderings.
@@ -177,7 +179,7 @@ pub trait SamplerStateStore: Send + Sync {
 /// In-memory split store with deterministic assignment derivation.
 pub struct DeterministicSplitStore {
     ratios: SplitRatios,
-    assignments: RwLock<HashMap<RecordId, SplitLabel>>,
+    assignments: RwLock<HashMap<RecordKey, SplitLabel>>,
     seed: u64,
     epoch_meta: RwLock<HashMap<SplitLabel, PersistedSplitMeta>>,
     epoch_hashes: RwLock<HashMap<SplitLabel, PersistedSplitHashes>>,
@@ -198,25 +200,25 @@ impl DeterministicSplitStore {
         })
     }
 
-    fn derive_label(&self, id: &RecordId) -> SplitLabel {
-        derive_label_for_id(id, self.seed, self.ratios)
+    fn derive_label(&self, key: &RecordKey) -> SplitLabel {
+        derive_label_for_key(key, self.seed, self.ratios)
     }
 }
 
 impl SplitStore for DeterministicSplitStore {
-    fn label_for(&self, id: &RecordId) -> Option<SplitLabel> {
-        if let Some(label) = self.assignments.read().ok()?.get(id).copied() {
+    fn label_for(&self, key: &RecordKey) -> Option<SplitLabel> {
+        if let Some(label) = self.assignments.read().ok()?.get(key).copied() {
             return Some(label);
         }
-        Some(self.derive_label(id))
+        Some(self.derive_label(key))
     }
 
-    fn upsert(&self, id: RecordId, label: SplitLabel) -> Result<(), SamplerError> {
+    fn upsert(&self, key: RecordKey, label: SplitLabel) -> Result<(), SamplerError> {
         let mut guard = self
             .assignments
             .write()
             .map_err(|_| SamplerError::SplitStore("lock poisoned".into()))?;
-        guard.insert(id, label);
+        guard.insert(key, label);
         Ok(())
     }
 
@@ -224,8 +226,8 @@ impl SplitStore for DeterministicSplitStore {
         self.ratios
     }
 
-    fn ensure(&self, id: RecordId) -> Result<SplitLabel, SamplerError> {
-        Ok(self.derive_label(&id))
+    fn ensure(&self, key: RecordKey) -> Result<SplitLabel, SamplerError> {
+        Ok(self.derive_label(&key))
     }
 }
 
@@ -509,18 +511,18 @@ impl FileSplitStore {
 }
 
 impl SplitStore for FileSplitStore {
-    fn label_for(&self, id: &RecordId) -> Option<SplitLabel> {
-        let key = split_key(id);
-        if let Ok(Some(value)) = self.store.read(&key)
+    fn label_for(&self, key: &RecordKey) -> Option<SplitLabel> {
+        let store_key = split_key(&key.source, &key.id);
+        if let Ok(Some(value)) = self.store.read(&store_key)
             && let Ok(label) = decode_label(value.as_ref())
         {
             return Some(label);
         }
-        Some(derive_label_for_id(id, self.seed, self.ratios))
+        Some(derive_label_for_key(key, self.seed, self.ratios))
     }
 
-    fn upsert(&self, id: RecordId, label: SplitLabel) -> Result<(), SamplerError> {
-        let _ = (id, label);
+    fn upsert(&self, key: RecordKey, label: SplitLabel) -> Result<(), SamplerError> {
+        let _ = (key, label);
         Ok(())
     }
 
@@ -528,8 +530,8 @@ impl SplitStore for FileSplitStore {
         self.ratios
     }
 
-    fn ensure(&self, id: RecordId) -> Result<SplitLabel, SamplerError> {
-        Ok(derive_label_for_id(&id, self.seed, self.ratios))
+    fn ensure(&self, key: RecordKey) -> Result<SplitLabel, SamplerError> {
+        Ok(derive_label_for_key(&key, self.seed, self.ratios))
     }
 }
 
@@ -630,6 +632,14 @@ fn decode_label(bytes: &[u8]) -> Result<SplitLabel, SamplerError> {
     }
 }
 
+fn derive_label_for_key(key: &RecordKey, seed: u64, ratios: SplitRatios) -> SplitLabel {
+    // Id-only derivation, deliberately: identical to the historical
+    // `derive_label_for_id`, so split assignments are unchanged for existing
+    // corpora. Same-id records across sources share an assignment, which is
+    // harmless (pools, cursors, and explicit upserts stay per-key).
+    derive_label_for_id(&key.id, seed, ratios)
+}
+
 fn derive_label_for_id(id: &RecordId, seed: u64, ratios: SplitRatios) -> SplitLabel {
     let mut hasher = SipHasher::new();
     id.hash(&mut hasher);
@@ -651,9 +661,11 @@ fn ratios_close(a: SplitRatios, b: SplitRatios) -> bool {
         < 1e-5
 }
 
-fn split_key(id: &RecordId) -> Vec<u8> {
-    let mut key = Vec::with_capacity(SPLIT_PREFIX.len() + id.len());
+fn split_key(source: &SourceId, id: &RecordId) -> Vec<u8> {
+    let mut key = Vec::with_capacity(SPLIT_PREFIX.len() + source.len() + 1 + id.len());
     key.extend_from_slice(SPLIT_PREFIX);
+    key.extend_from_slice(source.as_bytes());
+    key.push(0);
     key.extend_from_slice(id.as_bytes());
     key
 }
@@ -845,8 +857,8 @@ mod tests {
         let mut saw_train = false;
         let mut saw_validation = false;
         for idx in 0..20_000 {
-            let id = format!("record_{idx}");
-            let label = store.ensure(id).unwrap();
+            let key = RecordKey::new("src", format!("record_{idx}"));
+            let label = store.ensure(key).unwrap();
             assert_ne!(label, SplitLabel::Test);
             saw_train |= label == SplitLabel::Train;
             saw_validation |= label == SplitLabel::Validation;
@@ -913,7 +925,7 @@ mod tests {
         let path = dir.path().join("splits.json");
         let ratios = SplitRatios::default();
         let store = FileSplitStore::open(&path, ratios, 123).unwrap();
-        store.ensure("abc".to_string()).unwrap();
+        store.ensure(RecordKey::new("src", "abc")).unwrap();
         // Publish to disk so the seed is committed before the next open.
         store
             .save_sampler_state(
@@ -1038,7 +1050,7 @@ mod tests {
 
     #[test]
     fn split_keys_and_labels_cover_helper_paths() {
-        let key = split_key(&"abc".to_string());
+        let key = split_key(&"src".to_string(), &"abc".to_string());
         assert!(key.starts_with(SPLIT_PREFIX));
 
         assert!(matches!(decode_label(b"0"), Ok(SplitLabel::Train)));
@@ -1121,9 +1133,9 @@ mod tests {
         let store = FileSplitStore::open(&file_path, ratios, 444).unwrap();
         assert!((store.ratios().train - ratios.train).abs() < 1e-6);
         store
-            .upsert("record_1".to_string(), SplitLabel::Validation)
+            .upsert(RecordKey::new("src", "record_1"), SplitLabel::Validation)
             .unwrap();
-        let ensured = store.ensure("record_1".to_string()).unwrap();
+        let ensured = store.ensure(RecordKey::new("src", "record_1")).unwrap();
         assert!(matches!(
             ensured,
             SplitLabel::Train | SplitLabel::Validation | SplitLabel::Test
@@ -1178,10 +1190,10 @@ mod tests {
 
         assert_eq!(store.ratios().train, ratios.train);
 
-        let id = "source::record".to_string();
-        let derived = store.label_for(&id).unwrap();
-        store.upsert(id.clone(), SplitLabel::Validation).unwrap();
-        assert_eq!(store.label_for(&id), Some(SplitLabel::Validation));
+        let key = RecordKey::new("src", "source::record");
+        let derived = store.label_for(&key).unwrap();
+        store.upsert(key.clone(), SplitLabel::Validation).unwrap();
+        assert_eq!(store.label_for(&key), Some(SplitLabel::Validation));
         assert!(matches!(
             derived,
             SplitLabel::Train | SplitLabel::Validation | SplitLabel::Test
@@ -1314,7 +1326,7 @@ mod tests {
         let store_a = FileSplitStore::open(&path_a, ratios, 42).unwrap();
 
         let assigned_id = "record_with_assignment".to_string();
-        let assigned_key = split_key(&assigned_id);
+        let assigned_key = split_key(&"src".to_string(), &assigned_id);
         store_a.store.write(&assigned_key, b"1").unwrap();
 
         let sampler_state = PersistedSamplerState {
@@ -1335,7 +1347,7 @@ mod tests {
         // Destination gets the existing store data AND the new sampler state.
         let store_b = FileSplitStore::open(&path_b, ratios, 42).unwrap();
         assert_eq!(
-            store_b.label_for(&assigned_id),
+            store_b.label_for(&RecordKey::new("src", assigned_id)),
             Some(SplitLabel::Validation)
         );
         assert_eq!(store_b.load_sampler_state().unwrap().unwrap().epoch, 9);
@@ -1509,14 +1521,15 @@ mod tests {
         let store = FileSplitStore::open(&path, SplitRatios::default(), 42).unwrap();
 
         let id = "bad_label_record".to_string();
-        let expected = derive_label_for_id(&id, 42, SplitRatios::default());
-        let key = split_key(&id);
+        let key = RecordKey::new("test-source", id);
+        let expected = derive_label_for_key(&key, 42, SplitRatios::default());
+        let store_key = split_key(&key.source, &key.id);
 
-        store.store.write(&key, b"x").unwrap();
-        assert_eq!(store.label_for(&id), Some(expected));
+        store.store.write(&store_key, b"x").unwrap();
+        assert_eq!(store.label_for(&key), Some(expected));
 
-        store.store.write(&key, b"1").unwrap();
-        assert_eq!(store.label_for(&id), Some(SplitLabel::Validation));
+        store.store.write(&store_key, b"1").unwrap();
+        assert_eq!(store.label_for(&key), Some(SplitLabel::Validation));
 
         let meta_validation = epoch_meta_key(SplitLabel::Validation);
         let hashes_validation = epoch_hashes_key(SplitLabel::Validation);

@@ -301,7 +301,9 @@ mod tests {
             .map(|i| vec![i as f32 * 0.01 + 0.1; TEST_EMB_DIM])
             .collect();
         let texts: Vec<String> = (0..n).map(|i| format!("{tag} anchor text {i}")).collect();
-        let cands: Vec<String> = (0..n).map(|i| format!("{tag} candidate text {i}")).collect();
+        let cands: Vec<String> = (0..n)
+            .map(|i| format!("{tag} candidate text {i}"))
+            .collect();
         let entries: Vec<SrdPairWriteEntry> = vecs
             .iter()
             .zip(texts.iter())

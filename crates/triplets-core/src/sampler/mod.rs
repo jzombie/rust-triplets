@@ -30,7 +30,7 @@ use crate::data::{
 };
 use crate::epoch::EpochTracker;
 use crate::errors::SamplerError;
-use crate::hash::{derive_epoch_seed, stable_hash_str};
+use crate::hash::{derive_epoch_seed, stable_hash_key, stable_hash_key_section, stable_hash_str};
 use crate::ingestion::IngestionManager;
 use crate::metadata::{META_FIELD_DATE, MetadataKey};
 use crate::metrics::{chunk_proximity_score, window_index_proximity};
@@ -39,7 +39,7 @@ use crate::splits::{
     EpochStateStore, PersistedSamplerState, SamplerStateStore, SplitLabel, SplitStore,
 };
 use crate::tokenizer::{Tokenizer, WhitespaceTokenizer};
-use crate::types::{RecipeKey, RecordId, SourceId};
+use crate::types::{RecipeKey, RecordId, RecordKey, SourceId};
 use crate::utils::platform_newline;
 
 // AUTO-RECIPE HANDLING OVERVIEW (end-to-end):
@@ -288,8 +288,10 @@ struct TripletSamplerInner<S: SplitStore + EpochStateStore + SamplerStateStore +
     split_store: Arc<S>,
     /// On-demand ingestion manager that fills the batch-sized buffer.
     ingestion: IngestionManager,
-    /// Current in-memory record pool keyed by record id.
-    records: IndexMap<RecordId, Arc<DataRecord>>,
+    /// Current in-memory record pool keyed by composite record identity.
+    /// Composite keys (not bare ids) so overlapping ids from different
+    /// sources coexist instead of overwriting each other.
+    records: IndexMap<RecordKey, Arc<DataRecord>>,
     /// Deterministic RNG for per-batch shuffles and sampling.
     rng: DeterministicRng,
     /// Config-level triplet recipes used when sources do not supply their own.
@@ -315,13 +317,13 @@ struct TripletSamplerInner<S: SplitStore + EpochStateStore + SamplerStateStore +
     /// Epoch tracker for split-aware deterministic sampling.
     epoch_tracker: EpochTracker,
     /// Per-record, per-section chunk cursor to rotate through chunk windows.
-    chunk_cursors: HashMap<(RecordId, usize), usize>,
+    chunk_cursors: HashMap<(RecordKey, usize), usize>,
     /// Per-record, per-role cursor to rotate through role-specific sections.
-    role_cursors: HashMap<(RecordId, String), usize>,
+    role_cursors: HashMap<(RecordKey, String), usize>,
     /// Pluggable negative-selection backend (uniform-random or BM25).
     negative_backend: Box<dyn backends::NegativeBackend>,
-    /// Chunk id to record id lookup (used by epoch tracker).
-    chunk_index: HashMap<RecordId, RecordId>,
+    /// Chunk key to parent record key lookup (used by epoch tracker).
+    chunk_index: HashMap<RecordKey, RecordKey>,
     /// Round-robin order of source ids (deterministic).
     source_order: Vec<SourceId>,
     /// Current index into `source_order` for shuffled-cycle sampling.
@@ -332,8 +334,8 @@ struct TripletSamplerInner<S: SplitStore + EpochStateStore + SamplerStateStore +
     ingestion_cursors_loaded: bool,
     /// Marks whether source state needs persistence.
     source_state_dirty: bool,
-    /// Record indices per source for round-robin within a source.
-    source_record_indices: HashMap<SourceId, Vec<RecordId>>,
+    /// Record keys per source for round-robin within a source.
+    source_record_indices: HashMap<SourceId, Vec<RecordKey>>,
     /// Per-source cursor into `source_record_indices`.
     source_record_cursors: HashMap<SourceId, usize>,
     /// Round-robin index for triplet recipe cycling.
@@ -346,7 +348,7 @@ struct TripletSamplerInner<S: SplitStore + EpochStateStore + SamplerStateStore +
     /// Per-record tracking lets us surgically remove hashes only for evicted
     /// records, preserving cross-batch dedup across small window advances
     /// (e.g. window=512, batch_size=4 where only 4/512 records are swapped).
-    emitted_text_hashes: HashMap<RecordId, HashSet<u64>>,
+    emitted_text_hashes: HashMap<RecordKey, HashSet<u64>>,
     /// Round-robin index for text recipe cycling.
     text_recipe_rr_idx: usize,
     /// Epoch counter for per-source deterministic shuffling (seed ^ epoch).
@@ -367,7 +369,7 @@ struct TripletSamplerInner<S: SplitStore + EpochStateStore + SamplerStateStore +
     /// Cached `records_by_split` output, valid while
     /// `cached_records_by_split_gen == pool_generation`. Avoids rebuilding the
     /// full per-split map (O(N) clones + label lookups) on every batch.
-    cached_records_by_split: Option<HashMap<SplitLabel, Vec<(RecordId, SourceId)>>>,
+    cached_records_by_split: Option<HashMap<SplitLabel, Vec<RecordKey>>>,
     /// Pool generation the cached map was built from.
     cached_records_by_split_gen: u64,
 
@@ -378,9 +380,9 @@ struct TripletSamplerInner<S: SplitStore + EpochStateStore + SamplerStateStore +
     /// wholesale. Steady-state advances keep the delta fast path.
     last_force_refresh_generation: u64,
 
-    /// Persistent cache of split labels keyed by record id.
+    /// Persistent cache of split labels keyed by composite record identity.
     /// Eliminates redundant DataStore::read() calls for split label lookups.
-    split_labels: HashMap<RecordId, SplitLabel>,
+    split_labels: HashMap<RecordKey, SplitLabel>,
 }
 
 impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSamplerInner<S> {
@@ -480,15 +482,15 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     }
 
     /// Get or compute the split label for a record, using the persistent cache.
-    fn get_or_insert_split_label(&mut self, id: &RecordId) -> Result<SplitLabel, SamplerError> {
-        if let Some(&label) = self.split_labels.get(id) {
+    fn get_or_insert_split_label(&mut self, key: &RecordKey) -> Result<SplitLabel, SamplerError> {
+        if let Some(&label) = self.split_labels.get(key) {
             return Ok(label);
         }
-        let label = match self.split_store.label_for(id) {
+        let label = match self.split_store.label_for(key) {
             Some(label) => label,
-            None => self.split_store.ensure(id.clone())?,
+            None => self.split_store.ensure(key.clone())?,
         };
-        self.split_labels.insert(id.clone(), label);
+        self.split_labels.insert(key.clone(), label);
         Ok(label)
     }
 
@@ -535,25 +537,25 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
 
     fn next_chunk_from_pool(
         &mut self,
-        record_id: &str,
+        key: &RecordKey,
         section_idx: usize,
         pool: Vec<RecordChunk>,
     ) -> Option<RecordChunk> {
         if pool.is_empty() {
             return None;
         }
-        let key = (record_id.to_string(), section_idx);
-        if !self.chunk_cursors.contains_key(&key) {
+        let map_key = (key.clone(), section_idx);
+        if !self.chunk_cursors.contains_key(&map_key) {
             // First touch should **not** always start at window 0.
             // We derive a deterministic per-(record,section) starting offset so:
             // - repeated runs with the same seed/epoch are reproducible,
             // - first sampled window is spread across records/sections,
             // - subsequent calls still rotate cyclically through the pool.
-            let cursor_key = format!("{}::{}", record_id, section_idx);
-            let start = (stable_hash_str(self.epoch_seed(), &cursor_key) as usize) % pool.len();
-            self.chunk_cursors.insert(key.clone(), start);
+            let cursor_key = stable_hash_key_section(self.epoch_seed(), key, section_idx);
+            let start = (cursor_key as usize) % pool.len();
+            self.chunk_cursors.insert(map_key.clone(), start);
         }
-        let cursor = self.chunk_cursors.entry(key).or_insert(0);
+        let cursor = self.chunk_cursors.entry(map_key).or_insert(0);
         if *cursor >= pool.len() {
             *cursor = 0;
         }
@@ -569,12 +571,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         {
             return;
         }
-        let valid_ids: HashSet<RecordId> = self.records.keys().cloned().collect();
+        let valid_keys: HashSet<RecordKey> = self.records.keys().cloned().collect();
         self.chunk_cursors
-            .retain(|(record_id, _), _| valid_ids.contains(record_id));
+            .retain(|(record_key, _), _| valid_keys.contains(record_key));
         self.role_cursors
-            .retain(|(record_id, _), _| valid_ids.contains(record_id));
-        self.negative_backend.prune_cursors(&valid_ids);
+            .retain(|(record_key, _), _| valid_keys.contains(record_key));
+        self.negative_backend.prune_cursors(&valid_keys);
     }
 
     /// Ordered removal of a record id from one source's index vector.
@@ -582,23 +584,23 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     /// all evictions and additions are processed (mirroring
     /// `rebuild_source_index`, which only contains sources with at least one
     /// allowed-split record).
-    fn remove_id_from_source_index(&mut self, source: &SourceId, record_id: &RecordId) {
+    fn remove_id_from_source_index(&mut self, source: &SourceId, record_key: &RecordKey) {
         if let Some(ids) = self.source_record_indices.get_mut(source)
-            && let Some(pos) = ids.iter().position(|id| id == record_id)
+            && let Some(pos) = ids.iter().position(|key| key == record_key)
         {
             ids.remove(pos);
         }
     }
 
-    /// Insert a record id into one source's index vector, preserving the
-    /// deterministic `stable_hash_str(epoch_seed, id)` sort order via binary
+    /// Insert a record key into one source's index vector, preserving the
+    /// deterministic `stable_hash_key(epoch_seed, key)` sort order via binary
     /// search. Records whose split is not allowed are not indexed, mirroring
     /// `rebuild_source_index`. Creates the source entry when needed; the
     /// caller keeps `source_order` sorted afterwards.
     fn insert_id_into_source_index(
         &mut self,
         source: SourceId,
-        record_id: RecordId,
+        record_key: RecordKey,
         label: SplitLabel,
         allowed: &HashSet<SplitLabel>,
     ) {
@@ -606,24 +608,18 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             return;
         }
         let seed = self.epoch_seed();
-        let key = stable_hash_str(seed, &record_id);
+        let key = stable_hash_key(seed, &record_key);
         // Upper-bound insertion: with distinct hashes this is the unique
-        // sorted position; on a hash collision it places the id after
+        // sorted position; on a hash collision it places the key after
         // existing equals, matching stable-sort semantics.
         let pos = match self.source_record_indices.get(&source) {
-            Some(ids) => ids.partition_point(|id| {
-                self.records
-                    .get(id)
-                    .map(|record| stable_hash_str(seed, &record.id))
-                    .unwrap_or(0)
-                    <= key
-            }),
+            Some(ids) => ids.partition_point(|k| stable_hash_key(seed, k) <= key),
             None => 0,
         };
         self.source_record_indices
             .entry(source)
             .or_default()
-            .insert(pos, record_id);
+            .insert(pos, record_key);
     }
 
     /// Increment the long-section record count for a source.
@@ -648,8 +644,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     fn rebuild_chunk_index(&mut self) {
         self.chunk_index.clear();
         for record in self.records.values() {
-            self.chunk_index
-                .insert(record.id.clone(), record.id.clone());
+            let key = RecordKey::from(record);
+            self.chunk_index.insert(key.clone(), key);
         }
     }
 
@@ -657,31 +653,22 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         self.source_record_indices.clear();
         let allowed = self.allowed_target_splits();
         let allowed_set: HashSet<SplitLabel> = allowed.into_iter().collect();
-        // Collect record IDs first to avoid borrowing issues
-        let record_ids: Vec<(RecordId, SourceId)> = self
-            .records
-            .values()
-            .map(|r| (r.id.clone(), r.source.clone()))
-            .collect();
-        for (record_id, source) in record_ids {
-            let label = self.get_or_insert_split_label(&record_id)?;
+        // Collect record keys first to avoid borrowing issues
+        let record_keys: Vec<RecordKey> = self.records.values().map(RecordKey::of_arc).collect();
+        for record_key in record_keys {
+            let label = self.get_or_insert_split_label(&record_key)?;
             if !allowed_set.contains(&label) {
                 continue;
             }
             self.source_record_indices
-                .entry(source)
+                .entry(record_key.source.clone())
                 .or_default()
-                .push(record_id);
+                .push(record_key);
         }
 
         let shuffle_seed = self.epoch_seed();
-        for record_ids in self.source_record_indices.values_mut() {
-            record_ids.sort_by_key(|id| {
-                self.records
-                    .get(id)
-                    .map(|record| stable_hash_str(shuffle_seed, &record.id))
-                    .unwrap_or(0)
-            });
+        for record_keys in self.source_record_indices.values_mut() {
+            record_keys.sort_by_key(|key| stable_hash_key(shuffle_seed, key));
         }
 
         self.source_order = self.source_record_indices.keys().cloned().collect();
@@ -1009,20 +996,19 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         {
             return Ok(());
         }
-        let mut map: HashMap<SplitLabel, Vec<(RecordId, SourceId)>> = HashMap::new();
+        let mut map: HashMap<SplitLabel, Vec<RecordKey>> = HashMap::new();
         // Collect chunk_index entries first to avoid borrowing issues
-        let entries: Vec<(RecordId, RecordId)> = self
+        let entries: Vec<(RecordKey, RecordKey)> = self
             .chunk_index
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        for (chunk_id, record_id) in entries {
-            let source = match self.records.get(&record_id) {
-                Some(record) => record.source.clone(),
-                None => continue,
-            };
-            let label = self.get_or_insert_split_label(&record_id)?;
-            map.entry(label).or_default().push((chunk_id, source));
+        for (chunk_key, record_key) in entries {
+            if !self.records.contains_key(&record_key) {
+                continue;
+            }
+            let label = self.get_or_insert_split_label(&record_key)?;
+            map.entry(label).or_default().push(chunk_key);
         }
         self.cached_records_by_split = Some(map);
         self.cached_records_by_split_gen = self.pool_generation;
@@ -1033,9 +1019,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     /// Production paths use [`Self::refresh_records_by_split_cache`] plus a
     /// direct reference to avoid the per-call clone.
     #[cfg(test)]
-    fn records_by_split(
-        &mut self,
-    ) -> Result<HashMap<SplitLabel, Vec<(RecordId, SourceId)>>, SamplerError> {
+    fn records_by_split(&mut self) -> Result<HashMap<SplitLabel, Vec<RecordKey>>, SamplerError> {
         self.refresh_records_by_split_cache()?;
         Ok(self.cached_records_by_split.clone().unwrap_or_default())
     }
@@ -1056,17 +1040,17 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             let offset_seed = self.epoch_seed() ^ (cycle as u64);
             let offset = (stable_hash_str(offset_seed, source) as usize) % len;
             let mut wrapped = false;
-            let mut selected_id: Option<RecordId> = None;
+            let mut selected_key: Option<RecordKey> = None;
 
             for _ in 0..len {
                 let pos = (cursor % len).saturating_add(offset) % len;
-                let record_id = &record_ids[pos];
+                let record_key = &record_ids[pos];
                 cursor = cursor.saturating_add(1);
                 if cursor.is_multiple_of(len) {
                     wrapped = true;
                 }
-                if self.split_labels.get(record_id) == Some(&split) {
-                    selected_id = Some(record_id.clone());
+                if self.split_labels.get(record_key) == Some(&split) {
+                    selected_key = Some(record_key.clone());
                     break;
                 }
             }
@@ -1077,11 +1061,11 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 self.mark_source_wrapped(source);
             }
 
-            selected_id.and_then(|id| self.records.get(&id).map(Arc::clone))
+            selected_key.and_then(|key| self.records.get(&key).map(Arc::clone))
         } else {
-            while let Some(chunk_id) = self.epoch_tracker.next_record(split) {
-                if let Some(record_id) = self.chunk_index.get(&chunk_id)
-                    && let Some(record) = self.records.get(record_id)
+            while let Some(chunk_key) = self.epoch_tracker.next_record(split) {
+                if let Some(record_key) = self.chunk_index.get(&chunk_key)
+                    && let Some(record) = self.records.get(record_key)
                 {
                     return Some(Arc::clone(record));
                 }
@@ -1145,14 +1129,14 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     ) -> Option<Arc<DataRecord>> {
         let target = record.created_at + Duration::days(offset_days.into());
         let key = record.taxonomy.first().cloned();
-        let record_split = self.split_store.label_for(&record.id)?;
+        let record_split = self.split_store.label_for(&RecordKey::from(record))?;
         self.records
             .values()
             .filter(|candidate| {
-                candidate.id != record.id
+                RecordKey::from(*candidate) != RecordKey::from(record)
                     && self
                         .split_store
-                        .label_for(&candidate.id)
+                        .label_for(&RecordKey::from(*candidate))
                         .map(|label| label == record_split)
                         .unwrap_or(false)
                     && (candidate.source == record.source
@@ -1173,11 +1157,13 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         anchor_query_text: Option<&str>,
         rng: &mut dyn rand::RngCore,
     ) -> Option<(Arc<DataRecord>, bool)> {
-        let anchor_split = self.split_store.label_for(&anchor_record.id)?;
+        let anchor_split = self
+            .split_store
+            .label_for(&RecordKey::from(anchor_record))?;
 
         let in_anchor_split = |candidate: &DataRecord| {
             self.split_store
-                .label_for(&candidate.id)
+                .label_for(&RecordKey::from(candidate))
                 .map(|label| label == anchor_split)
                 .unwrap_or(false)
         };
@@ -1895,7 +1881,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             Selector::Role(role) => self.select_by_role(record, role),
             Selector::Paragraph(idx) => record.sections.get(*idx).and_then(|section| {
                 let pool = self.materialize_chunks(record, *idx, section);
-                self.next_chunk_from_pool(&record.id, *idx, pool)
+                self.next_chunk_from_pool(&RecordKey::from(record), *idx, pool)
             }),
             Selector::TemporalOffset(offset) => self
                 .select_temporal_neighbor(record, *offset)
@@ -1907,7 +1893,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 let idx = self.rng.random_range(0..record.sections.len());
                 record.sections.get(idx).and_then(|section| {
                     let pool = self.materialize_chunks(record, idx, section);
-                    self.next_chunk_from_pool(&record.id, idx, pool)
+                    self.next_chunk_from_pool(&RecordKey::from(record), idx, pool)
                 })
             }
         }
@@ -1924,7 +1910,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         if indices.is_empty() {
             return None;
         }
-        let key = role_cursor_key(&record.id, role);
+        let key = role_cursor_key(&RecordKey::from(record), role);
         let start_offset = self
             .role_cursors
             .get(&key)
@@ -1934,14 +1920,19 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 // On first use for this (record,role), choose a deterministic hashed
                 // section offset instead of always starting at the first matching section.
                 // This avoids systematic head-bias while preserving reproducibility.
-                let seed_key = format!("{}::{}", key.0, key.1);
+                // Preimage replicates the historical "{id}::{role}" form so
+                // sequences are unchanged for existing corpora.
+                let record_key = RecordKey::from(record);
+                let seed_key = format!("{}::{}", record_key.id, role_label(role));
                 (stable_hash_str(self.epoch_seed(), &seed_key) as usize) % indices.len()
             });
         for offset in 0..indices.len() {
             let section_idx = indices[(start_offset + offset) % indices.len()];
             let section = &record.sections[section_idx];
             let pool = self.materialize_chunks(record, section_idx, section);
-            if let Some(chunk) = self.next_chunk_from_pool(&record.id, section_idx, pool) {
+            if let Some(chunk) =
+                self.next_chunk_from_pool(&RecordKey::from(record), section_idx, pool)
+            {
                 self.role_cursors.insert(key.clone(), section_idx);
                 return Some(chunk);
             }
@@ -1975,6 +1966,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         // this a pointer copy, never a vector copy.
         for chunk in &mut chunks {
             chunk.embedding = section.embedding.clone();
+            chunk.source = record.source.clone();
         }
         chunks
     }
@@ -2052,21 +2044,21 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         // state for evicted records.
         let mut truly_evicted = false;
         if !evicted.is_empty() {
-            let added_ids: HashSet<&RecordId> = added.iter().map(|record| &record.id).collect();
-            for evicted_id in &evicted {
-                if added_ids.contains(evicted_id) {
+            let added_keys: HashSet<RecordKey> = added.iter().map(RecordKey::of_arc).collect();
+            for evicted_key in &evicted {
+                if added_keys.contains(evicted_key) {
                     continue;
                 }
-                let Some(record) = self.records.get(evicted_id) else {
+                let Some(record) = self.records.get(evicted_key) else {
                     continue;
                 };
                 let source = record.source.clone();
                 let is_long = self.record_has_long_anchor_or_context_section(record);
-                self.records.shift_remove(evicted_id);
-                self.emitted_text_hashes.remove(evicted_id);
-                self.split_labels.remove(evicted_id);
-                self.chunk_index.remove(evicted_id);
-                self.remove_id_from_source_index(&source, evicted_id);
+                self.records.shift_remove(evicted_key);
+                self.emitted_text_hashes.remove(evicted_key);
+                self.split_labels.remove(evicted_key);
+                self.chunk_index.remove(evicted_key);
+                self.remove_id_from_source_index(&source, evicted_key);
                 if is_long {
                     self.decrement_long_section_count(&source);
                 }
@@ -2084,30 +2076,25 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         if !added.is_empty() {
             let allowed: HashSet<SplitLabel> = self.allowed_target_splits().into_iter().collect();
             for record in &added {
-                // Re-ingested IDs (version bump for records already pooled,
+                // Re-ingested keys (version bump for records already pooled,
                 // e.g. a wrapped source re-draining known records) must not
                 // create duplicate index entries or double-count long
-                // sections. A full rebuild derives each ID exactly once from
+                // sections. A full rebuild derives each key exactly once from
                 // the pool, so skip index/count work here and only refresh
                 // the stored Arc.
-                if self.records.contains_key(&record.id) {
-                    self.records.insert(record.id.clone(), Arc::clone(record));
+                let key = RecordKey::from(record);
+                if self.records.contains_key(&key) {
+                    self.records.insert(key, Arc::clone(record));
                     continue;
                 }
                 pool_changed = true;
-                let label = self.get_or_insert_split_label(&record.id)?;
+                let label = self.get_or_insert_split_label(&key)?;
                 if self.record_has_long_anchor_or_context_section(record) {
                     self.increment_long_section_count(&record.source);
                 }
-                self.records.insert(record.id.clone(), Arc::clone(record));
-                self.chunk_index
-                    .insert(record.id.clone(), record.id.clone());
-                self.insert_id_into_source_index(
-                    record.source.clone(),
-                    record.id.clone(),
-                    label,
-                    &allowed,
-                );
+                self.records.insert(key.clone(), Arc::clone(record));
+                self.chunk_index.insert(key.clone(), key.clone());
+                self.insert_id_into_source_index(record.source.clone(), key, label, &allowed);
             }
         }
 
@@ -2164,26 +2151,27 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     /// new records in sorted order without breaking the IndexMap ordering.
     fn full_sync_records_from_cache(&mut self) -> Result<(), SamplerError> {
         let mut snapshot = self.ingestion.all_records_snapshot();
-        snapshot.sort_by(|a, b| a.id.cmp(&b.id));
+        snapshot.sort_by_key(RecordKey::of_arc);
 
         // Determine which records are being evicted BEFORE clearing self.records.
-        let old_ids: HashSet<String> = self.records.keys().cloned().collect();
-        let incoming_ids: HashSet<String> = snapshot.iter().map(|r| r.id.clone()).collect();
-        let evicted: HashSet<&String> = old_ids.difference(&incoming_ids).collect();
+        let old_keys: HashSet<RecordKey> = self.records.keys().cloned().collect();
+        let incoming_keys: HashSet<RecordKey> = snapshot.iter().map(RecordKey::of_arc).collect();
+        let evicted: HashSet<&RecordKey> = old_keys.difference(&incoming_keys).collect();
 
         self.records.clear();
         self.long_section_counts.clear();
-        for evicted_id in &evicted {
-            self.emitted_text_hashes.remove(*evicted_id);
-            self.split_labels.remove(*evicted_id);
+        for evicted_key in &evicted {
+            self.emitted_text_hashes.remove(*evicted_key);
+            self.split_labels.remove(*evicted_key);
         }
         self.negative_backend.on_sync_start();
         for record in snapshot {
-            let _ = self.get_or_insert_split_label(&record.id)?;
+            let key = RecordKey::from(&record);
+            let _ = self.get_or_insert_split_label(&key)?;
             if self.record_has_long_anchor_or_context_section(&record) {
                 self.increment_long_section_count(&record.source);
             }
-            self.records.insert(record.id.clone(), Arc::clone(&record));
+            self.records.insert(key, Arc::clone(&record));
         }
         self.prune_cursor_state();
         self.rebuild_chunk_index();
@@ -2492,7 +2480,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                         // For SRD pair-mode data, the label is stored in DataRecord.
                         let record_label = self
                             .records
-                            .get(&anchor.record_id)
+                            .get(&RecordKey::of_chunk(&anchor))
                             .and_then(|r| r.label.clone());
 
                         if pairs.len() < self.config.batch_size {
@@ -2587,7 +2575,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                     // Look up the anchor record's label to override structural defaults.
                     let record_label = self
                         .records
-                        .get(&anchor.record_id)
+                        .get(&RecordKey::of_chunk(&anchor))
                         .and_then(|r| r.label.clone());
 
                     if pairs.len() < self.config.batch_size {
@@ -2647,7 +2635,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         batch_texts.insert(sample.chunk.text.clone())
             && self
                 .emitted_text_hashes
-                .entry(sample.chunk.record_id.clone())
+                .entry(RecordKey::of_chunk(&sample.chunk))
                 .or_default()
                 .insert(stable_hash_str(0, &sample.chunk.text))
     }
@@ -3168,10 +3156,10 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     /// `TripletSamplerInner` before BM25 state moved into `Bm25Backend`.
     #[cfg(test)]
     #[cfg(feature = "bm25-mining")]
-    fn bm25_ranked_candidates(&mut self, anchor: &crate::data::DataRecord) -> Vec<RecordId> {
+    fn bm25_ranked_candidates(&mut self, anchor: &crate::data::DataRecord) -> Vec<RecordKey> {
         let split = self
             .split_store
-            .label_for(&anchor.id)
+            .label_for(&RecordKey::from(anchor))
             .unwrap_or(SplitLabel::Train);
         self.negative_backend
             .as_any_mut()
@@ -3545,8 +3533,8 @@ fn roles_match(target: &SectionRole, candidate: &SectionRole) -> bool {
     target == candidate
 }
 
-fn role_cursor_key(record_id: &RecordId, role: &SectionRole) -> (RecordId, String) {
-    (record_id.clone(), role_label(role))
+fn role_cursor_key(record_key: &RecordKey, role: &SectionRole) -> (RecordKey, String) {
+    (record_key.clone(), role_label(role))
 }
 
 fn role_label(role: &SectionRole) -> String {

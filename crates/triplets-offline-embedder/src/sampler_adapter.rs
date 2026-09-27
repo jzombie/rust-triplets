@@ -86,6 +86,7 @@ mod tests {
         RecordChunk {
             record_id: "r1".into(),
             section_idx: 0,
+            source: String::new(),
             view: ChunkView::Window {
                 index: 0,
                 overlap: 0,

@@ -4,7 +4,7 @@ use crate::data::DataRecord;
 use crate::errors::SamplerError;
 use crate::hash::derive_epoch_seed;
 use crate::source::{DataSource, SourceCursor, SourceSnapshot};
-use crate::types::{RecordId, SourceId};
+use crate::types::{RecordId, RecordKey, SourceId};
 use chrono::Utc;
 use indexmap::IndexMap;
 use std::collections::HashMap;
@@ -889,9 +889,12 @@ impl IngestionManager {
         !self.sources.is_empty()
     }
 
-    /// Return a delta of records added since `last_version` and record IDs evicted since `last_version`.
-    /// Queries all child caches using the unified version watermark and aggregates the results.
-    pub fn sync_delta(&mut self, last_version: u64) -> (u64, Vec<Arc<DataRecord>>, Vec<RecordId>) {
+    /// Return a delta of records added since `last_version` and record keys
+    /// evicted since `last_version`. Evicted ids are scoped to their source
+    /// here (per-source caches key by bare id, which is only unique within
+    /// one source). Queries all child caches using the unified version
+    /// watermark and aggregates the results.
+    pub fn sync_delta(&mut self, last_version: u64) -> (u64, Vec<Arc<DataRecord>>, Vec<RecordKey>) {
         let mut all_added = Vec::new();
         let mut all_evicted = Vec::new();
         let mut max_version = last_version;
@@ -902,7 +905,11 @@ impl IngestionManager {
                 max_version = new_version;
             }
             all_added.extend(added);
-            all_evicted.extend(evicted);
+            all_evicted.extend(
+                evicted
+                    .into_iter()
+                    .map(|id| RecordKey::new(state.source.id(), id)),
+            );
         }
 
         (max_version, all_added, all_evicted)

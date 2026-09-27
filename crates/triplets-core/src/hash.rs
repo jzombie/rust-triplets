@@ -25,6 +25,32 @@ pub fn stable_hash_str(seed: u64, value: &str) -> u64 {
     })
 }
 
+/// Return a deterministic u64 hash of a composite record identity mixed with
+/// `seed`.
+///
+/// Only the id part feeds the hasher — deliberately, not by omission: this
+/// keeps deterministic sequences (split assignment, orderings, cursor
+/// offsets) bit-identical for existing single-source corpora, so the
+/// composite-key migration changes coexistence, not behavior. Labels still
+/// conform to ratios per dataset; same-id records across sources simply share
+/// an assignment, which is harmless (pools and cursors stay per-source).
+pub fn stable_hash_key(seed: u64, key: &crate::types::RecordKey) -> u64 {
+    stable_hash_str(seed, &key.id)
+}
+
+/// Return a deterministic u64 hash selecting a chunk-window cursor offset for
+/// a (record, section) pair.
+///
+/// Replicates the historical `{id}::{section}` preimage exactly, so cursor
+/// sequences are unchanged for existing corpora.
+pub fn stable_hash_key_section(
+    seed: u64,
+    key: &crate::types::RecordKey,
+    section_idx: usize,
+) -> u64 {
+    stable_hash_str(seed, &format!("{}::{section_idx}", key.id))
+}
+
 /// Return a deterministic u64 hash of the string form of `path` mixed with `seed`.
 pub fn stable_hash_path(seed: u64, path: &Path) -> u64 {
     stable_hash_with(|hasher| {

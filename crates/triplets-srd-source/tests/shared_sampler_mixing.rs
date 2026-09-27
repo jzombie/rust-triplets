@@ -181,15 +181,9 @@ fn chunk_embeddings_match_store_ground_truth() {
     let store = DataStore::open_existing(&a_path).unwrap();
     for p in &batch.pairs {
         // Both slots verified: `section_idx` selects the entry side, the
-        // scoped id (`{source}::{index}`, parsed here only to address ground
-        // truth in this test) selects the entry.
+        // bare entry index selects the entry.
         for chunk in [&p.anchor, &p.positive] {
-            let idx: usize = chunk
-                .record_id
-                .strip_prefix("ds-a::")
-                .expect("scoped record id")
-                .parse()
-                .unwrap();
+            let idx: usize = chunk.record_id.parse().unwrap();
             let entries = batch_read_entries(&store, &[idx], DIM).unwrap();
             assert_eq!(entries.len(), 1);
             let emb: &[f32] = chunk.embedding.as_ref().expect("embedding present");

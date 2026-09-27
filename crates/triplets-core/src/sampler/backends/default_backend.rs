@@ -11,7 +11,7 @@ use indexmap::IndexMap;
 
 use crate::data::DataRecord;
 use crate::splits::SplitLabel;
-use crate::types::{RecordId, SourceId};
+use crate::types::{RecordKey, SourceId};
 
 use super::NegativeBackend;
 
@@ -51,14 +51,14 @@ impl NegativeBackend for DefaultBackend {
 
     fn on_records_refreshed(
         &mut self,
-        _records: &IndexMap<RecordId, Arc<DataRecord>>,
+        _records: &IndexMap<RecordKey, Arc<DataRecord>>,
         _max_window_tokens: usize,
-        _split_fn: &dyn Fn(&RecordId) -> Option<SplitLabel>,
+        _split_fn: &dyn Fn(&RecordKey) -> Option<SplitLabel>,
         _refreshed_source_ids: &[SourceId],
     ) {
     }
 
-    fn prune_cursors(&mut self, _valid_ids: &HashSet<RecordId>) {}
+    fn prune_cursors(&mut self, _valid_ids: &HashSet<RecordKey>) {}
 
     fn cursors_empty(&self) -> bool {
         true
@@ -152,8 +152,11 @@ mod tests {
     #[test]
     fn default_backend_noop_methods_and_test_hooks_are_stable() {
         let mut backend = DefaultBackend;
-        let records = IndexMap::from_iter([("r1".to_string(), Arc::new(record("r1")))]);
-        let valid_ids = HashSet::from_iter(["r1".to_string()]);
+        let records = IndexMap::from_iter([(
+            crate::types::RecordKey::new("test_source", "r1"),
+            Arc::new(record("r1")),
+        )]);
+        let valid_ids = HashSet::from_iter([crate::types::RecordKey::new("test_source", "r1")]);
 
         backend.on_sync_start();
         backend.on_records_refreshed(&records, 128, &|_| Some(SplitLabel::Train), &[]);

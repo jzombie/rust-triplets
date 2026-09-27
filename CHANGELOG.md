@@ -23,11 +23,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
   rebuilds); determinism comes from construction seeds.
 
 ### Fixed
-- **`SrdSource` record ids are now `{source_id}::{index}`** (triplets'
-  `{source}::{record}` convention). Bare entry indices collided in the sampler's
-  single `IndexMap<RecordId, _>` pool when several `SrdSource`s shared one
-  sampler — the later source silently overwrote the earlier one's records.
-  Ids are opaque; nothing parses them (vectors ride the embedding channel).
+- **Record identity is composite (`RecordKey { source, id }`) throughout the
+  sampler.** Pools, chunk index, split labels, dedup sets, ingestion deltas,
+  and BM25 state key by source + id instead of the bare id string, so same-id
+  records from different sources coexist instead of the later source silently
+  overwriting the earlier one's pool entries. Backends keep their native ids
+  (no decoration, no parsing — nothing touches the id string); the composite
+  derives from each record's own `source` + `id` fields, and sampled chunks
+  carry a structured `source` field for the same purpose. Split derivation,
+  orderings, and cursor offsets hash the id part exactly as before, so
+  deterministic sequences are unchanged for existing corpora (all 512 core
+  golden tests pass unmodified in behavior). `SplitStore::label_for/upsert/
+  ensure` now take `&RecordKey`/`RecordKey`; `FileSplitStore` persisted label
+  keys are namespaced the same way (epoch/sampler-state formats unchanged).
 
 ## [0.27.1-alpha] - 2026-09-09
 
