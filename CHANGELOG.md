@@ -43,9 +43,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
   explicit assignments. No dual-read fallback is kept (pre-1.0: rebuild the
   store rather than carrying legacy shims). Epoch/sampler-state formats
   unchanged. SRD baked-data files are unaffected (encoding untouched).
-- Bumped `parquet` from 59.1.0 to 60.0.0 (#166, semver-major)
+- Bumped `parquet` (and `arrow-*`) from 59.3.0 to 60.0.0 (#171, semver-major)
 - Bumped `clap` from 4.6.6 to 4.6.7 (#167)
 - Bumped `rustls` from 0.23.36 to 0.23.45 (RUSTSEC-2026-0285)
+- Bumped `thiserror` from 2.0.20 to 2.0.21 (#170)
+- Bumped `siphasher` from 1.0.3 to 1.0.4 (#173)
+- Bumped `cache-manager` from 0.4.1 to 0.6.0
+- Bumped `simd-r-drive` from 0.17.1-alpha to 0.17.3-alpha
+- Bumped `reqwest-drive` from 0.13.5-alpha to 0.13.5-alpha.1
 
 ### Fixed
 
