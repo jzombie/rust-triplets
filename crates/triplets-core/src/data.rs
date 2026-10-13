@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::kvp::KvpPrefixSampler;
 
@@ -108,6 +109,7 @@ impl DataRecord {
                 text: text_str,
                 sentences: vec![],
                 token_count,
+                embedding: None,
             }],
             meta_prefix: None,
             label: None,
@@ -129,6 +131,15 @@ pub struct RecordSection {
     /// Precomputed token count for this section, populated during section construction.
     #[serde(default)]
     pub token_count: usize,
+    /// Optional precomputed embedding for this section's text.
+    ///
+    /// Populated by sources that already hold vectors (e.g. SRD stores);
+    /// `None` for text-only sources. The sampler treats this as opaque
+    /// payload: it is cloned by [`Arc`] into chunks materialized from this
+    /// section and never interpreted, compared, or persisted (transient —
+    /// re-ingested from the source on resume).
+    #[serde(skip)]
+    pub embedding: Option<Arc<[f32]>>,
 }
 
 impl Default for RecordSection {
@@ -139,6 +150,7 @@ impl Default for RecordSection {
             text: String::new(),
             sentences: Vec::new(),
             token_count: 0,
+            embedding: None,
         }
     }
 }
@@ -155,8 +167,15 @@ pub enum SectionRole {
 /// A chunked view over a section.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RecordChunk {
-    /// Parent record id this chunk belongs to.
+    /// Parent record id this chunk belongs to (unique within [`RecordChunk::source`]).
     pub record_id: RecordId,
+    /// Source that produced the parent record. Together with `record_id` this
+    /// forms the chunk's [`RecordKey`](crate::types::RecordKey): a structured
+    /// field populated from the parent record, never parsed from strings.
+    /// Required (no `#[serde(default)]`): a chunk without a source resolves
+    /// split lookups against the wrong identity — that must fail loudly at
+    /// the boundary, not default to `""`.
+    pub source: SourceId,
     /// Index of the source section in `DataRecord.sections`.
     pub section_idx: usize,
     /// Chunk view metadata (window position or summary fallback).
@@ -176,6 +195,13 @@ pub struct RecordChunk {
     /// record has no `meta_prefix` configured.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub kvp_meta: HashMap<String, Vec<String>>,
+    /// Optional precomputed embedding inherited from the parent section.
+    ///
+    /// Stamped by the sampler when materializing chunks; `None` when the
+    /// source section carries no vector. Opaque payload — never interpreted,
+    /// compared, or persisted.
+    #[serde(skip)]
+    pub embedding: Option<Arc<[f32]>>,
 }
 
 /// Chunk view metadata (window or summary).
@@ -308,6 +334,7 @@ mod tests {
         RecordChunk {
             record_id: id.to_string(),
             section_idx: 0,
+            source: String::new(),
             view: ChunkView::SummaryFallback {
                 strategy: "test".to_string(),
                 weight: 1.0,
@@ -316,6 +343,7 @@ mod tests {
             tokens_estimate: 4,
             quality: QualityScore::default(),
             kvp_meta: Default::default(),
+            embedding: None,
         }
     }
 
@@ -392,6 +420,7 @@ mod tests {
                 text: "body".to_string(),
                 sentences: vec!["body".to_string()],
                 token_count: 0,
+                embedding: None,
             }],
             meta_prefix: None,
             label: None,
@@ -484,6 +513,7 @@ mod tests {
             text: "content".into(),
             sentences: vec!["content".into()],
             token_count: 0,
+            embedding: None,
         };
         assert_eq!(section.heading, Some("Title".to_string()));
     }
@@ -564,5 +594,19 @@ mod tests {
             WhitespaceTokenizer.token_count("hello beautiful world")
         );
         assert_eq!(record.id.as_str(), "from-txt");
+    }
+
+    #[test]
+    fn chunk_without_source_fails_deserialization_loudly() {
+        // A chunk with no source would resolve split lookups against the
+        // wrong identity ("", id). Deserialization must reject it — never
+        // default to an empty source.
+        let mut value = serde_json::to_value(sample_chunk("x")).unwrap();
+        value.as_object_mut().unwrap().remove("source");
+        let err = serde_json::from_value::<RecordChunk>(value).unwrap_err();
+        assert!(
+            err.to_string().contains("source"),
+            "missing source must fail loudly, got: {err}"
+        );
     }
 }

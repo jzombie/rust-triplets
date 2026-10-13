@@ -16,7 +16,7 @@ use indexmap::IndexMap;
 
 use crate::data::DataRecord;
 use crate::splits::SplitLabel;
-use crate::types::{RecordId, SourceId};
+use crate::types::{RecordKey, SourceId};
 
 #[cfg(feature = "bm25-mining")]
 pub(super) mod bm25_backend;
@@ -68,15 +68,15 @@ pub(super) trait NegativeBackend: Send + Sync {
     /// those sources rather than performing a full global reset.
     fn on_records_refreshed(
         &mut self,
-        records: &IndexMap<RecordId, Arc<DataRecord>>,
+        records: &IndexMap<RecordKey, Arc<DataRecord>>,
         max_window_tokens: usize,
-        split_fn: &dyn Fn(&RecordId) -> Option<SplitLabel>,
+        split_fn: &dyn Fn(&RecordKey) -> Option<SplitLabel>,
         refreshed_source_ids: &[SourceId],
     );
 
-    /// Prune internal per-record state so that only entries whose IDs appear in
+    /// Prune internal per-record state so that only entries whose keys appear in
     /// `valid_ids` are retained.  Called after every record-pool refresh.
-    fn prune_cursors(&mut self, valid_ids: &HashSet<RecordId>);
+    fn prune_cursors(&mut self, valid_ids: &HashSet<RecordKey>);
 
     /// Returns `true` when all internal cursor maps are empty.
     ///

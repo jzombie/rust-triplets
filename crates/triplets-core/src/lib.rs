@@ -63,5 +63,5 @@ pub use source::{DataSource, SourceCursor};
 pub use splits::{DeterministicSplitStore, FileSplitStore, SplitLabel, SplitRatios, SplitStore};
 pub use types::{
     CategoryId, HashPart, KvpValue, LogMessage, MetaValue, PathString, RecipeKey, RecordId,
-    Sentence, SourceId, TaxonomyValue,
+    RecordKey, Sentence, SourceId, TaxonomyValue,
 };
