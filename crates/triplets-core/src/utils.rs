@@ -62,6 +62,7 @@ pub fn make_section(role: SectionRole, heading: Option<&str>, text: &str) -> Rec
         text: text.to_string(),
         sentences: sentences(text),
         token_count: WhitespaceTokenizer.token_count(text),
+        embedding: None,
     }
 }
 

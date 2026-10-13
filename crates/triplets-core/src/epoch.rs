@@ -1,7 +1,7 @@
 use crate::errors::SamplerError;
 use crate::hash::stable_hash_with;
 use crate::splits::{EpochStateStore, PersistedSplitMeta, SplitLabel};
-use crate::types::{RecordId, SourceId};
+use crate::types::{RecordId, RecordKey, SourceId};
 use siphasher::sip::SipHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -151,11 +151,20 @@ impl EpochTracker {
     pub fn reconcile(
         &mut self,
         target_split: SplitLabel,
-        records: &HashMap<SplitLabel, Vec<(RecordId, SourceId)>>,
+        records: &HashMap<SplitLabel, Vec<RecordKey>>,
     ) {
         self.splits.retain(|label, _| *label == target_split);
         let mut changed = false;
-        let ids = records.get(&target_split).cloned().unwrap_or_default();
+        // Epoch populations stay `(id, source)` tuples (stable persisted form);
+        // the composite key converts at this boundary.
+        let ids: Vec<(RecordId, SourceId)> = records
+            .get(&target_split)
+            .map(|keys| {
+                keys.iter()
+                    .map(|k| (k.id.clone(), k.source.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
         let split_changed = self.reconcile_split(target_split, ids);
         changed |= split_changed;
         if changed {
@@ -237,13 +246,13 @@ impl EpochTracker {
         true
     }
 
-    pub fn next_record(&mut self, target_split: SplitLabel) -> Option<String> {
-        let id = self.next_from_split(target_split)?;
+    pub fn next_record(&mut self, target_split: SplitLabel) -> Option<RecordKey> {
+        let key = self.next_from_split(target_split)?;
         self.dirty |= self.backend.is_some();
-        Some(id)
+        Some(key)
     }
 
-    fn next_from_split(&mut self, label: SplitLabel) -> Option<String> {
+    fn next_from_split(&mut self, label: SplitLabel) -> Option<RecordKey> {
         let state = self.splits.get_mut(&label)?;
         if state.population.is_empty() {
             return None;
@@ -258,7 +267,10 @@ impl EpochTracker {
         }
         let idx = state.order[state.offset];
         state.offset += 1;
-        state.population.get(idx).map(|(id, _)| id.clone())
+        state
+            .population
+            .get(idx)
+            .map(|(id, source)| RecordKey::new(source.clone(), id.clone()))
     }
 
     pub fn persist(&mut self) -> Result<(), SamplerError> {
@@ -395,7 +407,7 @@ mod tests {
         records
             .get_mut(&SplitLabel::Train)
             .unwrap()
-            .push(("gamma".to_string(), "unit".to_string()));
+            .push(RecordKey::new("unit", "gamma"));
         tracker.reconcile(SplitLabel::Train, &records);
 
         let mut remainder = Vec::new();
@@ -417,7 +429,7 @@ mod tests {
             "expected the previously consumed record to reappear"
         );
         assert!(
-            remainder.contains(&"gamma".to_string()),
+            remainder.contains(&RecordKey::new("unit", "gamma")),
             "new record should be scheduled before epoch reset"
         );
         assert!(
@@ -426,12 +438,12 @@ mod tests {
         );
     }
 
-    fn single_split_records(ids: Vec<&str>) -> HashMap<SplitLabel, Vec<(RecordId, SourceId)>> {
+    fn single_split_records(ids: Vec<&str>) -> HashMap<SplitLabel, Vec<RecordKey>> {
         let mut map = HashMap::new();
         map.insert(
             SplitLabel::Train,
             ids.into_iter()
-                .map(|id| (id.to_string(), "unit".to_string()))
+                .map(|id| RecordKey::new("unit", id))
                 .collect(),
         );
         map
@@ -447,11 +459,11 @@ mod tests {
         let mut ids = Vec::new();
         // create 10 items for source "large" (0..10)
         for i in 0..10 {
-            ids.push((format!("large_{}", i), "large".to_string()));
+            ids.push(RecordKey::new("large", format!("large_{}", i)));
         }
         // create 2 items for source "small" (0..2)
         for i in 0..2 {
-            ids.push((format!("small_{}", i), "small".to_string()));
+            ids.push(RecordKey::new("small", format!("small_{}", i)));
         }
 
         let mut map = HashMap::new();
@@ -481,7 +493,7 @@ mod tests {
         let mut large_counts = HashMap::new();
 
         for (i, id) in output_sequence.iter().enumerate() {
-            if id.starts_with("small") {
+            if id.id.starts_with("small") {
                 *small_counts.entry(id.clone()).or_insert(0) += 1;
                 // Sources are sorted by name: "small" (even index) then "large" (odd index).
                 assert_eq!(i % 2, 0, "Small source should be at even indices");
@@ -493,7 +505,7 @@ mod tests {
 
         // Verify large source items appear exactly once
         for i in 0..10 {
-            let key = format!("large_{}", i);
+            let key = RecordKey::new("large", format!("large_{}", i));
             assert_eq!(
                 large_counts.get(&key),
                 Some(&1),
@@ -503,7 +515,7 @@ mod tests {
 
         // Verify small source items appear multiple times (5 times each, since 10/2 = 5)
         for i in 0..2 {
-            let key = format!("small_{}", i);
+            let key = RecordKey::new("small", format!("small_{}", i));
             assert_eq!(
                 small_counts.get(&key),
                 Some(&5),
@@ -521,14 +533,14 @@ mod tests {
         let mut ids = Vec::new();
         // 4 items for alpha (max source)
         for i in 0..4 {
-            ids.push((format!("alpha_{}", i), "alpha".to_string()));
+            ids.push(RecordKey::new("alpha", format!("alpha_{}", i)));
         }
         // 2 items for beta
         for i in 0..2 {
-            ids.push((format!("beta_{}", i), "beta".to_string()));
+            ids.push(RecordKey::new("beta", format!("beta_{}", i)));
         }
         // 1 item for gamma
-        ids.push(("gamma_0".to_string(), "gamma".to_string()));
+        ids.push(RecordKey::new("gamma", "gamma_0"));
 
         let mut map = HashMap::new();
         map.insert(SplitLabel::Train, ids);
@@ -555,10 +567,10 @@ mod tests {
         let mut gamma_counts = HashMap::new();
 
         for (i, id) in output_sequence.iter().enumerate() {
-            if id.starts_with("beta") {
+            if id.id.starts_with("beta") {
                 *beta_counts.entry(id.clone()).or_insert(0) += 1;
                 assert_eq!(i % 3, 0, "Beta source should be at index % 3 == 0");
-            } else if id.starts_with("alpha") {
+            } else if id.id.starts_with("alpha") {
                 *alpha_counts.entry(id.clone()).or_insert(0) += 1;
                 assert_eq!(i % 3, 1, "Alpha source should be at index % 3 == 1");
             } else {
@@ -569,7 +581,7 @@ mod tests {
 
         // Alpha items appear exactly once
         for i in 0..4 {
-            let key = format!("alpha_{}", i);
+            let key = RecordKey::new("alpha", format!("alpha_{}", i));
             assert_eq!(
                 alpha_counts.get(&key),
                 Some(&1),
@@ -579,7 +591,7 @@ mod tests {
 
         // Beta items appear twice each (4/2 = 2)
         for i in 0..2 {
-            let key = format!("beta_{}", i);
+            let key = RecordKey::new("beta", format!("beta_{}", i));
             assert_eq!(
                 beta_counts.get(&key),
                 Some(&2),
@@ -589,7 +601,7 @@ mod tests {
 
         // Gamma item appears 4 times (4/1 = 4)
         assert_eq!(
-            gamma_counts.get("gamma_0"),
+            gamma_counts.get(&RecordKey::new("gamma", "gamma_0")),
             Some(&4),
             "Gamma item should be upsampled to match max source"
         );
@@ -601,21 +613,21 @@ mod tests {
         let mut tracker = EpochTracker::new(true, Some(backend.clone()), 3);
         tracker.ensure_loaded().unwrap();
 
-        let mut records: HashMap<SplitLabel, Vec<(RecordId, SourceId)>> = HashMap::new();
+        let mut records: HashMap<SplitLabel, Vec<RecordKey>> = HashMap::new();
         // Train split: two sources
         records.insert(
             SplitLabel::Train,
             vec![
-                ("train_a0".to_string(), "alpha".to_string()),
-                ("train_b0".to_string(), "beta".to_string()),
+                RecordKey::new("alpha", "train_a0"),
+                RecordKey::new("beta", "train_b0"),
             ],
         );
         // Validation split: two sources
         records.insert(
             SplitLabel::Validation,
             vec![
-                ("val_a0".to_string(), "alpha".to_string()),
-                ("val_b0".to_string(), "beta".to_string()),
+                RecordKey::new("alpha", "val_a0"),
+                RecordKey::new("beta", "val_b0"),
             ],
         );
 
@@ -627,7 +639,7 @@ mod tests {
         assert!(!tracker.splits.contains_key(&SplitLabel::Validation));
 
         let next = tracker.next_record(SplitLabel::Train).unwrap();
-        assert!(next.starts_with("train_"));
+        assert!(next.id.starts_with("train_"));
     }
 
     #[test]

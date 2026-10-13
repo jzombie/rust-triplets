@@ -54,6 +54,8 @@ impl ChunkingAlgorithm for SlidingWindowChunker {
                 tokens_estimate: span,
                 quality: record.quality,
                 kvp_meta: Default::default(),
+                source: record.source.clone(),
+                embedding: None,
             });
             return chunks;
         }
@@ -77,6 +79,8 @@ impl ChunkingAlgorithm for SlidingWindowChunker {
                     tokens_estimate: end - start,
                     quality: record.quality,
                     kvp_meta: Default::default(),
+                    source: record.source.clone(),
+                    embedding: None,
                 });
                 if end == tokens.len() {
                     break;
@@ -109,6 +113,8 @@ impl ChunkingAlgorithm for SlidingWindowChunker {
                 tokens_estimate: fallback_len,
                 quality: record.quality,
                 kvp_meta: Default::default(),
+                source: record.source.clone(),
+                embedding: None,
             });
         }
 
@@ -147,6 +153,7 @@ mod tests {
                 text: text.into(),
                 sentences: vec![text.into()],
                 token_count: 0,
+                embedding: None,
             }],
             meta_prefix: None,
             label: None,

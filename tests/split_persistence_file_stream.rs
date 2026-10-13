@@ -14,8 +14,8 @@ use triplets::source::indexing::file_corpus::FileCorpusIndex;
 use triplets::splits::{FileSplitStore, SplitRatios, SplitStore};
 use triplets::utils::make_section;
 use triplets::{
-    DataRecord, NegativeStrategy, QualityScore, RecordId, Sampler, SamplerConfig, SectionRole,
-    Selector, SourceId, SplitLabel, TripletRecipe, TripletSampler,
+    DataRecord, NegativeStrategy, QualityScore, RecordId, RecordKey, Sampler, SamplerConfig,
+    SectionRole, Selector, SourceId, SplitLabel, TripletRecipe, TripletSampler,
 };
 
 fn write_qa_file(dir: &std::path::Path, name: &str, answer: &str) {
@@ -152,7 +152,12 @@ fn file_based_split_assignments_remain_stable_across_growth() {
         let store = FileSplitStore::open(&store_path, split, 123).unwrap();
         let mut labels_initial = HashMap::new();
         for id in &initial_ids {
-            labels_initial.insert(id.clone(), store.ensure(id.clone()).unwrap());
+            labels_initial.insert(
+                RecordKey::new(source_id.clone(), id.clone()),
+                store
+                    .ensure(RecordKey::new(source_id.clone(), id.clone()))
+                    .unwrap(),
+            );
         }
         assert_eq!(labels_initial.len(), initial_ids.len());
 
@@ -186,34 +191,41 @@ fn file_based_split_assignments_remain_stable_across_growth() {
         let store = FileSplitStore::open(&store_path, split, 123).unwrap();
         let mut labels_after = HashMap::new();
         for id in &all_ids {
-            labels_after.insert(id.clone(), store.ensure(id.clone()).unwrap());
+            labels_after.insert(
+                RecordKey::new(source_id.clone(), id.clone()),
+                store
+                    .ensure(RecordKey::new(source_id.clone(), id.clone()))
+                    .unwrap(),
+            );
         }
         assert_eq!(labels_after.len(), all_ids.len());
 
         // Original files must retain their original split labels.
         for id in &initial_ids {
+            let key = RecordKey::new(source_id.clone(), id.clone());
             assert_eq!(
-                labels_after.get(id).copied().unwrap(),
-                labels_initial.get(id).copied().unwrap()
+                labels_after.get(&key).copied().unwrap(),
+                labels_initial.get(&key).copied().unwrap()
             );
         }
 
         // New files must exist and be assigned to a split.
         let new_ids: Vec<RecordId> = all_ids
             .iter()
-            .filter(|id| !labels_initial.contains_key(*id))
+            .filter(|id| !labels_initial.contains_key(&RecordKey::new(source_id.clone(), *id)))
             .cloned()
             .collect();
         assert_eq!(new_ids.len(), 2);
         for id in &new_ids {
-            assert!(labels_after.contains_key(id));
+            assert!(labels_after.contains_key(&RecordKey::new(source_id.clone(), id)));
         }
 
         // Double-check: original IDs still map to the same splits.
         for id in &initial_ids {
+            let key = RecordKey::new(source_id.clone(), id.clone());
             assert_eq!(
-                labels_after.get(id).copied().unwrap(),
-                labels_initial.get(id).copied().unwrap()
+                labels_after.get(&key).copied().unwrap(),
+                labels_initial.get(&key).copied().unwrap()
             );
         }
     }

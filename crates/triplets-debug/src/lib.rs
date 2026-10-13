@@ -27,6 +27,7 @@ use triplets_core::metrics::{chunk_proximity_score, source_skew, window_chunk_di
 use triplets_core::sampler::chunk_weight;
 use triplets_core::source::DataSource;
 use triplets_core::splits::{FileSplitStore, SplitLabel, SplitRatios, SplitStore};
+use triplets_core::types::RecordKey;
 use triplets_core::{
     RecordChunk, SampleBatch, Sampler, SamplerError, SourceId, TextBatch, TextRecipe, TripletBatch,
     TripletSampler,
@@ -1301,7 +1302,7 @@ fn print_chunk_block(
 ) {
     let chunk_weight = chunk_weight(strategy, chunk);
     let split = split_store
-        .label_for(&chunk.record_id)
+        .label_for(&RecordKey::of_chunk(chunk))
         .map(|label| format!("{:?}", label))
         .unwrap_or_else(|| "Unknown".to_string());
     println!("--- {} ---", title);
@@ -1873,6 +1874,7 @@ mod tests {
                                 text: "anchor".to_string(),
                                 sentences: vec!["anchor".to_string()],
                                 token_count: 0,
+                                embedding: None,
                             },
                             RecordSection {
                                 role: SectionRole::Context,
@@ -1880,6 +1882,7 @@ mod tests {
                                 text: "context".to_string(),
                                 sentences: vec!["context".to_string()],
                                 token_count: 0,
+                                embedding: None,
                             },
                         ],
                         meta_prefix: None,
@@ -2271,6 +2274,7 @@ mod tests {
         let anchor = RecordChunk {
             record_id: "source_a::rec1".to_string(),
             section_idx: 0,
+            source: String::new(),
             view: ChunkView::Window {
                 index: 1,
                 overlap: 2,
@@ -2285,10 +2289,12 @@ mod tests {
             )]
             .into_iter()
             .collect(),
+            embedding: None,
         };
         let positive = RecordChunk {
             record_id: "source_a::rec2".to_string(),
             section_idx: 1,
+            source: String::new(),
             view: ChunkView::SummaryFallback {
                 strategy: "summary".to_string(),
                 weight: 0.7,
@@ -2297,10 +2303,12 @@ mod tests {
             tokens_estimate: 6,
             quality: triplets_core::data::QualityScore { trust: 0.8 },
             kvp_meta: Default::default(),
+            embedding: None,
         };
         let negative = RecordChunk {
             record_id: "source_b::rec3".to_string(),
             section_idx: 2,
+            source: String::new(),
             view: ChunkView::Window {
                 index: 0,
                 overlap: 0,
@@ -2310,6 +2318,7 @@ mod tests {
             tokens_estimate: 7,
             quality: triplets_core::data::QualityScore { trust: 0.5 },
             kvp_meta: Default::default(),
+            embedding: None,
         };
 
         let triplet_batch = TripletBatch {

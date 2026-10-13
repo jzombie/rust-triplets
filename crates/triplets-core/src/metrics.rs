@@ -199,6 +199,7 @@ mod tests {
         RecordChunk {
             record_id: record_id.to_string(),
             section_idx,
+            source: String::new(),
             view: ChunkView::Window {
                 index,
                 overlap: 0,
@@ -208,6 +209,7 @@ mod tests {
             tokens_estimate: 1,
             quality: crate::data::QualityScore::default(),
             kvp_meta: Default::default(),
+            embedding: None,
         }
     }
 

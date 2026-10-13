@@ -20,7 +20,7 @@ use crate::constants::sampler::BM25_SEARCH_TOP_K;
 use crate::data::DataRecord;
 use crate::splits::SplitLabel;
 use crate::tokenizer::{Tokenizer, WhitespaceTokenizer};
-use crate::types::{RecordId, SourceId};
+use crate::types::{RecordId, RecordKey, SourceId};
 use crate::utils::platform_newline;
 
 use super::NegativeBackend;
@@ -29,6 +29,7 @@ use super::NegativeBackend;
 
 /// Metadata stored alongside each indexed document in the global BM25 index.
 struct Bm25RecordMeta {
+    source: SourceId,
     record_id: RecordId,
     /// Cached split label (`None` when the record has not yet been assigned).
     split: Option<SplitLabel>,
@@ -54,14 +55,14 @@ struct PerSourceBm25Index {
 /// top-K rotation cursors.  The sampler core holds this as
 /// `Box<dyn NegativeBackend>` and interacts only through that trait.
 pub struct Bm25Backend {
-    /// BM25-ranked candidate IDs keyed by anchor record ID.
+    /// BM25-ranked candidate keys keyed by anchor record key.
     /// Written once per anchor (full-article query), then read-only until records refresh.
-    hard_negatives: RwLock<HashMap<RecordId, Vec<RecordId>>>,
+    hard_negatives: RwLock<HashMap<RecordKey, Vec<RecordKey>>>,
     /// Per-source BM25 search engines, keyed by source identifier.
     /// Rebuilt on refresh; read-only during sampling.
     source_indexes: HashMap<SourceId, PerSourceBm25Index>,
-    /// Per-`(anchor_id, split)` cursor for deterministic top-K rotation.
-    negative_cursors: RwLock<HashMap<(RecordId, SplitLabel), usize>>,
+    /// Per-`(anchor_key, split)` cursor for deterministic top-K rotation.
+    negative_cursors: RwLock<HashMap<(RecordKey, SplitLabel), usize>>,
     /// Token limit used when building BM25 document text; mirrors
     /// `config.chunking.max_window_tokens` and is refreshed on every
     /// `on_records_refreshed` call.
@@ -119,29 +120,29 @@ impl Bm25Backend {
         // been applied before arriving here.  This function re-ranks the pool
         // by BM25 lexical score and rotates through the top-K candidates.
         //
-        // 1) Fetch globally BM25-ranked candidate IDs (same-split, cached per
-        //    anchor).  Intersect with `pool` IDs to restrict to the
+        // 1) Fetch globally BM25-ranked candidate keys (same-split, cached per
+        //    anchor).  Intersect with `pool` keys to restrict to the
         //    pre-filtered set — no predicates need to be re-checked here.
         // 2) Compute top_k = min(configured_top_k, ranked_pool.len()).
-        // 3) Read per-(anchor_id, split) cursor, defaulting to 0.
+        // 3) Read per-(anchor_key, split) cursor, defaulting to 0.
         // 4) Return ranked_pool[cursor], then advance cursor mod top_k.
         //
         // Cursors are cleared in on_sync_start() so a refreshed corpus
         // restarts rotation from rank-1 for each anchor.
-        let pool_by_id: HashMap<&str, &Arc<DataRecord>> =
-            pool.iter().map(|r| (r.id.as_str(), r)).collect();
+        let pool_by_key: HashMap<RecordKey, &Arc<DataRecord>> =
+            pool.iter().map(|r| (RecordKey::from(r), r)).collect();
 
-        let candidate_ids = self.ranked_candidates(anchor, anchor_split, anchor_query_text);
-        let ranked_pool: Vec<Arc<DataRecord>> = candidate_ids
+        let candidate_keys = self.ranked_candidates(anchor, anchor_split, anchor_query_text);
+        let ranked_pool: Vec<Arc<DataRecord>> = candidate_keys
             .iter()
-            .filter_map(|id| pool_by_id.get(id.as_str()).copied().cloned())
+            .filter_map(|key| pool_by_key.get(key).copied().cloned())
             .collect();
 
         if !ranked_pool.is_empty() {
             let top_k = ranked_pool
                 .len()
                 .min(BM25_HARD_NEGATIVE_ROTATION_TOP_K.max(1));
-            let cursor_key = (anchor.id.clone(), anchor_split);
+            let cursor_key = (RecordKey::from(anchor), anchor_split);
             let mut cursors = self.negative_cursors.write().unwrap();
             let cursor = cursors.entry(cursor_key).or_insert(0);
             if *cursor >= top_k {
@@ -161,7 +162,7 @@ impl Bm25Backend {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         let mut fallback = pool.to_vec();
-        fallback.sort_by(|a, b| a.id.cmp(&b.id));
+        fallback.sort_by(|a, b| RecordKey::from(a).cmp(&RecordKey::from(b)));
         if fallback.is_empty() {
             return None;
         }
@@ -189,10 +190,16 @@ impl Bm25Backend {
         anchor: &DataRecord,
         anchor_split: SplitLabel,
         anchor_query_text: Option<&str>,
-    ) -> Vec<RecordId> {
+    ) -> Vec<RecordKey> {
+        let anchor_key = RecordKey::from(anchor);
         // When using full-article text, serve from cache if available.
         if anchor_query_text.is_none()
-            && let Some(cached) = self.hard_negatives.read().unwrap().get(&anchor.id).cloned()
+            && let Some(cached) = self
+                .hard_negatives
+                .read()
+                .unwrap()
+                .get(&anchor_key)
+                .cloned()
         {
             return cached;
         }
@@ -202,7 +209,7 @@ impl Bm25Backend {
                 self.hard_negatives
                     .write()
                     .unwrap()
-                    .insert(anchor.id.clone(), Vec::new());
+                    .insert(anchor_key, Vec::new());
             }
             return Vec::new();
         };
@@ -237,17 +244,18 @@ impl Bm25Backend {
         let results = index
             .search_engine
             .search(bm25_query_text, BM25_SEARCH_TOP_K);
-        let mut all_scored: Vec<(f32, RecordId)> = results
+        let mut all_scored: Vec<(f32, RecordKey)> = results
             .into_iter()
             .filter_map(|result| {
                 let m = index.meta.get(result.document.id)?;
-                if m.record_id == anchor.id {
+                let key = RecordKey::new(m.source.clone(), m.record_id.clone());
+                if key == anchor_key {
                     return None;
                 }
                 if m.split != Some(anchor_split) {
                     return None;
                 }
-                Some((result.score, m.record_id.clone()))
+                Some((result.score, key))
             })
             .collect();
 
@@ -257,14 +265,14 @@ impl Bm25Backend {
                 .then_with(|| a.1.cmp(&b.1))
         });
 
-        let ranked: Vec<RecordId> = all_scored.into_iter().map(|(_, id)| id).collect();
+        let ranked: Vec<RecordKey> = all_scored.into_iter().map(|(_, key)| key).collect();
         // Only cache full-article results; chunk-window results are not cached
         // because different windows of the same record produce different rankings.
         if anchor_query_text.is_none() {
             self.hard_negatives
                 .write()
                 .unwrap()
-                .insert(anchor.id.clone(), ranked.clone());
+                .insert(anchor_key, ranked.clone());
         }
         ranked
     }
@@ -278,7 +286,7 @@ impl Bm25Backend {
         &mut self,
         source_id: &SourceId,
         source_records: &[&DataRecord],
-        split_fn: &dyn Fn(&RecordId) -> Option<SplitLabel>,
+        split_fn: &dyn Fn(&RecordKey) -> Option<SplitLabel>,
     ) {
         if source_records.len() < 2 {
             self.source_indexes.remove(source_id);
@@ -289,8 +297,9 @@ impl Bm25Backend {
         let mut docs: Vec<Document<usize>> = Vec::with_capacity(source_records.len());
 
         for (idx, record) in source_records.iter().enumerate() {
-            let split = split_fn(&record.id);
+            let split = split_fn(&RecordKey::from(*record));
             meta.push(Bm25RecordMeta {
+                source: record.source.clone(),
                 record_id: record.id.clone(),
                 split,
             });
@@ -342,9 +351,9 @@ impl NegativeBackend for Bm25Backend {
 
     fn on_records_refreshed(
         &mut self,
-        records: &IndexMap<RecordId, Arc<DataRecord>>,
+        records: &IndexMap<RecordKey, Arc<DataRecord>>,
         max_window_tokens: usize,
-        split_fn: &dyn Fn(&RecordId) -> Option<SplitLabel>,
+        split_fn: &dyn Fn(&RecordKey) -> Option<SplitLabel>,
         refreshed_source_ids: &[SourceId],
     ) {
         if refreshed_source_ids.is_empty() {
@@ -358,12 +367,15 @@ impl NegativeBackend for Bm25Backend {
         // from unchanged sources keep their cached lists intact.
         let refreshed_set: HashSet<&str> =
             refreshed_source_ids.iter().map(|s| s.as_str()).collect();
-        self.hard_negatives.write().unwrap().retain(|anchor_id, _| {
-            records
-                .get(anchor_id)
-                .map(|r| !refreshed_set.contains(r.source.as_str()))
-                .unwrap_or(false)
-        });
+        self.hard_negatives
+            .write()
+            .unwrap()
+            .retain(|anchor_key, _| {
+                records
+                    .get(anchor_key)
+                    .map(|r| !refreshed_set.contains(r.source.as_str()))
+                    .unwrap_or(false)
+            });
 
         // Group current records by source, then rebuild only each refreshed
         // source's index from its current record slice.
@@ -389,17 +401,17 @@ impl NegativeBackend for Bm25Backend {
             .retain(|source_id, _| active_sources.contains(source_id.as_str()));
     }
 
-    fn prune_cursors(&mut self, valid_ids: &HashSet<RecordId>) {
+    fn prune_cursors(&mut self, valid_keys: &HashSet<RecordKey>) {
         self.negative_cursors
             .write()
             .unwrap()
-            .retain(|(record_id, _), _| valid_ids.contains(record_id));
+            .retain(|(record_key, _), _| valid_keys.contains(record_key));
         // Also remove hard-negative cache entries for anchors that are no
         // longer in the record pool.
         self.hard_negatives
             .write()
             .unwrap()
-            .retain(|anchor_id, _| valid_ids.contains(anchor_id));
+            .retain(|anchor_key, _| valid_keys.contains(anchor_key));
     }
 
     fn cursors_empty(&self) -> bool {
@@ -431,40 +443,48 @@ impl Bm25Backend {
         &self,
         anchor: &DataRecord,
         anchor_split: SplitLabel,
-    ) -> Vec<RecordId> {
+    ) -> Vec<RecordKey> {
         self.ranked_candidates(anchor, anchor_split, None)
     }
 
-    /// Return a clone of the hard-negative candidate list for `anchor_id`, or
+    /// Return a clone of the hard-negative candidate list for `anchor`, or
     /// `None` when no cache entry exists.
     #[cfg(test)]
     pub(in crate::sampler) fn hard_negatives_get(
         &self,
-        anchor_id: &RecordId,
-    ) -> Option<Vec<RecordId>> {
-        self.hard_negatives.read().unwrap().get(anchor_id).cloned()
+        anchor: &DataRecord,
+    ) -> Option<Vec<RecordKey>> {
+        self.hard_negatives
+            .read()
+            .unwrap()
+            .get(&RecordKey::from(anchor))
+            .cloned()
     }
 
-    /// Return the record IDs of all documents across all per-source indexes.
+    /// Return the record keys of all documents across all per-source indexes.
     ///
     /// Sources are visited in sorted order; within each source records appear
     /// in their per-source index order.  For single-source tests this matches
     /// the previous global-index ordering exactly.  Returns `None` when no
     /// indexes have been built yet.
     #[cfg(test)]
-    pub(in crate::sampler) fn index_meta_record_ids(&self) -> Option<Vec<RecordId>> {
+    pub(in crate::sampler) fn index_meta_record_ids(&self) -> Option<Vec<RecordKey>> {
         if self.source_indexes.is_empty() {
             return None;
         }
         let mut source_keys: Vec<&SourceId> = self.source_indexes.keys().collect();
         source_keys.sort();
-        let mut all_ids: Vec<RecordId> = Vec::new();
+        let mut all_keys: Vec<RecordKey> = Vec::new();
         for source_id in source_keys {
             if let Some(idx) = self.source_indexes.get(source_id) {
-                all_ids.extend(idx.meta.iter().map(|m| m.record_id.clone()));
+                all_keys.extend(
+                    idx.meta
+                        .iter()
+                        .map(|m| RecordKey::new(m.source.clone(), m.record_id.clone())),
+                );
             }
         }
-        Some(all_ids)
+        Some(all_keys)
     }
 
     /// Return the number of active negative-cursor entries.
@@ -485,7 +505,7 @@ impl Bm25Backend {
     #[cfg(test)]
     pub(in crate::sampler) fn negative_cursors_insert(
         &self,
-        key: (RecordId, SplitLabel),
+        key: (RecordKey, SplitLabel),
         value: usize,
     ) {
         self.negative_cursors.write().unwrap().insert(key, value);

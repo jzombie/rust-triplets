@@ -22,7 +22,7 @@ use triplets::splits::{
     SamplerStateStore, SplitLabel, SplitRatios, SplitStore,
 };
 use triplets::utils::make_section;
-use triplets::{RecordId, SourceId};
+use triplets::{RecordId, RecordKey, SourceId};
 
 fn build_record(source: &str, suffix: &str, day_offset: u32) -> DataRecord {
     let created_at = Utc
@@ -78,7 +78,7 @@ fn build_config(seed: u64, batch_size: usize, split: SplitRatios) -> SamplerConf
 struct CountingSplitStore {
     ratios: SplitRatios,
     seed: u64,
-    assignments: RwLock<HashMap<RecordId, SplitLabel>>,
+    assignments: RwLock<HashMap<RecordKey, SplitLabel>>,
     upserts: AtomicUsize,
     epoch_meta: RwLock<HashMap<SplitLabel, PersistedSplitMeta>>,
     epoch_hashes: RwLock<HashMap<SplitLabel, PersistedSplitHashes>>,
@@ -116,17 +116,17 @@ impl CountingSplitStore {
 }
 
 impl SplitStore for CountingSplitStore {
-    fn label_for(&self, id: &String) -> Option<SplitLabel> {
-        self.assignments.read().ok()?.get(id).copied()
+    fn label_for(&self, key: &RecordKey) -> Option<SplitLabel> {
+        self.assignments.read().ok()?.get(key).copied()
     }
 
-    fn upsert(&self, id: String, label: SplitLabel) -> Result<(), triplets::SamplerError> {
+    fn upsert(&self, key: RecordKey, label: SplitLabel) -> Result<(), triplets::SamplerError> {
         self.upserts.fetch_add(1, Ordering::Relaxed);
         let mut guard = self
             .assignments
             .write()
             .map_err(|_| triplets::SamplerError::SplitStore("lock poisoned".into()))?;
-        guard.insert(id, label);
+        guard.insert(key, label);
         Ok(())
     }
 
@@ -134,12 +134,12 @@ impl SplitStore for CountingSplitStore {
         self.ratios
     }
 
-    fn ensure(&self, id: String) -> Result<SplitLabel, triplets::SamplerError> {
-        if let Some(label) = self.label_for(&id) {
+    fn ensure(&self, key: RecordKey) -> Result<SplitLabel, triplets::SamplerError> {
+        if let Some(label) = self.label_for(&key) {
             return Ok(label);
         }
-        let label = self.derive_label(&id);
-        self.upsert(id, label)?;
+        let label = self.derive_label(&key.id);
+        self.upsert(key, label)?;
         Ok(label)
     }
 }
@@ -668,9 +668,13 @@ fn allowed_split_records_eventually_sampled_across_ratio_matrix() {
         config.ingestion_max_records = target_per_split * allowed_splits.len();
         let sampler = TripletSampler::new(config, Arc::clone(&store));
 
-        let mut expected: HashMap<SplitLabel, std::collections::HashSet<RecordId>> = HashMap::new();
+        let mut expected: HashMap<SplitLabel, std::collections::HashSet<RecordKey>> =
+            HashMap::new();
         let mut records = Vec::new();
         let mut idx = 0usize;
+        // Records register under matrix_case_{case_idx}, so expected keys
+        // use the normalized (registering) source, not the inner one.
+        let case_source = format!("matrix_case_{case_idx}");
         while expected.values().map(|ids| ids.len()).sum::<usize>()
             < target_per_split * allowed_splits.len()
         {
@@ -679,7 +683,9 @@ fn allowed_split_records_eventually_sampled_across_ratio_matrix() {
             let label = store.derive_label(&record_id);
             if allowed_splits.contains(&label) {
                 let ids = expected.entry(label).or_default();
-                if ids.len() < target_per_split && ids.insert(record_id.clone()) {
+                if ids.len() < target_per_split
+                    && ids.insert(RecordKey::new(case_source.clone(), record_id.clone()))
+                {
                     records.push(build_record("unit", &suffix, (records.len() % 27) as u32));
                 }
             }
@@ -696,13 +702,10 @@ fn allowed_split_records_eventually_sampled_across_ratio_matrix() {
         }
 
         sampler
-            .register_source(Box::new(InMemorySource::from_records(
-                format!("matrix_case_{case_idx}"),
-                records,
-            )))
+            .register_source(Box::new(InMemorySource::from_records(case_source, records)))
             .unwrap();
 
-        let mut seen: HashMap<SplitLabel, std::collections::HashSet<RecordId>> = HashMap::new();
+        let mut seen: HashMap<SplitLabel, std::collections::HashSet<RecordKey>> = HashMap::new();
         for split_label in &allowed_splits {
             seen.insert(*split_label, std::collections::HashSet::new());
         }
@@ -712,10 +715,10 @@ fn allowed_split_records_eventually_sampled_across_ratio_matrix() {
             for split_label in &allowed_splits {
                 let batch = sampler.next_triplet_batch_for_split(*split_label).unwrap();
                 for triplet in batch.triplets {
-                    let anchor_id = triplet.anchor.record_id;
-                    let anchor_label = store.label_for(&anchor_id).unwrap();
+                    let anchor_key = RecordKey::of_chunk(&triplet.anchor);
+                    let anchor_label = store.label_for(&anchor_key).unwrap();
                     assert_eq!(anchor_label, *split_label);
-                    seen.get_mut(split_label).unwrap().insert(anchor_id);
+                    seen.get_mut(split_label).unwrap().insert(anchor_key);
                 }
             }
 
@@ -781,7 +784,11 @@ fn allowed_split_records_eventually_sampled_across_ratio_matrix_via_generic_trip
         config.ingestion_max_records = target_per_split * allowed_splits.len();
         let sampler = TripletSampler::new(config, Arc::clone(&store));
 
-        let mut expected: HashMap<SplitLabel, std::collections::HashSet<RecordId>> = HashMap::new();
+        // Records register under generic_matrix_case_{case_idx}, so expected
+        // keys use the normalized (registering) source, not the inner one.
+        let case_source = format!("generic_matrix_case_{case_idx}");
+        let mut expected: HashMap<SplitLabel, std::collections::HashSet<RecordKey>> =
+            HashMap::new();
         let mut records = Vec::new();
         let mut idx = 0usize;
         while expected.values().map(|ids| ids.len()).sum::<usize>()
@@ -792,7 +799,9 @@ fn allowed_split_records_eventually_sampled_across_ratio_matrix_via_generic_trip
             let label = store.derive_label(&record_id);
             if allowed_splits.contains(&label) {
                 let ids = expected.entry(label).or_default();
-                if ids.len() < target_per_split && ids.insert(record_id.clone()) {
+                if ids.len() < target_per_split
+                    && ids.insert(RecordKey::new(case_source.clone(), record_id.clone()))
+                {
                     records.push(build_record("unit", &suffix, (records.len() % 27) as u32));
                 }
             }
@@ -809,13 +818,10 @@ fn allowed_split_records_eventually_sampled_across_ratio_matrix_via_generic_trip
         }
 
         sampler
-            .register_source(Box::new(InMemorySource::from_records(
-                format!("generic_matrix_case_{case_idx}"),
-                records,
-            )))
+            .register_source(Box::new(InMemorySource::from_records(case_source, records)))
             .unwrap();
 
-        let mut seen: HashMap<SplitLabel, std::collections::HashSet<RecordId>> = HashMap::new();
+        let mut seen: HashMap<SplitLabel, std::collections::HashSet<RecordKey>> = HashMap::new();
         for split_label in &allowed_splits {
             seen.insert(*split_label, std::collections::HashSet::new());
         }
@@ -825,15 +831,15 @@ fn allowed_split_records_eventually_sampled_across_ratio_matrix_via_generic_trip
             for split_label in &allowed_splits {
                 let batch = sampler.next_triplet_batch(*split_label).unwrap();
                 for triplet in batch.triplets {
-                    let anchor_id = triplet.anchor.record_id;
-                    let anchor_label = store.label_for(&anchor_id).unwrap();
+                    let anchor_key = RecordKey::of_chunk(&triplet.anchor);
+                    let anchor_label = store.label_for(&anchor_key).unwrap();
                     assert!(
                         allowed_splits.contains(&anchor_label),
                         "generic batch returned disallowed split {:?}",
                         anchor_label
                     );
                     assert_eq!(anchor_label, *split_label);
-                    seen.get_mut(split_label).unwrap().insert(anchor_id);
+                    seen.get_mut(split_label).unwrap().insert(anchor_key);
                 }
             }
 
