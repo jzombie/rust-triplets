@@ -1,4 +1,5 @@
 # Changelog
+
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
@@ -7,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 ## [0.28.0-alpha] - 2026-09-27
 
 ### Added
+
 - **Precomputed-embedding channel through the sampler.** `RecordSection.embedding`
   and `RecordChunk.embedding` (`Option<Arc<[f32]>>`, `#[serde(skip)]` — transient,
   re-ingested on resume, never persisted or compared). The sampler stamps every
@@ -34,6 +36,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
   without it fails loudly instead of defaulting to `""`.
 
 ### Changed
+
 - **BREAKING: `FileSplitStore` storage version bumped 1 → 2.** Persisted split
   label keys are namespaced by source (`split:<source>\0<id>`). v1 stores are
   rejected loudly at open (version mismatch) instead of silently missing their
@@ -45,6 +48,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - Bumped `rustls` from 0.23.36 to 0.23.45 (RUSTSEC-2026-0285)
 
 ### Fixed
+
 - **Record identity is composite (`RecordKey { source, id }`) throughout the
   sampler.** Pools, chunk index, split labels, dedup sets, ingestion deltas,
   and BM25 state key by source + id instead of the bare id string, so same-id
@@ -70,6 +74,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 ## [0.27.1-alpha] - 2026-09-09
 
 ### Changed
+
 - Bumped `reqwest` from 0.13.4 to 0.13.5 and `reqwest-drive` from 0.13.4-alpha to 0.13.5-alpha
 - Bumped `parquet` (and `arrow-*`) from 59.2.0 to 59.3.0 (#164)
 - Bumped `flate2` from 1.1.9 to 1.1.10 (#163)
@@ -78,10 +83,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 ## [0.27.0-alpha] - 2026-09-07
 
 ### Changed
+
 - Bumped `simd-r-drive` from 0.16.3-alpha to 0.17.1-alpha
 - Add throughput timing metrics (wall time spent waiting, embedding, and flushing, per step) to offline embedder loop events
 
 ### Fixed
+
 - **Sampler ingestion sync is now incremental.** Steady-state cache advances use
   an O(Δ) delta sync (`IngestionManager::sync_delta` over a unified global
   version timeline) instead of cloning, sorting, and diffing the full record
@@ -127,6 +134,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 ## [0.26.1-alpha] - 2026-09-04
 
 ### Changed
+
 - Bumped `serial_test` from 3.5.0 to 4.0.1
 - Bumped `parquet` from 59.1.0 to 59.2.0
 - Bumped `thiserror` from 2.0.19 to 2.0.20
@@ -134,6 +142,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - Bumped `tokio` from 1.53.0 to 1.53.1
 
 ### Fixed
+
 - JSON array `.json` files (e.g. `gbharti/finance-alpaca`) now stream-parse correctly
   instead of failing on newline splits.
 - Large HuggingFace datasets with >1000 files (e.g. `shash42/forecast-news`) now
@@ -149,6 +158,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 ## [0.26.0-alpha] - 2026-08-15
 
 ### Added
+
 - `SamplerAdapter` (`triplets-offline-embedder`) now carries a per-source
   `weights` map and forwards it to the sampler's `next_*_batch_with_weights`
   APIs, so callers can enforce an explicit source mixture (e.g. weighted
@@ -156,6 +166,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
   existing unweighted behavior.
 
 ### Changed
+
 - Bumped `serde` from 1.0.228 to 1.0.229 (#145)
 - Bumped `serde_json` from 1.0.150 to 1.0.151 (#142)
 - Bumped `thiserror` from 2.0.18 to 2.0.19 (#144)
@@ -163,6 +174,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - Bumped `tokio` from 1.52.3 to 1.53.0 (#146)
 
 ### Deprecated
+
 - Deprecated the unweighted batch-fetch methods on the `Sampler` trait
   (`next_pair_batch`, `next_text_batch`, `next_triplet_batch`) and on
   `TripletSampler` (`next_pair_batch_for_split`, `next_text_batch_for_split`,
@@ -174,12 +186,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 ## [0.25.0-alpha] - 2026-07-17
 
 ### Added
+
 - Expanded test coverage across `triplets-hf-source` and `triplets-core` (#138)
 - Modular sub-crate structure for `triplets-hf-source`: builder, config,
   disk_cache, download, expansion, file_utils, parsing, rows, shard_index,
   shard_indexing, source_core modules
 
 ### Changed
+
 - **Refactored `triplets-hf-source` sub-crate** (#136): decomposed monolithic
   `huggingface_source.rs` (11k+ lines) into focused modules with dedicated tests
 - **Refactored sampler batch from SoA to AoS** (#129): replaced flat
@@ -197,16 +211,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - Updated README files
 
 ### Removed
+
 - `hf-hub` crate dependency entirely (#130)
 - Legacy `datasets-server` fallback paths: sibling-based candidate resolution,
   `ClassLabel` `/info` resolution, global row count `/size` queries (#130)
 
 ### Fixed
+
 - Negative pair labels silently converted to Positive on SRD read-back (#133):
   negative labels were discarded because `DataRecord` had no label field and
   `SrdSource::refresh()` dropped `entry.label`
 - Transient shard downloads incorrectly written into evictable managed cache (#135)
 
 ### Security
+
 - Path traversal guard rejects `ParentDir`/`Prefix` components in HF source
   candidate resolution (#130)
