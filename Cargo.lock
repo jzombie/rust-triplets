@@ -362,12 +362,6 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
 name = "cache-manager"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "216b7b4ff753c73d33ffea0166bf3bf89b7ba16fb55e7bc7730818bab8ac8195"
-
-[[package]]
-name = "cache-manager"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d16266b6585746ebb43da97987694bbaa4b32c2de02e6cadb9a22e4faf2fc14"
@@ -1892,7 +1886,7 @@ dependencies = [
  "async-trait",
  "bitcode",
  "bytes",
- "cache-manager 0.6.0",
+ "cache-manager",
  "chrono",
  "http",
  "rand 0.10.1",
@@ -2609,7 +2603,7 @@ version = "0.28.0-alpha"
 dependencies = [
  "bitcode",
  "bm25",
- "cache-manager 0.5.0",
+ "cache-manager",
  "chrono",
  "clap",
  "csv",
@@ -2642,7 +2636,7 @@ version = "0.28.0-alpha"
 dependencies = [
  "bitcode",
  "bm25",
- "cache-manager 0.5.0",
+ "cache-manager",
  "chrono",
  "csv",
  "indexmap",
@@ -2665,7 +2659,7 @@ dependencies = [
 name = "triplets-debug"
 version = "0.28.0-alpha"
 dependencies = [
- "cache-manager 0.5.0",
+ "cache-manager",
  "chrono",
  "clap",
  "indexmap",
@@ -2681,7 +2675,7 @@ dependencies = [
 name = "triplets-hf-source"
 version = "0.28.0-alpha"
 dependencies = [
- "cache-manager 0.5.0",
+ "cache-manager",
  "chrono",
  "filetime",
  "flate2",
