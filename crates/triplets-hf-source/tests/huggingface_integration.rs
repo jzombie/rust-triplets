@@ -18,8 +18,8 @@ use triplets_core::{
     SplitRatios, TripletSampler,
 };
 use triplets_hf_source::download::{
-    build_http_runtime, fetch_remote_size_with_runtime, list_remote_candidates_with_runtime,
-    remote_url_for_candidate,
+    build_http_client, build_http_runtime, fetch_remote_size_with_runtime,
+    list_remote_candidates_with_runtime, remote_url_for_candidate,
 };
 use triplets_hf_source::{
     ENV_TRIPLETS_HF_TOKEN, ENV_TRIPLETS_HF_TOKEN_TEST_DATASET, HF_BASE_URL, HF_PUBLIC_TEST_DATASET,
@@ -1305,7 +1305,12 @@ fn huggingface_empty_split_discovers_all_splits() {
 fn huggingface_reads_live_remote_dataset() {
     let temp = tempfile::tempdir().expect("failed creating tempdir");
 
-    let mut config = config_no_auth(
+    // NOTE: deliberately *not* `config_no_auth` here.  This test hits the
+    // live Hub API, so it must send the ambient `HF_TOKEN` (if any) as
+    // `Authorization: Bearer` to stay under authenticated rate limits.
+    // Without it the Hub answers shared-CI IPs with HTTP 429.  When no token
+    // is configured this degrades to the same anonymous request as before.
+    let mut config = HuggingFaceRowsConfig::new(
         "hf_live_rotten_tomatoes",
         "cornell-movie-review-data/rotten_tomatoes",
         "default",
@@ -1384,15 +1389,12 @@ fn huggingface_live_e2e_candidate_and_shard_download() {
     // This is the same method called internally by `ensure_row_available()`.
     // We cache the result here so the HEAD assertion below has an expected
     // size to compare against.
-    let client = {
-        use reqwest_drive::ClientBuilder;
-        let inner = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(5))
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .expect("test reqwest client should build");
-        ClientBuilder::new(inner).build()
-    };
+    //
+    // NOTE: the client must come from `build_http_client` (not a bare
+    // `reqwest::Client`) so the ambient `HF_TOKEN` is sent as
+    // `Authorization: Bearer` default headers.  A bare client silently drops
+    // auth and hits the Hub's anonymous rate limits (HTTP 429).
+    let client = build_http_client(&config).expect("failed building authenticated HTTP client");
     let runtime = build_http_runtime(&config).expect("failed building tokio runtime");
     let (candidates, _candidate_sizes) =
         list_remote_candidates_with_runtime(&client, &config, Some(&runtime))

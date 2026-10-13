@@ -85,7 +85,13 @@ fn block_on_http_with_runtime<T>(
 /// Build a throttled `ClientWithMiddleware` from the config's connection
 /// and auth settings, including exponential-backoff retry for rate limits
 /// and transient failures.
-pub(crate) fn build_http_client(
+///
+/// When `config.hf_token` is set (populated automatically from the
+/// `HF_TOKEN` environment variable by [`HuggingFaceRowsConfig::new`]),
+/// the token is sent as `Authorization: Bearer <token>` default headers,
+/// so every request built from this client is authenticated.
+/// [`HuggingFaceRowsConfig::new`]: crate::HuggingFaceRowsConfig::new
+pub fn build_http_client(
     config: &HuggingFaceRowsConfig,
 ) -> Result<ClientWithMiddleware, SamplerError> {
     use reqwest_drive::ClientBuilder;
