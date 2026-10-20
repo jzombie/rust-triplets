@@ -11091,7 +11091,7 @@ fn same_selector_triplet_returns_none_when_only_one_chunk_exists() {
         allow_same_anchor_positive: false,
     };
 
-    let triplet = inner.make_triplet_with_anchor_seeded(&recipe, &anchor);
+    let triplet = inner.make_triplet_with_unique_negative_seeded(&recipe, &anchor);
     assert!(triplet.is_none());
 }
 
@@ -11993,7 +11993,7 @@ fn temporal_offset_selector_never_crosses_split_boundaries() {
 #[test]
 fn instruction_propagates_from_recipe_to_sample_triplet() {
     // Verify that a non-None `instruction` on a TripletRecipe flows through
-    // finalize_triplet_with_negative into every SampleTriplet it produces.
+    // the triplet builder into every SampleTriplet it produces.
     let split = SplitRatios {
         train: 1.0,
         validation: 0.0,
@@ -12071,7 +12071,7 @@ fn instruction_propagates_from_recipe_to_sample_triplet() {
 
 #[test]
 fn allow_same_anchor_positive_permits_identical_text_triplet() {
-    // Verify the guard in finalize_triplet_with_negative: with the flag false
+    // Verify the intra-triplet text guard: with the flag false
     // (default) a same-text pair is rejected; with the flag true it passes through.
     let split = SplitRatios {
         train: 1.0,
@@ -14412,7 +14412,7 @@ fn same_record_negative_selector_picks_from_context() {
     };
 
     let mut inner = sampler.inner.lock().unwrap();
-    let triplet = inner.make_triplet_with_anchor_seeded(&recipe, &anchor);
+    let triplet = inner.make_triplet_with_unique_negative_seeded(&recipe, &anchor);
     let triplet = triplet.expect("SameRecord + Context selector must produce a triplet");
 
     // The negative chunk must come from the same record.

@@ -20,6 +20,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
   text guard runs before the retry loop since no negative redraw can fix it.
   Best-effort pre-pad: `pad_with_reuse` may still duplicate when the unique
   pool is smaller than `batch_size`.
+- Removed the legacy serial triplet builder chain (`make_triplet_with_anchor`,
+  `finalize_triplet_with_negative`, and its helpers) now that all batch paths
+  build through `make_triplet_with_unique_negative`; the two unit tests that
+  exercised it now run against the live builder.
 
 ### Changed
 

@@ -1517,182 +1517,13 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         false
     }
 
-    /// Shared selector-pair stage for both standard and auto-injected triplet recipes.
-    /// Legacy serial builder kept as reference + test-shim path
-    /// (`make_triplet_with_anchor_seeded`). Production batch builders use
-    /// `make_triplet_with_unique_negative` for per-batch negative dedup.
-    #[allow(dead_code)]
-    fn build_triplet_with_selector_pair_policy(
-        &mut self,
-        recipe: &TripletRecipe,
-        record: &DataRecord,
-        enforce_window_pair: bool,
-        rng: &mut DeterministicRng,
-    ) -> Option<SampleTriplet> {
-        let (mut anchor_chunk, mut positive_chunk) = self.select_anchor_positive_pair(
-            record,
-            &recipe.anchor,
-            &recipe.positive_selector,
-            enforce_window_pair,
-        )?;
-        let anchor_raw_text = anchor_chunk.text.clone();
-        self.decorate_chunk(record, &mut anchor_chunk, rng);
-        self.decorate_chunk(record, &mut positive_chunk, rng);
-        // Snapshot the raw anchor text for BM25 querying before decoration
-        // added the metadata prefix — prefix tokens are absent from the index.
-        self.finalize_triplet_with_negative(
-            recipe,
-            record,
-            anchor_chunk,
-            positive_chunk,
-            &anchor_raw_text,
-            rng,
-        )
-    }
-
-    /// Execute the special auto-injected long-section chunk-pair recipe.
-    ///
-    /// Algorithm:
-    /// 0) Stage B check: current record must expose at least two window chunks for selector.
-    /// 1) Draw anchor and positive from the same record using recipe selectors.
-    /// 2) Require the two chunks to be distinct.
-    /// 3) Additionally require both chunks to be `ChunkView::Window` variants.
-    /// 4) Apply metadata decoration to both chunks.
-    /// 5) Draw the negative according to recipe negative strategy.
-    #[allow(dead_code)]
-    fn make_auto_chunk_pair_triplet_with_anchor(
-        &mut self,
-        recipe: &TripletRecipe,
-        record: &DataRecord,
-        rng: &mut DeterministicRng,
-    ) -> Option<SampleTriplet> {
-        if !self.record_has_at_least_two_window_chunks_for_selector(record, &recipe.anchor) {
-            return None;
-        }
-        let (mut anchor_chunk, mut positive_chunk) =
-            self.select_distinct_window_pair_for_auto_recipe(recipe, record)?;
-        let anchor_raw_text = anchor_chunk.text.clone();
-        self.decorate_chunk(record, &mut anchor_chunk, rng);
-        self.decorate_chunk(record, &mut positive_chunk, rng);
-        self.finalize_triplet_with_negative(
-            recipe,
-            record,
-            anchor_chunk,
-            positive_chunk,
-            &anchor_raw_text,
-            rng,
-        )
-    }
-
-    #[allow(dead_code)]
-    fn make_standard_triplet_with_anchor(
-        &mut self,
-        recipe: &TripletRecipe,
-        record: &DataRecord,
-        rng: &mut DeterministicRng,
-    ) -> Option<SampleTriplet> {
-        self.build_triplet_with_selector_pair_policy(recipe, record, false, rng)
-    }
-
-    /// Finalize a triplet by selecting a negative and applying a deterministic 50 % coin-flip
-    /// that swaps anchor and positive.
-    ///
-    /// # Anchor/positive swap
-    ///
-    /// Before constructing the [`SampleTriplet`], the sampler tests the least-significant bit of
-    /// the next RNG word. When the bit is zero (≈ 50 % of the time) the anchor and positive
-    /// slots are exchanged so that what was originally selected as the positive becomes the
-    /// anchor, and vice-versa.
-    ///
-    /// **Why this matters:** contrastive objectives such as InfoNCE treat the two non-negative
-    /// slots asymmetrically only in so far as downstream code does. If the model can learn a
-    /// positional shortcut — for example "the anchor is always the shorter text" — it can
-    /// achieve low loss without learning the intended similarity structure. The swap eliminates
-    /// that opportunity by ensuring both orderings appear at equal frequency, forcing the model
-    /// to treat the two positive-pair slots symmetrically.
-    ///
-    /// The negative chunk is unaffected by the swap.
-    #[allow(dead_code)]
-    fn finalize_triplet_with_negative(
-        &mut self,
-        recipe: &TripletRecipe,
-        record: &DataRecord,
-        anchor_chunk: RecordChunk,
-        positive_chunk: RecordChunk,
-        anchor_raw_text: &str,
-        rng: &mut DeterministicRng,
-    ) -> Option<SampleTriplet> {
-        let (negative_record, fallback_used) = self.select_negative_record(
-            record,
-            &recipe.negative_strategy,
-            Some(anchor_raw_text),
-            rng,
-        )?;
-        let mut negative_chunk = self.select_chunk(&negative_record, &recipe.negative_selector)?;
-        self.decorate_chunk(&negative_record, &mut negative_chunk, rng);
-
-        // 50 % coin-flip: swap anchor and positive to prevent positional shortcuts.
-        let (anchor_chunk, positive_chunk) = if rng.next_u64() & ANCHOR_POSITIVE_SWAP_MASK == 0 {
-            (positive_chunk, anchor_chunk)
-        } else {
-            (anchor_chunk, positive_chunk)
-        };
-
-        // Reject if any two slots share identical rendered text.  This catches sources
-        // that produce multiple records with the same string content: a negative whose
-        // text matches the positive (or the anchor) would produce a trivially-invalid
-        // training example.  String equality short-circuits on the first differing byte,
-        // so the guard is effectively free when texts differ (the common case).
-        //
-        // When `allow_same_anchor_positive` is set the anchor==positive check is skipped
-        // to support SimCSE-style training where both slots carry identical text and the
-        // model's dropout layers produce the required embedding variation at train time.
-        // The negative must still differ from both anchor and positive.
-        if (!recipe.allow_same_anchor_positive && anchor_chunk.text == positive_chunk.text)
-            || negative_chunk.text == positive_chunk.text
-            || negative_chunk.text == anchor_chunk.text
-        {
-            return None;
-        }
-
-        let chunk_weight =
-            self.triplet_chunk_weight(recipe, &anchor_chunk, &positive_chunk, &negative_chunk);
-        let weight = recipe.weight * chunk_weight;
-        let recipe_name = if fallback_used {
-            format!("{}_fallback_same_split", recipe.name)
-        } else {
-            recipe.name.to_string()
-        };
-        Some(SampleTriplet {
-            recipe: recipe_name,
-            anchor: anchor_chunk,
-            positive: positive_chunk,
-            negative: negative_chunk,
-            weight,
-            instruction: recipe.instruction.as_ref().map(|s| s.to_string()),
-        })
-    }
-
-    /// Legacy entry point kept for the test shim (`make_triplet_with_anchor_seeded`).
-    /// Production batch builders use `make_triplet_with_unique_negative`.
-    #[allow(dead_code)]
-    fn make_triplet_with_anchor(
-        &mut self,
-        recipe: &TripletRecipe,
-        record: &DataRecord,
-        rng: &mut DeterministicRng,
-    ) -> Option<SampleTriplet> {
-        if Self::is_auto_chunk_pair_recipe(recipe) {
-            return self.make_auto_chunk_pair_triplet_with_anchor(recipe, record, rng);
-        }
-        self.make_standard_triplet_with_anchor(recipe, record, rng)
-    }
-
     /// Serial candidate builder with per-batch negative-text dedup (Option A).
     ///
     /// Draws the anchor/positive pair once, hoists the 50 % swap + (A) guard
     /// out of the retry loop, then redraws **only the negative** up to
-    /// `NEG_DEDUP_RETRIES` times. All validation reads use references;
+    /// `NEG_DEDUP_RETRIES` times. The coin-flip swap (one RNG draw, negative
+    /// unaffected) defeats positional shortcuts so the model treats both
+    /// positive slots symmetrically. All validation reads use references;
     /// ownership of `final_anchor`/`final_positive` moves into the triplet
     /// only after a passing negative is found (then return). Text guard (A)
     /// (`a == p` when forbidden) is checked before the loop — unrecoverable.
@@ -1705,8 +1536,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         seen: &mut HashSet<(RecordKey, RecordKey, RecordKey)>,
         seen_negatives: &mut IntSet<u64>,
     ) -> Option<SampleTriplet> {
-        // Draw anchor/positive once (serial cursor semantics, mirrors
-        // build_triplet_with_selector_pair_policy without the negative half).
+        // Draw anchor/positive once (serial cursor semantics).
         let (mut anchor_chunk, mut positive_chunk) = if Self::is_auto_chunk_pair_recipe(recipe) {
             if !self.record_has_at_least_two_window_chunks_for_selector(record, &recipe.anchor) {
                 return None;
@@ -3384,15 +3214,24 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         result
     }
 
-    /// Test shim: `make_triplet_with_anchor` using the inner rng.
+    /// Test shim: `make_triplet_with_unique_negative` using the inner rng and
+    /// fresh per-batch dedup sets (single-candidate semantics).
     #[cfg(test)]
-    fn make_triplet_with_anchor_seeded(
+    fn make_triplet_with_unique_negative_seeded(
         &mut self,
         recipe: &TripletRecipe,
         anchor: &DataRecord,
     ) -> Option<SampleTriplet> {
         let mut rng = std::mem::replace(&mut self.rng, DeterministicRng::new(0));
-        let result = self.make_triplet_with_anchor(recipe, anchor, &mut rng);
+        let mut seen = HashSet::new();
+        let mut seen_negatives: IntSet<u64> = IntSet::default();
+        let result = self.make_triplet_with_unique_negative(
+            recipe,
+            anchor,
+            &mut rng,
+            &mut seen,
+            &mut seen_negatives,
+        );
         self.rng = rng;
         result
     }
