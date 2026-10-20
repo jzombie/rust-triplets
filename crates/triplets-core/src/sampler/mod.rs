@@ -3,6 +3,7 @@ mod backends;
 use crate::chunking::{ChunkingAlgorithm, SlidingWindowChunker};
 use chrono::Duration;
 use indexmap::IndexMap;
+use nohash_hasher::IntSet;
 use rand::prelude::*;
 use rayon::prelude::*;
 use std::borrow::Cow;
@@ -1517,6 +1518,10 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     }
 
     /// Shared selector-pair stage for both standard and auto-injected triplet recipes.
+    /// Legacy serial builder kept as reference + test-shim path
+    /// (`make_triplet_with_anchor_seeded`). Production batch builders use
+    /// `make_triplet_with_unique_negative` for per-batch negative dedup.
+    #[allow(dead_code)]
     fn build_triplet_with_selector_pair_policy(
         &mut self,
         recipe: &TripletRecipe,
@@ -1554,6 +1559,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     /// 3) Additionally require both chunks to be `ChunkView::Window` variants.
     /// 4) Apply metadata decoration to both chunks.
     /// 5) Draw the negative according to recipe negative strategy.
+    #[allow(dead_code)]
     fn make_auto_chunk_pair_triplet_with_anchor(
         &mut self,
         recipe: &TripletRecipe,
@@ -1578,6 +1584,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         )
     }
 
+    #[allow(dead_code)]
     fn make_standard_triplet_with_anchor(
         &mut self,
         recipe: &TripletRecipe,
@@ -1605,6 +1612,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     /// to treat the two positive-pair slots symmetrically.
     ///
     /// The negative chunk is unaffected by the swap.
+    #[allow(dead_code)]
     fn finalize_triplet_with_negative(
         &mut self,
         recipe: &TripletRecipe,
@@ -1665,6 +1673,9 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         })
     }
 
+    /// Legacy entry point kept for the test shim (`make_triplet_with_anchor_seeded`).
+    /// Production batch builders use `make_triplet_with_unique_negative`.
+    #[allow(dead_code)]
     fn make_triplet_with_anchor(
         &mut self,
         recipe: &TripletRecipe,
@@ -1675,6 +1686,106 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             return self.make_auto_chunk_pair_triplet_with_anchor(recipe, record, rng);
         }
         self.make_standard_triplet_with_anchor(recipe, record, rng)
+    }
+
+    /// Serial candidate builder with per-batch negative-text dedup (Option A).
+    ///
+    /// Draws the anchor/positive pair once, hoists the 50 % swap + (A) guard
+    /// out of the retry loop, then redraws **only the negative** up to
+    /// `NEG_DEDUP_RETRIES` times. All validation reads use references;
+    /// ownership of `final_anchor`/`final_positive` moves into the triplet
+    /// only after a passing negative is found (then return). Text guard (A)
+    /// (`a == p` when forbidden) is checked before the loop — unrecoverable.
+    /// Loop checks (B) (`fresh_tuple`, `fresh_neg`, `n == a/p`) on references.
+    fn make_triplet_with_unique_negative(
+        &mut self,
+        recipe: &TripletRecipe,
+        record: &DataRecord,
+        rng: &mut DeterministicRng,
+        seen: &mut HashSet<(RecordKey, RecordKey, RecordKey)>,
+        seen_negatives: &mut IntSet<u64>,
+    ) -> Option<SampleTriplet> {
+        // Draw anchor/positive once (serial cursor semantics, mirrors
+        // build_triplet_with_selector_pair_policy without the negative half).
+        let (mut anchor_chunk, mut positive_chunk) = if Self::is_auto_chunk_pair_recipe(recipe) {
+            if !self.record_has_at_least_two_window_chunks_for_selector(record, &recipe.anchor) {
+                return None;
+            }
+            self.select_distinct_window_pair_for_auto_recipe(recipe, record)?
+        } else {
+            self.select_anchor_positive_pair(
+                record,
+                &recipe.anchor,
+                &recipe.positive_selector,
+                false,
+            )?
+        };
+        let anchor_raw_text = anchor_chunk.text.clone();
+        self.decorate_chunk(record, &mut anchor_chunk, rng);
+        self.decorate_chunk(record, &mut positive_chunk, rng);
+
+        // Hoisted swap (single RNG draw) + guard (A).
+        let (final_anchor, final_positive) = if rng.next_u64() & ANCHOR_POSITIVE_SWAP_MASK == 0 {
+            (positive_chunk, anchor_chunk)
+        } else {
+            (anchor_chunk, positive_chunk)
+        };
+        if !recipe.allow_same_anchor_positive && final_anchor.text == final_positive.text {
+            return None;
+        }
+
+        // Negative-only retries; references only, no anchor/positive clones.
+        let mut accepted: Option<(RecordChunk, f32, bool)> = None;
+        for _ in 0..NEG_DEDUP_RETRIES {
+            let (negative_record, fallback_used) = self.select_negative_record(
+                record,
+                &recipe.negative_strategy,
+                Some(&anchor_raw_text),
+                rng,
+            )?;
+            let mut negative_chunk =
+                match self.select_chunk(&negative_record, &recipe.negative_selector) {
+                    Some(c) => c,
+                    None => continue,
+                };
+            self.decorate_chunk(&negative_record, &mut negative_chunk, rng);
+            if negative_chunk.text == final_positive.text
+                || negative_chunk.text == final_anchor.text
+            {
+                continue;
+            }
+            let key = (
+                RecordKey::of_chunk(&final_anchor),
+                RecordKey::of_chunk(&final_positive),
+                RecordKey::of_chunk(&negative_chunk),
+            );
+            let neg_h = negative_text_hash(&negative_chunk);
+            // Atomic check-then-commit: no partial `seen` mutation on reject.
+            if seen.contains(&key) || seen_negatives.contains(&neg_h) {
+                continue;
+            }
+            let chunk_weight =
+                self.triplet_chunk_weight(recipe, &final_anchor, &final_positive, &negative_chunk);
+            let weight = recipe.weight * chunk_weight;
+            seen.insert(key);
+            seen_negatives.insert(neg_h);
+            accepted = Some((negative_chunk, weight, fallback_used));
+            break;
+        }
+        let (negative_chunk, weight, fallback_used) = accepted?;
+        let recipe_name = if fallback_used {
+            format!("{}_fallback_same_split", recipe.name)
+        } else {
+            recipe.name.to_string()
+        };
+        Some(SampleTriplet {
+            recipe: recipe_name,
+            anchor: final_anchor,
+            positive: final_positive,
+            negative: negative_chunk,
+            weight,
+            instruction: recipe.instruction.as_ref().map(|s| s.to_string()),
+        })
     }
 
     fn make_text_sample_for_split(
@@ -2447,6 +2558,9 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     /// Returns:
     /// - candidate triplet (with recipe) if one was sampled,
     /// - number of recipe attempts consumed (for round-robin bookkeeping).
+    ///
+    /// Takes the batch `seen` sets so negative-text dedup commits atomically.
+    #[allow(clippy::too_many_arguments)]
     fn sample_source_triplet_candidate(
         &mut self,
         source: &str,
@@ -2454,6 +2568,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         recipe_orders: &mut HashMap<RecipeKey, Vec<usize>>,
         recipe_positions: &mut HashMap<RecipeKey, usize>,
         rng: &mut DeterministicRng,
+        seen: &mut HashSet<(RecordKey, RecordKey, RecordKey)>,
+        seen_negatives: &mut IntSet<u64>,
     ) -> (Option<(TripletRecipe, SampleTriplet)>, usize) {
         // Stage A (source-level injection): resolve effective recipe pool,
         // including auto-injected long-section recipe when source is eligible.
@@ -2480,10 +2596,13 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             let idx = order[(*pos + offset) % order.len()];
             attempts = attempts.saturating_add(1);
             let recipe = recipes[idx].clone();
-            // Stage B/C happen inside `make_triplet_with_anchor`:
-            // - Stage B: record-level auto-recipe eligibility gate,
-            // - Stage C: chunk window materialization/selection.
-            if let Some(sample) = self.make_triplet_with_anchor(&recipe, &anchor, rng) {
+            // Stage B/C happen inside the unique-negative builder, which draws
+            // anchor/positive once then retries only the negative (per-batch
+            // negative-text dedup, best-effort pre-pad). Commit is atomic
+            // inside the helper.
+            if let Some(sample) =
+                self.make_triplet_with_unique_negative(&recipe, &anchor, rng, seen, seen_negatives)
+            {
                 *pos = (*pos + offset + 1) % order.len();
                 return (Some((recipe, sample)), attempts);
             }
@@ -2515,6 +2634,10 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             );
             let mut pairs = Vec::new();
             let mut seen = HashSet::new();
+            // Per-batch negative-text dedup (Option A, best-effort pre-pad).
+            // `pad_with_reuse` below may still duplicate when the unique pool
+            // is smaller than `batch_size`.
+            let mut seen_negatives: IntSet<u64> = IntSet::default();
             let mut last_recipe_name = None;
             let mut recipe_pos = 0usize;
             let mut recipe_steps = 0usize;
@@ -2532,60 +2655,56 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                     recipe_steps = recipe_steps.saturating_add(1);
                     let recipe = self.triplet_recipes[idx].clone();
                     last_recipe_name = Some(recipe.name.clone());
-                    if let Some(sample) = self.make_triplet_with_anchor(&recipe, &anchor, &mut rng)
-                    {
+                    if let Some(sample) = self.make_triplet_with_unique_negative(
+                        &recipe,
+                        &anchor,
+                        &mut rng,
+                        &mut seen,
+                        &mut seen_negatives,
+                    ) {
                         triplet = Some((recipe, sample));
                         recipe_pos = (recipe_pos + offset + 1) % recipe_order.len();
                         break;
                     }
                 }
                 if let Some((recipe, triplet)) = triplet {
-                    let key = (
-                        RecordKey::of_chunk(&triplet.anchor),
-                        RecordKey::of_chunk(&triplet.positive),
-                        RecordKey::of_chunk(&triplet.negative),
-                    );
-                    if seen.insert(key) {
-                        let SampleTriplet {
+                    let SampleTriplet {
+                        recipe: triplet_recipe_name,
+                        anchor,
+                        positive,
+                        negative,
+                        weight,
+                        instruction,
+                    } = triplet;
+
+                    // Look up the anchor record's label to override structural defaults.
+                    // For SRD pair-mode data, the label is stored in DataRecord.
+                    let record_label = self
+                        .records
+                        .get(&RecordKey::of_chunk(&anchor))
+                        .and_then(|r| r.label.clone());
+
+                    if pairs.len() < self.config.batch_size {
+                        pairs.push(SamplePair {
+                            recipe: triplet_recipe_name.clone(),
+                            anchor: anchor.clone(),
+                            positive: positive.clone(),
+                            weight,
+                            instruction: instruction.clone(),
+                            label: record_label.clone().unwrap_or(PairLabel::Positive),
+                            reason: None,
+                        });
+                    }
+                    if pairs.len() < self.config.batch_size {
+                        pairs.push(SamplePair {
                             recipe: triplet_recipe_name,
                             anchor,
-                            positive,
-                            negative,
+                            positive: negative,
                             weight,
                             instruction,
-                        } = triplet;
-
-                        // Look up the anchor record's label to override structural defaults.
-                        // For SRD pair-mode data, the label is stored in DataRecord.
-                        let record_label = self
-                            .records
-                            .get(&RecordKey::of_chunk(&anchor))
-                            .and_then(|r| r.label.clone());
-
-                        if pairs.len() < self.config.batch_size {
-                            pairs.push(SamplePair {
-                                recipe: triplet_recipe_name.clone(),
-                                anchor: anchor.clone(),
-                                positive: positive.clone(),
-                                weight,
-                                instruction: instruction.clone(),
-                                label: record_label.clone().unwrap_or(PairLabel::Positive),
-                                reason: None,
-                            });
-                        }
-                        if pairs.len() < self.config.batch_size {
-                            pairs.push(SamplePair {
-                                recipe: triplet_recipe_name,
-                                anchor,
-                                positive: negative,
-                                weight,
-                                instruction,
-                                label: record_label.unwrap_or(PairLabel::Negative),
-                                reason: Some(
-                                    strategy_reason(&recipe.negative_strategy).to_string(),
-                                ),
-                            });
-                        }
+                            label: record_label.unwrap_or(PairLabel::Negative),
+                            reason: Some(strategy_reason(&recipe.negative_strategy).to_string()),
+                        });
                     }
                 }
             }
@@ -2607,6 +2726,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
 
         let mut pairs = Vec::new();
         let mut seen = HashSet::new();
+        // Per-batch negative-text dedup (Option A, best-effort pre-pad).
+        let mut seen_negatives: IntSet<u64> = IntSet::default();
         let mut source_steps = 0usize;
         let mut cycle = (self.source_cycle_idx / sources.len()) as u64;
         let mut source_idx = self.source_cycle_idx % sources.len();
@@ -2650,52 +2771,47 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 &mut recipe_orders,
                 &mut recipe_positions,
                 &mut rng,
+                &mut seen,
+                &mut seen_negatives,
             );
             recipe_steps = recipe_steps.saturating_add(attempts_used);
             if let Some((recipe, triplet)) = triplet {
-                let key = (
-                    RecordKey::of_chunk(&triplet.anchor),
-                    RecordKey::of_chunk(&triplet.positive),
-                    RecordKey::of_chunk(&triplet.negative),
-                );
-                if seen.insert(key) {
-                    let SampleTriplet {
+                let SampleTriplet {
+                    recipe: triplet_recipe_name,
+                    anchor,
+                    positive,
+                    negative,
+                    weight,
+                    instruction,
+                } = triplet;
+
+                // Look up the anchor record's label to override structural defaults.
+                let record_label = self
+                    .records
+                    .get(&RecordKey::of_chunk(&anchor))
+                    .and_then(|r| r.label.clone());
+
+                if pairs.len() < self.config.batch_size {
+                    pairs.push(SamplePair {
+                        recipe: triplet_recipe_name.clone(),
+                        anchor: anchor.clone(),
+                        positive: positive.clone(),
+                        weight,
+                        instruction: instruction.clone(),
+                        label: record_label.clone().unwrap_or(PairLabel::Positive),
+                        reason: None,
+                    });
+                }
+                if pairs.len() < self.config.batch_size {
+                    pairs.push(SamplePair {
                         recipe: triplet_recipe_name,
                         anchor,
-                        positive,
-                        negative,
+                        positive: negative,
                         weight,
                         instruction,
-                    } = triplet;
-
-                    // Look up the anchor record's label to override structural defaults.
-                    let record_label = self
-                        .records
-                        .get(&RecordKey::of_chunk(&anchor))
-                        .and_then(|r| r.label.clone());
-
-                    if pairs.len() < self.config.batch_size {
-                        pairs.push(SamplePair {
-                            recipe: triplet_recipe_name.clone(),
-                            anchor: anchor.clone(),
-                            positive: positive.clone(),
-                            weight,
-                            instruction: instruction.clone(),
-                            label: record_label.clone().unwrap_or(PairLabel::Positive),
-                            reason: None,
-                        });
-                    }
-                    if pairs.len() < self.config.batch_size {
-                        pairs.push(SamplePair {
-                            recipe: triplet_recipe_name,
-                            anchor,
-                            positive: negative,
-                            weight,
-                            instruction,
-                            label: record_label.unwrap_or(PairLabel::Negative),
-                            reason: Some(strategy_reason(&recipe.negative_strategy).to_string()),
-                        });
-                    }
+                        label: record_label.unwrap_or(PairLabel::Negative),
+                        reason: Some(strategy_reason(&recipe.negative_strategy).to_string()),
+                    });
                 }
             }
             source_idx += 1;
@@ -2924,6 +3040,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             );
             let mut triplets = Vec::new();
             let mut seen = HashSet::new();
+            // Per-batch negative-text dedup (Option A, best-effort pre-pad).
+            let mut seen_negatives: IntSet<u64> = IntSet::default();
             let mut last_recipe_name = None;
             let mut recipe_pos = 0usize;
             let mut recipe_steps = 0usize;
@@ -2941,22 +3059,20 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                     recipe_steps = recipe_steps.saturating_add(1);
                     let recipe = self.triplet_recipes[idx].clone();
                     last_recipe_name = Some(recipe.name.clone());
-                    if let Some(sample) = self.make_triplet_with_anchor(&recipe, &anchor, &mut rng)
-                    {
+                    if let Some(sample) = self.make_triplet_with_unique_negative(
+                        &recipe,
+                        &anchor,
+                        &mut rng,
+                        &mut seen,
+                        &mut seen_negatives,
+                    ) {
                         triplet = Some(sample);
                         recipe_pos = (recipe_pos + offset + 1) % recipe_order.len();
                         break;
                     }
                 }
                 if let Some(triplet) = triplet {
-                    let key = (
-                        RecordKey::of_chunk(&triplet.anchor),
-                        RecordKey::of_chunk(&triplet.positive),
-                        RecordKey::of_chunk(&triplet.negative),
-                    );
-                    if seen.insert(key) {
-                        triplets.push(triplet);
-                    }
+                    triplets.push(triplet);
                 }
             }
             if recipe_steps > 0 {
@@ -2978,6 +3094,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         // ── Declarations for multi-source parallel path ────────────────────────
         let mut triplets: Vec<SampleTriplet> = Vec::new();
         let mut seen: HashSet<(RecordKey, RecordKey, RecordKey)> = HashSet::new();
+        // Per-batch negative-text dedup (Option A, best-effort pre-pad).
+        let mut seen_negatives: IntSet<u64> = IntSet::default();
         let mut source_steps = 0usize;
         let mut cycle = (self.source_cycle_idx / sources.len()) as u64;
         let mut source_idx = self.source_cycle_idx % sources.len();
@@ -3098,66 +3216,83 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 break;
             }
             let Some(sc) = candidate else { continue };
-            let (negative_record, fallback_used) = match self.select_negative_record(
-                &sc.anchor,
-                &sc.recipe.negative_strategy,
-                Some(&sc.anchor_raw_text),
-                &mut rng,
-            ) {
-                Some(pair) => pair,
-                None => continue,
-            };
-            let mut negative_chunk = match self.select_chunk_parallel(
-                &negative_record,
-                &sc.recipe.negative_selector,
-                &mut rng,
-            ) {
-                Some(c) => c,
-                None => continue,
-            };
-            self.decorate_chunk_parallel(&negative_record, &mut negative_chunk, &mut rng);
-
-            // 50 % coin-flip swap using the pre-sampled per-slot seed + main rng.
-            let (anchor_chunk, positive_chunk) = if rng.next_u64() & ANCHOR_POSITIVE_SWAP_MASK == 0
+            // Hoisted 50 % coin-flip swap (single RNG draw) + guard (A).
+            // Unrecoverable a==p pairs skip before any negative work.
+            let (final_anchor, final_positive) = if rng.next_u64() & ANCHOR_POSITIVE_SWAP_MASK == 0
             {
                 (sc.positive_chunk, sc.anchor_chunk)
             } else {
                 (sc.anchor_chunk, sc.positive_chunk)
             };
-
-            if (!sc.recipe.allow_same_anchor_positive && anchor_chunk.text == positive_chunk.text)
-                || negative_chunk.text == positive_chunk.text
-                || negative_chunk.text == anchor_chunk.text
-            {
+            if !sc.recipe.allow_same_anchor_positive && final_anchor.text == final_positive.text {
                 continue;
             }
-
-            let chunk_weight = self.triplet_chunk_weight(
-                &sc.recipe,
-                &anchor_chunk,
-                &positive_chunk,
-                &negative_chunk,
-            );
-            let weight = sc.recipe.weight * chunk_weight;
-            let recipe_name = if fallback_used {
-                format!("{}_fallback_same_split", sc.recipe.name)
-            } else {
-                sc.recipe.name.to_string()
+            // Negative-only retries: references only, no anchor/positive clones.
+            // (B) checks inside loop are all negative-resolvable.
+            let mut accepted: Option<(RecordChunk, f32, String)> = None;
+            for _ in 0..NEG_DEDUP_RETRIES {
+                let (negative_record, fallback_used) = match self.select_negative_record(
+                    &sc.anchor,
+                    &sc.recipe.negative_strategy,
+                    Some(&sc.anchor_raw_text),
+                    &mut rng,
+                ) {
+                    Some(pair) => pair,
+                    None => break,
+                };
+                let mut negative_chunk = match self.select_chunk_parallel(
+                    &negative_record,
+                    &sc.recipe.negative_selector,
+                    &mut rng,
+                ) {
+                    Some(c) => c,
+                    None => continue,
+                };
+                self.decorate_chunk_parallel(&negative_record, &mut negative_chunk, &mut rng);
+                if negative_chunk.text == final_positive.text
+                    || negative_chunk.text == final_anchor.text
+                {
+                    continue;
+                }
+                let key = (
+                    RecordKey::of_chunk(&final_anchor),
+                    RecordKey::of_chunk(&final_positive),
+                    RecordKey::of_chunk(&negative_chunk),
+                );
+                let neg_h = negative_text_hash(&negative_chunk);
+                // Atomic check-then-commit: no partial `seen` mutation on reject.
+                if seen.contains(&key) || seen_negatives.contains(&neg_h) {
+                    continue;
+                }
+                let chunk_weight = self.triplet_chunk_weight(
+                    &sc.recipe,
+                    &final_anchor,
+                    &final_positive,
+                    &negative_chunk,
+                );
+                let weight = sc.recipe.weight * chunk_weight;
+                let recipe_name = if fallback_used {
+                    format!("{}_fallback_same_split", sc.recipe.name)
+                } else {
+                    sc.recipe.name.to_string()
+                };
+                seen.insert(key);
+                seen_negatives.insert(neg_h);
+                accepted = Some((negative_chunk, weight, recipe_name));
+                break;
+            }
+            let Some((negative_chunk, weight, recipe_name)) = accepted else {
+                continue;
             };
             let triplet = SampleTriplet {
                 recipe: recipe_name,
-                anchor: anchor_chunk,
-                positive: positive_chunk,
+                anchor: final_anchor,
+                positive: final_positive,
                 negative: negative_chunk,
                 weight,
                 instruction: sc.recipe.instruction.as_ref().map(|s| s.to_string()),
             };
-            let key = (
-                RecordKey::of_chunk(&triplet.anchor),
-                RecordKey::of_chunk(&triplet.positive),
-                RecordKey::of_chunk(&triplet.negative),
-            );
-            if seen.insert(key) && triplets.len() < self.config.batch_size {
+            if triplets.len() < self.config.batch_size {
                 triplets.push(triplet);
             }
         }
@@ -3729,6 +3864,24 @@ fn triplet_chunk_key(chunk: &RecordChunk) -> String {
             format!("{}|{}|s|{}", chunk.record_id, chunk.section_idx, strategy)
         }
     }
+}
+
+/// Bounded negative-redraw attempts per anchor-positive pair.
+///
+/// When a candidate negative collides with an already-accepted negative in
+/// the current batch (or fails the intra-triplet text guard), only the
+/// negative is redrawn — the anchor/positive pair is kept. After this many
+/// failures the slot is skipped; the outer `attempts` budget then moves on.
+const NEG_DEDUP_RETRIES: usize = 4;
+
+/// Pure `u64` text hash for per-batch negative dedup (Option A: negative-vs-negative).
+///
+/// InfoNCE-style objectives compare text content, so the key must be text-only:
+/// no `RecordKey` coupling (same text from different records/windows must still
+/// collide) and no `String` allocation in the hot loop.
+#[inline]
+fn negative_text_hash(chunk: &RecordChunk) -> u64 {
+    stable_hash_str(0, &chunk.text)
 }
 
 fn pad_with_reuse<T: Clone>(items: &mut Vec<T>, target: usize) {

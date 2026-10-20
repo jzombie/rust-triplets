@@ -34,13 +34,13 @@ pub const TEXT_SEQUENCE_LEN: usize = 22;
 pub const TEXT_BATCH_SEQUENCE_HASH: u64 = 16610876526529257994;
 /// Expected hash for deterministic triplet batch sequence.
 #[cfg(not(feature = "bm25-mining"))]
-pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 13667098550054758072;
+pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 13786196962391734272;
 /// Expected hash for deterministic triplet batch sequence when bm25-mining is enabled.
 #[cfg(feature = "bm25-mining")]
-pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 3183170921249349780;
+pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 12276607046866300124;
 /// Expected hash for deterministic pair batch sequence.
 #[cfg(not(feature = "bm25-mining"))]
-pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 6874876021731074880;
+pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 10647424760669092757;
 /// Expected hash for deterministic pair batch sequence when bm25-mining is enabled.
 #[cfg(feature = "bm25-mining")]
 pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 9916688473817591159;
@@ -48,16 +48,16 @@ pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 9916688473817591159;
 pub const PREFETCH_TEXT_BATCH_SEQUENCE_HASH: u64 = 16610876526529257994;
 /// Expected hash for deterministic prefetch triplet batch sequence.
 #[cfg(not(feature = "bm25-mining"))]
-pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 4251833242746332028;
+pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 14093275483386623964;
 /// Expected hash for deterministic prefetch triplet batch sequence when bm25-mining is enabled.
 #[cfg(feature = "bm25-mining")]
-pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 15105652253366404300;
+pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 10182485217788015868;
 /// Expected hash for deterministic prefetch pair batch sequence.
 #[cfg(not(feature = "bm25-mining"))]
-pub const PREFETCH_PAIR_BATCH_SEQUENCE_HASH: u64 = 8960363625745535152;
+pub const PREFETCH_PAIR_BATCH_SEQUENCE_HASH: u64 = 5838267164903469960;
 /// Expected hash for deterministic prefetch pair batch sequence when bm25-mining is enabled.
 #[cfg(feature = "bm25-mining")]
-pub const PREFETCH_PAIR_BATCH_SEQUENCE_HASH: u64 = 16725467462822671025;
+pub const PREFETCH_PAIR_BATCH_SEQUENCE_HASH: u64 = 6312154801633507213;
 
 /// Expected readable wrong-article sequence without BM25 mining.
 pub const READABLE_NON_BM25_TITLES: [&str; 8] = [
@@ -857,13 +857,15 @@ fn weighted_sampling_honors_frequency_and_splits_jointly() {
             }
         }
     }
-    // Frequency is exact end to end here: DRR draws apportion 3:1
-    // deterministically, and source-qualified dedup keys mean no valid
-    // triplet is ever dropped, so no pad_with_reuse fill skews the count.
-    // Split purity above stays exact for the same reason.
-    // Exact: DRR draws apportion 3:1 deterministically, and dedup keys
-    // are source-qualified so no valid triplet is ever dropped.
-    assert_eq!((a_rows, total), (120, 160), "DRR apportions exactly 3:1");
+    // Frequency is a band here, not exact: DRR apportions source *attempts*
+    // 3:1 deterministically, but per-batch negative-text dedup may reject a
+    // candidate (negative already used in the batch) and the retry/skip shifts
+    // which source's triplet fills the slot. Split purity above stays exact.
+    // Band: 3:1 => 0.75 share for freq_a; allow +/-0.1 over 160 rows.
+    assert!(
+        (104..=136).contains(&a_rows) && total == 160,
+        "DRR apportions ~3:1 within dedup-shift band, got ({a_rows}, {total})"
+    );
     for split_label in [SplitLabel::Validation, SplitLabel::Test] {
         let batch = sampler
             .next_pair_batch_with_weights_for_split(split_label, &weights)
@@ -8788,6 +8790,119 @@ fn triplet_batch_dedupes_identical_triplets() {
             triplet.negative.record_id.clone(),
         );
         assert!(seen.insert(key), "triplet should be unique within batch");
+    }
+}
+
+#[test]
+fn triplet_batch_negatives_unique_pre_pad() {
+    // Per-batch negative-text dedup (Option A): no two triplets in one batch
+    // may share the same negative text. Pool is large enough that
+    // `pad_with_reuse` never triggers, so uniqueness must hold exactly.
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+    let mut config = base_config();
+    config.batch_size = 4;
+    config.ingestion_max_records = 64;
+    config.allowed_splits = vec![SplitLabel::Train];
+    config.split = split;
+    config.recipes = vec![TripletRecipe {
+        name: "neg_unique".into(),
+        anchor: Selector::Role(SectionRole::Anchor),
+        positive_selector: Selector::Role(SectionRole::Context),
+        negative_selector: Selector::Role(SectionRole::Context),
+        negative_strategy: NegativeStrategy::WrongArticle,
+        weight: 1.0,
+        instruction: None,
+        allow_same_anchor_positive: false,
+    }];
+    config.text_recipes = Vec::new();
+    let store = Arc::new(DeterministicSplitStore::new(split, 77).unwrap());
+    let sampler = TripletSampler::new(config, store);
+    let records: Vec<DataRecord> = (0..8)
+        .map(|i| {
+            trader_record(
+                &format!("neguniq_{i}"),
+                "2025-01-01",
+                &format!("Title {i}"),
+                &format!("Distinct body text number {i} for negative uniqueness"),
+            )
+        })
+        .collect();
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("tt", records)))
+        .unwrap();
+
+    for _ in 0..5 {
+        let batch = sampler.next_triplet_batch(SplitLabel::Train).unwrap();
+        assert_eq!(batch.triplets.len(), 4);
+        let mut seen = std::collections::HashSet::new();
+        for triplet in &batch.triplets {
+            assert!(
+                seen.insert(triplet.negative.text.clone()),
+                "negative text must be unique within batch, got duplicate: {:?}",
+                triplet.negative.text
+            );
+        }
+    }
+}
+
+#[test]
+fn pair_batch_negatives_unique_pre_pad() {
+    // Same guarantee through the pair-from-triplet path: the negative-derived
+    // pair (second pair per triplet) must not repeat negative text in a batch.
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+    let mut config = base_config();
+    config.batch_size = 8;
+    config.ingestion_max_records = 64;
+    config.allowed_splits = vec![SplitLabel::Train];
+    config.split = split;
+    config.recipes = vec![TripletRecipe {
+        name: "neg_unique_pair".into(),
+        anchor: Selector::Role(SectionRole::Anchor),
+        positive_selector: Selector::Role(SectionRole::Context),
+        negative_selector: Selector::Role(SectionRole::Context),
+        negative_strategy: NegativeStrategy::WrongArticle,
+        weight: 1.0,
+        instruction: None,
+        allow_same_anchor_positive: false,
+    }];
+    config.text_recipes = Vec::new();
+    let store = Arc::new(DeterministicSplitStore::new(split, 78).unwrap());
+    let sampler = TripletSampler::new(config, store);
+    let records: Vec<DataRecord> = (0..8)
+        .map(|i| {
+            trader_record(
+                &format!("negpair_{i}"),
+                "2025-01-01",
+                &format!("Title {i}"),
+                &format!("Distinct pair body text number {i} for uniqueness"),
+            )
+        })
+        .collect();
+    sampler
+        .register_source(Box::new(InMemorySource::from_records("tt", records)))
+        .unwrap();
+
+    for _ in 0..5 {
+        let batch = sampler.next_pair_batch(SplitLabel::Train).unwrap();
+        assert_eq!(batch.pairs.len(), 8);
+        // Every odd-indexed pair carries the negative as its positive slot.
+        let mut seen = std::collections::HashSet::new();
+        for (idx, pair) in batch.pairs.iter().enumerate() {
+            if idx % 2 == 1 {
+                assert!(
+                    seen.insert(pair.positive.text.clone()),
+                    "negative-derived pair text must be unique within batch"
+                );
+            }
+        }
     }
 }
 
