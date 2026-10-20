@@ -7,12 +7,7 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 categories = ["algorithms", "artificial-intelligence", "science", "text-processing"]
-keywords = [
-    "train-test-split",
-    "triplet-mining",
-    "dataset-sampling",
-    "preprocessing",
-]
+keywords = ["train-test-split", "triplet-mining", "dataset-sampling", "preprocessing"]
 
 [features]
 default = []
