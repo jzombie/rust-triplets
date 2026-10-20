@@ -3,7 +3,32 @@
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
-(or is loosely based on) Semantic Versioning.
+ (or is loosely based on) Semantic Versioning.
+
+## [UNRELEASED]
+
+### Fixed
+
+- **Negatives are now unique within each batch by text.** All pair/triplet
+  batch paths track accepted negative chunk texts (`stable_hash_str` of the
+  rendered text in a zero-cost `nohash-hasher` set) alongside the existing
+  full-tuple `(anchor, positive, negative)` `seen` set. A candidate whose
+  negative text already appears in the batch is rejected; the sampler redraws
+  **only the negative** (up to 4 retries, anchor/positive kept, swap hoisted
+  before the loop) instead of discarding the whole triplet. Checks are atomic
+  (check-then-commit, no partial `seen` mutation) and the anchor-vs-positive
+  text guard runs before the retry loop since no negative redraw can fix it.
+  Best-effort pre-pad: `pad_with_reuse` may still duplicate when the unique
+  pool is smaller than `batch_size`.
+
+### Changed
+
+- Added `nohash-hasher` dependency (pass-through hashing for the `u64`
+  negative-text keys; avoids re-hashing in the sampler hot loop).
+- Deterministic batch sequences change (triplet/pair snapshot hashes updated
+  for default and `bm25-mining` features) because dedup rejections shift RNG
+  consumption. The weighted-mixture test now asserts a frequency band instead
+  of an exact 3:1 count for the same reason (split purity stays exact).
 
 ## [0.28.0-alpha] - 2026-10-13
 
