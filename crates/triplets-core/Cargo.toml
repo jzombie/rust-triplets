@@ -28,6 +28,7 @@ chrono = { workspace = true }
 csv = { workspace = true }
 indexmap = { workspace = true }
 line-ending = { workspace = true }
+nohash-hasher = { workspace = true }
 rand = { workspace = true }
 rayon = { workspace = true }
 serde = { workspace = true }

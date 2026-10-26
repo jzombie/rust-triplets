@@ -3,7 +3,46 @@
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
-(or is loosely based on) Semantic Versioning.
+ (or is loosely based on) Semantic Versioning.
+
+## [0.29.0-alpha] - 2026-10-26
+
+### Fixed
+
+- **Negatives are now unique within each batch by text.** All pair/triplet
+  batch paths track accepted negative chunk texts (`stable_hash_str` of the
+  rendered text in a zero-cost `nohash-hasher` set) alongside the existing
+  full-tuple `(anchor, positive, negative)` `seen` set. A candidate whose
+  negative text already appears in the batch is rejected; the sampler redraws
+  **only the negative** (up to 4 retries, anchor/positive kept, swap hoisted
+  before the loop) instead of discarding the whole triplet. Checks are atomic
+  (check-then-commit, no partial `seen` mutation) and the anchor-vs-positive
+  text guard runs before the retry loop since no negative redraw can fix it.
+  Best-effort pre-pad: `pad_with_reuse` may still duplicate when the unique
+  pool is smaller than `batch_size`.
+- Removed the legacy serial triplet builder chain (`make_triplet_with_anchor`,
+  `finalize_triplet_with_negative`, and its helpers) now that all batch paths
+  build through `make_triplet_with_unique_negative`; the two unit tests that
+  exercised it now run against the live builder.
+
+### Changed
+
+- Added `nohash-hasher` dependency (pass-through hashing for the `u64`
+  negative-text keys; avoids re-hashing in the sampler hot loop).
+- Deterministic batch sequences change (triplet/pair snapshot hashes updated
+  for default and `bm25-mining` features) because dedup rejections shift RNG
+  consumption. The weighted-mixture test now asserts a frequency band instead
+  of an exact 3:1 count for the same reason (split purity stays exact).
+- Bumped `tokio` from 1.53.1 to 1.54.1 (#179)
+- Bumped `serde_json` from 1.0.151 to 1.0.154 (#176)
+- Bumped `indoc` from 2.0.7 to 2.0.8 (#174)
+- Bumped `rustls` from 0.23.45 to 0.23.46 (RUSTSEC-2026-0346 through RUSTSEC-2026-0349)
+- Bumped `rustls-webpki` from 0.103.15 to 0.103.16 (RUSTSEC-2026-0382)
+- Bumped `webpki-root-certs` from 1.0.7 to 1.0.11 (RUSTSEC-2026-0383)
+- Bumped `zstd` from 0.14.0 to 0.14.3 (RUSTSEC-2026-0391)
+- Bumped `zstd-safe` from 8.0.0 to 8.2.0 (RUSTSEC-2026-0395 through RUSTSEC-2026-0405)
+- Bumped `zstd-sys` from 2.1.0+zstd.1.5.7 to 2.1.2+zstd.1.5.7 (RUSTSEC-2026-0410)
+- Bumped `chacha20` from 0.10.0 (yanked) to 0.10.2
 
 ## [0.28.0-alpha] - 2026-10-13
 
