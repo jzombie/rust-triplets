@@ -33,6 +33,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
   for default and `bm25-mining` features) because dedup rejections shift RNG
   consumption. The weighted-mixture test now asserts a frequency band instead
   of an exact 3:1 count for the same reason (split purity stays exact).
+- Bumped `tokio` from 1.53.1 to 1.54.1 (#179)
+- Bumped `serde_json` from 1.0.151 to 1.0.154 (#176)
+- Bumped `indoc` from 2.0.7 to 2.0.8 (#174)
 
 ## [0.28.0-alpha] - 2026-10-13
 
