@@ -36,6 +36,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - Bumped `tokio` from 1.53.1 to 1.54.1 (#179)
 - Bumped `serde_json` from 1.0.151 to 1.0.154 (#176)
 - Bumped `indoc` from 2.0.7 to 2.0.8 (#174)
+- Bumped `rustls` from 0.23.45 to 0.23.46 (RUSTSEC-2026-0346 through RUSTSEC-2026-0349)
+- Bumped `rustls-webpki` from 0.103.15 to 0.103.16 (RUSTSEC-2026-0382)
+- Bumped `webpki-root-certs` from 1.0.7 to 1.0.11 (RUSTSEC-2026-0383)
+- Bumped `zstd` from 0.14.0 to 0.14.3 (RUSTSEC-2026-0391)
+- Bumped `zstd-safe` from 8.0.0 to 8.2.0 (RUSTSEC-2026-0395 through RUSTSEC-2026-0405)
+- Bumped `zstd-sys` from 2.1.0+zstd.1.5.7 to 2.1.2+zstd.1.5.7 (RUSTSEC-2026-0410)
+- Bumped `chacha20` from 0.10.0 (yanked) to 0.10.2
 
 ## [0.28.0-alpha] - 2026-10-13
 
