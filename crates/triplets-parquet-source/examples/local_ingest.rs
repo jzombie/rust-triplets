@@ -60,8 +60,12 @@ fn parse_args() -> Result<Args, Box<dyn Error>> {
             "--schema" => args.schema_only = true,
             "--text" => args.text.push(it.next().ok_or("--text needs a value")?),
             "--anchor" => args.anchor.push(it.next().ok_or("--anchor needs a value")?),
-            "--positive" => args.positive.push(it.next().ok_or("--positive needs a value")?),
-            "--context" => args.context.push(it.next().ok_or("--context needs a value")?),
+            "--positive" => args
+                .positive
+                .push(it.next().ok_or("--positive needs a value")?),
+            "--context" => args
+                .context
+                .push(it.next().ok_or("--context needs a value")?),
             "--id" => args.id = Some(it.next().ok_or("--id needs a value")?),
             "--limit" => {
                 args.limit = it
