@@ -37,13 +37,13 @@ pub const TEXT_BATCH_SEQUENCE_HASH: u64 = 16610876526529257994;
 pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 13786196962391734272;
 /// Expected hash for deterministic triplet batch sequence when bm25-mining is enabled.
 #[cfg(feature = "bm25-mining")]
-pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 12276607046866300124;
+pub const TRIPLET_BATCH_SEQUENCE_HASH: u64 = 12028785201715027148;
 /// Expected hash for deterministic pair batch sequence.
 #[cfg(not(feature = "bm25-mining"))]
 pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 10647424760669092757;
 /// Expected hash for deterministic pair batch sequence when bm25-mining is enabled.
 #[cfg(feature = "bm25-mining")]
-pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 9916688473817591159;
+pub const PAIR_BATCH_SEQUENCE_HASH: u64 = 1881973594562937881;
 /// Expected hash for deterministic prefetch text batch sequence.
 pub const PREFETCH_TEXT_BATCH_SEQUENCE_HASH: u64 = 16610876526529257994;
 /// Expected hash for deterministic prefetch triplet batch sequence.
@@ -51,13 +51,13 @@ pub const PREFETCH_TEXT_BATCH_SEQUENCE_HASH: u64 = 16610876526529257994;
 pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 14093275483386623964;
 /// Expected hash for deterministic prefetch triplet batch sequence when bm25-mining is enabled.
 #[cfg(feature = "bm25-mining")]
-pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 10182485217788015868;
+pub const PREFETCH_TRIPLET_BATCH_SEQUENCE_HASH: u64 = 16494385890506053344;
 /// Expected hash for deterministic prefetch pair batch sequence.
 #[cfg(not(feature = "bm25-mining"))]
 pub const PREFETCH_PAIR_BATCH_SEQUENCE_HASH: u64 = 5838267164903469960;
 /// Expected hash for deterministic prefetch pair batch sequence when bm25-mining is enabled.
 #[cfg(feature = "bm25-mining")]
-pub const PREFETCH_PAIR_BATCH_SEQUENCE_HASH: u64 = 6312154801633507213;
+pub const PREFETCH_PAIR_BATCH_SEQUENCE_HASH: u64 = 12766552351354355020;
 
 /// Expected readable wrong-article sequence without BM25 mining.
 pub const READABLE_NON_BM25_TITLES: [&str; 8] = [
@@ -74,14 +74,14 @@ pub const READABLE_NON_BM25_TITLES: [&str; 8] = [
 /// Expected readable wrong-article sequence with BM25 mining enabled.
 #[cfg(feature = "bm25-mining")]
 pub const READABLE_BM25_TITLES: [&str; 8] = [
-    "Carbon market and emissions policy",
     "Carbon policy update",
-    "Regulatory market digest",
-    "Carbon market and emissions policy",
+    "Marine geology report",
+    "Marine geology report",
+    "Energy transition memo",
     "Carbon policy update",
-    "Regulatory market digest",
-    "Carbon market and emissions policy",
+    "Energy transition memo",
     "Carbon policy update",
+    "Energy transition memo",
 ];
 
 use crate::data::{ChunkView, QualityScore, RecordChunk, RecordSection};
@@ -321,6 +321,7 @@ fn overlapping_ids_across_sources_coexist_in_shared_pool() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
     config.text_recipes = Vec::new();
     let sampler = TripletSampler::new(config, Arc::clone(&store));
@@ -443,6 +444,7 @@ fn late_registered_source_is_cycled_without_rebuild() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
     config.text_recipes = Vec::new();
     let sampler = TripletSampler::new(config, Arc::clone(&store));
@@ -710,6 +712,7 @@ fn unknown_weight_source_ids_fail_loudly() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
     config.text_recipes = Vec::new();
     let sampler = TripletSampler::new(config, Arc::clone(&store));
@@ -779,6 +782,11 @@ fn weighted_sampling_honors_frequency_and_splits_jointly() {
     };
     let store = Arc::new(DeterministicSplitStore::new(split, 108).unwrap());
     let mut config = base_config();
+    config.retrieval_sampling = crate::config::RetrievalSamplingConfig {
+        min_rank: 0,
+        max_rank: 100,
+        search_top_k: 32,
+    };
     config.batch_size = 8;
     config.ingestion_max_records = 128;
     config.allowed_splits = vec![SplitLabel::Train, SplitLabel::Validation, SplitLabel::Test];
@@ -792,6 +800,7 @@ fn weighted_sampling_honors_frequency_and_splits_jointly() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
     config.text_recipes = Vec::new();
     let sampler = TripletSampler::new(config, Arc::clone(&store));
@@ -1579,6 +1588,7 @@ fn exhaustion_retry_limit_returns_exhausted() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
     config.text_recipes = Vec::new();
 
@@ -1634,6 +1644,7 @@ fn single_source_failure_does_not_fail_batch_when_other_source_has_data() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
     config.text_recipes = Vec::new();
 
@@ -1696,6 +1707,7 @@ fn triplet_batch_is_padded_to_batch_size_when_unique_pool_is_small() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
 
     let records = vec![
@@ -1750,6 +1762,7 @@ fn pair_batch_is_padded_to_batch_size_when_unique_pool_is_small() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
 
     let records = vec![
@@ -1850,6 +1863,7 @@ fn failed_source_is_retried_on_next_batch_call() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
     config.text_recipes = Vec::new();
 
@@ -2280,6 +2294,7 @@ fn runtime_batches_do_not_bypass_custom_chunker() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
     config.text_recipes = vec![TextRecipe {
         name: "custom_chunker_runtime_text".into(),
@@ -2476,6 +2491,7 @@ fn triplet_weight_averages_chunk_weights() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     };
 
     let anchor = RecordChunk {
@@ -2551,6 +2567,7 @@ fn non_auto_triplet_negative_weight_uses_trust_only() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     };
 
     let anchor = RecordChunk {
@@ -2626,6 +2643,7 @@ fn non_auto_triplet_weight_applies_anchor_positive_proximity() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     };
 
     let anchor = RecordChunk {
@@ -2706,6 +2724,7 @@ fn non_auto_triplet_weight_tracks_positive_window_index() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     };
 
     let anchor = RecordChunk {
@@ -2808,6 +2827,7 @@ fn auto_chunk_pair_triplet_weight_uses_proximity_inside_chunk_weight() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     };
 
     let anchor = RecordChunk {
@@ -2980,6 +3000,7 @@ fn text_pair_and_triplet_chunks_all_come_from_materialize_pool() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
     config.text_recipes = vec![TextRecipe {
         name: "parity_text".into(),
@@ -3303,6 +3324,7 @@ fn build_split_order_sampler_with_window(
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
 
     let sampler = Arc::new(TripletSampler::new(config, Arc::clone(&store)));
@@ -3764,6 +3786,7 @@ fn readable_triplet_examples_by_mode() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     };
     let config = SamplerConfig {
         seed: 991,
@@ -3930,6 +3953,7 @@ fn bm25_not_rng_only_when_only_anchor_text_changes() {
                 weight: 1.0,
                 instruction: None,
                 allow_same_anchor_positive: false,
+                retrieval_sampling: None,
             }],
             text_recipes: Vec::new(),
             split,
@@ -4222,6 +4246,7 @@ fn generates_pairs_from_single_source() {
             weight: 1.0,
             instruction: None,
             allow_same_anchor_positive: false,
+            retrieval_sampling: None,
         }],
         text_recipes: vec![TextRecipe {
             name: "teacher_chunk".into(),
@@ -4672,6 +4697,7 @@ fn kvp_date_formats_can_differ_within_same_triplet_across_all_splits() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
     config.text_recipes = Vec::new();
 
@@ -4820,6 +4846,7 @@ fn kvp_date_formats_can_differ_between_anchor_and_positive_across_all_splits() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
     config.text_recipes = Vec::new();
 
@@ -4914,6 +4941,7 @@ fn kvp_prefix_signatures_are_not_constant_across_triplets_with_all_splits() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
     config.text_recipes = Vec::new();
 
@@ -5059,6 +5087,7 @@ fn triplets_cover_kvp_behaviors_across_all_splits() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
     config.text_recipes = Vec::new();
 
@@ -5360,6 +5389,7 @@ fn derives_text_recipes_from_triplets() {
             weight: 1.0,
             instruction: None,
             allow_same_anchor_positive: false,
+            retrieval_sampling: None,
         }],
         text_recipes: Vec::new(),
         split,
@@ -5418,6 +5448,7 @@ fn source_triplets_drive_text_sampling() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
     let decorated = RecipeDecoratedSource::new(records, recipes);
     let sampler = TripletSampler::new(config, store);
@@ -5456,6 +5487,7 @@ fn source_defined_recipes_fill_config_gap() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
     let records = vec![
         trader_record(
@@ -5519,6 +5551,7 @@ fn source_recipes_drive_text_sampling() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
     let records = vec![
         trader_record(
@@ -5576,6 +5609,7 @@ fn role_mode_text_batches_cover_all_three_selector_slots() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
     let records: Vec<DataRecord> = (0..6)
         .map(|i| {
@@ -5640,6 +5674,7 @@ fn source_a_negative_pairs_follow_strategy() {
             weight: 1.0,
             instruction: None,
             allow_same_anchor_positive: false,
+            retrieval_sampling: None,
         }],
         text_recipes: Vec::new(),
         split,
@@ -5697,6 +5732,7 @@ fn qa_negative_pairs_mismatch() {
             weight: 1.0,
             instruction: None,
             allow_same_anchor_positive: false,
+            retrieval_sampling: None,
         }],
         text_recipes: Vec::new(),
         split,
@@ -5924,6 +5960,7 @@ fn weighted_recipe_selection_zero_weight_recipe_never_appears_in_batch() {
             weight: 1.0,
             instruction: None,
             allow_same_anchor_positive: false,
+            retrieval_sampling: None,
         },
         TripletRecipe {
             name: "excluded".into(),
@@ -5934,6 +5971,7 @@ fn weighted_recipe_selection_zero_weight_recipe_never_appears_in_batch() {
             weight: 0.0, // must never be selected
             instruction: None,
             allow_same_anchor_positive: false,
+            retrieval_sampling: None,
         },
     ];
 
@@ -6010,6 +6048,7 @@ fn weighted_recipe_selection_frequency_matches_weight_ratio() {
             weight: 3.0,
             instruction: None,
             allow_same_anchor_positive: false,
+            retrieval_sampling: None,
         },
         TripletRecipe {
             name: "light".into(),
@@ -6020,6 +6059,7 @@ fn weighted_recipe_selection_frequency_matches_weight_ratio() {
             weight: 1.0,
             instruction: None,
             allow_same_anchor_positive: false,
+            retrieval_sampling: None,
         },
     ];
 
@@ -6301,6 +6341,7 @@ fn source_less_batch_builders_sample_from_primed_epoch_tracker() {
             weight: 1.0,
             instruction: None,
             allow_same_anchor_positive: false,
+            retrieval_sampling: None,
         }];
         config.text_recipes = vec![TextRecipe {
             name: "manual_text".into(),
@@ -6410,6 +6451,7 @@ fn source_less_batch_builders_report_last_recipe_when_sampling_exhausts() {
             weight: 1.0,
             instruction: None,
             allow_same_anchor_positive: false,
+            retrieval_sampling: None,
         }];
         config.text_recipes = vec![TextRecipe {
             name: text_name.to_string().into(),
@@ -6490,6 +6532,7 @@ fn source_state_and_recipe_helpers_cover_remaining_branches() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     };
 
     inner.persist_source_state(None).unwrap();
@@ -6698,6 +6741,7 @@ fn temporal_neighbor_auto_pair_and_weighted_retry_paths_are_covered() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     };
     assert!(
         inner
@@ -6716,6 +6760,7 @@ fn temporal_neighbor_auto_pair_and_weighted_retry_paths_are_covered() {
             weight: 1.0,
             instruction: None,
             allow_same_anchor_positive: false,
+            retrieval_sampling: None,
         }],
         text_recipes: vec![TextRecipe {
             name: "retry_text".into(),
@@ -7100,6 +7145,7 @@ fn custom_recipe_still_respects_strategy_pool_with_bm25() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     };
     let config = SamplerConfig {
         seed: 23,
@@ -7543,6 +7589,7 @@ fn bm25_triplets_never_reuse_text_across_slots() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     };
     let config = SamplerConfig {
         seed: 91,
@@ -7607,27 +7654,19 @@ fn bm25_triplets_never_reuse_text_across_slots() {
 #[cfg(feature = "bm25-mining")]
 #[test]
 fn bm25_cursor_pruning_runs_even_when_other_cursors_are_empty() {
+    // Rank-window backend is stateless: no rotation cursors exist.
     let split = SplitRatios::default();
     let store = Arc::new(DeterministicSplitStore::new(split, 1234).unwrap());
     let mut inner = TripletSamplerInner::new(base_config(), store);
 
     assert!(inner.chunk_cursors.is_empty());
     assert!(inner.role_cursors.is_empty());
+    assert!(inner.bm25_backend_mut().negative_cursors_is_empty());
+    assert_eq!(inner.bm25_backend_mut().negative_cursors_len(), 0);
 
-    inner.bm25_backend_mut().negative_cursors_insert(
-        (RecordKey::new("stale", "stale_anchor"), SplitLabel::Train),
-        7,
-    );
-    assert_eq!(inner.bm25_backend_mut().negative_cursors_len(), 1);
-
-    // With no records loaded, every cursor entry is stale and must be removed.
-    // This specifically guards against early-return logic that skips BM25 pruning.
+    // Prune must be a no-op (apart from empty cache) and never panic.
     inner.prune_cursor_state();
-
-    assert!(
-        inner.bm25_backend_mut().negative_cursors_is_empty(),
-        "bm25_negative_cursors should be pruned even when chunk/role cursor maps are empty"
-    );
+    assert!(inner.bm25_backend_mut().negative_cursors_is_empty());
 }
 
 #[cfg(feature = "bm25-mining")]
@@ -7657,22 +7696,12 @@ fn bm25_cursor_state_is_cleared_on_each_record_snapshot_sync() {
     let mut inner = sampler.inner.lock().unwrap();
     inner.ingest_internal(SplitLabel::Train).unwrap();
 
-    inner.bm25_backend_mut().negative_cursors_insert(
-        (
-            RecordKey::new("strict_sync_source", sync_id.clone()),
-            SplitLabel::Train,
-        ),
-        42,
-    );
-    assert_eq!(inner.bm25_backend_mut().negative_cursors_len(), 1);
+    // Stateless backend: no cursor entries ever exist.
+    assert!(inner.bm25_backend_mut().negative_cursors_is_empty());
 
-    // Strict contract: every snapshot sync clears BM25 cursor state, even if
-    // the same anchor remains present in the refreshed record pool.
+    // Sync must not create cursor state and must not panic.
     inner.sync_records_from_cache().unwrap();
-    assert!(
-        inner.bm25_backend_mut().negative_cursors_is_empty(),
-        "bm25 cursor state must reset at every record snapshot boundary"
-    );
+    assert!(inner.bm25_backend_mut().negative_cursors_is_empty());
 }
 
 #[test]
@@ -8190,6 +8219,7 @@ fn fallback_triplet_negative_never_matches_anchor() {
             weight: 1.0,
             instruction: None,
             allow_same_anchor_positive: false,
+            retrieval_sampling: None,
         }],
         text_recipes: Vec::new(),
         split,
@@ -8314,6 +8344,7 @@ fn triplets_never_cross_split_boundaries() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
     config.text_recipes = Vec::new();
 
@@ -8391,6 +8422,7 @@ fn split_specific_batch_apis_return_exact_size_and_requested_split_only() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
     config.text_recipes = vec![TextRecipe {
         name: "split_api_text".into(),
@@ -8512,6 +8544,7 @@ fn split_specific_triplet_api_keeps_anchor_positive_negative_in_same_split() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
     config.text_recipes = Vec::new();
 
@@ -8606,6 +8639,7 @@ fn triplet_sampling_produces_anchor_positive_and_negative() {
             weight: 1.0,
             instruction: None,
             allow_same_anchor_positive: false,
+            retrieval_sampling: None,
         }],
         text_recipes: Vec::new(),
         split,
@@ -8701,6 +8735,7 @@ fn triplet_sampling_cycles_recipes_over_time() {
             weight: 1.0,
             instruction: None,
             allow_same_anchor_positive: false,
+            retrieval_sampling: None,
         },
         TripletRecipe {
             name: "recipe_b".into(),
@@ -8711,6 +8746,7 @@ fn triplet_sampling_cycles_recipes_over_time() {
             weight: 1.0,
             instruction: None,
             allow_same_anchor_positive: false,
+            retrieval_sampling: None,
         },
     ];
     config.text_recipes = Vec::new();
@@ -8757,6 +8793,7 @@ fn triplet_batch_dedupes_identical_triplets() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
 
     let store = Arc::new(DeterministicSplitStore::new(split, 77).unwrap());
@@ -8804,6 +8841,11 @@ fn triplet_batch_negatives_unique_pre_pad() {
         test: 0.0,
     };
     let mut config = base_config();
+    config.retrieval_sampling = crate::config::RetrievalSamplingConfig {
+        min_rank: 0,
+        max_rank: 100,
+        search_top_k: 32,
+    };
     config.batch_size = 4;
     config.ingestion_max_records = 64;
     config.allowed_splits = vec![SplitLabel::Train];
@@ -8817,6 +8859,7 @@ fn triplet_batch_negatives_unique_pre_pad() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
     config.text_recipes = Vec::new();
     let store = Arc::new(DeterministicSplitStore::new(split, 77).unwrap());
@@ -8859,6 +8902,11 @@ fn pair_batch_negatives_unique_pre_pad() {
         test: 0.0,
     };
     let mut config = base_config();
+    config.retrieval_sampling = crate::config::RetrievalSamplingConfig {
+        min_rank: 0,
+        max_rank: 100,
+        search_top_k: 32,
+    };
     config.batch_size = 8;
     config.ingestion_max_records = 64;
     config.allowed_splits = vec![SplitLabel::Train];
@@ -8872,6 +8920,7 @@ fn pair_batch_negatives_unique_pre_pad() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
     config.text_recipes = Vec::new();
     let store = Arc::new(DeterministicSplitStore::new(split, 78).unwrap());
@@ -8988,6 +9037,7 @@ fn text_batch_prevents_duplicate_text_per_record_from_text_columns() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: true,
+        retrieval_sampling: None,
     }];
 
     let store = Arc::new(DeterministicSplitStore::new(split, 91).unwrap());
@@ -9273,6 +9323,7 @@ fn text_dedup_isolation_does_not_affect_triplet_or_pair_batches() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
     config.text_recipes = vec![TextRecipe {
         name: "iso_text".into(),
@@ -9420,6 +9471,7 @@ fn epoch_sampling_visits_each_record_before_repeat() {
             weight: 1.0,
             instruction: None,
             allow_same_anchor_positive: false,
+            retrieval_sampling: None,
         }],
         text_recipes: Vec::new(),
         split,
@@ -9488,6 +9540,7 @@ fn epoch_sampling_persists_between_runs() {
                 weight: 1.0,
                 instruction: None,
                 allow_same_anchor_positive: false,
+                retrieval_sampling: None,
             }],
             text_recipes: Vec::new(),
             split,
@@ -9589,6 +9642,7 @@ fn epoch_sampling_handles_new_records_after_restart() {
             weight: 1.0,
             instruction: None,
             allow_same_anchor_positive: false,
+            retrieval_sampling: None,
         }],
         text_recipes: Vec::new(),
         split,
@@ -9702,6 +9756,7 @@ fn epoch_is_propagated_to_ingestion_on_resume() {
             weight: 1.0,
             instruction: None,
             allow_same_anchor_positive: false,
+            retrieval_sampling: None,
         }],
         text_recipes: Vec::new(),
         split,
@@ -9814,6 +9869,7 @@ fn resume_restores_epoch_and_epoch_step_together() {
             weight: 1.0,
             instruction: None,
             allow_same_anchor_positive: false,
+            retrieval_sampling: None,
         }],
         text_recipes: Vec::new(),
         ..SamplerConfig::default()
@@ -10255,6 +10311,7 @@ fn adds_dynamic_chunk_pair_recipe_for_long_section_sources() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
 
     let now = Utc::now();
@@ -10373,6 +10430,7 @@ fn does_not_add_dynamic_chunk_pair_recipe_when_all_sections_fit_window() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
 
     let now = Utc::now();
@@ -10497,6 +10555,7 @@ fn adds_dynamic_chunk_pair_recipe_even_with_global_config_recipes() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
 
     let now = Utc::now();
@@ -11089,6 +11148,7 @@ fn same_selector_triplet_returns_none_when_only_one_chunk_exists() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     };
 
     let triplet = inner.make_triplet_with_unique_negative_seeded(&recipe, &anchor);
@@ -11263,6 +11323,7 @@ fn sampler_for_prefetch_tests() -> Arc<TripletSampler<DeterministicSplitStore>> 
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
     config.text_recipes = vec![TextRecipe {
         name: "prefetch_text".into(),
@@ -11405,6 +11466,7 @@ fn different_epochs_produce_different_record_orderings() {
             weight: 1.0,
             instruction: None,
             allow_same_anchor_positive: false,
+            retrieval_sampling: None,
         }],
         text_recipes: Vec::new(),
         allowed_splits: vec![SplitLabel::Train],
@@ -11522,6 +11584,7 @@ fn resumed_sampler_uses_persisted_epoch_seed() {
             weight: 1.0,
             instruction: None,
             allow_same_anchor_positive: false,
+            retrieval_sampling: None,
         }],
         text_recipes: Vec::new(),
         allowed_splits: vec![SplitLabel::Train],
@@ -11634,6 +11697,7 @@ fn triplet_rejects_negative_with_duplicate_text_content() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
 
     let store = Arc::new(DeterministicSplitStore::new(split, 55).unwrap());
@@ -12013,6 +12077,7 @@ fn instruction_propagates_from_recipe_to_sample_triplet() {
         weight: 1.0,
         instruction: Some("Retrieve a relevant document.".into()),
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
 
     let now = Utc::now();
@@ -12132,6 +12197,7 @@ fn allow_same_anchor_positive_permits_identical_text_triplet() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     };
 
     let mut config_blocked = config.clone();
@@ -12164,6 +12230,7 @@ fn allow_same_anchor_positive_permits_identical_text_triplet() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: true,
+        retrieval_sampling: None,
     };
 
     let mut config_allowed = config.clone();
@@ -12774,6 +12841,7 @@ fn select_role_parallel_returns_none_when_no_matching_role() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     };
     let ap = inner.select_anchor_positive_for_recipe(&recipe, &anchor_only_record, &mut rng);
     assert!(
@@ -13093,6 +13161,7 @@ fn for_split_weight_apis_succeed_with_registered_source() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
     config.text_recipes = vec![TextRecipe {
         name: "for_split_text_test".into(),
@@ -13426,6 +13495,7 @@ fn batch_size_guard_prevents_oversampling_from_large_pool() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
     config.text_recipes = vec![TextRecipe {
         name: "oversample_guard_text".into(),
@@ -13540,6 +13610,7 @@ fn text_batch_cursor_wrap_during_batch_does_not_duplicate_text() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: true,
+        retrieval_sampling: None,
     }];
 
     let store = Arc::new(DeterministicSplitStore::new(split, 42).unwrap());
@@ -13596,6 +13667,7 @@ fn text_batch_cursor_wrap_mid_batch_with_diff_size() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: true,
+        retrieval_sampling: None,
     }];
 
     let store = Arc::new(DeterministicSplitStore::new(split, 42).unwrap());
@@ -13666,6 +13738,7 @@ fn text_batch_duplicate_text_different_records() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: true,
+        retrieval_sampling: None,
     }];
 
     let store = Arc::new(DeterministicSplitStore::new(split, 42).unwrap());
@@ -13716,6 +13789,7 @@ fn epoch_step_increments_through_public_batch_apis() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
     config.text_recipes = vec![TextRecipe {
         name: "context".into(),
@@ -13795,6 +13869,7 @@ fn explicit_set_epoch_resets_epoch_step_then_increments_per_batch() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
 
     let store = Arc::new(DeterministicSplitStore::new(SplitRatios::default(), 42).unwrap());
@@ -13876,6 +13951,7 @@ fn epoch_step_resume_preserves_epoch_and_continues_from_saved_value() {
             weight: 1.0,
             instruction: None,
             allow_same_anchor_positive: false,
+            retrieval_sampling: None,
         }],
         text_recipes: Vec::new(),
         ..SamplerConfig::default()
@@ -13975,6 +14051,11 @@ fn resume_continues_epoch_step_from_saved_value() {
     // emitted_text_hashes on resume; triplet batches have an independent
     // pre-existing resume issue (separate from step counter changes).
     let mut config = base_config();
+    config.retrieval_sampling = crate::config::RetrievalSamplingConfig {
+        min_rank: 0,
+        max_rank: 100,
+        search_top_k: 32,
+    };
     config.seed = 42;
     config.batch_size = 4;
     config.split = split;
@@ -13988,6 +14069,7 @@ fn resume_continues_epoch_step_from_saved_value() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
 
     // === PAIR batch resume ===
@@ -14409,6 +14491,7 @@ fn same_record_negative_selector_picks_from_context() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     };
 
     let mut inner = sampler.inner.lock().unwrap();
@@ -14460,6 +14543,7 @@ fn same_record_and_wrong_article_recipes_coexist() {
                 weight: 1.0,
                 instruction: None,
                 allow_same_anchor_positive: false,
+                retrieval_sampling: None,
             },
             TripletRecipe {
                 name: "same_record_recipe".into(),
@@ -14470,6 +14554,7 @@ fn same_record_and_wrong_article_recipes_coexist() {
                 weight: 1.0,
                 instruction: None,
                 allow_same_anchor_positive: false,
+                retrieval_sampling: None,
             },
         ],
         text_recipes: Vec::new(),
@@ -14735,6 +14820,7 @@ fn build_derived_text_recipes_produces_anchor_positive_negative_variants() {
             weight: 1.5,
             instruction: None,
             allow_same_anchor_positive: false,
+            retrieval_sampling: None,
         },
         TripletRecipe {
             name: "retrieval".into(),
@@ -14745,6 +14831,7 @@ fn build_derived_text_recipes_produces_anchor_positive_negative_variants() {
             weight: 0.8,
             instruction: None,
             allow_same_anchor_positive: false,
+            retrieval_sampling: None,
         },
     ];
     let derived =
@@ -14956,9 +15043,11 @@ fn negative_strategy_wrong_publication_date_uses_date_taxonomy() {
         .unwrap();
     let mut rng = DeterministicRng::new(42);
     let anchor_date = taxonomy_value(anchor, META_FIELD_DATE).map(|d| d.to_string());
+    let hardness = inner.config.retrieval_sampling.clone();
     let neg = inner.select_negative_record(
         anchor,
         &NegativeStrategy::WrongPublicationDate,
+        &hardness,
         None,
         &mut rng,
     );
@@ -15015,9 +15104,11 @@ fn negative_strategy_question_answer_mismatch_same_source() {
         .get(&RecordKey::new(PRIMARY_SOURCE_ID, "qa_anchor"))
         .unwrap();
     let mut rng = DeterministicRng::new(42);
+    let hardness = inner.config.retrieval_sampling.clone();
     let neg = inner.select_negative_record(
         anchor,
         &NegativeStrategy::QuestionAnswerMismatch,
+        &hardness,
         None,
         &mut rng,
     );
@@ -15067,9 +15158,11 @@ fn negative_strategy_wrong_publication_date_falls_back_when_no_different_date() 
         .get(&RecordKey::new(PRIMARY_SOURCE_ID, "wpd_a"))
         .unwrap();
     let mut rng = DeterministicRng::new(42);
+    let hardness = inner.config.retrieval_sampling.clone();
     let neg = inner.select_negative_record(
         anchor,
         &NegativeStrategy::WrongPublicationDate,
+        &hardness,
         None,
         &mut rng,
     );
@@ -15102,6 +15195,7 @@ fn batch_builders_handle_empty_source_pool() {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
     config.text_recipes = vec![TextRecipe {
         name: "empty_pool_text".into(),
@@ -15342,4 +15436,191 @@ fn record_has_at_least_two_window_chunks_returns_false_for_no_section_match() {
             &Selector::TemporalOffset(1)
         )
     );
+}
+
+#[cfg(feature = "bm25-mining")]
+#[test]
+fn retrieval_rank_window_respects_bounds_and_skips_rank_zero() {
+    use crate::config::RetrievalSamplingConfig;
+    let split = SplitRatios {
+        train: 0.7,
+        validation: 0.2,
+        test: 0.1,
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 13).unwrap());
+    let mut inner = TripletSamplerInner::new(base_config(), Arc::clone(&store));
+    let mk = |id: &str, body: &str| trader_record(id, "2025-01-01", id, body);
+    let recs = vec![
+        mk(
+            "rw_anchor",
+            "carbon pricing policy emissions reduction roadmap market design",
+        ),
+        mk(
+            "rw_a",
+            "carbon pricing policy emissions reduction roadmap market design carbon",
+        ),
+        mk("rw_b", "carbon pricing policy emissions reduction roadmap"),
+        mk(
+            "rw_c",
+            "emissions reduction roadmap clean energy transition",
+        ),
+        mk(
+            "rw_d",
+            "policy market design regulatory framework compliance",
+        ),
+        mk("rw_e", "bronze age pottery fragments excavation trench"),
+    ];
+    for r in &recs {
+        let k = RecordKey::new(r.source.clone(), r.id.clone());
+        store.upsert(k.clone(), SplitLabel::Train).unwrap();
+        inner.chunk_index.insert(k.clone(), k.clone());
+        inner.records.insert(k, Arc::new(r.clone()));
+    }
+    inner.epoch_tracker.ensure_loaded().unwrap();
+    let by_split = inner.records_by_split().unwrap();
+    inner.epoch_tracker.reconcile(SplitLabel::Train, &by_split);
+    let all: indexmap::IndexMap<RecordKey, Arc<DataRecord>> = inner.records.clone();
+    inner.negative_backend.on_records_refreshed(
+        &all,
+        1024,
+        &|_| Some(SplitLabel::Train),
+        &["source_a".to_string()],
+    );
+    let anchor = inner
+        .records
+        .get(&RecordKey::new("source_a", "rw_anchor"))
+        .unwrap()
+        .clone();
+    let ranked = {
+        inner
+            .bm25_backend_mut()
+            .ranked_candidates_pub(&anchor, SplitLabel::Train)
+    };
+    assert!(ranked.len() >= 3, "need ranked pool, got {}", ranked.len());
+    // min=1 skips rank-0: never return top candidate over many draws when pool large enough.
+    let h = RetrievalSamplingConfig {
+        min_rank: 1,
+        max_rank: 30,
+        search_top_k: 32,
+    };
+    let top = ranked[0].clone();
+    let mut saw_non_top = false;
+    let mut rng = DeterministicRng::new(7);
+    for _ in 0..20 {
+        let n = inner
+            .select_negative_record(&anchor, &NegativeStrategy::WrongArticle, &h, None, &mut rng)
+            .unwrap()
+            .0;
+        if RecordKey::from(&*n) != top {
+            saw_non_top = true;
+            break;
+        }
+    }
+    // With len>2 and window starting at 1, at least one draw should miss rank-0 (probabilistic but seeded deterministically; assert slice bound instead).
+    let len = ranked.len();
+    let start = 1usize.min(len.saturating_sub(1));
+    let end = 30usize.clamp(start + 1, len);
+    assert!(start >= 1 || len <= 1);
+    assert!(end <= len);
+    let allowed: std::collections::HashSet<RecordKey> =
+        ranked[start..end].iter().cloned().collect();
+    let mut rng2 = DeterministicRng::new(11);
+    for _ in 0..10 {
+        let n = inner
+            .select_negative_record(
+                &anchor,
+                &NegativeStrategy::WrongArticle,
+                &h,
+                None,
+                &mut rng2,
+            )
+            .unwrap()
+            .0;
+        assert!(
+            allowed.contains(&RecordKey::from(&*n)),
+            "rank-window sample outside [start..end]"
+        );
+    }
+    let _ = saw_non_top;
+}
+
+#[cfg(feature = "bm25-mining")]
+#[test]
+fn retrieval_cache_partitions_by_search_depth() {
+    use crate::config::RetrievalSamplingConfig;
+    let split = SplitRatios {
+        train: 0.7,
+        validation: 0.2,
+        test: 0.1,
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 13).unwrap());
+    let mut inner = TripletSamplerInner::new(base_config(), Arc::clone(&store));
+    let mk = |id: &str, body: &str| trader_record(id, "2025-01-01", id, body);
+    let recs = vec![
+        mk(
+            "cd_anchor",
+            "carbon pricing policy emissions reduction roadmap market design",
+        ),
+        mk(
+            "cd_a",
+            "carbon pricing policy emissions reduction roadmap market design carbon",
+        ),
+        mk("cd_b", "carbon pricing policy emissions reduction roadmap"),
+        mk(
+            "cd_c",
+            "emissions reduction roadmap clean energy transition",
+        ),
+    ];
+    for r in &recs {
+        let k = RecordKey::new(r.source.clone(), r.id.clone());
+        store.upsert(k.clone(), SplitLabel::Train).unwrap();
+        inner.chunk_index.insert(k.clone(), k.clone());
+        inner.records.insert(k, Arc::new(r.clone()));
+    }
+    inner.epoch_tracker.ensure_loaded().unwrap();
+    let by_split = inner.records_by_split().unwrap();
+    inner.epoch_tracker.reconcile(SplitLabel::Train, &by_split);
+    let all: indexmap::IndexMap<RecordKey, Arc<DataRecord>> = inner.records.clone();
+    inner.negative_backend.on_records_refreshed(
+        &all,
+        1024,
+        &|_| Some(SplitLabel::Train),
+        &["source_a".to_string()],
+    );
+    let anchor = inner
+        .records
+        .get(&RecordKey::new("source_a", "cd_anchor"))
+        .unwrap()
+        .clone();
+    let h_shallow = RetrievalSamplingConfig {
+        min_rank: 0,
+        max_rank: 10,
+        search_top_k: 5,
+    };
+    let h_deep = RetrievalSamplingConfig {
+        min_rank: 0,
+        max_rank: 10,
+        search_top_k: 100,
+    };
+    let mut rng = DeterministicRng::new(9);
+    let _ = inner.select_negative_record(
+        &anchor,
+        &NegativeStrategy::WrongArticle,
+        &h_shallow,
+        None,
+        &mut rng,
+    );
+    let _ = inner.select_negative_record(
+        &anchor,
+        &NegativeStrategy::WrongArticle,
+        &h_deep,
+        None,
+        &mut rng,
+    );
+    let keys = {
+        inner
+            .bm25_backend_mut()
+            .hard_negatives_keys_for_test(&RecordKey::from(&*anchor))
+    };
+    assert!(keys.len() >= 2, "cache must partition by search_top_k");
 }

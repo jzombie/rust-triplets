@@ -43,8 +43,8 @@ mod errors;
 
 pub use chunking::{ChunkingAlgorithm, SlidingWindowChunker};
 pub use config::{
-    ChunkingStrategy, DenoiserConfig, NegativeStrategy, SamplerConfig, Selector, TextRecipe,
-    TripletRecipe,
+    ChunkingStrategy, DenoiserConfig, NegativeStrategy, RetrievalSamplingConfig, SamplerConfig,
+    Selector, TextRecipe, TripletRecipe,
 };
 pub use data::{
     DataRecord, PairLabel, QualityScore, RecordChunk, SampleBatch, SamplePair, SampleTriplet,

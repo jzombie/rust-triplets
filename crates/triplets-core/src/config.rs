@@ -180,6 +180,10 @@ pub struct TripletRecipe {
     /// Defaults to `false`; set `true` only for recipes whose anchor and positive
     /// selectors intentionally resolve to the same content (e.g. text-only sources).
     pub allow_same_anchor_positive: bool,
+    /// Per-lane retrieval hardness override (`None` = use global `SamplerConfig`).
+    ///
+    /// Rank-windowed BM25 sampling; cache partitioned by `(anchor, search_top_k)`.
+    pub retrieval_sampling: Option<RetrievalSamplingConfig>,
 }
 
 impl Default for TripletRecipe {
@@ -193,6 +197,7 @@ impl Default for TripletRecipe {
             weight: 1.0,
             instruction: None,
             allow_same_anchor_positive: false,
+            retrieval_sampling: None,
         }
     }
 }
@@ -236,6 +241,58 @@ pub struct TextRecipe {
     pub instruction: Option<Cow<'static, str>>,
 }
 
+/// Rank-windowed retrieval sampling configuration.
+///
+/// Industry-standard BM25 hard-negative mining: rank candidates by score
+/// descending, skip `min_rank` false-positive heads, cap at `max_rank`,
+/// uniform sample from `ranked[start..end]` with
+/// `start = min_rank.min(len.saturating_sub(1))`,
+/// `end = max_rank.clamp(start+1, len)`.
+///
+/// Defaults: `min_rank = 1` (skip rank-0 identical match),
+/// `max_rank = 30` (standard hard), `search_top_k = 32`.
+#[derive(Clone, Debug)]
+pub struct RetrievalSamplingConfig {
+    /// Skip top ranks (default 1 to skip rank-0 identical matches).
+    pub min_rank: usize,
+    /// Upper bound rank for hard negative pool (default 30).
+    pub max_rank: usize,
+    /// Total candidate search depth (default 32).
+    pub search_top_k: usize,
+}
+
+impl Default for RetrievalSamplingConfig {
+    fn default() -> Self {
+        Self {
+            min_rank: 1,
+            max_rank: 30,
+            #[cfg(feature = "bm25-mining")]
+            search_top_k: crate::constants::sampler::BM25_SEARCH_TOP_K,
+            #[cfg(not(feature = "bm25-mining"))]
+            search_top_k: 32,
+        }
+    }
+}
+
+impl RetrievalSamplingConfig {
+    /// Eager startup validation: rejects invalid states before runtime sampling.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.search_top_k == 0 {
+            return Err("retrieval_sampling.search_top_k must be > 0".to_string());
+        }
+        if self.max_rank == 0 {
+            return Err("retrieval_sampling.max_rank must be > 0".to_string());
+        }
+        if !(self.min_rank < self.max_rank) {
+            return Err(format!(
+                "retrieval min_rank ({}) must be < max_rank ({})",
+                self.min_rank, self.max_rank
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Strategy for picking the negative *record* in a triplet.
 ///
 /// Each variant defines the candidate pool from which the negative record is drawn.
@@ -244,8 +301,9 @@ pub struct TextRecipe {
 /// cross-domain. A same-split fallback engages automatically when the in-source
 /// pool is too small (for example a source with only one record in the split).
 ///
-/// When the `bm25-mining` feature is enabled, BM25 lexical re-ranking is applied
-/// on top of the strategy-filtered pool — BM25 re-orders candidates by keyword
+/// When the `bm25-mining` feature is enabled, retrieval re-ranking
+/// (see `RetrievalSamplingConfig`) is applied on top of the strategy-filtered
+/// pool. BM25 lexical re-ranking is the current backend — BM25 re-orders candidates by keyword
 /// overlap with the anchor, but does not widen or replace the strategy pool.
 /// BM25 is a first-pass lexical ranker, not a semantic one; it is well-suited for
 /// lifting average negative quality without an encoder at data-generation time.
@@ -310,6 +368,8 @@ pub struct SamplerConfig {
     pub split: SplitRatios,
     /// Splits allowed for sampling requests.
     pub allowed_splits: Vec<SplitLabel>,
+    /// Global retrieval hardness default; per-recipe `retrieval_sampling` overrides.
+    pub retrieval_sampling: RetrievalSamplingConfig,
 }
 
 impl Default for SamplerConfig {
@@ -323,11 +383,34 @@ impl Default for SamplerConfig {
             text_recipes: Vec::new(),
             split: SplitRatios::default(),
             allowed_splits: vec![SplitLabel::Train],
+            retrieval_sampling: RetrievalSamplingConfig::default(),
         }
     }
 }
 
 impl SamplerConfig {
+    /// Eager startup validation for retrieval hardness configs.
+    ///
+    /// Validates the global default plus every per-recipe override. Returns
+    /// `Err(SamplerError::Configuration)` on the first invalid entry so
+    /// invalid states never penetrate the runtime sampling pipeline.
+    pub fn validate(&self) -> Result<(), crate::errors::SamplerError> {
+        self.retrieval_sampling
+            .validate()
+            .map_err(crate::errors::SamplerError::Configuration)?;
+        for recipe in &self.recipes {
+            if let Some(cfg) = recipe.retrieval_sampling.as_ref() {
+                cfg.validate().map_err(|e| {
+                    crate::errors::SamplerError::Configuration(format!(
+                        "recipe '{}': {e}",
+                        recipe.name
+                    ))
+                })?;
+            }
+        }
+        Ok(())
+    }
+
     /// Consuming builder to enable the built-in OCR/markdown denoiser on
     /// the sampler's chunking strategy.
     ///
@@ -447,6 +530,50 @@ mod tests {
         for s in &strategies {
             let _ = format!("{:?}", s);
         }
+    }
+
+    #[test]
+    fn retrieval_sampling_defaults_and_validation() {
+        let cfg = RetrievalSamplingConfig::default();
+        assert_eq!(cfg.min_rank, 1);
+        assert_eq!(cfg.max_rank, 30);
+        assert!(cfg.validate().is_ok());
+        assert!(cfg.search_top_k > 0);
+        let bad = RetrievalSamplingConfig {
+            min_rank: 5,
+            max_rank: 5,
+            search_top_k: 32,
+        };
+        assert!(bad.validate().is_err());
+        let bad2 = RetrievalSamplingConfig {
+            min_rank: 10,
+            max_rank: 5,
+            search_top_k: 32,
+        };
+        assert!(bad2.validate().is_err());
+        let bad3 = RetrievalSamplingConfig {
+            min_rank: 0,
+            max_rank: 0,
+            search_top_k: 32,
+        };
+        assert!(bad3.validate().is_err());
+        let bad4 = RetrievalSamplingConfig {
+            min_rank: 1,
+            max_rank: 30,
+            search_top_k: 0,
+        };
+        assert!(bad4.validate().is_err());
+        let mut global = SamplerConfig::default();
+        assert!(global.validate().is_ok());
+        global.recipes.push(TripletRecipe {
+            retrieval_sampling: Some(RetrievalSamplingConfig {
+                min_rank: 1,
+                max_rank: 10,
+                search_top_k: 100,
+            }),
+            ..TripletRecipe::default()
+        });
+        assert!(global.validate().is_ok());
     }
 
     #[test]

@@ -81,6 +81,7 @@ fn standard_recipe(name: &'static str) -> TripletRecipe {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }
 }
 

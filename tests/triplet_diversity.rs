@@ -111,6 +111,7 @@ fn assert_diversity_for_seed_and_split(seed: u64, allowed_split: SplitLabel) {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     }];
     config.text_recipes = Vec::new();
 

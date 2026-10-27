@@ -65,6 +65,7 @@ fn prefetcher_yields_triplet_batches() {
             weight: 1.0,
             instruction: None,
             allow_same_anchor_positive: false,
+            retrieval_sampling: None,
         }],
         ..SamplerConfig::default()
     };

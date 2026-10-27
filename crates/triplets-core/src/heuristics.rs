@@ -139,6 +139,7 @@ mod tests {
             weight,
             instruction: None,
             allow_same_anchor_positive: false,
+            retrieval_sampling: None,
         }
     }
 

@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use indexmap::IndexMap;
 
+use crate::config::RetrievalSamplingConfig;
 use crate::data::DataRecord;
 use crate::splits::SplitLabel;
 use crate::types::{RecordKey, SourceId};
@@ -47,6 +48,7 @@ pub(super) trait NegativeBackend: Send + Sync {
     /// tie-breaking or fallback should use it rather than maintaining their own.
     /// `fallback_used` threads through from the caller and is returned unchanged
     /// so the batch builder can record whether the negative is from a degraded pool.
+    #[allow(clippy::too_many_arguments)]
     fn choose_negative(
         &self,
         anchor: &DataRecord,
@@ -54,6 +56,7 @@ pub(super) trait NegativeBackend: Send + Sync {
         pool: Vec<Arc<DataRecord>>,
         fallback_used: bool,
         anchor_query_text: Option<&str>,
+        hardness: &RetrievalSamplingConfig,
         rng: &mut dyn rand::RngCore,
     ) -> Option<(Arc<DataRecord>, bool)>;
 

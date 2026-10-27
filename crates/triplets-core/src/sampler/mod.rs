@@ -15,7 +15,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use crate::config::{
-    ChunkingStrategy, NegativeStrategy, SamplerConfig, Selector, TextRecipe, TripletRecipe,
+    ChunkingStrategy, NegativeStrategy, RetrievalSamplingConfig, SamplerConfig, Selector,
+    TextRecipe, TripletRecipe,
 };
 use crate::constants::sampler::AUTO_INJECTED_LONG_SECTION_CHUNK_PAIR_RECIPE_NAME;
 use crate::constants::sampler::{
@@ -405,6 +406,9 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         split_store: Arc<S>,
         chunker: Arc<dyn ChunkingAlgorithm>,
     ) -> Self {
+        if let Err(e) = config.validate() {
+            panic!("invalid SamplerConfig: {e}");
+        }
         let buffer_size = config.ingestion_max_records.max(config.batch_size).max(2);
         let using_config_triplet_recipes = !config.recipes.is_empty();
         let using_config_text_recipes = !config.text_recipes.is_empty();
@@ -922,6 +926,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             weight: 1.0,
             instruction: None,
             allow_same_anchor_positive: false,
+            retrieval_sampling: None,
         }
     }
 
@@ -1227,10 +1232,12 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             .cloned()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn select_negative_record(
         &self,
         anchor_record: &DataRecord,
         strategy: &NegativeStrategy,
+        hardness: &RetrievalSamplingConfig,
         anchor_query_text: Option<&str>,
         rng: &mut dyn rand::RngCore,
     ) -> Option<(Arc<DataRecord>, bool)> {
@@ -1285,6 +1292,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                         same_date,
                         false,
                         anchor_query_text,
+                        hardness,
                         rng,
                     );
                 }
@@ -1302,6 +1310,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                     pool,
                     true,
                     anchor_query_text,
+                    hardness,
                     rng,
                 )
             }
@@ -1347,6 +1356,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                         fallback_pool,
                         true,
                         anchor_query_text,
+                        hardness,
                         rng,
                     );
                 }
@@ -1357,6 +1367,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                     pool,
                     false,
                     anchor_query_text,
+                    hardness,
                     rng,
                 )
             }
@@ -1389,6 +1400,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                         fallback_pool,
                         true,
                         anchor_query_text,
+                        hardness,
                         rng,
                     );
                 }
@@ -1399,6 +1411,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                     pool,
                     false,
                     anchor_query_text,
+                    hardness,
                     rng,
                 )
             }
@@ -1567,9 +1580,14 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         // Negative-only retries; references only, no anchor/positive clones.
         let mut accepted: Option<(RecordChunk, f32, bool)> = None;
         for _ in 0..NEG_DEDUP_RETRIES {
+            let hardness = recipe
+                .retrieval_sampling
+                .as_ref()
+                .unwrap_or(&self.config.retrieval_sampling);
             let (negative_record, fallback_used) = self.select_negative_record(
                 record,
                 &recipe.negative_strategy,
+                hardness,
                 Some(&anchor_raw_text),
                 rng,
             )?;
@@ -3061,9 +3079,15 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             // (B) checks inside loop are all negative-resolvable.
             let mut accepted: Option<(RecordChunk, f32, String)> = None;
             for _ in 0..NEG_DEDUP_RETRIES {
+                let hardness = sc
+                    .recipe
+                    .retrieval_sampling
+                    .as_ref()
+                    .unwrap_or(&self.config.retrieval_sampling);
                 let (negative_record, fallback_used) = match self.select_negative_record(
                     &sc.anchor,
                     &sc.recipe.negative_strategy,
+                    hardness,
                     Some(&sc.anchor_raw_text),
                     &mut rng,
                 ) {
@@ -3208,8 +3232,14 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         anchor_query_text: Option<&str>,
     ) -> Option<(Arc<DataRecord>, bool)> {
         let mut rng = std::mem::replace(&mut self.rng, DeterministicRng::new(0));
-        let result =
-            self.select_negative_record(anchor_record, strategy, anchor_query_text, &mut rng);
+        let hardness = self.config.retrieval_sampling.clone();
+        let result = self.select_negative_record(
+            anchor_record,
+            strategy,
+            &hardness,
+            anchor_query_text,
+            &mut rng,
+        );
         self.rng = rng;
         result
     }

@@ -68,6 +68,7 @@ fn build_config(seed: u64, batch_size: usize, split: SplitRatios) -> SamplerConf
             weight: 1.0,
             instruction: None,
             allow_same_anchor_positive: false,
+            retrieval_sampling: None,
         }],
         text_recipes: Vec::new(),
         ..SamplerConfig::default()

@@ -167,6 +167,7 @@ pub fn default_title_context_triplet_recipes(include_date_aware: bool) -> Vec<Tr
             weight: 0.30,
             instruction: None,
             allow_same_anchor_positive: false,
+            retrieval_sampling: None,
         });
         // Keep a smaller anchor-negative date-aware lane for harder examples
         // without overwhelming the primary summary-driven objectives.
@@ -180,6 +181,7 @@ pub fn default_title_context_triplet_recipes(include_date_aware: bool) -> Vec<Tr
             weight: 0.10,
             instruction: None,
             allow_same_anchor_positive: false,
+            retrieval_sampling: None,
         });
     }
     // Rebalance summary wrong-article depending on whether date-aware lanes are
@@ -193,6 +195,7 @@ pub fn default_title_context_triplet_recipes(include_date_aware: bool) -> Vec<Tr
         weight: if include_date_aware { 0.35 } else { 0.75 },
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     });
     // Medium-hard lane adds anchor-as-negative pressure to improve
     // discrimination among title-like anchor fields.
@@ -205,6 +208,7 @@ pub fn default_title_context_triplet_recipes(include_date_aware: bool) -> Vec<Tr
         weight: 0.25,
         instruction: None,
         allow_same_anchor_positive: false,
+        retrieval_sampling: None,
     });
     recipes
 }
@@ -430,6 +434,7 @@ mod tests {
             weight: 1.0,
             instruction: None,
             allow_same_anchor_positive: false,
+            retrieval_sampling: None,
         }];
 
         let source = FileSource::new(
@@ -514,6 +519,7 @@ mod tests {
             weight: 1.0,
             instruction: None,
             allow_same_anchor_positive: false,
+            retrieval_sampling: None,
         }];
         let source = FileSource::new(
             FileSourceConfig::new("qa_defaults_override", temp.path())
