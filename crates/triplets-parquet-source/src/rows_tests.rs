@@ -1420,3 +1420,56 @@ fn transcode_json_array_streaming_trailing_batch_flush() {
     let served = transcode_json_array_streaming(&source, &shard, &mut reader, &store).unwrap();
     assert_eq!(served, 5);
 }
+
+#[test]
+fn parse_row_skips_when_anchor_candidate_missing() {
+    let dir = tempdir().unwrap();
+    let mut config = test_config(dir.path().to_path_buf());
+    config.anchor_columns = vec!["missing_col".to_string()];
+    config.positive_columns = vec!["text".to_string()];
+    let source = test_source(config);
+    let row = parse_row(&source, 0, &json!({"text": "hello"})).unwrap();
+    assert!(row.is_none(), "row without anchor content must be skipped");
+}
+
+#[test]
+fn parse_row_skips_when_positive_candidate_missing() {
+    let dir = tempdir().unwrap();
+    let mut config = test_config(dir.path().to_path_buf());
+    config.anchor_columns = vec!["text".to_string()];
+    config.positive_columns = vec!["missing_col".to_string()];
+    let source = test_source(config);
+    let row = parse_row(&source, 0, &json!({"text": "hello"})).unwrap();
+    assert!(
+        row.is_none(),
+        "row without positive content must be skipped"
+    );
+}
+
+#[test]
+fn parse_row_skips_when_context_column_missing_or_blank() {
+    let dir = tempdir().unwrap();
+    let mut config = test_config(dir.path().to_path_buf());
+    config.anchor_columns = vec!["text".to_string()];
+    config.positive_columns = vec!["text".to_string()];
+    config.context_columns = vec!["ctx".to_string()];
+    let source = test_source(config);
+    let row = parse_row(&source, 0, &json!({"text": "hello"})).unwrap();
+    assert!(row.is_none(), "row with missing context must be skipped");
+    let row = parse_row(&source, 1, &json!({"text": "hello", "ctx": "  "})).unwrap();
+    assert!(row.is_none(), "row with blank context must be skipped");
+}
+
+#[test]
+fn parse_row_skips_when_negative_column_missing_or_blank() {
+    let dir = tempdir().unwrap();
+    let mut config = test_config(dir.path().to_path_buf());
+    config.anchor_columns = vec!["text".to_string()];
+    config.positive_columns = vec!["text".to_string()];
+    config.negative_columns = vec!["negs".to_string()];
+    let source = test_source(config);
+    let row = parse_row(&source, 0, &json!({"text": "hello"})).unwrap();
+    assert!(row.is_none(), "row with missing negatives must be skipped");
+    let row = parse_row(&source, 1, &json!({"text": "hello", "negs": []})).unwrap();
+    assert!(row.is_none(), "row with empty negatives must be skipped");
+}

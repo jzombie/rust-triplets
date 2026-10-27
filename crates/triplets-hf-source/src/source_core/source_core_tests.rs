@@ -2278,3 +2278,20 @@ fn manifest_cache_rootjoins_parquet_manifest_dir() {
     let root = source.manifest_cache_root();
     assert!(root.ends_with(crate::constants::HF_PARQUET_MANIFEST_DIR));
 }
+
+#[test]
+fn safe_test_source_drop_joins_leaked_expansion_thread() {
+    // Covers the SafeTestSource teardown path that joins a still-running
+    // expansion thread instead of leaking it (which would deadlock later
+    // tests on EXPANSION_GATE).
+    let dir = tempdir().unwrap();
+    let source = test_source(test_config(dir.path().to_path_buf()));
+    {
+        let handle = std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        });
+        *source.expansion_thread.lock().unwrap() = Some(handle);
+    }
+    // Drop joins the thread; would panic on deadlock via recv_timeout.
+    drop(source);
+}

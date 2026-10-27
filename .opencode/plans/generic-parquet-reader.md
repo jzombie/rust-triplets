@@ -7,6 +7,15 @@ Closes #59. Unrelated to #66 (KVP) — no KVP changes here.
 Workspace green (`cargo test --workspace`), zero warnings in both
 crates, `cargo clippy` adds no new lints, `cargo fmt` applied.
 
+Follow-up for PR #183 CI (lint + coverage checks):
+- `cargo sort --workspace` ordering fixed; `fmt --check` clean.
+- Coverage back to baseline-or-better on all local metrics (lines
+  94.98% vs 94.97%, regions 95.28% vs 95.23%, functions 92.20% vs
+  91.99%): new `tests/generic_surface.rs` covers the generic public
+  surface, plus row-skip tests and a `SafeTestSource` drop-join test.
+  Remaining misses are pre-existing patterns (tracing-disabled log
+  args, poison/error closures), identical in kind to `main`.
+
 As-built deviations from the draft below:
 - `ParquetRowsConfig` carries `row_id_namespace: String` + `taxonomy:
   Vec<String>` data fields instead of fn pointers (simpler, same
