@@ -22,6 +22,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
   tests updated; deterministic sequence hashes relocked.
 - Removed BM25_HARD_NEGATIVE_ROTATION_TOP_K and the negative_cursors rotation state (alpha, no legacy shims kept).
 
+### Changed
+
+- Bumped `xxhash-rust` from 0.8.15 to 0.8.19 (#180)
+
 ## [0.29.0-alpha] - 2026-10-26
 
 ### Fixed
