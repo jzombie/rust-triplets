@@ -1478,7 +1478,7 @@ OCR table rows that mix company names with dense numeric columns are stripped do
 
 Negative selection is delegated to a pluggable backend.
 - **DefaultBackend**: Uniform random selection from the candidate pool (ignores `retrieval_sampling`).
-- **Bm25Backend**: (Requires `bm25-mining`) Ranks candidates by lexical overlap and samples uniformly from `ranked[start..end]` with `start = min_rank.min(len.saturating_sub(1))`, `end = max_rank.clamp(start+1, len)`. Configure per-recipe via `retrieval_sampling: { min_rank: 1, max_rank: 30, search_top_k: 32 }` (defaults). `1..30` is standard hard (skip rank-0 false positive); `1..10` extreme; `10..100` moderate. Cache is partitioned by `(anchor, search_top_k)` so lanes don't poison each other. No rotation cursors — stateless uniform.
+- **Bm25Backend**: (Requires `bm25-mining`) Ranks candidates by lexical overlap and samples uniformly from `ranked[start..end]` with `start = min_rank.min(len.saturating_sub(1))`, `end = max_rank.clamp(start+1, len)`. Configure per-recipe via `retrieval_sampling: Some(RetrievalSamplingConfig { min_rank: 1, max_rank: 30, search_top_k: 32 })` (defaults when `None`). `1..30` is standard hard (skip rank-0 false positive); `1..10` extreme; `10..100` moderate — all the same code path with different bounds. Cache is partitioned by `(anchor, search_top_k)` so lanes don't poison each other. No rotation cursors — stateless uniform.
 
 #### User-Derived Negatives
 
