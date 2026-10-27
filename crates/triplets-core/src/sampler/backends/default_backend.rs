@@ -74,6 +74,11 @@ impl NegativeBackend for DefaultBackend {
         (0, 0)
     }
 
+    #[cfg(all(feature = "bm25-mining", feature = "extended-metrics"))]
+    fn bm25_margin_stats(&self) -> (u64, u64) {
+        (0, 0)
+    }
+
     #[cfg(test)]
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
@@ -171,6 +176,9 @@ mod tests {
 
         #[cfg(all(feature = "bm25-mining", feature = "extended-metrics"))]
         assert_eq!(backend.bm25_fallback_stats(), (0, 0));
+
+        #[cfg(all(feature = "bm25-mining", feature = "extended-metrics"))]
+        assert_eq!(backend.bm25_margin_stats(), (0, 0));
 
         let any_ref = backend.as_any_mut();
         assert!(any_ref.downcast_mut::<DefaultBackend>().is_some());

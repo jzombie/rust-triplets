@@ -444,7 +444,7 @@ pub(crate) fn test_source(config: HuggingFaceRowsConfig) -> SafeTestSource {
     };
     source.set_active_sampler_config(&SamplerConfig {
         seed: 1,
-        ingestion_max_records: source.config.cache_capacity,
+        per_source_max_pool: source.config.cache_capacity,
         ..SamplerConfig::default()
     });
     SafeTestSource { source }

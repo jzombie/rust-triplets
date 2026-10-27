@@ -268,6 +268,17 @@ pub struct RetrievalSamplingConfig {
     /// before strategy-pool intersection; larger values cost more per
     /// query and grow the per-anchor cache. Ignored by `DefaultBackend`.
     pub search_top_k: usize,
+    /// Require `bm25(anchor_query, neg) < bm25(anchor_query, anchor_self)
+    /// - margin`. `None` disables margin enforcement entirely (filter
+    /// skipped, ties pass through, margin counters untouched).
+    /// Defaults to `Some(0.0)`: negatives must score strictly below the
+    /// anchor's own self-score, which rejects exact duplicates and
+    /// maximum-score collisions without presuming any score magnitude.
+    /// Set to `None` explicitly to opt out (e.g. lanes where the top-ranked
+    /// peers are the valuable hard negatives). Consumed in
+    /// `Bm25Backend::select_hard_negative`; ignored by
+    /// `DefaultBackend` (which has no scores).
+    pub negative_margin: Option<f32>,
 }
 
 impl Default for RetrievalSamplingConfig {
@@ -279,6 +290,7 @@ impl Default for RetrievalSamplingConfig {
             search_top_k: crate::constants::sampler::BM25_SEARCH_TOP_K,
             #[cfg(not(feature = "bm25-mining"))]
             search_top_k: 32,
+            negative_margin: Some(0.0),
         }
     }
 }
@@ -297,6 +309,14 @@ impl RetrievalSamplingConfig {
                 "retrieval min_rank ({}) must be < max_rank ({})",
                 self.min_rank, self.max_rank
             ));
+        }
+        if let Some(margin) = self.negative_margin {
+            if !margin.is_finite() {
+                return Err("retrieval_sampling.negative_margin must be finite".to_string());
+            }
+            if margin < 0.0 {
+                return Err("retrieval_sampling.negative_margin must be >= 0.0".to_string());
+            }
         }
         Ok(())
     }
@@ -354,19 +374,21 @@ pub struct SamplerConfig {
     pub seed: u64,
     /// Target number of samples per batch.
     pub batch_size: usize,
-    /// Max number of records kept in the ingestion cache for candidate sampling.
+    /// Max number of records kept **per source** in the ingestion cache for
+    /// candidate sampling.
     ///
     /// This is intentionally decoupled from `batch_size` so anchors/negatives can
     /// be drawn from a broader rolling pool.
     ///
     /// Practical tuning: values above `batch_size` usually improve diversity and
     /// reduce short-horizon repetition; gains taper off as source/recipe/split
-    /// constraints become the limiting factor. Higher values also increase memory.
+    /// constraints become the limiting factor. Higher values also increase memory
+    /// (roughly linear in sources × this value).
     ///
     /// For remote shard-backed sources (for example Hugging Face), larger initial
     /// targets may require fetching more shards before the first batch, so startup
     /// latency can increase based on shard sizes and network throughput.
-    pub ingestion_max_records: usize,
+    pub per_source_max_pool: usize,
     /// Chunking behavior for long sections.
     pub chunking: ChunkingStrategy,
     /// Triplet recipes to use; empty means sources may provide defaults.
@@ -386,7 +408,7 @@ impl Default for SamplerConfig {
         Self {
             seed: 42,
             batch_size: 128,
-            ingestion_max_records: 2048,
+            per_source_max_pool: 2048,
             chunking: ChunkingStrategy::default(),
             recipes: Vec::new(),
             text_recipes: Vec::new(),
@@ -465,7 +487,7 @@ mod tests {
         let cfg = SamplerConfig::default();
         assert_eq!(cfg.seed, 42);
         assert_eq!(cfg.batch_size, 128);
-        assert_eq!(cfg.ingestion_max_records, 2048);
+        assert_eq!(cfg.per_source_max_pool, 2048);
         assert!(cfg.recipes.is_empty());
         assert!(cfg.text_recipes.is_empty());
         assert_eq!(cfg.allowed_splits, vec![SplitLabel::Train]);
@@ -546,32 +568,54 @@ mod tests {
         let cfg = RetrievalSamplingConfig::default();
         assert_eq!(cfg.min_rank, 1);
         assert_eq!(cfg.max_rank, 30);
+        assert_eq!(cfg.negative_margin, Some(0.0));
         assert!(cfg.validate().is_ok());
         assert!(cfg.search_top_k > 0);
         let bad = RetrievalSamplingConfig {
             min_rank: 5,
             max_rank: 5,
             search_top_k: 32,
+            negative_margin: None,
         };
         assert!(bad.validate().is_err());
         let bad2 = RetrievalSamplingConfig {
             min_rank: 10,
             max_rank: 5,
             search_top_k: 32,
+            negative_margin: None,
         };
         assert!(bad2.validate().is_err());
         let bad3 = RetrievalSamplingConfig {
             min_rank: 0,
             max_rank: 0,
             search_top_k: 32,
+            negative_margin: None,
         };
         assert!(bad3.validate().is_err());
         let bad4 = RetrievalSamplingConfig {
             min_rank: 1,
             max_rank: 30,
             search_top_k: 0,
+            negative_margin: None,
         };
         assert!(bad4.validate().is_err());
+        // Margin validation: negative and non-finite margins rejected;
+        // explicit `None` (opt-out) and `Some(0.0)` (strict inferiority) accepted.
+        let bad_margin = RetrievalSamplingConfig {
+            negative_margin: Some(-1.0),
+            ..RetrievalSamplingConfig::default()
+        };
+        assert!(bad_margin.validate().is_err());
+        let bad_margin_nan = RetrievalSamplingConfig {
+            negative_margin: Some(f32::NAN),
+            ..RetrievalSamplingConfig::default()
+        };
+        assert!(bad_margin_nan.validate().is_err());
+        let ok_margin_none = RetrievalSamplingConfig {
+            negative_margin: None,
+            ..RetrievalSamplingConfig::default()
+        };
+        assert!(ok_margin_none.validate().is_ok());
         let mut global = SamplerConfig::default();
         assert!(global.validate().is_ok());
         global.recipes.push(TripletRecipe {
@@ -579,6 +623,7 @@ mod tests {
                 min_rank: 1,
                 max_rank: 10,
                 search_top_k: 100,
+                negative_margin: None,
             }),
             ..TripletRecipe::default()
         });

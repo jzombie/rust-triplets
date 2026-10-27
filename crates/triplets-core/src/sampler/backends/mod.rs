@@ -96,6 +96,19 @@ pub(super) trait NegativeBackend: Send + Sync {
     #[cfg(all(feature = "bm25-mining", feature = "extended-metrics"))]
     fn bm25_fallback_stats(&self) -> (u64, u64);
 
+    /// Return cumulative `(margin_exhausted, margin_evaluated)` for the
+    /// margin-aware negative-selection rule since the backend was created.
+    ///
+    /// `margin_evaluated` counts draws where a margin was configured *and* the
+    /// anchor self-score reference resolved (filter executed).
+    /// `margin_exhausted` counts the subset where no candidate cleared the
+    /// margin and the uniform-random pool fallback was taken instead.
+    /// Draws with an unresolvable reference bypass the margin and count in
+    /// neither counter (visible as `selections − evaluated` drift).
+    /// Non-BM25 backends always return `(0, 0)`.
+    #[cfg(all(feature = "bm25-mining", feature = "extended-metrics"))]
+    fn bm25_margin_stats(&self) -> (u64, u64);
+
     /// Expose as [`std::any::Any`] for test-only downcasting.
     ///
     /// Each concrete backend must implement this as `fn as_any_mut(&mut self)

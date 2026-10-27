@@ -309,7 +309,7 @@ fn overlapping_ids_across_sources_coexist_in_shared_pool() {
     let store = Arc::new(DeterministicSplitStore::new(split, 109).unwrap());
     let mut config = base_config();
     config.batch_size = 4;
-    config.ingestion_max_records = 64;
+    config.per_source_max_pool = 64;
     config.allowed_splits = vec![SplitLabel::Train];
     config.split = split;
     config.recipes = vec![TripletRecipe {
@@ -432,7 +432,7 @@ fn late_registered_source_is_cycled_without_rebuild() {
     let store = Arc::new(DeterministicSplitStore::new(split, 77).unwrap());
     let mut config = base_config();
     config.batch_size = 4;
-    config.ingestion_max_records = 64;
+    config.per_source_max_pool = 64;
     config.allowed_splits = vec![SplitLabel::Train];
     config.split = split;
     config.recipes = vec![TripletRecipe {
@@ -786,9 +786,10 @@ fn weighted_sampling_honors_frequency_and_splits_jointly() {
         min_rank: 0,
         max_rank: 100,
         search_top_k: 32,
+        negative_margin: None,
     };
     config.batch_size = 8;
-    config.ingestion_max_records = 128;
+    config.per_source_max_pool = 128;
     config.allowed_splits = vec![SplitLabel::Train, SplitLabel::Validation, SplitLabel::Test];
     config.split = split;
     config.recipes = vec![TripletRecipe {
@@ -1576,7 +1577,7 @@ fn exhaustion_retry_limit_returns_exhausted() {
     let mut config = base_config();
     config.seed = 202;
     config.batch_size = 1;
-    config.ingestion_max_records = 2;
+    config.per_source_max_pool = 2;
     config.allowed_splits = vec![SplitLabel::Train];
     config.split = split;
     config.recipes = vec![TripletRecipe {
@@ -1632,7 +1633,7 @@ fn single_source_failure_does_not_fail_batch_when_other_source_has_data() {
     let mut config = base_config();
     config.seed = 1337;
     config.batch_size = 1;
-    config.ingestion_max_records = 8;
+    config.per_source_max_pool = 8;
     config.allowed_splits = vec![SplitLabel::Train];
     config.split = split;
     config.recipes = vec![TripletRecipe {
@@ -1695,7 +1696,7 @@ fn triplet_batch_is_padded_to_batch_size_when_unique_pool_is_small() {
     let mut config = base_config();
     config.seed = 101;
     config.batch_size = 8;
-    config.ingestion_max_records = 4;
+    config.per_source_max_pool = 4;
     config.allowed_splits = vec![SplitLabel::Train];
     config.split = split;
     config.recipes = vec![TripletRecipe {
@@ -1750,7 +1751,7 @@ fn pair_batch_is_padded_to_batch_size_when_unique_pool_is_small() {
     let mut config = base_config();
     config.seed = 202;
     config.batch_size = 9;
-    config.ingestion_max_records = 4;
+    config.per_source_max_pool = 4;
     config.allowed_splits = vec![SplitLabel::Train];
     config.split = split;
     config.recipes = vec![TripletRecipe {
@@ -1801,7 +1802,7 @@ fn text_batch_is_padded_to_batch_size_when_unique_pool_is_small() {
     let mut config = base_config();
     config.seed = 303;
     config.batch_size = 7;
-    config.ingestion_max_records = 2;
+    config.per_source_max_pool = 2;
     config.allowed_splits = vec![SplitLabel::Train];
     config.split = split;
     config.text_recipes = vec![TextRecipe {
@@ -1851,7 +1852,7 @@ fn failed_source_is_retried_on_next_batch_call() {
     let mut config = base_config();
     config.seed = 505;
     config.batch_size = 1;
-    config.ingestion_max_records = 8;
+    config.per_source_max_pool = 8;
     config.allowed_splits = vec![SplitLabel::Train];
     config.split = split;
     config.recipes = vec![TripletRecipe {
@@ -3295,7 +3296,7 @@ fn build_split_order_sampler(seed: u64, batch_size: usize) -> SplitOrderFixture 
 fn build_split_order_sampler_with_window(
     seed: u64,
     batch_size: usize,
-    ingestion_max_records: usize,
+    per_source_max_pool: usize,
 ) -> SplitOrderFixture {
     let split = SplitRatios {
         train: 0.5,
@@ -3307,7 +3308,7 @@ fn build_split_order_sampler_with_window(
     let mut config = base_config();
     config.seed = seed;
     config.batch_size = batch_size;
-    config.ingestion_max_records = ingestion_max_records;
+    config.per_source_max_pool = per_source_max_pool;
     config.allowed_splits = vec![SplitLabel::Train];
     config.text_recipes = vec![TextRecipe {
         name: "split_text".into(),
@@ -4094,7 +4095,7 @@ fn full_sequence_hashes_match_for_prefetch_pair_batches() {
 /// Regression test: cross-batch text dedup (`emitted_text_hashes`) must NOT be
 /// cleared when the ingestion window advances by `batch_size` records.
 ///
-/// When `ingestion_max_records` (window) is much larger than `batch_size`,
+/// When `per_source_max_pool` (window) is much larger than `batch_size`,
 /// typically only a few records are evicted from the pool on each advance.
 /// The old code cleared the entire `emitted_text_hashes` set whenever ANY
 /// record IDs changed (`pool_changed`), which happened on every advance call
@@ -4155,7 +4156,7 @@ fn cross_batch_text_dedup_survives_window_advance() {
     let mut config = base_config();
     config.seed = 808;
     config.batch_size = 4;
-    config.ingestion_max_records = 8;
+    config.per_source_max_pool = 8;
     config.allowed_splits = vec![SplitLabel::Train];
     config.split = split;
     config.text_recipes = vec![TextRecipe {
@@ -5947,7 +5948,7 @@ fn weighted_recipe_selection_zero_weight_recipe_never_appears_in_batch() {
     let mut config = base_config();
     config.seed = 1001;
     config.batch_size = 4;
-    config.ingestion_max_records = 8;
+    config.per_source_max_pool = 8;
     config.allowed_splits = vec![SplitLabel::Train];
     config.split = split;
     config.recipes = vec![
@@ -6035,7 +6036,7 @@ fn weighted_recipe_selection_frequency_matches_weight_ratio() {
     let mut config = base_config();
     config.seed = 2002;
     config.batch_size = 4;
-    config.ingestion_max_records = 16;
+    config.per_source_max_pool = 16;
     config.allowed_splits = vec![SplitLabel::Train];
     config.split = split;
     config.recipes = vec![
@@ -7654,6 +7655,7 @@ fn bm25_triplets_never_reuse_text_across_slots() {
 #[cfg(feature = "bm25-mining")]
 #[test]
 fn bm25_cache_pruning_runs_even_when_other_cursors_are_empty() {
+    use super::backends::NegativeBackend;
     // Rank-window backend holds only the hard-negatives cache (no cursors).
     // Pruning must clear stale cache entries even when chunk/role maps are empty.
     let split = SplitRatios::default();
@@ -7662,6 +7664,12 @@ fn bm25_cache_pruning_runs_even_when_other_cursors_are_empty() {
 
     assert!(inner.chunk_cursors.is_empty());
     assert!(inner.role_cursors.is_empty());
+    // NOTE (margin-plan implementation): `Bm25Backend` never had
+    // `negative_cursors_*` methods — the rank-window backend is stateless and
+    // exposes emptiness via the `NegativeBackend::cursors_empty` contract
+    // (backed by the hard-negatives cache). Assert that instead; a zero
+    // length is implied by emptiness.
+    assert!(inner.bm25_backend_mut().cursors_empty());
 
     let mk = |id: &str| {
         trader_record(
@@ -8734,7 +8742,7 @@ fn refresh_limit_caps_records_per_source() {
     let mut config = base_config();
     config.split = split;
     config.batch_size = 3;
-    config.ingestion_max_records = 3;
+    config.per_source_max_pool = 3;
     let store = Arc::new(DeterministicSplitStore::new(split, 37).unwrap());
     let base = Utc::now() - Duration::seconds(60);
     // Generate enough record IDs that at least 3 hash to Train; take the first 10.
@@ -8890,9 +8898,10 @@ fn triplet_batch_negatives_unique_pre_pad() {
         min_rank: 0,
         max_rank: 100,
         search_top_k: 32,
+        negative_margin: None,
     };
     config.batch_size = 4;
-    config.ingestion_max_records = 64;
+    config.per_source_max_pool = 64;
     config.allowed_splits = vec![SplitLabel::Train];
     config.split = split;
     config.recipes = vec![TripletRecipe {
@@ -8951,9 +8960,10 @@ fn pair_batch_negatives_unique_pre_pad() {
         min_rank: 0,
         max_rank: 100,
         search_top_k: 32,
+        negative_margin: None,
     };
     config.batch_size = 8;
-    config.ingestion_max_records = 64;
+    config.per_source_max_pool = 64;
     config.allowed_splits = vec![SplitLabel::Train];
     config.split = split;
     config.recipes = vec![TripletRecipe {
@@ -9147,7 +9157,7 @@ fn text_batch_prevents_repeat_across_batches() {
     };
     let mut config = base_config();
     config.batch_size = 1;
-    config.ingestion_max_records = 10;
+    config.per_source_max_pool = 10;
     config.allowed_splits = vec![SplitLabel::Train];
     config.split = split;
     config.recipes = Vec::new();
@@ -9203,7 +9213,7 @@ fn emitted_text_hashes_allows_resample_after_cache_refresh() {
     let mut config = base_config();
     config.batch_size = 1;
     // Cache holds 2 records at a time so the window slides across refreshes.
-    config.ingestion_max_records = 2;
+    config.per_source_max_pool = 2;
     config.allowed_splits = vec![SplitLabel::Train];
     config.split = split;
     config.recipes = Vec::new();
@@ -9292,7 +9302,7 @@ fn emitted_text_hashes_blocks_repeats_across_batches_with_same_pool() {
     let mut config = base_config();
     config.batch_size = 1;
     // Large enough to hold all records — no cache eviction happens.
-    config.ingestion_max_records = 10;
+    config.per_source_max_pool = 10;
     config.allowed_splits = vec![SplitLabel::Train];
     config.split = split;
     config.recipes = Vec::new();
@@ -9356,7 +9366,7 @@ fn text_dedup_isolation_does_not_affect_triplet_or_pair_batches() {
     };
     let mut config = base_config();
     config.batch_size = 2;
-    config.ingestion_max_records = 10;
+    config.per_source_max_pool = 10;
     config.allowed_splits = vec![SplitLabel::Train];
     config.split = split;
     config.recipes = vec![TripletRecipe {
@@ -11008,6 +11018,11 @@ fn auto_injected_recipe_keeps_all_components_in_requested_split() {
     config.seed = 812;
     config.batch_size = 1;
     config.allowed_splits = vec![SplitLabel::Train, SplitLabel::Validation, SplitLabel::Test];
+    // This test is about split isolation, not margin filtering: the two
+    // same-split records differ by a single token, so under the default
+    // `Some(0.0)` margin the peer ties the self-score and exhausts into a
+    // fallback draw. Pin the margin off to test splits in isolation.
+    config.retrieval_sampling.negative_margin = None;
 
     // No custom recipes to ensure the auto-injected recipe is the only recipe available.
     config.recipes = Vec::new();
@@ -11211,7 +11226,7 @@ fn sampler_allows_concurrent_batch_requests() {
     let mut config = base_config();
     config.seed = 7;
     config.batch_size = 1;
-    config.ingestion_max_records = 8;
+    config.per_source_max_pool = 8;
     config.allowed_splits = vec![SplitLabel::Train];
     config.split = split;
     config.text_recipes = vec![TextRecipe {
@@ -11358,7 +11373,7 @@ fn sampler_for_prefetch_tests() -> Arc<TripletSampler<DeterministicSplitStore>> 
     config.split = split;
     config.allowed_splits = vec![SplitLabel::Train];
     config.batch_size = 1;
-    config.ingestion_max_records = 16;
+    config.per_source_max_pool = 16;
     config.recipes = vec![TripletRecipe {
         name: "prefetch_triplet".into(),
         anchor: Selector::Role(SectionRole::Anchor),
@@ -12530,6 +12545,333 @@ fn bm25_fallback_counter_increments_when_no_bm25_candidates_match() {
     );
 }
 
+/// Margin-aware negative selection: a zero margin lets every below-self
+/// candidate through (no filtering, no exhaustion).
+///
+/// Setup: anchor and peer share vocabulary so BM25 ranks the peer; the full-
+/// article query makes the anchor its own top hit, so every peer scores
+/// strictly below `self_score - 0.0`.
+#[cfg(all(feature = "bm25-mining", feature = "extended-metrics"))]
+#[test]
+fn bm25_margin_zero_passes_all_candidates_through() {
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+    let config = SamplerConfig {
+        seed: 42,
+        batch_size: 1,
+        chunking: ChunkingStrategy::default(),
+        recipes: Vec::new(),
+        text_recipes: Vec::new(),
+        split,
+        ..SamplerConfig::default()
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 77).unwrap());
+    let records = vec![
+        trader_record(
+            "margin_zero_anchor",
+            "2025-06-01",
+            "Quarterly results",
+            "revenue profit margin guidance outlook fiscal year",
+        ),
+        trader_record(
+            "margin_zero_peer",
+            "2025-06-02",
+            "Annual report",
+            "revenue profit margin guidance outlook fiscal year",
+        ),
+    ];
+    let sampler = TripletSampler::new(config, Arc::clone(&store));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            PRIMARY_SOURCE_ID,
+            records,
+        )))
+        .unwrap();
+    sampler
+        .inner
+        .lock()
+        .unwrap()
+        .ingest_internal(SplitLabel::Train)
+        .unwrap();
+
+    let mut inner = sampler.inner.lock().unwrap();
+    inner.config.retrieval_sampling.negative_margin = Some(0.0);
+    let anchor = inner
+        .records
+        .get(&RecordKey::new(PRIMARY_SOURCE_ID, "margin_zero_anchor"))
+        .cloned()
+        .expect("anchor");
+
+    // Full-article query (`None`): the anchor is its own top hit, so the
+    // peer scores strictly below self and survives the margin.
+    let (negative, fallback_used) = inner
+        .select_negative_record_seeded(&anchor, &NegativeStrategy::WrongArticle, None)
+        .expect("margin-zero draw must return a negative");
+    assert_eq!(negative.id, "margin_zero_peer");
+    assert!(
+        !fallback_used,
+        "no fallback involved — the peer cleared the margin"
+    );
+
+    let (fallback, total) = inner.bm25_fallback_stats();
+    assert_eq!(total, 1);
+    assert_eq!(
+        fallback, 0,
+        "index-miss fallback counter must stay 0 — BM25 ranked the peer"
+    );
+    let (exhausted, evaluated) = inner.bm25_margin_stats();
+    assert_eq!(evaluated, 1, "margin was configured and resolved once");
+    assert_eq!(
+        exhausted, 0,
+        "zero margin must not exhaust — peer scores below self"
+    );
+}
+
+/// Margin-aware negative selection: an astronomically large margin rejects
+/// every candidate, triggering the uniform-random pool fallback (NOT Rank-1)
+/// with `fallback_used = true` and a margin-exhausted count — while the
+/// index-miss fallback counter stays untouched.
+#[cfg(all(feature = "bm25-mining", feature = "extended-metrics"))]
+#[test]
+fn bm25_margin_huge_exhausts_to_random_pool_fallback() {
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+    let config = SamplerConfig {
+        seed: 42,
+        batch_size: 1,
+        chunking: ChunkingStrategy::default(),
+        recipes: Vec::new(),
+        text_recipes: Vec::new(),
+        split,
+        ..SamplerConfig::default()
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 77).unwrap());
+    let records = vec![
+        trader_record(
+            "margin_huge_anchor",
+            "2025-06-01",
+            "Quarterly results",
+            "revenue profit margin guidance outlook fiscal year",
+        ),
+        trader_record(
+            "margin_huge_peer",
+            "2025-06-02",
+            "Annual report",
+            "revenue profit margin guidance outlook fiscal year",
+        ),
+    ];
+    let sampler = TripletSampler::new(config, Arc::clone(&store));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            PRIMARY_SOURCE_ID,
+            records,
+        )))
+        .unwrap();
+    sampler
+        .inner
+        .lock()
+        .unwrap()
+        .ingest_internal(SplitLabel::Train)
+        .unwrap();
+
+    let mut inner = sampler.inner.lock().unwrap();
+    inner.config.retrieval_sampling.negative_margin = Some(1e9);
+    let anchor = inner
+        .records
+        .get(&RecordKey::new(PRIMARY_SOURCE_ID, "margin_huge_anchor"))
+        .cloned()
+        .expect("anchor");
+
+    let (negative, fallback_used) = inner
+        .select_negative_record_seeded(&anchor, &NegativeStrategy::WrongArticle, None)
+        .expect("exhaustion must still return a negative via pool fallback");
+    assert_eq!(
+        negative.id, "margin_huge_peer",
+        "only peer available — pool fallback must select it"
+    );
+    assert!(
+        fallback_used,
+        "margin exhaustion is a fallback draw — flag must be true"
+    );
+
+    let (fallback, total) = inner.bm25_fallback_stats();
+    assert_eq!(total, 1);
+    assert_eq!(
+        fallback, 0,
+        "index-miss counter must stay 0 — BM25 ranked the peer, the margin rejected it"
+    );
+    let (exhausted, evaluated) = inner.bm25_margin_stats();
+    assert_eq!(evaluated, 1);
+    assert_eq!(
+        exhausted, 1,
+        "no candidate clears self - 1e9 — margin exhaustion must be counted"
+    );
+}
+
+/// Margin boundary semantics: the filter is strict (`score < self - margin`),
+/// so a candidate scoring exactly at the reference is rejected. Two records
+/// with identical text score identically, so at `margin = 0.0` the duplicate
+/// peer ties self and is filtered out, exhausting the pool.
+#[cfg(all(feature = "bm25-mining", feature = "extended-metrics"))]
+#[test]
+fn bm25_margin_boundary_rejects_score_equal_to_reference() {
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+    let config = SamplerConfig {
+        seed: 42,
+        batch_size: 1,
+        chunking: ChunkingStrategy::default(),
+        recipes: Vec::new(),
+        text_recipes: Vec::new(),
+        split,
+        ..SamplerConfig::default()
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 77).unwrap());
+    // Identical title+body: peer BM25 score ties the anchor self-score.
+    // Different dates keep both records eligible for the WrongArticle pool.
+    let records = vec![
+        trader_record(
+            "margin_tie_anchor",
+            "2025-06-01",
+            "Identical title text here",
+            "identical body words repeated exactly",
+        ),
+        trader_record(
+            "margin_tie_peer",
+            "2025-06-02",
+            "Identical title text here",
+            "identical body words repeated exactly",
+        ),
+    ];
+    let sampler = TripletSampler::new(config, Arc::clone(&store));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            PRIMARY_SOURCE_ID,
+            records,
+        )))
+        .unwrap();
+    sampler
+        .inner
+        .lock()
+        .unwrap()
+        .ingest_internal(SplitLabel::Train)
+        .unwrap();
+
+    let mut inner = sampler.inner.lock().unwrap();
+    inner.config.retrieval_sampling.negative_margin = Some(0.0);
+    let anchor = inner
+        .records
+        .get(&RecordKey::new(PRIMARY_SOURCE_ID, "margin_tie_anchor"))
+        .cloned()
+        .expect("anchor");
+
+    let (negative, fallback_used) = inner
+        .select_negative_record_seeded(&anchor, &NegativeStrategy::WrongArticle, None)
+        .expect("tied candidate exhausts margin — pool fallback must still return it");
+    assert_eq!(negative.id, "margin_tie_peer");
+    assert!(
+        fallback_used,
+        "strict `<` rejects the tie — exhaustion fallback flag must be true"
+    );
+    let (exhausted, evaluated) = inner.bm25_margin_stats();
+    assert_eq!(evaluated, 1);
+    assert_eq!(
+        exhausted, 1,
+        "score == self - 0.0 must not pass the strict margin filter"
+    );
+}
+
+/// Unresolvable margin reference: when the anchor falls outside its own
+/// top-K (window query with no term overlap against the anchor's own text),
+/// the margin is bypassed — the rank-window pick ships as today and neither
+/// margin counter moves.
+#[cfg(all(feature = "bm25-mining", feature = "extended-metrics"))]
+#[test]
+fn bm25_margin_unresolvable_reference_bypasses_margin() {
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+    let config = SamplerConfig {
+        seed: 42,
+        batch_size: 1,
+        chunking: ChunkingStrategy::default(),
+        recipes: Vec::new(),
+        text_recipes: Vec::new(),
+        split,
+        ..SamplerConfig::default()
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 77).unwrap());
+    let records = vec![
+        trader_record(
+            "margin_noref_anchor",
+            "2025-06-01",
+            "Zebra xylophone quantum",
+            "zebra xylophone quantum wanderer",
+        ),
+        trader_record(
+            "margin_noref_peer",
+            "2025-06-02",
+            "Annual report",
+            "revenue profit margin guidance outlook fiscal year",
+        ),
+    ];
+    let sampler = TripletSampler::new(config, Arc::clone(&store));
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            PRIMARY_SOURCE_ID,
+            records,
+        )))
+        .unwrap();
+    sampler
+        .inner
+        .lock()
+        .unwrap()
+        .ingest_internal(SplitLabel::Train)
+        .unwrap();
+
+    let mut inner = sampler.inner.lock().unwrap();
+    inner.config.retrieval_sampling.negative_margin = Some(5.0);
+    let anchor = inner
+        .records
+        .get(&RecordKey::new(PRIMARY_SOURCE_ID, "margin_noref_anchor"))
+        .cloned()
+        .expect("anchor");
+
+    // Window query shares terms with the peer only; the anchor itself has no
+    // overlapping terms, so it cannot appear in its own results and the
+    // self-score reference is unresolvable.
+    let query = "revenue profit margin guidance outlook fiscal year";
+    let (negative, fallback_used) = inner
+        .select_negative_record_seeded(&anchor, &NegativeStrategy::WrongArticle, Some(query))
+        .expect("bypassed margin must return the ranked peer");
+    assert_eq!(negative.id, "margin_noref_peer");
+    assert!(
+        !fallback_used,
+        "bypass is not a fallback — the ranked pick ships unchanged"
+    );
+
+    let (fallback, total) = inner.bm25_fallback_stats();
+    assert_eq!(total, 1);
+    assert_eq!(fallback, 0);
+    let (exhausted, evaluated) = inner.bm25_margin_stats();
+    assert_eq!(
+        (exhausted, evaluated),
+        (0, 0),
+        "unresolvable reference touches neither margin counter"
+    );
+}
+
 /// Regression test: BM25 must use the raw (pre-decoration) anchor chunk text as
 /// its query, not the metadata-decorated text.
 ///
@@ -13643,7 +13985,7 @@ fn text_batch_cursor_wrap_during_batch_does_not_duplicate_text() {
     };
     let mut config = base_config();
     config.batch_size = 4;
-    config.ingestion_max_records = 4;
+    config.per_source_max_pool = 4;
     config.allowed_splits = vec![SplitLabel::Train];
     config.split = split;
     config.recipes = vec![TripletRecipe {
@@ -13700,7 +14042,7 @@ fn text_batch_cursor_wrap_mid_batch_with_diff_size() {
     };
     let mut config = base_config();
     config.batch_size = 3;
-    config.ingestion_max_records = 4;
+    config.per_source_max_pool = 4;
     config.allowed_splits = vec![SplitLabel::Train];
     config.split = split;
     config.recipes = vec![TripletRecipe {
@@ -13771,7 +14113,7 @@ fn text_batch_duplicate_text_different_records() {
     };
     let mut config = base_config();
     config.batch_size = 4;
-    config.ingestion_max_records = 4;
+    config.per_source_max_pool = 4;
     config.allowed_splits = vec![SplitLabel::Train];
     config.split = split;
     config.recipes = vec![TripletRecipe {
@@ -14100,6 +14442,7 @@ fn resume_continues_epoch_step_from_saved_value() {
         min_rank: 0,
         max_rank: 100,
         search_top_k: 32,
+        negative_margin: None,
     };
     config.seed = 42;
     config.batch_size = 4;
@@ -15547,6 +15890,7 @@ fn retrieval_rank_window_respects_bounds_and_skips_rank_zero() {
         min_rank: 1,
         max_rank: 30,
         search_top_k: 32,
+        negative_margin: None,
     };
     let top = ranked[0].clone();
     let mut saw_non_top = false;
@@ -15641,11 +15985,13 @@ fn retrieval_cache_partitions_by_search_depth() {
         min_rank: 0,
         max_rank: 10,
         search_top_k: 5,
+        negative_margin: None,
     };
     let h_deep = RetrievalSamplingConfig {
         min_rank: 0,
         max_rank: 10,
         search_top_k: 100,
+        negative_margin: None,
     };
     let mut rng = DeterministicRng::new(9);
     let _ = inner.select_negative_record(

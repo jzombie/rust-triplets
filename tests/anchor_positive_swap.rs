@@ -99,7 +99,7 @@ fn make_sampler(
     let config = SamplerConfig {
         seed,
         batch_size: 8,
-        ingestion_max_records: 64,
+        per_source_max_pool: 64,
         allowed_splits: vec![SplitLabel::Train],
         split,
         recipes: vec![standard_recipe("swap_test")],
@@ -280,7 +280,7 @@ fn negative_is_unaffected_by_swap() {
     let config = SamplerConfig {
         seed: 111,
         batch_size: 8,
-        ingestion_max_records: 64,
+        per_source_max_pool: 64,
         allowed_splits: vec![SplitLabel::Train],
         split,
         recipes: vec![standard_recipe("neg_test")],

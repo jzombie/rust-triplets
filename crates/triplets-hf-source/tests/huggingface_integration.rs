@@ -248,7 +248,7 @@ fn huggingface_text_mode_triplets_can_use_different_anchor_positive_windows() {
     sampler_config.split = split;
     sampler_config.allowed_splits = vec![SplitLabel::Train];
     sampler_config.batch_size = 1;
-    sampler_config.ingestion_max_records = 16;
+    sampler_config.per_source_max_pool = 16;
     sampler_config.chunking = {
         let mut c = ChunkingStrategy::default();
         c.max_window_tokens = 3;
@@ -1915,7 +1915,7 @@ fn sampler_next_text_batch_re_expands_after_cache_eviction() {
         Arc::new(DeterministicSplitStore::new(SplitRatios::default(), 42).expect("split store"));
     let sampler_config = SamplerConfig {
         batch_size: 1,
-        ingestion_max_records: 10,
+        per_source_max_pool: 10,
         seed: 1,
         allowed_splits: vec![SplitLabel::Train],
         ..SamplerConfig::default()
@@ -2048,7 +2048,7 @@ fn expansion_headroom_grows_with_multiple_refresh_cycles() {
     let source = HuggingFaceRowSource::new(config).expect("new source");
     let sampler_cfg = SamplerConfig {
         seed: 42,
-        ingestion_max_records: 5,
+        per_source_max_pool: 5,
         ..SamplerConfig::default()
     };
 
@@ -2102,7 +2102,7 @@ fn full_pipeline_samples_across_downloaded_shards() {
         Arc::new(DeterministicSplitStore::new(SplitRatios::default(), 42).expect("split store"));
     let sampler_config = SamplerConfig {
         batch_size: 4,
-        ingestion_max_records: 20,
+        per_source_max_pool: 20,
         seed: 1,
         allowed_splits: vec![SplitLabel::Train],
         ..SamplerConfig::default()

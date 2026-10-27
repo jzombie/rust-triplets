@@ -186,7 +186,7 @@ fn effective_targets_respect_minimum_multiplier_and_sampler_override() {
     assert_eq!(source.effective_expansion_headroom_rows(), 9);
 
     let sampler = SamplerConfig {
-        ingestion_max_records: 4,
+        per_source_max_pool: 4,
         ..SamplerConfig::default()
     };
     *source.sampler_config.lock().unwrap() = Some(sampler);
@@ -220,7 +220,7 @@ fn effective_expansion_headroom_rows_uses_config_multiplier() {
     assert_eq!(source.effective_expansion_headroom_rows(), 300);
 
     source.configure_sampler(&SamplerConfig {
-        ingestion_max_records: 50,
+        per_source_max_pool: 50,
         ..SamplerConfig::default()
     });
     assert_eq!(source.effective_expansion_headroom_rows(), 150);
@@ -233,11 +233,11 @@ fn effective_expansion_headroom_rows_uses_sampler_config() {
     let source = test_source(config);
 
     let sampler_cfg = SamplerConfig {
-        ingestion_max_records: 500,
+        per_source_max_pool: 500,
         ..SamplerConfig::default()
     };
     source.set_active_sampler_config(&sampler_cfg);
-    // sampler_config.ingestion_max_records = 500, multiplier = 3
+    // sampler_config.per_source_max_pool = 500, multiplier = 3
     // headroom = 500 * 3 = 1500
     assert_eq!(source.effective_expansion_headroom_rows(), 1500);
 }
@@ -254,7 +254,7 @@ fn effective_expansion_headroom_rows_falls_back_to_cache_capacity() {
 }
 
 #[test]
-fn expansion_headroom_uses_sampler_ingestion_max_records_when_configured() {
+fn expansion_headroom_uses_sampler_per_source_max_pool_when_configured() {
     let dir = tempdir().unwrap();
     let config = test_config(dir.path().to_path_buf());
     let source = test_source(config);
@@ -262,7 +262,7 @@ fn expansion_headroom_uses_sampler_ingestion_max_records_when_configured() {
     assert_eq!(source.effective_expansion_headroom_rows(), 30);
 
     let sampler = SamplerConfig {
-        ingestion_max_records: 7,
+        per_source_max_pool: 7,
         ..SamplerConfig::default()
     };
     source.configure_sampler(&sampler);
@@ -1322,7 +1322,7 @@ fn len_hint_covers_known_and_empty_paths() {
         ]);
         state.next_remote_idx = 0;
     }
-    // headroom = ingestion_max_records * multiplier = 10 * 3 = 30; since known (5)
+    // headroom = per_source_max_pool * multiplier = 10 * 3 = 30; since known (5)
     // < headroom, expansion = 30; upper = 5 + 30 = 35
     assert_eq!(source.len_hint(), Some(35));
 
@@ -1458,12 +1458,12 @@ fn configure_sampler_updates_len_hint_headroom_via_trait_methods() {
         state.next_remote_idx = 0;
     }
 
-    // headroom = ingestion_max_records * multiplier = 10 * 3 = 30
+    // headroom = per_source_max_pool * multiplier = 10 * 3 = 30
     // known (5) < headroom, expansion = 30; upper = 5 + 30 = 35
     assert_eq!(source.reported_record_count().unwrap(), 35);
 
     let sampler = SamplerConfig {
-        ingestion_max_records: 2,
+        per_source_max_pool: 2,
         ..SamplerConfig::default()
     };
     source.configure_sampler(&sampler);
@@ -2136,7 +2136,7 @@ fn next_text_batch_produces_distinct_cursor_values_per_call() {
     let sampler = TripletSampler::new(
         SamplerConfig {
             seed: 1,
-            ingestion_max_records: 1,
+            per_source_max_pool: 1,
             batch_size: 1,
             ..SamplerConfig::default()
         },
@@ -2195,7 +2195,7 @@ fn next_batch_methods_rebuild_shard_order_with_step() {
              let split = Arc::new(
                  DeterministicSplitStore::new(SplitRatios { train: 1.0, validation: 0.0, test: 0.0 }, 777).unwrap());
              let sampler = TripletSampler::new(SamplerConfig {
-                 seed: 42, ingestion_max_records: 10, batch_size: 1,
+                 seed: 42, per_source_max_pool: 10, batch_size: 1,
                  ..SamplerConfig::default()
              }, split);
              sampler.register_source(Box::new(source.clone())).unwrap();

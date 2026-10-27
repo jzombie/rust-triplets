@@ -177,6 +177,8 @@ fn main() {
                 min_rank: 1,
                 max_rank: 30,
                 search_top_k: 32,
+                // Margin off: this example compares rank windows; margin filtering is orthogonal.
+                negative_margin: None,
             },
         ),
         (
@@ -185,6 +187,8 @@ fn main() {
                 min_rank: 1,
                 max_rank: 10,
                 search_top_k: 32,
+                // Margin off: this example compares rank windows; margin filtering is orthogonal.
+                negative_margin: None,
             },
         ),
         (
@@ -193,6 +197,8 @@ fn main() {
                 min_rank: 0,
                 max_rank: 100,
                 search_top_k: 32,
+                // Margin off: this example compares rank windows; margin filtering is orthogonal.
+                negative_margin: None,
             },
         ),
     ] {

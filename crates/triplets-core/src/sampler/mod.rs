@@ -409,7 +409,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         if let Err(e) = config.validate() {
             panic!("invalid SamplerConfig: {e}");
         }
-        let buffer_size = config.ingestion_max_records.max(config.batch_size).max(2);
+        let buffer_size = config.per_source_max_pool.max(config.batch_size).max(2);
         let using_config_triplet_recipes = !config.recipes.is_empty();
         let using_config_text_recipes = !config.text_recipes.is_empty();
         let triplet_recipes = if using_config_triplet_recipes {
@@ -3284,6 +3284,14 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         self.negative_backend.bm25_fallback_stats()
     }
 
+    /// Return cumulative `(margin_exhausted, margin_evaluated)` from the BM25
+    /// backend since it was created.  Only available when both `bm25-mining`
+    /// and `extended-metrics` features are active.
+    #[cfg(all(feature = "bm25-mining", feature = "extended-metrics"))]
+    fn bm25_margin_stats(&self) -> (u64, u64) {
+        self.negative_backend.bm25_margin_stats()
+    }
+
     /// Look up `anchor`'s split label and return BM25-ranked candidate IDs.
     ///
     /// Mirrors the old `bm25_ranked_candidates` method that tests called on
@@ -3639,6 +3647,20 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     pub fn bm25_fallback_stats(&self) -> (u64, u64) {
         let inner = self.inner.lock().unwrap();
         inner.bm25_fallback_stats()
+    }
+
+    /// Return cumulative `(margin_exhausted, margin_evaluated)` from the BM25
+    /// backend since it was created.  Only available when both `bm25-mining`
+    /// and `extended-metrics` features are active.
+    ///
+    /// `margin_evaluated` counts draws where a margin was configured and the
+    /// anchor self-score reference resolved; `margin_exhausted` counts the
+    /// subset where no candidate cleared the margin and the random-pool
+    /// fallback was taken.
+    #[cfg(all(feature = "bm25-mining", feature = "extended-metrics"))]
+    pub fn bm25_margin_stats(&self) -> (u64, u64) {
+        let inner = self.inner.lock().unwrap();
+        inner.bm25_margin_stats()
     }
 }
 

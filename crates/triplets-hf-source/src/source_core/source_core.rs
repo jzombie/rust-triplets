@@ -308,7 +308,7 @@ impl HuggingFaceRowSource {
             .sampler_config
             .lock()
             .ok()
-            .and_then(|config| config.as_ref().map(|value| value.ingestion_max_records))
+            .and_then(|config| config.as_ref().map(|value| value.per_source_max_pool))
             .unwrap_or(self.config.cache_capacity)
             .max(1);
         base.saturating_mul(multiplier)

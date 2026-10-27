@@ -96,10 +96,10 @@ fn assert_diversity_for_seed_and_split(seed: u64, allowed_split: SplitLabel) {
     let mut config = SamplerConfig {
         seed,
         batch_size: 8,
-        ingestion_max_records: 64,
+        per_source_max_pool: 64,
         ..SamplerConfig::default()
     };
-    let ingestion_max_records = config.ingestion_max_records;
+    let per_source_max_pool = config.per_source_max_pool;
     config.allowed_splits = vec![allowed_split];
     config.split = split;
     config.recipes = vec![TripletRecipe {
@@ -143,11 +143,11 @@ fn assert_diversity_for_seed_and_split(seed: u64, allowed_split: SplitLabel) {
         "expected many unique anchors, got {}",
         anchor_counts.len()
     );
-    if total_triplets >= ingestion_max_records {
+    if total_triplets >= per_source_max_pool {
         let mut windows = HashSet::new();
         for id in anchor_counts.keys() {
             if let Some(idx) = id.rsplit('_').next().and_then(|s| s.parse::<usize>().ok()) {
-                windows.insert(idx / ingestion_max_records);
+                windows.insert(idx / per_source_max_pool);
             }
         }
         assert!(

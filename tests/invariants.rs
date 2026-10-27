@@ -56,7 +56,7 @@ fn build_config(seed: u64, batch_size: usize, split: SplitRatios) -> SamplerConf
     SamplerConfig {
         seed,
         batch_size,
-        ingestion_max_records: batch_size,
+        per_source_max_pool: batch_size,
         allowed_splits: vec![SplitLabel::Train],
         split,
         recipes: vec![TripletRecipe {
@@ -414,7 +414,7 @@ fn batch_size_invariance_matches_sequence() {
     let sample_ids = |batch_size| {
         let store = Arc::new(CountingSplitStore::new(split, 17));
         let mut config = build_config(17, batch_size, split);
-        config.ingestion_max_records = 6;
+        config.per_source_max_pool = 6;
         let sampler = TripletSampler::new(config, store);
         sampler
             .register_source(Box::new(InMemorySource::from_records(
@@ -511,7 +511,7 @@ fn deterministic_order_with_fixed_seed_and_unchanged_dataset() {
     let run = || {
         let store = Arc::new(CountingSplitStore::new(split, 31));
         let mut config = build_config(31, 4, split);
-        config.ingestion_max_records = 6;
+        config.per_source_max_pool = 6;
         let sampler = TripletSampler::new(config, store);
         sampler
             .register_source(Box::new(InMemorySource::from_records(
@@ -547,7 +547,7 @@ fn zero_test_split_still_cycles_all_records_when_train_and_validation_allowed() 
 
     let mut config = build_config(53, 2, split);
     config.allowed_splits = vec![SplitLabel::Train, SplitLabel::Validation];
-    config.ingestion_max_records = 6;
+    config.per_source_max_pool = 6;
     let sampler = TripletSampler::new(config, Arc::clone(&store));
 
     let mut train_suffixes = Vec::new();
@@ -666,7 +666,7 @@ fn allowed_split_records_eventually_sampled_across_ratio_matrix() {
 
         let mut config = build_config(seed, 2, split);
         config.allowed_splits = allowed_splits.clone();
-        config.ingestion_max_records = target_per_split * allowed_splits.len();
+        config.per_source_max_pool = target_per_split * allowed_splits.len();
         let sampler = TripletSampler::new(config, Arc::clone(&store));
 
         let mut expected: HashMap<SplitLabel, std::collections::HashSet<RecordKey>> =
@@ -782,7 +782,7 @@ fn allowed_split_records_eventually_sampled_across_ratio_matrix_via_generic_trip
 
         let mut config = build_config(seed, 2, split);
         config.allowed_splits = allowed_splits.clone();
-        config.ingestion_max_records = target_per_split * allowed_splits.len();
+        config.per_source_max_pool = target_per_split * allowed_splits.len();
         let sampler = TripletSampler::new(config, Arc::clone(&store));
 
         // Records register under generic_matrix_case_{case_idx}, so expected
@@ -949,7 +949,7 @@ fn many_sources_small_batch_distribution_is_uniform() {
     // batch_size) so all 200 records get ingested at once rather than trickling
     // in a few at a time.
     let mut config = build_config(seed, BATCH_SIZE, split);
-    config.ingestion_max_records = NUM_SOURCES * RECORDS_PER_SOURCE;
+    config.per_source_max_pool = NUM_SOURCES * RECORDS_PER_SOURCE;
     let sampler = TripletSampler::new(config, store);
 
     // Register 50 independent in-memory sources, each with 4 records.
