@@ -7653,20 +7653,67 @@ fn bm25_triplets_never_reuse_text_across_slots() {
 
 #[cfg(feature = "bm25-mining")]
 #[test]
-fn bm25_cursor_pruning_runs_even_when_other_cursors_are_empty() {
-    // Rank-window backend is stateless: no rotation cursors exist.
+fn bm25_cache_pruning_runs_even_when_other_cursors_are_empty() {
+    // Rank-window backend holds only the hard-negatives cache (no cursors).
+    // Pruning must clear stale cache entries even when chunk/role maps are empty.
     let split = SplitRatios::default();
     let store = Arc::new(DeterministicSplitStore::new(split, 1234).unwrap());
-    let mut inner = TripletSamplerInner::new(base_config(), store);
+    let mut inner = TripletSamplerInner::new(base_config(), Arc::clone(&store));
 
     assert!(inner.chunk_cursors.is_empty());
     assert!(inner.role_cursors.is_empty());
-    assert!(inner.bm25_backend_mut().negative_cursors_is_empty());
-    assert_eq!(inner.bm25_backend_mut().negative_cursors_len(), 0);
 
-    // Prune must be a no-op (apart from empty cache) and never panic.
+    let mk = |id: &str| {
+        trader_record(
+            id,
+            "2025-01-01",
+            id,
+            "carbon pricing policy emissions roadmap market design",
+        )
+    };
+    for id in ["cache_a", "cache_b"] {
+        let r = mk(id);
+        let k = RecordKey::new(r.source.clone(), r.id.clone());
+        store.upsert(k.clone(), SplitLabel::Train).unwrap();
+        inner.chunk_index.insert(k.clone(), k.clone());
+        inner.records.insert(k, Arc::new(r));
+    }
+    inner.epoch_tracker.ensure_loaded().unwrap();
+    let by_split = inner.records_by_split().unwrap();
+    inner.epoch_tracker.reconcile(SplitLabel::Train, &by_split);
+    let all: indexmap::IndexMap<RecordKey, Arc<DataRecord>> = inner.records.clone();
+    inner.negative_backend.on_records_refreshed(
+        &all,
+        1024,
+        &|_| Some(SplitLabel::Train),
+        &["source_a".to_string()],
+    );
+    let anchor = inner
+        .records
+        .get(&RecordKey::new("source_a", "cache_a"))
+        .unwrap()
+        .clone();
+    let h = crate::config::RetrievalSamplingConfig::default();
+    let mut rng = DeterministicRng::new(1);
+    let _ =
+        inner.select_negative_record(&anchor, &NegativeStrategy::WrongArticle, &h, None, &mut rng);
+    assert!(
+        !inner
+            .bm25_backend_mut()
+            .hard_negatives_keys_for_test(&RecordKey::from(&*anchor))
+            .is_empty()
+    );
+
+    // Evict everything: with no records live, prune must drop the cache.
+    inner.records.clear();
+    inner.chunk_index.clear();
     inner.prune_cursor_state();
-    assert!(inner.bm25_backend_mut().negative_cursors_is_empty());
+    assert!(
+        inner
+            .bm25_backend_mut()
+            .hard_negatives_keys_for_test(&RecordKey::from(&*anchor))
+            .is_empty()
+    );
 }
 
 #[cfg(feature = "bm25-mining")]
@@ -7696,12 +7743,10 @@ fn bm25_cursor_state_is_cleared_on_each_record_snapshot_sync() {
     let mut inner = sampler.inner.lock().unwrap();
     inner.ingest_internal(SplitLabel::Train).unwrap();
 
-    // Stateless backend: no cursor entries ever exist.
-    assert!(inner.bm25_backend_mut().negative_cursors_is_empty());
-
-    // Sync must not create cursor state and must not panic.
+    // Stateless backend: sync must not panic and leaves no cursor state;
+    // cache behaviour is covered by dedicated cache tests.
     inner.sync_records_from_cache().unwrap();
-    assert!(inner.bm25_backend_mut().negative_cursors_is_empty());
+    assert!(inner.negative_backend.cursors_empty());
 }
 
 #[test]

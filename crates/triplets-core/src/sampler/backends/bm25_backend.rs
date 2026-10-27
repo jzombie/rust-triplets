@@ -474,29 +474,6 @@ impl Bm25Backend {
         Some(all_keys)
     }
 
-    /// Stateless backend: no rotation cursors exist. Kept for
-    /// `prune_cursor_state` fast-path compatibility in tests.
-    #[cfg(test)]
-    pub(in crate::sampler) fn negative_cursors_len(&self) -> usize {
-        0
-    }
-
-    /// Always true: rank-window sampling holds no cursor state.
-    #[cfg(test)]
-    pub(in crate::sampler) fn negative_cursors_is_empty(&self) -> bool {
-        true
-    }
-
-    /// No-op shim: cursor state was removed with the enum flattening.
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(in crate::sampler) fn negative_cursors_insert(
-        &self,
-        _key: (RecordKey, SplitLabel),
-        _value: usize,
-    ) {
-    }
-
     /// Return cached search depths for anchor (test-only).
     #[cfg(test)]
     pub(in crate::sampler) fn hard_negatives_keys_for_test(
@@ -509,16 +486,6 @@ impl Bm25Backend {
             .keys()
             .filter_map(|(k, d)| (k == anchor).then_some(*d))
             .collect()
-    }
-
-    /// No-op shim for removed cursor key.
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(in crate::sampler) fn negative_cursors_insert_full(
-        &self,
-        _key: (RecordKey, SplitLabel, usize, usize),
-        _value: usize,
-    ) {
     }
 }
 

@@ -20,6 +20,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
   `(anchor, search_top_k)`; no rotation cursors (stateless). `README`
   Negative Mining section, `bm25_hardness_echo` example, and distribution
   tests updated; deterministic sequence hashes relocked.
+- Removed BM25_HARD_NEGATIVE_ROTATION_TOP_K and the negative_cursors rotation state (alpha, no legacy shims kept).
 
 ## [0.29.0-alpha] - 2026-10-26
 
