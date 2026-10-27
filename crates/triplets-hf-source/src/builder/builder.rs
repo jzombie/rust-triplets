@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::config::HuggingFaceRowsConfig;
 use crate::disk_cache::managed_hf_list_snapshot_dir;
 use crate::download::build_http_client;
-use crate::parsing::{HfListRoots, hf_source_id_slug, parse_hf_uri};
+use crate::parsing::{HfListRoots, HfUriParts, hf_source_id_slug, parse_hf_uri};
 use crate::source_core::HuggingFaceRowSource;
 use reqwest_drive::ClientWithMiddleware;
 use tracing::{info, warn};
@@ -67,7 +67,7 @@ pub fn build_hf_sources_with_weights(roots: &HfListRoots) -> BuildResult {
                 None
             } else {
                 Some(match parse_hf_uri(&source.uri) {
-                    Ok((dataset, config, split)) => hf_source_id_slug(&dataset, &config, &split),
+                    Ok(parts) => hf_source_id_slug(&parts.dataset, &parts.config, &parts.split),
                     Err(_) => format!("hf_list_{idx}"),
                 })
             }
@@ -88,7 +88,7 @@ pub fn build_hf_sources_with_weights(roots: &HfListRoots) -> BuildResult {
         .iter()
         .enumerate()
         .filter_map(|(idx, source)| {
-            let (dataset, config, split) = match parse_hf_uri(&source.uri) {
+            let parts = match parse_hf_uri(&source.uri) {
                 Ok(v) => v,
                 Err(err) => {
                     failures.push(BuildFailure {
@@ -99,6 +99,11 @@ pub fn build_hf_sources_with_weights(roots: &HfListRoots) -> BuildResult {
                     return None;
                 }
             };
+            let HfUriParts {
+                dataset,
+                config,
+                split,
+            } = parts;
 
             let source_id = if let Some(ref sid) = source.source_id {
                 sid.clone()

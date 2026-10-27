@@ -43,6 +43,20 @@ struct CacheStats {
     ingests: u64,
 }
 
+/// Delta of cached records added/evicted since a version watermark.
+///
+/// `Id` is the evicted-record key type: bare [`RecordId`] for a single
+/// [`RecordCache`], source-scoped [`RecordKey`] for the multi-source
+/// [`IngestionManager`].
+pub struct SyncDelta<Id> {
+    /// Highest cache version observed (the watermark to pass next time).
+    pub version: u64,
+    /// Records added or updated since the watermark.
+    pub added: Vec<Arc<DataRecord>>,
+    /// Keys of records evicted since the watermark.
+    pub evicted: Vec<Id>,
+}
+
 impl RecordCache {
     /// Create a cache capped to at most `max_records` live records.
     pub fn new(max_records: usize) -> Self {
@@ -175,7 +189,7 @@ impl RecordCache {
     }
 
     /// Return a delta of records added since `last_version` and record IDs evicted since `last_version`.
-    pub fn sync_delta(&self, last_version: u64) -> (u64, Vec<Arc<DataRecord>>, Vec<RecordId>) {
+    pub fn sync_delta(&self, last_version: u64) -> SyncDelta<RecordId> {
         let mut inner = self.inner.write().expect("record cache poisoned");
         inner.sync_delta(last_version)
     }
@@ -263,7 +277,7 @@ impl RecordCacheInner {
     }
 
     /// Return a delta of records added since `last_version` and record IDs evicted since `last_version`.
-    fn sync_delta(&mut self, last_version: u64) -> (u64, Vec<Arc<DataRecord>>, Vec<RecordId>) {
+    fn sync_delta(&mut self, last_version: u64) -> SyncDelta<RecordId> {
         // Drain eviction log entries where version <= last_version.
         // This preserves entries for version watermarks that haven't synced yet.
         self.eviction_log.retain(|&(v, _)| v > last_version);
@@ -283,7 +297,11 @@ impl RecordCacheInner {
         // that haven't called sync_delta yet. enforce_limit() handles
         // bounding the log size.
 
-        (self.next_version, added, evicted)
+        SyncDelta {
+            version: self.next_version,
+            added,
+            evicted,
+        }
     }
 }
 
@@ -897,13 +915,17 @@ impl IngestionManager {
     /// here (per-source caches key by bare id, which is only unique within
     /// one source). Queries all child caches using the unified version
     /// watermark and aggregates the results.
-    pub fn sync_delta(&mut self, last_version: u64) -> (u64, Vec<Arc<DataRecord>>, Vec<RecordKey>) {
+    pub fn sync_delta(&mut self, last_version: u64) -> SyncDelta<RecordKey> {
         let mut all_added = Vec::new();
         let mut all_evicted = Vec::new();
         let mut max_version = last_version;
 
         for state in &mut self.sources {
-            let (new_version, added, evicted) = state.cache.sync_delta(last_version);
+            let SyncDelta {
+                version: new_version,
+                added,
+                evicted,
+            } = state.cache.sync_delta(last_version);
             if new_version > max_version {
                 max_version = new_version;
             }
@@ -915,7 +937,11 @@ impl IngestionManager {
             );
         }
 
-        (max_version, all_added, all_evicted)
+        SyncDelta {
+            version: max_version,
+            added: all_added,
+            evicted: all_evicted,
+        }
     }
 
     /// Return the current global version counter.
@@ -2193,7 +2219,7 @@ mod tests {
         cache.ingest_with_version(vec![make_record("v1", "s")], 10);
         assert_eq!(cache.len(), 1);
         // A subsequent sync_delta from version 0 should see the record as added.
-        let (_, added, evicted) = cache.sync_delta(0);
+        let SyncDelta { added, evicted, .. } = cache.sync_delta(0);
         assert_eq!(added.len(), 1);
         assert!(evicted.is_empty());
         assert_eq!(added[0].id, "v1");
@@ -2204,10 +2230,18 @@ mod tests {
         let cache = RecordCache::new(4);
         cache.ingest_with_version(vec![make_record("a", "s")], 5);
         // First pull consumes the delta.
-        let (v1, added1, _) = cache.sync_delta(0);
+        let SyncDelta {
+            version: v1,
+            added: added1,
+            ..
+        } = cache.sync_delta(0);
         assert_eq!(added1.len(), 1);
         // Second pull with same watermark returns empty.
-        let (v2, added2, evicted2) = cache.sync_delta(v1);
+        let SyncDelta {
+            version: v2,
+            added: added2,
+            evicted: evicted2,
+        } = cache.sync_delta(v1);
         assert!(added2.is_empty());
         assert!(evicted2.is_empty());
         assert_eq!(v2, v1);
@@ -2218,11 +2252,11 @@ mod tests {
         let cache = RecordCache::new(4);
         cache.ingest(vec![make_record("e1", "s"), make_record("e2", "s")]);
         // Consume the initial add.
-        let (v1, _, _) = cache.sync_delta(0);
+        let SyncDelta { version: v1, .. } = cache.sync_delta(0);
         assert!(v1 > 0);
         // Clear records — should log evictions.
         cache.clear();
-        let (_, added, evicted) = cache.sync_delta(v1);
+        let SyncDelta { added, evicted, .. } = cache.sync_delta(v1);
         assert!(added.is_empty());
         assert_eq!(evicted.len(), 2);
         assert!(evicted.contains(&"e1".to_string()));
@@ -2233,14 +2267,20 @@ mod tests {
     fn record_cache_sync_delta_filters_evictions_by_version_watermark() {
         let cache = RecordCache::new(4);
         cache.ingest_with_version(vec![make_record("old", "s")], 1);
-        let (v1, _, _) = cache.sync_delta(0);
+        let SyncDelta { version: v1, .. } = cache.sync_delta(0);
         assert!(v1 >= 1);
         cache.clear();
         // Pull at the old watermark — should see eviction for "old".
-        let (_, _, evicted_at_v1) = cache.sync_delta(v1);
+        let SyncDelta {
+            evicted: evicted_at_v1,
+            ..
+        } = cache.sync_delta(v1);
         assert_eq!(evicted_at_v1.len(), 1);
         // Pull at a higher watermark that was bumped by clear — should be empty.
-        let (_, _, evicted_at_higher) = cache.sync_delta(v1 + 1);
+        let SyncDelta {
+            evicted: evicted_at_higher,
+            ..
+        } = cache.sync_delta(v1 + 1);
         assert!(evicted_at_higher.is_empty());
     }
 
@@ -2255,10 +2295,10 @@ mod tests {
         // Cache should hold only 2 records.
         assert_eq!(cache.len(), 2);
         // Consume delta to establish a baseline version.
-        let (v1, _, _) = cache.sync_delta(0);
+        let SyncDelta { version: v1, .. } = cache.sync_delta(0);
         // Ingest one more to trigger eviction of "second" (FIFO order).
         cache.ingest(vec![make_record("fourth", "s")]);
-        let (_, _, evicted) = cache.sync_delta(v1);
+        let SyncDelta { evicted, .. } = cache.sync_delta(v1);
         // "first" was evicted when "third" was ingested, "second" when "fourth" was.
         // At minimum one eviction must appear.
         assert!(!evicted.is_empty());
@@ -2327,7 +2367,11 @@ mod tests {
             .unwrap();
 
         manager.refresh_all();
-        let (version, added, evicted) = manager.sync_delta(0);
+        let SyncDelta {
+            version,
+            added,
+            evicted,
+        } = manager.sync_delta(0);
         assert!(version > 0);
         assert_eq!(added.len(), 2);
         let ids: Vec<&str> = added.iter().map(|r| r.id.as_str()).collect();
@@ -2336,7 +2380,11 @@ mod tests {
         assert!(evicted.is_empty());
 
         // Second pull should be empty.
-        let (_, added2, evicted2) = manager.sync_delta(version);
+        let SyncDelta {
+            added: added2,
+            evicted: evicted2,
+            ..
+        } = manager.sync_delta(version);
         assert!(added2.is_empty());
         assert!(evicted2.is_empty());
     }
@@ -2384,12 +2432,12 @@ mod tests {
     fn record_cache_ingest_with_version_replaces_existing_record() {
         let cache = RecordCache::new(4);
         cache.ingest_with_version(vec![make_record("vr", "s")], 5);
-        let (v1, _, _) = cache.sync_delta(0);
+        let SyncDelta { version: v1, .. } = cache.sync_delta(0);
         assert_eq!(cache.len(), 1);
 
         // Re-ingest same id with higher version.
         cache.ingest_with_version(vec![make_record("vr", "s")], v1 + 5);
-        let (_, added, evicted) = cache.sync_delta(v1);
+        let SyncDelta { added, evicted, .. } = cache.sync_delta(v1);
         assert_eq!(added.len(), 1);
         assert!(evicted.is_empty());
         assert_eq!(cache.len(), 1);
@@ -2406,11 +2454,11 @@ mod tests {
         assert_eq!(cache.len(), 3);
 
         // Consume delta to flush.
-        let (v1, _, _) = cache.sync_delta(0);
+        let SyncDelta { version: v1, .. } = cache.sync_delta(0);
 
         // Verify eviction log is bounded by calling sync_delta —
         // should not panic or grow unbounded.
-        let (_, added, evicted) = cache.sync_delta(v1);
+        let SyncDelta { added, evicted, .. } = cache.sync_delta(v1);
         // New records from the last ingest may appear as added.
         // Evictions from the FIFO limit should appear.
         assert!(added.len() + evicted.len() <= 5);

@@ -9,12 +9,11 @@ use std::sync::Arc;
 
 use indexmap::IndexMap;
 
-use crate::config::RetrievalSamplingConfig;
 use crate::data::DataRecord;
 use crate::splits::SplitLabel;
 use crate::types::{RecordKey, SourceId};
 
-use super::NegativeBackend;
+use super::{NegativeBackend, NegativeRequest};
 
 /// Stateless uniform-random negative selection.
 ///
@@ -27,18 +26,12 @@ use super::NegativeBackend;
 pub struct DefaultBackend;
 
 impl NegativeBackend for DefaultBackend {
-    #[allow(clippy::too_many_arguments)]
     fn choose_negative(
         &self,
-        _anchor: &DataRecord,
-        _anchor_split: SplitLabel,
-        pool: Vec<Arc<DataRecord>>,
-        fallback_used: bool,
-        _anchor_query_text: Option<&str>,
-        _hardness: &RetrievalSamplingConfig,
+        request: NegativeRequest<'_>,
         rng: &mut dyn rand::RngCore,
     ) -> Option<(Arc<DataRecord>, bool)> {
-        if pool.is_empty() {
+        if request.pool.is_empty() {
             return None;
         }
         // Use next_u64() directly instead of rand::IndexedRandom::choose so that
@@ -46,8 +39,8 @@ impl NegativeBackend for DefaultBackend {
         // can make a variable number of calls (bias rejection in gen_range), which
         // makes the negative-selection sequence change between incremental vs. clean
         // rebuilds, breaking deterministic test assertions.
-        let idx = rng.next_u64() as usize % pool.len();
-        Some((pool[idx].clone(), fallback_used))
+        let idx = rng.next_u64() as usize % request.pool.len();
+        Some((request.pool[idx].clone(), request.fallback_used))
     }
 
     fn on_sync_start(&mut self) {}
@@ -88,6 +81,7 @@ impl NegativeBackend for DefaultBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::RetrievalSamplingConfig;
     use crate::data::{QualityScore, RecordSection, SectionRole};
     use chrono::Utc;
     use rand::SeedableRng;
@@ -121,12 +115,14 @@ mod tests {
         let anchor = record("anchor");
 
         let selected = backend.choose_negative(
-            &anchor,
-            SplitLabel::Train,
-            Vec::new(),
-            false,
-            None,
-            &RetrievalSamplingConfig::default(),
+            NegativeRequest {
+                anchor: &anchor,
+                anchor_split: SplitLabel::Train,
+                pool: Vec::new(),
+                fallback_used: false,
+                anchor_query_text: None,
+                hardness: &RetrievalSamplingConfig::default(),
+            },
             &mut rng,
         );
 
@@ -145,12 +141,14 @@ mod tests {
         ];
 
         let selected = backend.choose_negative(
-            &anchor,
-            SplitLabel::Train,
-            pool,
-            true,
-            Some("anchor query text"),
-            &RetrievalSamplingConfig::default(),
+            NegativeRequest {
+                anchor: &anchor,
+                anchor_split: SplitLabel::Train,
+                pool,
+                fallback_used: true,
+                anchor_query_text: Some("anchor query text"),
+                hardness: &RetrievalSamplingConfig::default(),
+            },
             &mut rng,
         );
 

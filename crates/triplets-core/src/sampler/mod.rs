@@ -33,7 +33,7 @@ use crate::data::{
 use crate::epoch::EpochTracker;
 use crate::errors::SamplerError;
 use crate::hash::{derive_epoch_seed, stable_hash_key, stable_hash_key_section, stable_hash_str};
-use crate::ingestion::IngestionManager;
+use crate::ingestion::{IngestionManager, SyncDelta};
 use crate::metadata::{META_FIELD_DATE, MetadataKey};
 use crate::metrics::{chunk_proximity_score, window_index_proximity};
 use crate::source::DataSource;
@@ -195,6 +195,31 @@ struct PrefetcherStats {
     queued: AtomicUsize,
     produced: AtomicUsize,
     errors: AtomicUsize,
+}
+
+/// Anchor/positive chunk pair plus the anchor's raw text.
+///
+/// The raw text is captured before decoration so Phase 3 can pass it as the
+/// BM25 window query (`anchor_query_text`) for negative selection.
+struct AnchorPositive {
+    anchor_chunk: RecordChunk,
+    positive_chunk: RecordChunk,
+    anchor_raw_text: String,
+}
+
+/// Per-batch loop state: recipe round-robin cursors plus negative-dedup sets.
+struct BatchLoopState {
+    recipe_orders: HashMap<RecipeKey, Vec<usize>>,
+    recipe_positions: HashMap<RecipeKey, usize>,
+    seen: HashSet<(RecordKey, RecordKey, RecordKey)>,
+    seen_negatives: IntSet<u64>,
+}
+
+/// Outcome of one source-candidate draw: the sampled triplet (with recipe),
+/// if any, plus the recipe attempts consumed (for round-robin bookkeeping).
+struct SourceCandidate {
+    triplet: Option<(TripletRecipe, SampleTriplet)>,
+    attempts: usize,
 }
 
 impl<T: Send + 'static> BatchPrefetcher<T> {
@@ -1232,7 +1257,6 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             .cloned()
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn select_negative_record(
         &self,
         anchor_record: &DataRecord,
@@ -1287,12 +1311,14 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 }
                 if !same_date.is_empty() {
                     return self.negative_backend.choose_negative(
-                        anchor_record,
-                        anchor_split,
-                        same_date,
-                        false,
-                        anchor_query_text,
-                        hardness,
+                        backends::NegativeRequest {
+                            anchor: anchor_record,
+                            anchor_split,
+                            pool: same_date,
+                            fallback_used: false,
+                            anchor_query_text,
+                            hardness,
+                        },
                         rng,
                     );
                 }
@@ -1305,12 +1331,14 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                     .cloned()
                     .collect::<Vec<_>>();
                 self.negative_backend.choose_negative(
-                    anchor_record,
-                    anchor_split,
-                    pool,
-                    true,
-                    anchor_query_text,
-                    hardness,
+                    backends::NegativeRequest {
+                        anchor: anchor_record,
+                        anchor_split,
+                        pool,
+                        fallback_used: true,
+                        anchor_query_text,
+                        hardness,
+                    },
                     rng,
                 )
             }
@@ -1351,23 +1379,27 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                         .collect::<Vec<_>>();
 
                     return self.negative_backend.choose_negative(
-                        anchor_record,
-                        anchor_split,
-                        fallback_pool,
-                        true,
-                        anchor_query_text,
-                        hardness,
+                        backends::NegativeRequest {
+                            anchor: anchor_record,
+                            anchor_split,
+                            pool: fallback_pool,
+                            fallback_used: true,
+                            anchor_query_text,
+                            hardness,
+                        },
                         rng,
                     );
                 }
 
                 self.negative_backend.choose_negative(
-                    anchor_record,
-                    anchor_split,
-                    pool,
-                    false,
-                    anchor_query_text,
-                    hardness,
+                    backends::NegativeRequest {
+                        anchor: anchor_record,
+                        anchor_split,
+                        pool,
+                        fallback_used: false,
+                        anchor_query_text,
+                        hardness,
+                    },
                     rng,
                 )
             }
@@ -1395,23 +1427,27 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                         .collect::<Vec<_>>();
 
                     return self.negative_backend.choose_negative(
-                        anchor_record,
-                        anchor_split,
-                        fallback_pool,
-                        true,
-                        anchor_query_text,
-                        hardness,
+                        backends::NegativeRequest {
+                            anchor: anchor_record,
+                            anchor_split,
+                            pool: fallback_pool,
+                            fallback_used: true,
+                            anchor_query_text,
+                            hardness,
+                        },
                         rng,
                     );
                 }
 
                 self.negative_backend.choose_negative(
-                    anchor_record,
-                    anchor_split,
-                    pool,
-                    false,
-                    anchor_query_text,
-                    hardness,
+                    backends::NegativeRequest {
+                        anchor: anchor_record,
+                        anchor_split,
+                        pool,
+                        fallback_used: false,
+                        anchor_query_text,
+                        hardness,
+                    },
                     rng,
                 )
             }
@@ -1866,14 +1902,14 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         Some((anchor_chunk, positive_chunk))
     }
 
-    /// Select (anchor_chunk, positive_chunk, anchor_raw_text) for a recipe — parallel-safe.
+    /// Select anchor/positive chunks for a recipe — parallel-safe.
     /// Does NOT select a negative; that happens sequentially in Phase 3.
     fn select_anchor_positive_for_recipe(
         &self,
         recipe: &TripletRecipe,
         anchor_record: &DataRecord,
         rng: &mut DeterministicRng,
-    ) -> Option<(RecordChunk, RecordChunk, String)> {
+    ) -> Option<AnchorPositive> {
         if Self::is_auto_chunk_pair_recipe(recipe) {
             if !self
                 .record_has_at_least_two_window_chunks_for_selector(anchor_record, &recipe.anchor)
@@ -1896,7 +1932,11 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             let anchor_raw_text = anchor_chunk.text.clone();
             self.decorate_chunk_parallel(anchor_record, &mut anchor_chunk, rng);
             self.decorate_chunk_parallel(anchor_record, &mut positive_chunk, rng);
-            return Some((anchor_chunk, positive_chunk, anchor_raw_text));
+            return Some(AnchorPositive {
+                anchor_chunk,
+                positive_chunk,
+                anchor_raw_text,
+            });
         }
         let (mut anchor_chunk, mut positive_chunk) = self.select_anchor_positive_parallel(
             anchor_record,
@@ -1908,7 +1948,11 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         let anchor_raw_text = anchor_chunk.text.clone();
         self.decorate_chunk_parallel(anchor_record, &mut anchor_chunk, rng);
         self.decorate_chunk_parallel(anchor_record, &mut positive_chunk, rng);
-        Some((anchor_chunk, positive_chunk, anchor_raw_text))
+        Some(AnchorPositive {
+            anchor_chunk,
+            positive_chunk,
+            anchor_raw_text,
+        })
     }
 
     fn select_chunk(&mut self, record: &DataRecord, selector: &Selector) -> Option<RecordChunk> {
@@ -2061,7 +2105,11 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
 
         // Use sync_delta to get only added and evicted records.
         // No full snapshot, no sort, no HashSet diff — O(ΔN) path.
-        let (new_version, added, evicted) = self.ingestion.sync_delta(self.last_sync_version);
+        let SyncDelta {
+            version: new_version,
+            added,
+            evicted,
+        } = self.ingestion.sync_delta(self.last_sync_version);
 
         if added.is_empty() && evicted.is_empty() {
             self.negative_backend.on_sync_start();
@@ -2408,22 +2456,27 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     /// - number of recipe attempts consumed (for round-robin bookkeeping).
     ///
     /// Takes the batch `seen` sets so negative-text dedup commits atomically.
-    #[allow(clippy::too_many_arguments)]
     fn sample_source_triplet_candidate(
         &mut self,
         source: &str,
         target_split: SplitLabel,
-        recipe_orders: &mut HashMap<RecipeKey, Vec<usize>>,
-        recipe_positions: &mut HashMap<RecipeKey, usize>,
+        loop_state: &mut BatchLoopState,
         rng: &mut DeterministicRng,
-        seen: &mut HashSet<(RecordKey, RecordKey, RecordKey)>,
-        seen_negatives: &mut IntSet<u64>,
-    ) -> (Option<(TripletRecipe, SampleTriplet)>, usize) {
+    ) -> SourceCandidate {
+        let BatchLoopState {
+            recipe_orders,
+            recipe_positions,
+            seen,
+            seen_negatives,
+        } = loop_state;
         // Stage A (source-level injection): resolve effective recipe pool,
         // including auto-injected long-section recipe when source is eligible.
         let (recipes, _auto_injected) = self.resolve_source_triplet_plan(source);
         if recipes.is_empty() {
-            return (None, 0);
+            return SourceCandidate {
+                triplet: None,
+                attempts: 0,
+            };
         }
         if !recipe_orders.contains_key(source) {
             let recipe_weights: Vec<f32> = recipes.iter().map(|r| r.weight).collect();
@@ -2436,7 +2489,10 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             .expect("recipe order missing for source");
         let pos = recipe_positions.entry(source.to_string()).or_insert(0);
         let Some(anchor) = self.choose_anchor_record(Some(source), target_split) else {
-            return (None, 0);
+            return SourceCandidate {
+                triplet: None,
+                attempts: 0,
+            };
         };
 
         let mut attempts = 0usize;
@@ -2448,15 +2504,25 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             // anchor/positive once then retries only the negative (per-batch
             // negative-text dedup, best-effort pre-pad). Commit is atomic
             // inside the helper.
-            if let Some(sample) =
-                self.make_triplet_with_unique_negative(&recipe, &anchor, rng, seen, seen_negatives)
-            {
+            if let Some(sample) = self.make_triplet_with_unique_negative(
+                &recipe,
+                &anchor,
+                rng,
+                &mut *seen,
+                &mut *seen_negatives,
+            ) {
                 *pos = (*pos + offset + 1) % order.len();
-                return (Some((recipe, sample)), attempts);
+                return SourceCandidate {
+                    triplet: Some((recipe, sample)),
+                    attempts,
+                };
             }
         }
 
-        (None, attempts)
+        SourceCandidate {
+            triplet: None,
+            attempts,
+        }
     }
 
     fn next_pair_batch_inner_with_weights(
@@ -2573,9 +2639,13 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         }
 
         let mut pairs = Vec::new();
-        let mut seen = HashSet::new();
-        // Per-batch negative-text dedup (Option A, best-effort pre-pad).
-        let mut seen_negatives: IntSet<u64> = IntSet::default();
+        let mut loop_state = BatchLoopState {
+            recipe_orders: HashMap::new(),
+            recipe_positions: HashMap::new(),
+            seen: HashSet::new(),
+            // Per-batch negative-text dedup (Option A, best-effort pre-pad).
+            seen_negatives: IntSet::default(),
+        };
         let mut source_steps = 0usize;
         let mut cycle = (self.source_cycle_idx / sources.len()) as u64;
         let mut source_idx = self.source_cycle_idx % sources.len();
@@ -2586,8 +2656,6 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             Some(w) if Self::weights_are_selective(w) => Some(w),
             _ => None,
         };
-        let mut recipe_orders: HashMap<RecipeKey, Vec<usize>> = HashMap::new();
-        let mut recipe_positions: HashMap<RecipeKey, usize> = HashMap::new();
         let mut recipe_steps = 0usize;
         let max_recipe_len = sources
             .iter()
@@ -2613,17 +2681,14 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
             } else {
                 cycle_sources[source_idx].as_str()
             };
-            let (triplet, attempts_used) = self.sample_source_triplet_candidate(
+            let outcome = self.sample_source_triplet_candidate(
                 source,
                 target_split,
-                &mut recipe_orders,
-                &mut recipe_positions,
+                &mut loop_state,
                 &mut rng,
-                &mut seen,
-                &mut seen_negatives,
             );
-            recipe_steps = recipe_steps.saturating_add(attempts_used);
-            if let Some((recipe, triplet)) = triplet {
+            recipe_steps = recipe_steps.saturating_add(outcome.attempts);
+            if let Some((recipe, triplet)) = outcome.triplet {
                 let SampleTriplet {
                     recipe: triplet_recipe_name,
                     anchor,
@@ -3036,15 +3101,15 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                 let mut candidate = None;
                 for &idx in &order {
                     let recipe = &plan.recipes[idx];
-                    if let Some((ac, pc, raw)) =
+                    if let Some(ap) =
                         self.select_anchor_positive_for_recipe(recipe, &plan.anchor, &mut fork_rng)
                     {
                         candidate = Some(SlotCandidate {
                             recipe: recipe.clone(),
                             anchor: Arc::clone(&plan.anchor),
-                            anchor_chunk: ac,
-                            positive_chunk: pc,
-                            anchor_raw_text: raw,
+                            anchor_chunk: ap.anchor_chunk,
+                            positive_chunk: ap.positive_chunk,
+                            anchor_raw_text: ap.anchor_raw_text,
                         });
                         break;
                     }

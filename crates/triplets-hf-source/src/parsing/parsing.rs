@@ -203,8 +203,18 @@ pub fn parse_hf_source_line(line: &str) -> Result<HfSourceEntry, String> {
     Ok(entry)
 }
 
+/// Parsed `hf://org/dataset[/config[/split]]` URI components.
+pub struct HfUriParts {
+    /// `org/dataset` portion of the URI.
+    pub dataset: String,
+    /// Dataset config (defaults to `"default"` when absent).
+    pub config: String,
+    /// Dataset split (empty means all-splits mode).
+    pub split: String,
+}
+
 /// Parse an hf:// URI into dataset/config/split components.
-pub fn parse_hf_uri(uri: &str) -> Result<(String, String, String), String> {
+pub fn parse_hf_uri(uri: &str) -> Result<HfUriParts, String> {
     let trimmed = uri.trim();
     let Some(rest) = trimmed.strip_prefix("hf://") else {
         return Err(format!(
@@ -227,7 +237,11 @@ pub fn parse_hf_uri(uri: &str) -> Result<(String, String, String), String> {
     // so all HF splits are discovered and triplets' own split logic handles partitioning.
     let split = parts.get(3).copied().unwrap_or("").to_string();
 
-    Ok((dataset, config, split))
+    Ok(HfUriParts {
+        dataset,
+        config,
+        split,
+    })
 }
 
 /// Load a Hugging Face source list file containing explicit field mappings.
