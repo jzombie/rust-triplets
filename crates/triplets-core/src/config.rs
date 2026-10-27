@@ -253,11 +253,20 @@ pub struct TextRecipe {
 /// `max_rank = 30` (standard hard), `search_top_k = 32`.
 #[derive(Clone, Debug)]
 pub struct RetrievalSamplingConfig {
-    /// Skip top ranks (default 1 to skip rank-0 identical matches).
+    /// Ranks below this are never sampled (default 1 skips the rank-0
+    /// identical match, often a false-positive paraphrase). Consumed in
+    /// `Bm25Backend::select_hard_negative` as the window floor;
+    /// ignored by `DefaultBackend`.
     pub min_rank: usize,
-    /// Upper bound rank for hard negative pool (default 30).
+    /// Ranks at or above this are never sampled (default 30, industry
+    /// standard hard cutoff; tail beyond is easy negatives). Consumed in
+    /// `select_hard_negative` as the window ceiling; ignored by
+    /// `DefaultBackend`.
     pub max_rank: usize,
-    /// Total candidate search depth (default 32).
+    /// How many top-scored BM25 index hits to retrieve per anchor query
+    /// (default 32). Consumed in `ranked_candidates` as the search depth
+    /// before strategy-pool intersection; larger values cost more per
+    /// query and grow the per-anchor cache. Ignored by `DefaultBackend`.
     pub search_top_k: usize,
 }
 
