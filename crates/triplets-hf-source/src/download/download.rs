@@ -138,7 +138,7 @@ pub fn build_http_client(
 
 /// Validate a configured `hf_token` against the Hugging Face whoami endpoint.
 ///
-/// Called once during [`HuggingFaceRowSource::new`] when `config.hf_token` is
+/// Called once during [`crate::source_core::HuggingFaceRowSource::new`] when `config.hf_token` is
 /// `Some`.  Returns `Err(SamplerError::SourceUnavailable)` for any non-2xx
 /// response (including 401 Unauthorized for invalid/expired tokens) so that
 /// callers get a clear error at construction time rather than silent failures
