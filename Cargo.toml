@@ -25,6 +25,7 @@ members = [
     "crates/triplets-debug",
     "crates/triplets-hf-source",
     "crates/triplets-offline-embedder",
+    "crates/triplets-parquet-source",
     "crates/triplets-srd-source",
 ]
 resolver = "2"
@@ -68,6 +69,7 @@ triplets = { path = ".", version = "0.30.1-alpha" }
 triplets-core = { path = "crates/triplets-core", version = "0.30.1-alpha" }
 triplets-debug = { path = "crates/triplets-debug", version = "0.30.1-alpha" }
 triplets-hf-source = { path = "crates/triplets-hf-source", version = "0.30.1-alpha" }
+triplets-parquet-source = { path = "crates/triplets-parquet-source", version = "0.30.1-alpha" }
 triplets-offline-embedder = { path = "crates/triplets-offline-embedder", version = "0.30.1-alpha" }
 triplets-srd-source = { path = "crates/triplets-srd-source", version = "0.30.1-alpha" }
 walkdir = "2.5.0"

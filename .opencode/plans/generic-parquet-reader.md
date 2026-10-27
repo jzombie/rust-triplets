@@ -2,6 +2,28 @@
 
 Closes #59. Unrelated to #66 (KVP) — no KVP changes here.
 
+**Status: IMPLEMENTED** on branch
+`59-extract-parquet-reader-from-hf-source-to-use-independently--draft`.
+Workspace green (`cargo test --workspace`), zero warnings in both
+crates, `cargo clippy` adds no new lints, `cargo fmt` applied.
+
+As-built deviations from the draft below:
+- `ParquetRowsConfig` carries `row_id_namespace: String` + `taxonomy:
+  Vec<String>` data fields instead of fn pointers (simpler, same
+  generality; `From<&HuggingFaceRowsConfig>` fills them).
+- `enforce_disk_cap_locked` dropped its unused `_protected_path` arg;
+  eviction scope comes from `managed_subdir` (`None` = disabled).
+- `sync_shard_state_from_disk_locked` returns `bool` (any missing); the
+  HF wrapper resets its remote frontier on `true`.
+- `ParquetRowSource::{local, cache}` are `pub` white-box fields for
+  wrappers/tests; `config` stays behind the `config()` accessor.
+- Generic `len_hint` = materialized rows only; HF keeps its 3-branch
+  version (headroom while remotes remain).
+- HF crate dropped `parquet`/`rayon`/`walkdir` deps (`flate2`/`filetime`
+  → dev-deps); the new crate has no `reqwest`.
+- Decisions resolved: name `triplets-parquet-source`, `.simdr` moved
+  as-is, compat shims kept (`StoreCache`, store/recipe constants).
+
 ## Goal
 
 New generic local-parquet row reader sharing HF's row mechanics

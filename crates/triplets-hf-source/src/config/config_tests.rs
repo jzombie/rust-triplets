@@ -1,6 +1,5 @@
 use super::*;
 use crate::constants::HF_PARQUET_DEFAULT_ENDPOINT;
-use crate::source_core::HuggingFaceRowSource;
 use crate::test_utils::test_config;
 use tempfile::tempdir;
 
@@ -20,7 +19,9 @@ fn normalized_shard_extensions_trims_dots_and_lowercases() {
     let dir = tempdir().unwrap();
     let mut config = test_config(dir.path().to_path_buf());
     config.shard_extensions = vec![".PARQUET".into(), " ndjson ".into()];
-    let normalized = HuggingFaceRowSource::normalized_shard_extensions(&config);
+    let normalized = triplets_parquet_source::ParquetRowSource::normalized_shard_extensions(
+        &config.shard_extensions,
+    );
     assert_eq!(
         normalized,
         vec!["parquet".to_string(), "ndjson".to_string()]

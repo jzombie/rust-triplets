@@ -2,13 +2,20 @@
 #![warn(missing_docs)]
 #![allow(clippy::module_inception)]
 
+//! Hugging Face remote layer for the triplets data pipeline.
+//!
+//! Local parquet mechanics (column mapping, shard indexing, row-store
+//! caching) live in `triplets-parquet-source`; this crate adds hub
+//! downloads, manifest expansion, authentication, and per-dataset identity
+//! on top of [`triplets_parquet_source::ParquetRowSource`].
+
 /// Download utilities and HTTP helpers for Hugging Face shard fetching.
 pub mod download;
 
 /// Test utilities for Hugging Face source tests.
 ///
-/// Used by unit tests inside the `triplets-hf` crate and integration tests
-/// in `crates/triplets-hf/tests/huggingface_integration.rs`.
+/// Used by unit tests inside the `triplets-hf` crate and integration
+/// tests in `crates/triplets-hf/tests/huggingface_integration.rs`.
 pub mod test_utils;
 
 pub use builder::{BuildFailure, BuildResult, build_hf_sources, build_hf_sources_with_weights};
@@ -31,11 +38,5 @@ mod config;
 mod constants;
 mod disk_cache;
 mod expansion;
-mod file_utils;
-mod huggingface_source;
 mod parsing;
-mod rows;
-mod shard_index;
-mod shard_indexer;
 mod source_core;
-mod types;

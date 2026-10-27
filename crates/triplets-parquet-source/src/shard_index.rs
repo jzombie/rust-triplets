@@ -1,11 +1,9 @@
-use crate::config::HuggingFaceRowsConfig;
+use crate::config::ParquetRowsConfig;
 use crate::constants::{
-    HF_PARQUET_MANIFEST_DIR, HF_SHARD_STORE_EXTENSION, HF_SHARD_STORE_META_ROWS_KEY,
-    HF_SHARD_STORE_ROW_PREFIX,
+    HF_SHARD_STORE_EXTENSION, HF_SHARD_STORE_META_ROWS_KEY, HF_SHARD_STORE_ROW_PREFIX,
 };
-use crate::disk_cache;
-use crate::disk_cache::open_store_via_cache;
 use crate::file_utils::{is_gzip_path, is_transient_text};
+use crate::store_cache::open_store_via_cache;
 use crate::types::ShardIndex;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use rayon::prelude::*;
@@ -25,12 +23,9 @@ use walkdir::WalkDir;
 type ShardIndexResult = (Vec<ShardIndex>, usize);
 
 /// Build deterministic local shard index for accepted extensions.
-pub(crate) fn build_shard_index(
-    config: &HuggingFaceRowsConfig,
-) -> Result<ShardIndexResult, SamplerError> {
+pub fn build_shard_index(config: &ParquetRowsConfig) -> Result<ShardIndexResult, SamplerError> {
     let start_index = Instant::now();
     let mut shard_paths = Vec::new();
-    let manifest_root = config.snapshot_dir.join(HF_PARQUET_MANIFEST_DIR);
     let accepted = config
         .shard_extensions
         .iter()
@@ -53,7 +48,7 @@ pub(crate) fn build_shard_index(
         if !entry.file_type().is_file() {
             continue;
         }
-        let in_manifest = entry.path().starts_with(&manifest_root);
+        let in_transient_dir = config.in_transient_dir(entry.path());
         let Some(ext) = entry.path().extension().and_then(|v| v.to_str()) else {
             continue;
         };
@@ -62,8 +57,9 @@ pub(crate) fn build_shard_index(
             is_transient_text(entry.path()) || is_gzip_path(entry.path()) || is_parquet;
 
         if is_transient {
-            if in_manifest {
-                // Delete orphaned remote artifacts (truncated/crashed downloads)
+            if in_transient_dir {
+                // Delete orphaned transient artifacts (truncated/crashed
+                // materializations) so they are rebuilt on next indexing.
                 let _ = fs::remove_file(entry.path());
                 continue;
             }
@@ -79,13 +75,13 @@ pub(crate) fn build_shard_index(
             shard_paths.push(entry.path().to_path_buf());
             continue;
         }
-        // For non-parquet files inside _parquet_manifest: only accept
+        // For non-transient-format files inside a transient dir: only accept
         // shard store files (.simdr).  Metadata files like
         // _sequence_state.json and any other non-shard artifacts are
-        // skipped.  Remote-sourced shards are stored as .simdr files
-        // under _parquet_manifest and must be indexed here so that
+        // skipped.  Wrapper-managed shards are stored as .simdr files
+        // under transient dirs and must be indexed here so that
         // materialized_rows is correctly populated on restart.
-        if in_manifest && !ext.eq_ignore_ascii_case(HF_SHARD_STORE_EXTENSION) {
+        if in_transient_dir && !ext.eq_ignore_ascii_case(HF_SHARD_STORE_EXTENSION) {
             continue;
         }
         if accepted
@@ -100,7 +96,7 @@ pub(crate) fn build_shard_index(
     if shard_paths.is_empty() {
         if saw_parquet {
             warn!(
-                "[triplets:hf] found persisted parquet under {} (transient-only policy); parquet files were pruned and source will repopulate from remote candidates",
+                "[triplets:parquet] found parquet under {} subject to transient-only policy; parquet files were pruned",
                 config.snapshot_dir.display()
             );
         }
@@ -115,7 +111,10 @@ pub(crate) fn build_shard_index(
     }
 
     let total_shards = shard_paths.len();
-    info!("[triplets:hf] indexing {} shards in parallel", total_shards);
+    info!(
+        "[triplets:parquet] indexing {} shards in parallel",
+        total_shards
+    );
     let completed = AtomicUsize::new(0);
     let indexed_shards: Result<Vec<_>, _> = shard_paths
         .into_par_iter()
@@ -125,7 +124,7 @@ pub(crate) fn build_shard_index(
             let n = completed.fetch_add(1, AtomicOrdering::Relaxed) + 1;
             let row_count = result.0.as_ref().map_or(0, |s| s.row_count);
             debug!(
-                "[triplets:hf] indexed shard {}/{}: {} ({} rows)",
+                "[triplets:parquet] indexed shard {}/{}: {} ({} rows)",
                 n,
                 total_shards,
                 path.file_name()
@@ -157,7 +156,7 @@ pub(crate) fn build_shard_index(
     }
 
     info!(
-        "[triplets:hf] indexing complete in {:.2}s (rows={}, shards={})",
+        "[triplets:parquet] indexing complete in {:.2}s (rows={}, shards={})",
         start_index.elapsed().as_secs_f64(),
         running_total,
         shards.len()
@@ -172,21 +171,23 @@ pub(crate) fn build_shard_index(
 #[cfg(test)]
 #[allow(dead_code)]
 fn index_single_shard_for_test(
-    config: &HuggingFaceRowsConfig,
+    config: &ParquetRowsConfig,
     path: &Path,
     global_start: usize,
 ) -> Result<(Option<ShardIndex>, Option<Arc<DataStore>>), SamplerError> {
     index_single_shard(config, path, global_start)
 }
 
-pub(crate) fn is_store_shard_path(path: &Path) -> bool {
+/// Returns `true` when `path` is a `.simdr` row-store shard.
+pub fn is_store_shard_path(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| ext.eq_ignore_ascii_case(HF_SHARD_STORE_EXTENSION))
 }
 
-pub(crate) fn index_single_shard(
-    config: &HuggingFaceRowsConfig,
+/// Build shard metadata for a single local file, opening its row store.
+pub fn index_single_shard(
+    config: &ParquetRowsConfig,
     path: &Path,
     global_start: usize,
 ) -> Result<(Option<ShardIndex>, Option<Arc<DataStore>>), SamplerError> {
@@ -227,18 +228,18 @@ pub(crate) fn index_single_shard(
         // Integrity check: verify the last claimed row actually exists in
         // the store.  A corrupt store (partial write, truncated file) may
         // have the metadata key intact but be missing row data.  Delete it
-        // so the shard is re-downloaded on the next expansion cycle.
+        // so the shard is rebuilt on the next cycle.
         if rows > 0 {
             let last_key = row_store_row_key(rows.saturating_sub(1));
             match store.batch_read(&[last_key.as_slice()]) {
                 Ok(entries) if entries[0].is_some() => {}
                 _ => {
                     warn!(
-                        "[triplets:hf] corrupted store detected ({} rows claimed but last row missing), deleting: {}",
+                        "[triplets:parquet] corrupted store detected ({} rows claimed but last row missing), deleting: {}",
                         rows,
                         path.display()
                     );
-                    disk_cache::remove_stale_store(config, path);
+                    crate::store_cache::remove_stale_store(config, path);
                     return Ok((None, None));
                 }
             }
@@ -300,7 +301,8 @@ pub(crate) fn index_single_shard(
     ))
 }
 
-pub(crate) fn row_store_row_key(local_idx: usize) -> Vec<u8> {
+/// Row-store key for the row at a shard-local index.
+pub fn row_store_row_key(local_idx: usize) -> Vec<u8> {
     let mut key = Vec::with_capacity(HF_SHARD_STORE_ROW_PREFIX.len() + std::mem::size_of::<u64>());
     key.extend_from_slice(HF_SHARD_STORE_ROW_PREFIX);
     key.extend_from_slice(&(local_idx as u64).to_le_bytes());
@@ -308,8 +310,8 @@ pub(crate) fn row_store_row_key(local_idx: usize) -> Vec<u8> {
 }
 
 /// Build parquet row-group map for random-access row reads.
-pub(crate) fn parquet_row_group_map(
-    config: &HuggingFaceRowsConfig,
+pub fn parquet_row_group_map(
+    config: &ParquetRowsConfig,
     path: &Path,
 ) -> Result<(usize, Vec<(usize, usize)>), SamplerError> {
     let file = File::open(path).map_err(|err| SamplerError::SourceUnavailable {
@@ -353,7 +355,8 @@ pub(crate) fn parquet_row_group_map(
     Ok((total_rows, vec![(0, total_rows)]))
 }
 
-pub(crate) fn shard_store_path_for(path: &Path) -> PathBuf {
+/// Canonical `.simdr` store path for a shard (passthrough for stores).
+pub fn shard_store_path_for(path: &Path) -> PathBuf {
     if is_store_shard_path(path) {
         return path.to_path_buf();
     }
