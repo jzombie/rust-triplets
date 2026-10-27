@@ -28,6 +28,20 @@ pub(super) use self::bm25_backend::Bm25Backend;
 #[cfg(not(feature = "bm25-mining"))]
 pub(super) use self::default_backend::DefaultBackend;
 
+/// Request bundle for [`NegativeBackend::choose_negative`].
+///
+/// Without `bm25-mining` only `pool`/`fallback_used` are consumed
+/// (`DefaultBackend`); the remaining fields exist for the BM25 backend.
+#[cfg_attr(not(feature = "bm25-mining"), allow(dead_code))]
+pub(super) struct NegativeRequest<'a> {
+    pub anchor: &'a DataRecord,
+    pub anchor_split: SplitLabel,
+    pub pool: Vec<Arc<DataRecord>>,
+    pub fallback_used: bool,
+    pub anchor_query_text: Option<&'a str>,
+    pub hardness: &'a RetrievalSamplingConfig,
+}
+
 /// Contract for negative-example selection.
 ///
 /// Each backend receives a strategy-filtered `pool` produced by
@@ -48,15 +62,9 @@ pub(super) trait NegativeBackend: Send + Sync {
     /// tie-breaking or fallback should use it rather than maintaining their own.
     /// `fallback_used` threads through from the caller and is returned unchanged
     /// so the batch builder can record whether the negative is from a degraded pool.
-    #[allow(clippy::too_many_arguments)]
     fn choose_negative(
         &self,
-        anchor: &DataRecord,
-        anchor_split: SplitLabel,
-        pool: Vec<Arc<DataRecord>>,
-        fallback_used: bool,
-        anchor_query_text: Option<&str>,
-        hardness: &RetrievalSamplingConfig,
+        request: NegativeRequest<'_>,
         rng: &mut dyn rand::RngCore,
     ) -> Option<(Arc<DataRecord>, bool)>;
 

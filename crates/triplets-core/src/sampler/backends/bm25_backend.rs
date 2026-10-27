@@ -15,7 +15,6 @@ use std::sync::{Arc, RwLock};
 use bm25::{Document, Language, SearchEngine, SearchEngineBuilder};
 use indexmap::IndexMap;
 
-use crate::config::RetrievalSamplingConfig;
 use crate::constants::sampler::BM25_QUERY_TOKEN_LIMIT;
 use crate::data::DataRecord;
 use crate::splits::SplitLabel;
@@ -23,7 +22,7 @@ use crate::tokenizer::{Tokenizer, WhitespaceTokenizer};
 use crate::types::{RecordId, RecordKey, SourceId};
 use crate::utils::platform_newline;
 
-use super::NegativeBackend;
+use super::{NegativeBackend, NegativeRequest};
 
 // ── internal structures ───────────────────────────────────────────────────────
 
@@ -112,17 +111,20 @@ impl Bm25Backend {
 
     /// Core selection logic: intersect globally BM25-ranked candidates with
     /// the caller-supplied strategy pool, then sample from the rank window.
-    #[allow(clippy::too_many_arguments)]
     fn select_hard_negative(
         &self,
-        anchor: &DataRecord,
-        anchor_split: SplitLabel,
-        pool: &[Arc<DataRecord>],
-        fallback_used: bool,
-        anchor_query_text: Option<&str>,
-        hardness: &RetrievalSamplingConfig,
+        request: NegativeRequest<'_>,
         rng: &mut dyn rand::RngCore,
     ) -> Option<(Arc<DataRecord>, bool)> {
+        let NegativeRequest {
+            anchor,
+            anchor_split,
+            pool,
+            fallback_used,
+            anchor_query_text,
+            hardness,
+        } = request;
+        let pool: &[Arc<DataRecord>] = &pool;
         if pool.is_empty() {
             return None;
         }
@@ -412,26 +414,12 @@ impl Bm25Backend {
 // ── NegativeBackend impl ──────────────────────────────────────────────────────
 
 impl NegativeBackend for Bm25Backend {
-    #[allow(clippy::too_many_arguments)]
     fn choose_negative(
         &self,
-        anchor: &DataRecord,
-        anchor_split: SplitLabel,
-        pool: Vec<Arc<DataRecord>>,
-        fallback_used: bool,
-        anchor_query_text: Option<&str>,
-        hardness: &RetrievalSamplingConfig,
+        request: NegativeRequest<'_>,
         rng: &mut dyn rand::RngCore,
     ) -> Option<(Arc<DataRecord>, bool)> {
-        self.select_hard_negative(
-            anchor,
-            anchor_split,
-            &pool,
-            fallback_used,
-            anchor_query_text,
-            hardness,
-            rng,
-        )
+        self.select_hard_negative(request, rng)
     }
 
     fn on_sync_start(&mut self) {

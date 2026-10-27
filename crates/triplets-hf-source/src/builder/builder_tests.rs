@@ -212,7 +212,7 @@ fn build_hf_sources_disambiguates_duplicate_slugs() {
         .iter()
         .enumerate()
         .map(|(idx, source)| match parse_hf_uri(&source.uri) {
-            Ok((dataset, config, split)) => hf_source_id_slug(&dataset, &config, &split),
+            Ok(parts) => hf_source_id_slug(&parts.dataset, &parts.config, &parts.split),
             Err(_) => format!("hf_list_{idx}"),
         })
         .collect();

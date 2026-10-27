@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [0.30.1-alpha] - 2026-10-27
+
+### Changed
+
+- Internal refactors (no behavior change, all suites green): `NegativeBackend::choose_negative`
+  now takes a single `NegativeRequest` bundle instead of seven parameters (both backends,
+  all six call sites); `select_anchor_positive_for_recipe` returns an `AnchorPositive`
+  struct instead of a 3-tuple; `sync_delta` returns a generic `SyncDelta<Id>` struct;
+  `parse_hf_uri` returns `HfUriParts` with named fields; `sample_source_triplet_candidate`
+  takes a `BatchLoopState` bundle and returns a `SourceCandidate` struct. Zero
+  `clippy::too_many_arguments` allows remain in the workspace.
+
 ## [0.30.0-alpha] - 2026-10-27
 
 ### Added

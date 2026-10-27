@@ -495,20 +495,15 @@ fn huggingface_helper_parsers_cover_success_and_error_paths() {
     assert!(parse_hf_source_line("hf://org/dataset/default/train").is_err());
 
     let defaults = parse_hf_uri("hf://org/dataset").expect("uri should parse with defaults");
-    assert_eq!(
-        defaults,
-        (
-            "org/dataset".to_string(),
-            "default".to_string(),
-            // No split component in the URI → empty string, meaning all-splits mode.
-            // Triplets' own train/validation/test split logic handles partitioning.
-            "".to_string()
-        )
-    );
+    assert_eq!(defaults.dataset, "org/dataset");
+    assert_eq!(defaults.config, "default");
+    // No split component in the URI → empty string, meaning all-splits mode.
+    // Triplets' own train/validation/test split logic handles partitioning.
+    assert_eq!(defaults.split, "");
     // Explicit split is preserved exactly.
     let explicit_split = parse_hf_uri("hf://org/dataset/default/train")
         .expect("uri with explicit split should parse");
-    assert_eq!(explicit_split.2, "train");
+    assert_eq!(explicit_split.split, "train");
 
     assert!(parse_hf_uri("hf://org").is_err());
     assert!(parse_hf_uri(HF_BASE_URL).is_err());
