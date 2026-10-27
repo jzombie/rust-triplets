@@ -13,7 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
   `RetrievalSamplingConfig { min_rank, max_rank, search_top_k }` (defaults
   `1/30/32`) on `SamplerConfig` (global) with per-recipe override on
   `TripletRecipe.retrieval_sampling`. `Bm25Backend` samples uniformly from
-  `ranked[start..end]` (`start = min_rank.min(len-1)`, `end =
+  `ranked[start..end]` (`start = min_rank.min(len.saturating_sub(1))`, `end =
   max_rank.clamp(start+1, len)`), skipping rank-0 false positives; `1..30`
   standard hard, `1..10` extreme, `10..100` moderate. Eager validation
   (`max_rank > 0`, `min_rank < max_rank`, `search_top_k > 0`). Cache keyed by
