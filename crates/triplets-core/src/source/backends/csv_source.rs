@@ -380,6 +380,7 @@ impl DataSource for CsvSource {
                 weight: 1.0,
                 instruction: None,
                 allow_same_anchor_positive: true,
+                retrieval_sampling: None,
             }];
         }
 
@@ -394,6 +395,7 @@ impl DataSource for CsvSource {
                 weight: 0.75,
                 instruction: None,
                 allow_same_anchor_positive: false,
+                retrieval_sampling: None,
             },
             // Medium-hard lane: anchor-as-negative for discrimination pressure.
             TripletRecipe {
@@ -405,6 +407,7 @@ impl DataSource for CsvSource {
                 weight: 0.25,
                 instruction: None,
                 allow_same_anchor_positive: false,
+                retrieval_sampling: None,
             },
         ]
     }

@@ -64,6 +64,7 @@ fn run_samples(batch_size: usize, total_samples: usize) -> Vec<RecordId> {
             weight: 1.0,
             instruction: None,
             allow_same_anchor_positive: false,
+            retrieval_sampling: None,
         }],
         text_recipes: Vec::new(),
         ..SamplerConfig::default()

@@ -217,6 +217,7 @@ impl DataSource for SrdSource {
                 weight: 1.0,
                 instruction: None,
                 allow_same_anchor_positive: false,
+                retrieval_sampling: None,
             }],
             SrdMode::Triplet => vec![TripletRecipe {
                 name: "srd_triplet".into(),
@@ -227,6 +228,7 @@ impl DataSource for SrdSource {
                 weight: 1.0,
                 instruction: None,
                 allow_same_anchor_positive: false,
+                retrieval_sampling: None,
             }],
         }
     }

@@ -3,10 +3,11 @@
 //! Compiled only when the `bm25-mining` feature is enabled (`pub(super) mod
 //! bm25_backend;` in `backends/mod.rs` is cfg-gated accordingly).
 //!
-//! All BM25 state that previously lived as scattered `#[cfg]`-gated fields
-//! inside `TripletSamplerInner` is encapsulated in [`Bm25Backend`], which
-//! implements [`super::NegativeBackend`].  The sampler core in `mod.rs` holds
-//! only a `Box<dyn NegativeBackend>` and knows nothing about BM25 internals.
+//! Implements [`super::NegativeBackend`] with rank-windowed hardness sampling
+//! (`RetrievalSamplingConfig { min_rank, max_rank, search_top_k }`):
+//! uniform sample from `ranked[start..end]`, skipping rank-0 false positives.
+//! Ranked keys are cached per `(anchor, search_top_k)` for full-article
+//! queries; window queries bypass the cache. Stateless — no rotation cursors.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
@@ -14,9 +15,8 @@ use std::sync::{Arc, RwLock};
 use bm25::{Document, Language, SearchEngine, SearchEngineBuilder};
 use indexmap::IndexMap;
 
-use crate::constants::sampler::BM25_HARD_NEGATIVE_ROTATION_TOP_K;
+use crate::config::RetrievalSamplingConfig;
 use crate::constants::sampler::BM25_QUERY_TOKEN_LIMIT;
-use crate::constants::sampler::BM25_SEARCH_TOP_K;
 use crate::data::DataRecord;
 use crate::splits::SplitLabel;
 use crate::tokenizer::{Tokenizer, WhitespaceTokenizer};
@@ -35,6 +35,11 @@ struct Bm25RecordMeta {
     split: Option<SplitLabel>,
 }
 
+/// Cached margin-aware ranking for one anchor+depth: the anchor self-score
+/// reference (`None` when the anchor fell outside its own top-K) plus the
+/// scored candidates in rank order (anchor key itself excluded).
+type CachedScoredRanking = (Option<f32>, Vec<(RecordKey, f32)>);
+
 /// Per-source BM25 search engine, containing only records from one source.
 ///
 /// One `PerSourceBm25Index` is maintained per active source so that a refresh
@@ -51,18 +56,20 @@ struct PerSourceBm25Index {
 
 /// BM25-backed hard-negative selection backend.
 ///
-/// Owns the global BM25 index, the per-anchor candidate cache, and the
-/// top-K rotation cursors.  The sampler core holds this as
-/// `Box<dyn NegativeBackend>` and interacts only through that trait.
+/// Owns the per-source BM25 indexes and the per-anchor candidate cache.
+/// Sampling is stateless rank-window uniform: no rotation cursors.
 pub struct Bm25Backend {
-    /// BM25-ranked candidate keys keyed by anchor record key.
-    /// Written once per anchor (full-article query), then read-only until records refresh.
-    hard_negatives: RwLock<HashMap<RecordKey, Vec<RecordKey>>>,
+    /// Scored BM25 candidates plus the anchor self-score, keyed by
+    /// (anchor record key, search_top_k). The anchor key itself stays
+    /// excluded from the ranked vec (self-selection must remain
+    /// impossible); its own score is stored alongside as the margin
+    /// reference (`None` when the anchor fell outside its own top-K).
+    /// Written once per anchor+depth (full-article query), then read-only
+    /// until records refresh.
+    hard_negatives: RwLock<HashMap<(RecordKey, usize), CachedScoredRanking>>,
     /// Per-source BM25 search engines, keyed by source identifier.
     /// Rebuilt on refresh; read-only during sampling.
     source_indexes: HashMap<SourceId, PerSourceBm25Index>,
-    /// Per-`(anchor_key, split)` cursor for deterministic top-K rotation.
-    negative_cursors: RwLock<HashMap<(RecordKey, SplitLabel), usize>>,
     /// Token limit used when building BM25 document text; mirrors
     /// `config.chunking.max_window_tokens` and is refreshed on every
     /// `on_records_refreshed` call.
@@ -74,6 +81,14 @@ pub struct Bm25Backend {
     /// the random fallback path was taken.
     #[cfg(feature = "extended-metrics")]
     bm25_fallback_count: std::sync::atomic::AtomicU64,
+    /// Margin-filter evaluations where the reference resolved (margin
+    /// configured and anchor self-score present).
+    #[cfg(feature = "extended-metrics")]
+    bm25_margin_evaluated: std::sync::atomic::AtomicU64,
+    /// Margin-filter evaluations where no candidate cleared the margin and
+    /// the uniform-random pool fallback was taken.
+    #[cfg(feature = "extended-metrics")]
+    bm25_margin_exhausted: std::sync::atomic::AtomicU64,
 }
 
 impl Bm25Backend {
@@ -81,19 +96,23 @@ impl Bm25Backend {
         Self {
             hard_negatives: RwLock::new(HashMap::new()),
             source_indexes: HashMap::new(),
-            negative_cursors: RwLock::new(HashMap::new()),
             max_window_tokens: 0,
             #[cfg(feature = "extended-metrics")]
             bm25_selection_count: std::sync::atomic::AtomicU64::new(0),
             #[cfg(feature = "extended-metrics")]
             bm25_fallback_count: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(feature = "extended-metrics")]
+            bm25_margin_evaluated: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(feature = "extended-metrics")]
+            bm25_margin_exhausted: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
     // ── private helpers ───────────────────────────────────────────────────────
 
     /// Core selection logic: intersect globally BM25-ranked candidates with
-    /// the caller-supplied strategy pool, then rotate through the top-K.
+    /// the caller-supplied strategy pool, then sample from the rank window.
+    #[allow(clippy::too_many_arguments)]
     fn select_hard_negative(
         &self,
         anchor: &DataRecord,
@@ -101,6 +120,7 @@ impl Bm25Backend {
         pool: &[Arc<DataRecord>],
         fallback_used: bool,
         anchor_query_text: Option<&str>,
+        hardness: &RetrievalSamplingConfig,
         rng: &mut dyn rand::RngCore,
     ) -> Option<(Arc<DataRecord>, bool)> {
         if pool.is_empty() {
@@ -113,54 +133,92 @@ impl Bm25Backend {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
 
-        // BM25 top-K rotation.
-        //
-        // `pool` is already strategy-filtered by `select_negative_record`:
-        // same-source, same-split, and any strategy-specific predicates have
-        // been applied before arriving here.  This function re-ranks the pool
-        // by BM25 lexical score and rotates through the top-K candidates.
-        //
-        // 1) Fetch globally BM25-ranked candidate keys (same-split, cached per
-        //    anchor).  Intersect with `pool` keys to restrict to the
-        //    pre-filtered set — no predicates need to be re-checked here.
-        // 2) Compute top_k = min(configured_top_k, ranked_pool.len()).
-        // 3) Read per-(anchor_key, split) cursor, defaulting to 0.
-        // 4) Return ranked_pool[cursor], then advance cursor mod top_k.
-        //
-        // Cursors are cleared in on_sync_start() so a refreshed corpus
-        // restarts rotation from rank-1 for each anchor.
+        // `pool` is already strategy-filtered by `select_negative_record`.
+        // 1) Fetch scored BM25 candidates (self-score + ranked keys with
+        //    scores, same-split, cached per anchor+search_top_k for
+        //    full-article queries). Intersect with `pool` keys.
+        // 2) If empty → fallback random below.
+        // 3) If a margin is configured and the self-score resolved, filter
+        //    to candidates below `self_score - margin`; exhaustion falls
+        //    back to uniform random (NOT Rank-1). Unresolvable reference
+        //    bypasses the margin entirely (neither margin counter moves).
+        // 4) Else sample uniformly from rank window [start..end).
         let pool_by_key: HashMap<RecordKey, &Arc<DataRecord>> =
             pool.iter().map(|r| (RecordKey::from(r), r)).collect();
 
-        let candidate_keys = self.ranked_candidates(anchor, anchor_split, anchor_query_text);
-        let ranked_pool: Vec<Arc<DataRecord>> = candidate_keys
+        let (self_score, scored_candidates) = self.ranked_candidates_scored(
+            anchor,
+            anchor_split,
+            anchor_query_text,
+            hardness.search_top_k,
+        );
+        // Preserve BM25 rank order (descending score, key tiebreak) through
+        // the pool intersection.
+        let mut ranked_pool_scored: Vec<(Arc<DataRecord>, f32)> = scored_candidates
             .iter()
-            .filter_map(|key| pool_by_key.get(key).copied().cloned())
+            .filter_map(|(key, score)| pool_by_key.get(key).copied().cloned().map(|r| (r, *score)))
             .collect();
 
-        if !ranked_pool.is_empty() {
-            let top_k = ranked_pool
-                .len()
-                .min(BM25_HARD_NEGATIVE_ROTATION_TOP_K.max(1));
-            let cursor_key = (RecordKey::from(anchor), anchor_split);
-            let mut cursors = self.negative_cursors.write().unwrap();
-            let cursor = cursors.entry(cursor_key).or_insert(0);
-            if *cursor >= top_k {
-                *cursor = 0;
+        if ranked_pool_scored.is_empty() {
+            // Index miss: BM25 yielded nothing intersecting the pool.
+            // Unchanged semantics — counted separately from margin misses
+            // even when a margin is configured.
+            #[cfg(feature = "extended-metrics")]
+            {
+                self.bm25_fallback_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
-            let selected = ranked_pool.get(*cursor).cloned();
-            *cursor = (*cursor + 1) % top_k;
-            drop(cursors);
-            return selected.map(|record| (record, fallback_used));
+            return Self::random_pool_pick(pool, fallback_used, rng);
         }
 
-        // BM25 yielded nothing in the pool — fall back to deterministic random
-        // sampling within `pool`.
-        #[cfg(feature = "extended-metrics")]
-        {
-            self.bm25_fallback_count
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Some(margin) = hardness.negative_margin {
+            match self_score {
+                // Reference unresolvable: bypass the margin for this draw.
+                // Neither margin counter moves; visible as
+                // `selections − evaluated` drift.
+                None => {}
+                Some(reference) => {
+                    #[cfg(feature = "extended-metrics")]
+                    {
+                        self.bm25_margin_evaluated
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    let threshold = reference - margin;
+                    ranked_pool_scored.retain(|(_, score)| *score < threshold);
+                    if ranked_pool_scored.is_empty() {
+                        // Margin exhaustion: candidates existed but none
+                        // cleared the margin — uniform random pool pick
+                        // (NOT Rank-1), flagged as a fallback draw.
+                        #[cfg(feature = "extended-metrics")]
+                        {
+                            self.bm25_margin_exhausted
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        return Self::random_pool_pick(pool, true, rng);
+                    }
+                }
+            }
         }
+
+        let len = ranked_pool_scored.len();
+        let start = hardness.min_rank.min(len.saturating_sub(1));
+        let end = hardness.max_rank.clamp(start + 1, len);
+        let idx = {
+            use rand::Rng as _;
+            rng.random_range(start..end)
+        };
+        ranked_pool_scored
+            .get(idx)
+            .map(|(r, _)| (r.clone(), fallback_used))
+    }
+
+    /// Deterministic uniform-random pick from `pool` (sorted by key first so
+    /// the draw is stable given the RNG state).
+    fn random_pool_pick(
+        pool: &[Arc<DataRecord>],
+        fallback_used: bool,
+        rng: &mut dyn rand::RngCore,
+    ) -> Option<(Arc<DataRecord>, bool)> {
         let mut fallback = pool.to_vec();
         fallback.sort_by(|a, b| RecordKey::from(a).cmp(&RecordKey::from(b)));
         if fallback.is_empty() {
@@ -173,8 +231,13 @@ impl Bm25Backend {
         fallback.get(idx).cloned().map(|r| (r, fallback_used))
     }
 
-    /// Return BM25-ranked candidate record IDs for `anchor`, restricted to
-    /// records assigned to `anchor_split`.
+    /// Return the anchor self-score plus scored BM25 candidates for `anchor`,
+    /// restricted to records assigned to `anchor_split`.
+    ///
+    /// The self-score is the anchor record's *own* score against the query,
+    /// read *before* the self-exclusion filter. It is `None` when the anchor
+    /// falls outside its own top-K (extreme truncation, duplicate
+    /// saturation) or when no index exists for the anchor's source.
     ///
     /// When `anchor_query_text` is `Some`, it is used as the BM25 query directly
     /// (the rendered text of the anchor's already-selected chunk window).  Results
@@ -185,33 +248,33 @@ impl Bm25Backend {
     /// article text via `record_bm25_text`, and the result is cached per anchor ID.
     /// The cache is invalidated in `on_records_refreshed` when the anchor's own
     /// source refreshes, and stale entries are removed by `prune_cursors`.
-    fn ranked_candidates(
+    fn ranked_candidates_scored(
         &self,
         anchor: &DataRecord,
         anchor_split: SplitLabel,
         anchor_query_text: Option<&str>,
-    ) -> Vec<RecordKey> {
+        search_top_k: usize,
+    ) -> CachedScoredRanking {
         let anchor_key = RecordKey::from(anchor);
+        let depth = search_top_k.max(1);
+        let cache_key = (anchor_key.clone(), depth);
         // When using full-article text, serve from cache if available.
         if anchor_query_text.is_none()
-            && let Some(cached) = self
-                .hard_negatives
-                .read()
-                .unwrap()
-                .get(&anchor_key)
-                .cloned()
+            && let Some(cached) = self.hard_negatives.read().unwrap().get(&cache_key).cloned()
         {
             return cached;
         }
 
         let Some(index) = self.source_indexes.get(anchor.source.as_str()) else {
             if anchor_query_text.is_none() {
+                let entry = (None, Vec::new());
                 self.hard_negatives
                     .write()
                     .unwrap()
-                    .insert(anchor_key, Vec::new());
+                    .insert(cache_key, entry.clone());
+                return entry;
             }
-            return Vec::new();
+            return (None, Vec::new());
         };
 
         let owned_text: String;
@@ -241,23 +304,27 @@ impl Bm25Backend {
         // results from other sources would be discarded during pool intersection
         // anyway.  Restricting to the anchor's source index avoids O(N_sources)
         // full scans per anchor.
-        let results = index
-            .search_engine
-            .search(bm25_query_text, BM25_SEARCH_TOP_K);
-        let mut all_scored: Vec<(f32, RecordKey)> = results
-            .into_iter()
-            .filter_map(|result| {
-                let m = index.meta.get(result.document.id)?;
-                let key = RecordKey::new(m.source.clone(), m.record_id.clone());
-                if key == anchor_key {
-                    return None;
-                }
-                if m.split != Some(anchor_split) {
-                    return None;
-                }
-                Some((result.score, key))
-            })
-            .collect();
+        let results = index.search_engine.search(bm25_query_text, depth);
+        // Capture the anchor's own score BEFORE the self-exclusion filter —
+        // it is the margin reference. The anchor record is expected in its
+        // own top-K (the query derives from its own text) but not
+        // guaranteed; absence yields `None` (unresolvable reference).
+        let mut self_score: Option<f32> = None;
+        let mut all_scored: Vec<(f32, RecordKey)> = Vec::new();
+        for result in results {
+            let Some(m) = index.meta.get(result.document.id) else {
+                continue;
+            };
+            let key = RecordKey::new(m.source.clone(), m.record_id.clone());
+            if key == anchor_key {
+                self_score = Some(result.score);
+                continue;
+            }
+            if m.split != Some(anchor_split) {
+                continue;
+            }
+            all_scored.push((result.score, key));
+        }
 
         all_scored.sort_by(|a, b| {
             b.0.partial_cmp(&a.0)
@@ -265,16 +332,37 @@ impl Bm25Backend {
                 .then_with(|| a.1.cmp(&b.1))
         });
 
-        let ranked: Vec<RecordKey> = all_scored.into_iter().map(|(_, key)| key).collect();
+        let ranked: Vec<(RecordKey, f32)> = all_scored
+            .into_iter()
+            .map(|(score, key)| (key, score))
+            .collect();
+        let entry = (self_score, ranked);
         // Only cache full-article results; chunk-window results are not cached
         // because different windows of the same record produce different rankings.
         if anchor_query_text.is_none() {
             self.hard_negatives
                 .write()
                 .unwrap()
-                .insert(anchor_key, ranked.clone());
+                .insert(cache_key, entry.clone());
         }
-        ranked
+        entry
+    }
+
+    /// Legacy key-only view of [`Self::ranked_candidates_scored`], kept for
+    /// existing callers/tests that only need the ranking order.
+    #[cfg(test)]
+    fn ranked_candidates(
+        &self,
+        anchor: &DataRecord,
+        anchor_split: SplitLabel,
+        anchor_query_text: Option<&str>,
+        search_top_k: usize,
+    ) -> Vec<RecordKey> {
+        self.ranked_candidates_scored(anchor, anchor_split, anchor_query_text, search_top_k)
+            .1
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect()
     }
 
     /// Build a fresh BM25 index for `source_id` from `source_records`, which
@@ -324,6 +412,7 @@ impl Bm25Backend {
 // ── NegativeBackend impl ──────────────────────────────────────────────────────
 
 impl NegativeBackend for Bm25Backend {
+    #[allow(clippy::too_many_arguments)]
     fn choose_negative(
         &self,
         anchor: &DataRecord,
@@ -331,6 +420,7 @@ impl NegativeBackend for Bm25Backend {
         pool: Vec<Arc<DataRecord>>,
         fallback_used: bool,
         anchor_query_text: Option<&str>,
+        hardness: &RetrievalSamplingConfig,
         rng: &mut dyn rand::RngCore,
     ) -> Option<(Arc<DataRecord>, bool)> {
         self.select_hard_negative(
@@ -339,14 +429,14 @@ impl NegativeBackend for Bm25Backend {
             &pool,
             fallback_used,
             anchor_query_text,
+            hardness,
             rng,
         )
     }
 
     fn on_sync_start(&mut self) {
-        // Strict mode: per-anchor cursor state must never outlive a corpus
-        // snapshot boundary.  Clear it before the new snapshot is loaded.
-        self.negative_cursors.write().unwrap().clear();
+        // Rank-window sampling is stateless; per-anchor candidate cache
+        // is invalidated in on_records_refreshed, not here.
     }
 
     fn on_records_refreshed(
@@ -370,7 +460,7 @@ impl NegativeBackend for Bm25Backend {
         self.hard_negatives
             .write()
             .unwrap()
-            .retain(|anchor_key, _| {
+            .retain(|(anchor_key, _depth), _| {
                 records
                     .get(anchor_key)
                     .map(|r| !refreshed_set.contains(r.source.as_str()))
@@ -401,21 +491,15 @@ impl NegativeBackend for Bm25Backend {
             .retain(|source_id, _| active_sources.contains(source_id.as_str()));
     }
 
-    fn prune_cursors(&mut self, valid_keys: &HashSet<RecordKey>) {
-        self.negative_cursors
-            .write()
-            .unwrap()
-            .retain(|(record_key, _), _| valid_keys.contains(record_key));
-        // Also remove hard-negative cache entries for anchors that are no
-        // longer in the record pool.
+    fn prune_cursors(&mut self, valid_ids: &HashSet<RecordKey>) {
         self.hard_negatives
             .write()
             .unwrap()
-            .retain(|anchor_key, _| valid_keys.contains(anchor_key));
+            .retain(|(anchor_key, _), _| valid_ids.contains(anchor_key));
     }
 
     fn cursors_empty(&self) -> bool {
-        self.negative_cursors.read().unwrap().is_empty()
+        self.hard_negatives.read().unwrap().is_empty()
     }
 
     #[cfg(all(feature = "bm25-mining", feature = "extended-metrics"))]
@@ -424,6 +508,16 @@ impl NegativeBackend for Bm25Backend {
             self.bm25_fallback_count
                 .load(std::sync::atomic::Ordering::Relaxed),
             self.bm25_selection_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    #[cfg(all(feature = "bm25-mining", feature = "extended-metrics"))]
+    fn bm25_margin_stats(&self) -> (u64, u64) {
+        (
+            self.bm25_margin_exhausted
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.bm25_margin_evaluated
                 .load(std::sync::atomic::Ordering::Relaxed),
         )
     }
@@ -444,21 +538,32 @@ impl Bm25Backend {
         anchor: &DataRecord,
         anchor_split: SplitLabel,
     ) -> Vec<RecordKey> {
-        self.ranked_candidates(anchor, anchor_split, None)
+        let depth = crate::config::RetrievalSamplingConfig::default().search_top_k;
+        self.ranked_candidates(anchor, anchor_split, None, depth)
     }
 
     /// Return a clone of the hard-negative candidate list for `anchor`, or
     /// `None` when no cache entry exists.
+    ///
+    /// Prefers the default `search_top_k` entry; falls back to any depth for
+    /// the same anchor to keep legacy single-depth tests stable.
     #[cfg(test)]
     pub(in crate::sampler) fn hard_negatives_get(
         &self,
         anchor: &DataRecord,
     ) -> Option<Vec<RecordKey>> {
-        self.hard_negatives
-            .read()
-            .unwrap()
-            .get(&RecordKey::from(anchor))
-            .cloned()
+        let key = RecordKey::from(anchor);
+        let guard = self.hard_negatives.read().unwrap();
+        let to_keys = |entry: &CachedScoredRanking| {
+            entry.1.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>()
+        };
+        let default_depth = crate::config::RetrievalSamplingConfig::default().search_top_k;
+        if let Some(v) = guard.get(&(key.clone(), default_depth)) {
+            return Some(to_keys(v));
+        }
+        guard
+            .iter()
+            .find_map(|((k, _), v)| (k == &key).then(|| to_keys(v)))
     }
 
     /// Return the record keys of all documents across all per-source indexes.
@@ -487,28 +592,18 @@ impl Bm25Backend {
         Some(all_keys)
     }
 
-    /// Return the number of active negative-cursor entries.
+    /// Return cached search depths for anchor (test-only).
     #[cfg(test)]
-    pub(in crate::sampler) fn negative_cursors_len(&self) -> usize {
-        self.negative_cursors.read().unwrap().len()
-    }
-
-    /// Return `true` when no negative-cursor entries are active.
-    #[cfg(test)]
-    pub(in crate::sampler) fn negative_cursors_is_empty(&self) -> bool {
-        self.negative_cursors.read().unwrap().is_empty()
-    }
-
-    /// Insert a synthetic cursor entry.  Used by tests that need to pre-seed
-    /// cursor state before calling `prune_cursor_state` or
-    /// `sync_records_from_cache`.
-    #[cfg(test)]
-    pub(in crate::sampler) fn negative_cursors_insert(
+    pub(in crate::sampler) fn hard_negatives_keys_for_test(
         &self,
-        key: (RecordKey, SplitLabel),
-        value: usize,
-    ) {
-        self.negative_cursors.write().unwrap().insert(key, value);
+        anchor: &RecordKey,
+    ) -> Vec<usize> {
+        self.hard_negatives
+            .read()
+            .unwrap()
+            .keys()
+            .filter_map(|(k, d)| (k == anchor).then_some(*d))
+            .collect()
     }
 }
 

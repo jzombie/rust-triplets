@@ -1976,7 +1976,7 @@ mod tests {
             // the cache permanently and the cross-batch text dedup would never
             // clear `emitted_texts`, causing early Exhausted after only a few
             // batches (only 8 unique texts across 40 records).
-            ingestion_max_records: 4,
+            per_source_max_pool: 4,
             ..SamplerConfig::default()
         };
         let store = Arc::new(DeterministicSplitStore::new(config.split, 99).unwrap());

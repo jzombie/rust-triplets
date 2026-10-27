@@ -173,12 +173,12 @@ struct MultiSourceDemoCli {
     )]
     batch_size: usize,
     #[arg(
-        long = "ingestion-max-records",
-        default_value_t = default_ingestion_max_records(),
-        value_parser = parse_ingestion_max_records,
+        long = "per-source-max-pool",
+        default_value_t = default_per_source_max_pool(),
+        value_parser = parse_per_source_max_pool,
         help = "Per-source ingestion buffer target used while refreshing records"
     )]
-    ingestion_max_records: usize,
+    per_source_max_pool: usize,
     #[arg(long, help = "Optional deterministic seed override")]
     seed: Option<u64>,
     #[arg(long, value_enum, help = "Target split to sample from")]
@@ -577,16 +577,14 @@ where
     let mut config = SamplerConfig::default();
     config.seed = cli.seed.unwrap_or(config.seed);
     config.batch_size = cli.batch_size;
-    config.ingestion_max_records = cli.ingestion_max_records;
-    config.chunking = Default::default();
+    config.per_source_max_pool = cli.per_source_max_pool;
     let selected_split = cli.split.map(Into::into).unwrap_or(SplitLabel::Train);
-    config.split = SplitRatios::default();
     config.allowed_splits = vec![selected_split];
     let chunking = config.chunking.clone();
     let config_snapshot = MultiSourceDemoConfigSnapshot {
         seed: config.seed,
         batch_size: config.batch_size,
-        ingestion_max_records: config.ingestion_max_records,
+        per_source_max_pool: config.per_source_max_pool,
         split: selected_split,
         split_ratios: config.split,
         max_window_tokens: config.chunking.max_window_tokens,
@@ -749,6 +747,18 @@ where
                 let pct = fallback as f64 / total as f64 * 100.0;
                 println!("bm25 fallback rate : {}/{} ({:.1}%)", fallback, total, pct);
             }
+            let (margin_exhausted, margin_evaluated) = sampler.bm25_margin_stats();
+            if margin_evaluated > 0 {
+                let pct = margin_exhausted as f64 / margin_evaluated as f64 * 100.0;
+                println!(
+                    "bm25 margin-miss rate: {}/{} ({:.1}%)",
+                    margin_exhausted, margin_evaluated, pct
+                );
+            } else if total > 0 {
+                println!(
+                    "bm25 margin filter   : off (negative_margin unset — set per-lane to enable)"
+                );
+            }
         }
     } else {
         match sampler
@@ -770,6 +780,18 @@ where
                         let pct = fallback as f64 / total as f64 * 100.0;
                         println!("bm25 fallback rate : {}/{} ({:.1}%)", fallback, total, pct);
                     }
+                    let (margin_exhausted, margin_evaluated) = sampler.bm25_margin_stats();
+                    if margin_evaluated > 0 {
+                        let pct = margin_exhausted as f64 / margin_evaluated as f64 * 100.0;
+                        println!(
+                            "bm25 margin-miss rate: {}/{} ({:.1}%)",
+                            margin_exhausted, margin_evaluated, pct
+                        );
+                    } else if total > 0 {
+                        println!(
+                            "bm25 margin filter   : off (negative_margin unset — set per-lane to enable)"
+                        );
+                    }
                 }
             }
             Err(SamplerError::Exhausted(name)) => {
@@ -788,7 +810,7 @@ where
 struct MultiSourceDemoConfigSnapshot {
     seed: u64,
     batch_size: usize,
-    ingestion_max_records: usize,
+    per_source_max_pool: usize,
     split: SplitLabel,
     split_ratios: SplitRatios,
     max_window_tokens: usize,
@@ -801,7 +823,7 @@ fn print_demo_config(cfg: &MultiSourceDemoConfigSnapshot) {
     println!("=== sampler config ===");
     println!("seed                 : {}", cfg.seed);
     println!("batch_size           : {}", cfg.batch_size);
-    println!("ingestion_max_records: {}", cfg.ingestion_max_records);
+    println!("per_source_max_pool: {}", cfg.per_source_max_pool);
     println!("split                : {:?}", cfg.split);
     println!(
         "split_ratios         : train={:.2} val={:.2} test={:.2}",
@@ -816,8 +838,8 @@ fn print_demo_config(cfg: &MultiSourceDemoConfigSnapshot) {
     println!();
 }
 
-fn default_ingestion_max_records() -> usize {
-    SamplerConfig::default().ingestion_max_records
+fn default_per_source_max_pool() -> usize {
+    SamplerConfig::default().per_source_max_pool
 }
 
 fn parse_positive_usize_flag(raw: &str, flag: &str) -> Result<usize, String> {
@@ -837,8 +859,8 @@ fn parse_batch_size(raw: &str) -> Result<usize, String> {
     parse_positive_usize_flag(raw, "--batch-size")
 }
 
-fn parse_ingestion_max_records(raw: &str) -> Result<usize, String> {
-    parse_positive_usize_flag(raw, "--ingestion-max-records")
+fn parse_per_source_max_pool(raw: &str) -> Result<usize, String> {
+    parse_positive_usize_flag(raw, "--per-source-max-pool")
 }
 
 fn parse_batch_count(raw: &str) -> Result<usize, String> {
@@ -1581,7 +1603,7 @@ mod tests {
     }
 
     struct IngestionConfigSource {
-        expected_ingestion_max_records: usize,
+        expected_per_source_max_pool: usize,
         records: Vec<DataRecord>,
     }
 
@@ -1596,12 +1618,12 @@ mod tests {
             _cursor: Option<&SourceCursor>,
             _limit: Option<usize>,
         ) -> Result<SourceSnapshot, SamplerError> {
-            if config.ingestion_max_records != self.expected_ingestion_max_records {
+            if config.per_source_max_pool != self.expected_per_source_max_pool {
                 return Err(SamplerError::SourceInconsistent {
                     source_id: self.id().to_string(),
                     details: format!(
-                        "expected ingestion_max_records {} but got {}",
-                        self.expected_ingestion_max_records, config.ingestion_max_records
+                        "expected per_source_max_pool {} but got {}",
+                        self.expected_per_source_max_pool, config.per_source_max_pool
                     ),
                 });
             }
@@ -1657,6 +1679,7 @@ mod tests {
             weight: 1.0,
             instruction: None,
             allow_same_anchor_positive: false,
+            retrieval_sampling: None,
         }
     }
 
@@ -1665,8 +1688,8 @@ mod tests {
         assert_eq!(parse_batch_size("2").unwrap(), 2);
         assert!(parse_batch_size("0").is_err());
         assert!(parse_batch_size("abc").is_err());
-        assert_eq!(parse_ingestion_max_records("16").unwrap(), 16);
-        assert!(parse_ingestion_max_records("0").is_err());
+        assert_eq!(parse_per_source_max_pool("16").unwrap(), 16);
+        assert!(parse_per_source_max_pool("0").is_err());
         assert!(parse_batch_count("0").is_err());
 
         let split = parse_split_ratios_arg("0.8,0.1,0.1").unwrap();
@@ -1699,11 +1722,11 @@ mod tests {
         assert_eq!(fixture.default_triplet_recipes().len(), 1);
 
         let source = IngestionConfigSource {
-            expected_ingestion_max_records: 7,
+            expected_per_source_max_pool: 7,
             records,
         };
         let ok_cfg = SamplerConfig {
-            ingestion_max_records: 7,
+            per_source_max_pool: 7,
             ..SamplerConfig::default()
         };
         assert!(source.refresh(&ok_cfg, None, None).is_ok());
@@ -1711,7 +1734,7 @@ mod tests {
         assert_eq!(source.default_triplet_recipes().len(), 1);
 
         let bad_cfg = SamplerConfig {
-            ingestion_max_records: 8,
+            per_source_max_pool: 8,
             ..SamplerConfig::default()
         };
         let err = source.refresh(&bad_cfg, None, None).unwrap_err();
@@ -1940,11 +1963,8 @@ mod tests {
         let err = parse_cli::<MultiSourceDemoCli, _>(["multi_source_demo", "--batch-size", "0"]);
         assert!(err.is_err());
 
-        let err = parse_cli::<MultiSourceDemoCli, _>([
-            "multi_source_demo",
-            "--ingestion-max-records",
-            "0",
-        ]);
+        let err =
+            parse_cli::<MultiSourceDemoCli, _>(["multi_source_demo", "--per-source-max-pool", "0"]);
         assert!(err.is_err());
 
         let parsed = parse_cli::<MultiSourceDemoCli, _>(["multi_source_demo"]);
@@ -2103,7 +2123,7 @@ mod tests {
     }
 
     #[test]
-    fn run_multi_source_demo_passes_ingestion_max_records_to_sources() {
+    fn run_multi_source_demo_passes_per_source_max_pool_to_sources() {
         let dir = tempdir().unwrap();
         let split_store_path = dir.path().join("ingestion_config_split_store.bin");
         let expected = 7;
@@ -2111,7 +2131,7 @@ mod tests {
         let result = run_multi_source_demo(
             [
                 "--pair-batch".to_string(),
-                "--ingestion-max-records".to_string(),
+                "--per-source-max-pool".to_string(),
                 expected.to_string(),
                 "--split-store-path".to_string(),
                 split_store_path.to_string_lossy().to_string(),
@@ -2120,7 +2140,7 @@ mod tests {
             |_| Ok(()),
             |_| {
                 vec![Box::new(IngestionConfigSource {
-                    expected_ingestion_max_records: expected,
+                    expected_per_source_max_pool: expected,
                     records: (1..=8)
                         .map(|day| {
                             fixture_record(

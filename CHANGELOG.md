@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [0.30.0-alpha] - 2026-10-27
+
+### Added
+
+- **Configurable BM25 hardness via rank windows (#141).** New
+  `RetrievalSamplingConfig { min_rank, max_rank, search_top_k }` (defaults
+  `1/30/32`) on `SamplerConfig` (global) with per-recipe override on
+  `TripletRecipe.retrieval_sampling`. `Bm25Backend` samples uniformly from
+  `ranked[start..end]` (`start = min_rank.min(len.saturating_sub(1))`, `end =
+  max_rank.clamp(start+1, len)`), skipping rank-0 false positives; `1..30`
+  standard hard, `1..10` extreme, `10..100` moderate. Eager validation
+  (`max_rank > 0`, `min_rank < max_rank`, `search_top_k > 0`). Cache keyed by
+  `(anchor, search_top_k)`; no rotation cursors (stateless). `README`
+  Negative Mining section, `bm25_hardness_echo` example, and distribution
+  tests updated; deterministic sequence hashes relocked.
+- Removed BM25_HARD_NEGATIVE_ROTATION_TOP_K and the negative_cursors rotation state (alpha, no legacy shims kept).
+
+### Changed
+
+- Bumped `xxhash-rust` from 0.8.15 to 0.8.19 (#180)
+
 ## [0.29.0-alpha] - 2026-10-26
 
 ### Fixed

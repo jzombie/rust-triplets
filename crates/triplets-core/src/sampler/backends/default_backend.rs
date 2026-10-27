@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use indexmap::IndexMap;
 
+use crate::config::RetrievalSamplingConfig;
 use crate::data::DataRecord;
 use crate::splits::SplitLabel;
 use crate::types::{RecordKey, SourceId};
@@ -26,6 +27,7 @@ use super::NegativeBackend;
 pub struct DefaultBackend;
 
 impl NegativeBackend for DefaultBackend {
+    #[allow(clippy::too_many_arguments)]
     fn choose_negative(
         &self,
         _anchor: &DataRecord,
@@ -33,6 +35,7 @@ impl NegativeBackend for DefaultBackend {
         pool: Vec<Arc<DataRecord>>,
         fallback_used: bool,
         _anchor_query_text: Option<&str>,
+        _hardness: &RetrievalSamplingConfig,
         rng: &mut dyn rand::RngCore,
     ) -> Option<(Arc<DataRecord>, bool)> {
         if pool.is_empty() {
@@ -68,6 +71,11 @@ impl NegativeBackend for DefaultBackend {
     // must still be defined on the default for it to be compiled.
     #[cfg(all(feature = "bm25-mining", feature = "extended-metrics"))]
     fn bm25_fallback_stats(&self) -> (u64, u64) {
+        (0, 0)
+    }
+
+    #[cfg(all(feature = "bm25-mining", feature = "extended-metrics"))]
+    fn bm25_margin_stats(&self) -> (u64, u64) {
         (0, 0)
     }
 
@@ -118,6 +126,7 @@ mod tests {
             Vec::new(),
             false,
             None,
+            &RetrievalSamplingConfig::default(),
             &mut rng,
         );
 
@@ -141,6 +150,7 @@ mod tests {
             pool,
             true,
             Some("anchor query text"),
+            &RetrievalSamplingConfig::default(),
             &mut rng,
         );
 
@@ -166,6 +176,9 @@ mod tests {
 
         #[cfg(all(feature = "bm25-mining", feature = "extended-metrics"))]
         assert_eq!(backend.bm25_fallback_stats(), (0, 0));
+
+        #[cfg(all(feature = "bm25-mining", feature = "extended-metrics"))]
+        assert_eq!(backend.bm25_margin_stats(), (0, 0));
 
         let any_ref = backend.as_any_mut();
         assert!(any_ref.downcast_mut::<DefaultBackend>().is_some());

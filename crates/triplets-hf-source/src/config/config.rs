@@ -139,7 +139,7 @@ impl HuggingFaceRowsConfig {
                 "ndjson".to_string(),
                 "json".to_string(),
             ],
-            cache_capacity: SamplerConfig::default().ingestion_max_records,
+            cache_capacity: SamplerConfig::default().per_source_max_pool,
             parquet_row_group_cache_capacity: 8,
             refresh_batch_multiplier: HF_REFRESH_BATCH_MULTIPLIER,
             remote_expansion_headroom_multiplier: HF_REMOTE_EXPANSION_HEADROOM_MULTIPLIER,

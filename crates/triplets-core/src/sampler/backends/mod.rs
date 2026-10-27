@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use indexmap::IndexMap;
 
+use crate::config::RetrievalSamplingConfig;
 use crate::data::DataRecord;
 use crate::splits::SplitLabel;
 use crate::types::{RecordKey, SourceId};
@@ -47,6 +48,7 @@ pub(super) trait NegativeBackend: Send + Sync {
     /// tie-breaking or fallback should use it rather than maintaining their own.
     /// `fallback_used` threads through from the caller and is returned unchanged
     /// so the batch builder can record whether the negative is from a degraded pool.
+    #[allow(clippy::too_many_arguments)]
     fn choose_negative(
         &self,
         anchor: &DataRecord,
@@ -54,6 +56,7 @@ pub(super) trait NegativeBackend: Send + Sync {
         pool: Vec<Arc<DataRecord>>,
         fallback_used: bool,
         anchor_query_text: Option<&str>,
+        hardness: &RetrievalSamplingConfig,
         rng: &mut dyn rand::RngCore,
     ) -> Option<(Arc<DataRecord>, bool)>;
 
@@ -92,6 +95,19 @@ pub(super) trait NegativeBackend: Send + Sync {
     /// selection was used instead.  Non-BM25 backends always return `(0, 0)`.
     #[cfg(all(feature = "bm25-mining", feature = "extended-metrics"))]
     fn bm25_fallback_stats(&self) -> (u64, u64);
+
+    /// Return cumulative `(margin_exhausted, margin_evaluated)` for the
+    /// margin-aware negative-selection rule since the backend was created.
+    ///
+    /// `margin_evaluated` counts draws where a margin was configured *and* the
+    /// anchor self-score reference resolved (filter executed).
+    /// `margin_exhausted` counts the subset where no candidate cleared the
+    /// margin and the uniform-random pool fallback was taken instead.
+    /// Draws with an unresolvable reference bypass the margin and count in
+    /// neither counter (visible as `selections − evaluated` drift).
+    /// Non-BM25 backends always return `(0, 0)`.
+    #[cfg(all(feature = "bm25-mining", feature = "extended-metrics"))]
+    fn bm25_margin_stats(&self) -> (u64, u64);
 
     /// Expose as [`std::any::Any`] for test-only downcasting.
     ///

@@ -696,7 +696,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 weight: 1.0,
                 instruction: None,
                 allow_same_anchor_positive: false,
-            }],
+            retrieval_sampling: None,
+}],
             ..Default::default()
         },
         Arc::new(DeterministicSplitStore::new(ratios, 7)?),
@@ -805,7 +806,8 @@ let config = SamplerConfig {
             weight: 3.0,
             instruction: None, // See the Instruction Tuning section to attach a task prompt.
             allow_same_anchor_positive: false,
-        },
+        retrieval_sampling: None,
+},
         // Fallback recipe with random chunk selection.
         TripletRecipe {
             name: "random_fallback".into(),
@@ -816,7 +818,8 @@ let config = SamplerConfig {
             weight: 1.0,
             instruction: None,
             allow_same_anchor_positive: false,
-        },
+        retrieval_sampling: None,
+},
         // Disabled recipe — excluded from sampling until weight is set above zero.
         TripletRecipe {
             name: "experimental".into(),
@@ -827,7 +830,8 @@ let config = SamplerConfig {
             weight: 0.0,
             instruction: None,
             allow_same_anchor_positive: false,
-        },
+        retrieval_sampling: None,
+},
     ],
     ..SamplerConfig::default()
 };
@@ -856,7 +860,8 @@ let config = SamplerConfig {
             weight: 1.0,
             instruction: Some("Retrieve a passage that answers the question:".into()),
             allow_same_anchor_positive: false,
-        },
+        retrieval_sampling: None,
+},
         // Plain contrastive recipe: no prompt — model sees bare chunk text.
         TripletRecipe {
             name: "similarity".into(),
@@ -867,7 +872,8 @@ let config = SamplerConfig {
             weight: 1.0,
             instruction: None,
             allow_same_anchor_positive: false,
-        },
+        retrieval_sampling: None,
+},
     ],
     ..SamplerConfig::default()
 };
@@ -1007,7 +1013,8 @@ fn metrics_cross_view_recipe() -> TripletRecipe {
         weight: 1.0,
         instruction: None,
         allow_same_anchor_positive: false,
-    }
+    retrieval_sampling: None,
+}
 }
 
 /// Transcript recipe: targets an optional third section (index 2).
@@ -1033,7 +1040,8 @@ fn metrics_to_transcript_recipe() -> TripletRecipe {
         weight: 0.5,
         instruction: None,
         allow_same_anchor_positive: false,
-    }
+    retrieval_sampling: None,
+}
 }
 ```
 
@@ -1046,7 +1054,7 @@ use triplets::{DataRecord, SamplerConfig, SamplerError};
 
 # use triplets::config::{NegativeStrategy, Selector};
 # use triplets::data::SectionRole;
-# fn metrics_cross_view_recipe() -> TripletRecipe { TripletRecipe { name: "".into(), anchor: Selector::Random, positive_selector: Selector::Random, negative_selector: Selector::Random, negative_strategy: NegativeStrategy::WrongArticle, weight: 1.0, instruction: None, allow_same_anchor_positive: false } }
+# fn metrics_cross_view_recipe() -> TripletRecipe { TripletRecipe { name: "".into(), anchor: Selector::Random, positive_selector: Selector::Random, negative_selector: Selector::Random, negative_strategy: NegativeStrategy::WrongArticle, weight: 1.0, instruction: None, allow_same_anchor_positive: false, retrieval_sampling: None } }
 # fn metrics_to_transcript_recipe() -> TripletRecipe { metrics_cross_view_recipe() }
 struct FinancialReportsSource { /* store handle, symbol index, … */ }
 
@@ -1469,8 +1477,8 @@ OCR table rows that mix company names with dense numeric columns are stripped do
 ### Negative Mining
 
 Negative selection is delegated to a pluggable backend.
-- **DefaultBackend**: Uniform random selection from the candidate pool.
-- **Bm25Backend**: (Requires `bm25-mining`) Ranks candidates by lexical overlap with the anchor to provide harder training examples.
+- **DefaultBackend**: Uniform random selection from the candidate pool (ignores `retrieval_sampling`).
+- **Bm25Backend**: (Requires `bm25-mining`) Ranks candidates by lexical overlap and samples uniformly from `ranked[start..end]` with `start = min_rank.min(len.saturating_sub(1))`, `end = max_rank.clamp(start+1, len)`. Configure per-recipe via `retrieval_sampling: Some(RetrievalSamplingConfig { min_rank: 1, max_rank: 30, search_top_k: 32, negative_margin: Some(0.0) })` (defaults when `None`). `1..30` is standard hard (skip rank-0 false positive); `1..10` extreme; `10..100` moderate — all the same code path with different bounds. Cache is partitioned by `(anchor, search_top_k)` so lanes don't poison each other. No rotation cursors — stateless uniform. **Margin-aware selection (default on):** negatives must score strictly below the anchor record's own self-score (`neg_score < self_score − margin`, default margin `Some(0.0)`), which rejects exact duplicates and top-score collisions without presuming any score magnitude. If no candidate clears the margin, the draw falls back to a uniform random pool pick (flagged as fallback, counted separately from index-misses via `bm25_margin_stats()` under `extended-metrics`); if the self-score itself is unresolvable the margin is bypassed. Set `negative_margin: None` explicitly to opt a lane out. Caution: on window-query lanes a topic-focused peer can legitimately outscore the anchor's self-score, so a tight margin softens the hardest negatives — tune per lane from the demo's margin-miss vs fallback lines.
 
 #### User-Derived Negatives
 

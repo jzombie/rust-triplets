@@ -308,7 +308,7 @@ impl HuggingFaceRowSource {
             .sampler_config
             .lock()
             .ok()
-            .and_then(|config| config.as_ref().map(|value| value.ingestion_max_records))
+            .and_then(|config| config.as_ref().map(|value| value.per_source_max_pool))
             .unwrap_or(self.config.cache_capacity)
             .max(1);
         base.saturating_mul(multiplier)
@@ -1184,6 +1184,7 @@ impl DataSource for HuggingFaceRowSource {
                 weight: 1.0,
                 instruction: None,
                 allow_same_anchor_positive: false,
+                retrieval_sampling: None,
             }];
         }
 
@@ -1203,6 +1204,7 @@ impl DataSource for HuggingFaceRowSource {
                 weight: 1.0,
                 instruction: None,
                 allow_same_anchor_positive: true,
+                retrieval_sampling: None,
             }];
         }
 
@@ -1218,6 +1220,7 @@ impl DataSource for HuggingFaceRowSource {
                 weight: 0.75,
                 instruction: None,
                 allow_same_anchor_positive: false,
+                retrieval_sampling: None,
             },
             // Medium-hard lane adds anchor-as-negative pressure to improve
             // discrimination between title-like anchor fields.
@@ -1230,6 +1233,7 @@ impl DataSource for HuggingFaceRowSource {
                 weight: 0.25,
                 instruction: None,
                 allow_same_anchor_positive: false,
+                retrieval_sampling: None,
             },
         ]
     }

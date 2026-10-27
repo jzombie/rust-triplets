@@ -82,20 +82,14 @@ pub mod sampler {
     pub const ANCHOR_POSITIVE_SWAP_MASK: u64 = 1;
     /// Number of highest-ranked BM25 hard negatives rotated per anchor before repeating.
     ///
-    /// Effective selection window per draw:
-    /// - `top_k = min(BM25_HARD_NEGATIVE_ROTATION_TOP_K, ranked_pool.len())`
-    /// - draws cycle over indices `0..top_k` in order.
-    ///
-    /// Rotating through the top-K preserves lexical hardness while preventing
-    /// collapse to the single top-ranked document on repeated draws for the same anchor.
-    #[cfg(feature = "bm25-mining")]
-    pub const BM25_HARD_NEGATIVE_ROTATION_TOP_K: usize = 3;
-
     /// Number of top-ranked BM25 results to retrieve per anchor query.
     ///
-    /// Must be large enough that, after split filtering, at least
-    /// `BM25_HARD_NEGATIVE_ROTATION_TOP_K` same-split candidates remain.
-    /// Raise this value if you use a heavily imbalanced split or a very small per-source pool.
+    /// Default for `RetrievalSamplingConfig::search_top_k`. Per-lane overrides
+    /// widen/narrow retrieval; cache key includes `search_top_k` so lanes
+    /// don't poison each other.
+    /// Must be large enough that, after split filtering, enough same-split
+    /// candidates remain. Raise this value if you use a heavily imbalanced
+    /// split or a very small per-source pool.
     #[cfg(feature = "bm25-mining")]
     pub const BM25_SEARCH_TOP_K: usize = 32;
 

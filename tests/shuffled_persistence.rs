@@ -51,7 +51,7 @@ fn build_config(batch_size: usize, split: SplitRatios) -> SamplerConfig {
     SamplerConfig {
         seed: 999,
         batch_size,
-        ingestion_max_records: batch_size,
+        per_source_max_pool: batch_size,
         allowed_splits: vec![SplitLabel::Train],
         split,
         recipes: vec![TripletRecipe {
@@ -63,6 +63,7 @@ fn build_config(batch_size: usize, split: SplitRatios) -> SamplerConfig {
             weight: 1.0,
             instruction: None,
             allow_same_anchor_positive: false,
+            retrieval_sampling: None,
         }],
         text_recipes: Vec::new(),
         ..SamplerConfig::default()

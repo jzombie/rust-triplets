@@ -90,9 +90,9 @@ struct HfTextLatencyCli {
         long,
         default_value_t = 2048,
         value_name = "N",
-        help = "Sampler ingestion_max_records"
+        help = "Sampler per_source_max_pool"
     )]
-    ingestion_max_records: usize,
+    per_source_max_pool: usize,
     #[arg(
         long,
         default_value_t = 1000,
@@ -160,7 +160,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("== hf_text_latency_temp ==");
     println!("source_list      : {}", source_list_path.display());
     println!("batch_size       : {}", cli.batch_size);
-    println!("ingestion_max_rec: {}", cli.ingestion_max_records);
+    println!("ingestion_max_rec: {}", cli.per_source_max_pool);
     println!("iterations       : {}", cli.iterations);
     println!("prefetch_depth   : {}", cli.prefetch_depth);
     println!("mode             : {}", mode);
@@ -175,7 +175,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let config = SamplerConfig {
         seed: cli.seed,
         batch_size: cli.batch_size,
-        ingestion_max_records: cli.ingestion_max_records,
+        per_source_max_pool: cli.per_source_max_pool,
         split: SplitRatios::default(),
         allowed_splits: vec![split],
         ..Default::default()

@@ -10,7 +10,7 @@ pub const HF_REMOTE_URL_PREFIX: &str = "url::";
 /// This is not a file count. It lets sampling look slightly past the local row
 /// frontier so lazy remote expansion can continue without jumping to the full
 /// global row domain at once.
-/// Multiplies the sampler ingestion base (`SamplerConfig.ingestion_max_records`)
+/// Multiplies the sampler ingestion base (`SamplerConfig.per_source_max_pool`)
 /// to compute `len_hint` expansion headroom rows.
 pub const HF_REMOTE_EXPANSION_HEADROOM_MULTIPLIER: usize = 4;
 /// Number of initial remote shards to materialize when bootstrapping an empty
