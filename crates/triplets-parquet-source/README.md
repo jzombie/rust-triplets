@@ -1,6 +1,11 @@
 # triplets-parquet-source
 
-Generic local-parquet row reader for the triplets data pipeline.
+Generic local-parquet row reader for the [triplets](https://crates.io/crates/triplets) data pipeline framework.
+
+For full documentation on configuring sources, sampling, chunking, and pipeline orchestration,
+see the [main triplets README](https://github.com/jzombie/rust-triplets/blob/main/README.md) on GitHub.
+
+## Contents
 
 This crate owns the network-independent half of row ingestion, extracted
 from `triplets-hf-source` (see issue #59):
@@ -14,11 +19,6 @@ from `triplets-hf-source` (see issue #59):
 - the `ParquetRowSource` data source (`source`), including the
   `ingest_shard` hot-reload hook used by remote-backed wrappers when a
   background download materializes a new local shard.
-
-Remote concerns — hub downloads, manifests, tokens, expansion policy,
-per-dataset identity — stay in the calling crate (e.g.
-`triplets-hf-source`, where `HuggingFaceRowSource` wraps
-`ParquetRowSource`). This crate has no network dependencies.
 
 ## Identity
 
