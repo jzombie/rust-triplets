@@ -7,21 +7,15 @@
 use super::*;
 use crate::config::HuggingFaceRowsConfig;
 use crate::constants::{
-    ENV_TRIPLETS_HF_WHOAMI_ENDPOINT, HF_PARQUET_MANIFEST_DIR,
-    HF_RECIPE_ANCHOR_ANCHOR_WRONG_ARTICLE, HF_RECIPE_ANCHOR_CONTEXT_WRONG_ARTICLE,
-    HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE, HF_REMOTE_URL_PREFIX, HF_SHARD_STORE_SOURCE_SIZE_KEY,
+    ENV_TRIPLETS_HF_WHOAMI_ENDPOINT, HF_PARQUET_MANIFEST_DIR, HF_REMOTE_URL_PREFIX,
+    HF_SHARD_STORE_SOURCE_SIZE_KEY,
 };
 use crate::download::{build_candidate_order, build_http_runtime, candidate_target_path};
-use crate::huggingface_source::{
-    EligibleIndexCache, ParquetCache, RowCache, RowTextField, RowView,
-};
-use crate::shard_index::{index_single_shard, shard_store_path_for};
 use crate::test_utils::{
     TEST_UNREACHABLE_URL, TestHttpServer, spawn_manifest_and_shard_http, spawn_one_shot_http,
     test_config, test_http_client, test_source, with_env_var, write_parquet_fixture,
     write_simdr_fixture,
 };
-use crate::types::{ShardIndex, SourceState};
 use chrono::Utc;
 use serde_json::json;
 use serial_test::serial;
@@ -38,6 +32,13 @@ use triplets_core::config::{NegativeStrategy, SamplerConfig};
 use triplets_core::source::{DataSource, SourceCursor};
 use triplets_core::splits::{PersistedSamplerState, SamplerStateStore};
 use triplets_core::{DeterministicSplitStore, Sampler, SplitLabel, SplitRatios, TripletSampler};
+use triplets_parquet_source::constants::{
+    HF_RECIPE_ANCHOR_ANCHOR_WRONG_ARTICLE, HF_RECIPE_ANCHOR_CONTEXT_WRONG_ARTICLE,
+    HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE,
+};
+use triplets_parquet_source::row_view::{RowTextField, RowView};
+use triplets_parquet_source::shard_index::{index_single_shard, shard_store_path_for};
+use triplets_parquet_source::types::ShardIndex;
 
 #[test]
 fn new_errors_when_snapshot_dir_path_is_a_file() {
@@ -88,9 +89,9 @@ fn new_source_indexes_local_simdr_files() {
     config.positive_columns = vec!["positive".to_string()];
 
     let source = HuggingFaceRowSource::new(config).expect("new should succeed");
-    let state = source.state.lock().unwrap();
-    assert_eq!(state.materialized_rows, 2);
-    assert_eq!(state.shards.len(), 1);
+    let local = source.inner.local.lock().unwrap();
+    assert_eq!(local.materialized_rows, 2);
+    assert_eq!(local.shards.len(), 1);
 }
 
 #[test]
@@ -182,14 +183,14 @@ fn effective_targets_respect_minimum_multiplier_and_sampler_override() {
     config.cache_capacity = 9;
     let source = test_source(config.clone());
 
-    assert_eq!(source.effective_refresh_batch_target(5), 5);
+    assert_eq!(source.inner.effective_refresh_batch_target(5), 5);
     assert_eq!(source.effective_expansion_headroom_rows(), 9);
 
     let sampler = SamplerConfig {
         per_source_max_pool: 4,
         ..SamplerConfig::default()
     };
-    *source.sampler_config.lock().unwrap() = Some(sampler);
+    source.set_active_sampler_config(&sampler);
     assert_eq!(source.effective_expansion_headroom_rows(), 4);
 }
 
@@ -199,7 +200,7 @@ fn effective_refresh_batch_target_uses_multiplier_floor_of_one() {
     let mut config = test_config(dir.path().to_path_buf());
     config.refresh_batch_multiplier = 0;
     let source = test_source(config);
-    assert_eq!(source.effective_refresh_batch_target(7), 7);
+    assert_eq!(source.inner.effective_refresh_batch_target(7), 7);
 }
 
 #[test]
@@ -207,7 +208,7 @@ fn effective_refresh_batch_target_uses_multiplier() {
     let dir = tempdir().unwrap();
     let config = test_config(dir.path().to_path_buf());
     let source = test_source(config);
-    assert!(source.effective_refresh_batch_target(100) >= 2);
+    assert!(source.inner.effective_refresh_batch_target(100) >= 2);
 }
 
 #[test]
@@ -275,27 +276,20 @@ fn configured_sampler_seed_and_paging_seed_require_sampler_config() {
     let config = test_config(dir.path().to_path_buf());
     let http_runtime = Arc::new(build_http_runtime(&config).unwrap());
     let http_client = test_http_client();
+    let inner = triplets_parquet_source::ParquetRowSource::new_empty(
+        triplets_parquet_source::ParquetRowsConfig::from(&config),
+    );
     let source = HuggingFaceRowSource {
         config,
+        inner,
         http_runtime,
         http_client,
-        sampler_config: Arc::new(Mutex::new(None)),
-        state: Arc::new(Mutex::new(SourceState {
-            materialized_rows: 0,
-            shards: Vec::new(),
-            remote_candidates: None,
-            remote_candidate_sizes: HashMap::new(),
-            next_remote_idx: 0,
-            remote_candidate_order: Vec::new(),
-        })),
-        cache: Arc::new(Mutex::new(RowCache::default())),
-        parquet_cache: Arc::new(Mutex::new(ParquetCache::default())),
-        eligible_index: Arc::new(Mutex::new(EligibleIndexCache::default())),
+        remote: Arc::new(Mutex::new(crate::source_core::HfRemoteState::default())),
         expansion_thread: Arc::new(Mutex::new(None)),
     };
 
     assert!(source.configured_sampler_seed().is_err());
-    assert!(source.paging_seed(5).is_err());
+    assert!(source.inner.paging_seed(5).is_err());
 }
 
 #[test]
@@ -305,19 +299,21 @@ fn ensure_row_available_returns_from_fast_paths() {
     let source = test_source(config);
 
     {
-        let mut state = source.state.lock().unwrap();
-        state.materialized_rows = 3;
-        state.remote_candidates = Some(vec!["x".to_string()]);
-        state.next_remote_idx = 0;
+        let mut local = source.inner.local.lock().unwrap();
+        let mut remote = source.remote.lock().unwrap();
+        local.materialized_rows = 3;
+        remote.remote_candidates = Some(vec!["x".to_string()]);
+        remote.next_remote_idx = 0;
     }
     assert!(source.ensure_row_available(1).unwrap());
 
     let source_done = test_source(test_config(dir.path().to_path_buf()));
     {
-        let mut state = source_done.state.lock().unwrap();
-        state.materialized_rows = 0;
-        state.remote_candidates = Some(vec!["a".to_string()]);
-        state.next_remote_idx = 1;
+        let mut local = source_done.inner.local.lock().unwrap();
+        let mut remote = source_done.remote.lock().unwrap();
+        local.materialized_rows = 0;
+        remote.remote_candidates = Some(vec!["a".to_string()]);
+        remote.next_remote_idx = 1;
     }
     assert!(!source_done.ensure_row_available(0).unwrap());
 }
@@ -335,17 +331,18 @@ fn ensure_row_available_bootstraps_from_in_memory_candidates() {
     let candidate = format!("url::{base_url}/datasets/org/ds/resolve/main/train/persisted.ndjson");
 
     {
-        let mut state = source.state.lock().unwrap();
-        state.remote_candidates = Some(vec![candidate]);
-        state.next_remote_idx = 0;
+        let mut remote = source.remote.lock().unwrap();
+        remote.remote_candidates = Some(vec![candidate]);
+        remote.next_remote_idx = 0;
     }
 
     assert!(source.ensure_row_available(0).unwrap());
 
-    let state = source.state.lock().unwrap();
-    assert_eq!(state.materialized_rows, 2);
-    assert_eq!(state.next_remote_idx, 1);
-    assert_eq!(state.shards.len(), 1);
+    let local = source.inner.local.lock().unwrap();
+    let remote = source.remote.lock().unwrap();
+    assert_eq!(local.materialized_rows, 2);
+    assert_eq!(remote.next_remote_idx, 1);
+    assert_eq!(local.shards.len(), 1);
 }
 
 #[test]
@@ -359,18 +356,20 @@ fn ensure_row_available_triggers_lazy_download_for_remote_candidates() {
     let candidate = format!("url::{base_url}/datasets/org/ds/resolve/main/train/part-002.ndjson");
 
     {
-        let mut state = source.state.lock().unwrap();
-        state.materialized_rows = 0;
-        state.remote_candidates = Some(vec![candidate.clone()]);
-        state.remote_candidate_sizes.insert(candidate, 24);
-        state.next_remote_idx = 0;
+        let mut local = source.inner.local.lock().unwrap();
+        let mut remote = source.remote.lock().unwrap();
+        local.materialized_rows = 0;
+        remote.remote_candidates = Some(vec![candidate.clone()]);
+        remote.remote_candidate_sizes.insert(candidate, 24);
+        remote.next_remote_idx = 0;
     }
 
     assert!(source.ensure_row_available(0).unwrap());
 
-    let state = source.state.lock().unwrap();
-    assert!(state.materialized_rows >= 1);
-    assert_eq!(state.next_remote_idx, 1);
+    let local = source.inner.local.lock().unwrap();
+    let remote = source.remote.lock().unwrap();
+    assert!(local.materialized_rows >= 1);
+    assert_eq!(remote.next_remote_idx, 1);
 }
 
 #[test]
@@ -379,10 +378,11 @@ fn ensure_row_available_handles_materialized_max_and_exhausted_candidates() {
     let config = test_config(dir.path().to_path_buf());
     let source = test_source(config);
     {
-        let mut state = source.state.lock().unwrap();
-        state.materialized_rows = 1;
-        state.remote_candidates = Some(vec![]);
-        state.next_remote_idx = 0;
+        let mut local = source.inner.local.lock().unwrap();
+        let mut remote = source.remote.lock().unwrap();
+        local.materialized_rows = 1;
+        remote.remote_candidates = Some(vec![]);
+        remote.next_remote_idx = 0;
     }
 
     assert!(source.ensure_row_available(0).unwrap());
@@ -400,7 +400,7 @@ fn ensure_row_available_bootstraps_from_manifest_candidates() {
         spawn_manifest_and_shard_http(2, b"{\"text\":\"hello\"}\n".to_vec());
 
     // Reset to None so ensure_row_available triggers the manifest-fetch path.
-    source.state.lock().unwrap().remote_candidates = None;
+    source.remote.lock().unwrap().remote_candidates = None;
     source.config.parquet_endpoint = base_url.to_string();
 
     assert!(source.ensure_row_available(0).unwrap());
@@ -429,16 +429,17 @@ fn ensure_row_available_skips_past_all_cached_candidates_on_restart() {
 
     // Inject an already-materialised shard so materialized_rows == 1.
     {
-        let mut state = source.state.lock().unwrap();
-        state.shards = vec![ShardIndex {
+        let mut local = source.inner.local.lock().unwrap();
+        let mut remote = source.remote.lock().unwrap();
+        local.shards = vec![ShardIndex {
             path: store_path,
             global_start: 0,
             row_count: 1,
             parquet_row_groups: vec![(0, 1)],
             remote_candidate: None,
         }];
-        state.materialized_rows = 1;
-        state.remote_candidates = None;
+        local.materialized_rows = 1;
+        remote.remote_candidates = None;
     }
 
     // Serve a manifest that lists the same (already-cached) shard.
@@ -458,10 +459,10 @@ fn ensure_row_available_skips_past_all_cached_candidates_on_restart() {
         !result,
         "no new rows available — all candidates already cached"
     );
-    let state = source.state.lock().unwrap();
+    let remote = source.remote.lock().unwrap();
     assert_eq!(
-        state.next_remote_idx,
-        state
+        remote.next_remote_idx,
+        remote
             .remote_candidates
             .as_ref()
             .map(|c| c.len())
@@ -502,17 +503,18 @@ fn ensure_row_available_does_not_loop_on_eviction() {
     .unwrap();
 
     {
-        let mut state = source.state.lock().unwrap();
-        state.shards = vec![ShardIndex {
+        let mut local = source.inner.local.lock().unwrap();
+        let mut remote = source.remote.lock().unwrap();
+        local.shards = vec![ShardIndex {
             path: existing_path,
             global_start: 0,
             row_count: 1,
             parquet_row_groups: vec![(0, 1)],
             remote_candidate: None,
         }];
-        state.materialized_rows = 1;
+        local.materialized_rows = 1;
         // None triggers the candidate-fetch path on first ensure_row_available call.
-        state.remote_candidates = None;
+        remote.remote_candidates = None;
     }
 
     // Use a single multi-accept mock server that serves both the
@@ -556,8 +558,8 @@ fn ensure_row_available_row_already_materialized() {
     let source = test_source(config);
 
     {
-        let mut state = source.state.lock().unwrap();
-        state.materialized_rows = 10;
+        let mut local = source.inner.local.lock().unwrap();
+        local.materialized_rows = 10;
     }
 
     let result = source.ensure_row_available(5).unwrap();
@@ -574,10 +576,11 @@ fn ensure_row_available_candidates_exhausted() {
     let source = test_source(config);
 
     {
-        let mut state = source.state.lock().unwrap();
-        state.materialized_rows = 0;
-        state.remote_candidates = Some(vec![]);
-        state.next_remote_idx = 0;
+        let mut local = source.inner.local.lock().unwrap();
+        let mut remote = source.remote.lock().unwrap();
+        local.materialized_rows = 0;
+        remote.remote_candidates = Some(vec![]);
+        remote.next_remote_idx = 0;
     }
 
     let result = source.ensure_row_available(0).unwrap();
@@ -603,23 +606,24 @@ fn download_next_remote_shard_clears_row_cache_when_eviction_occurs() {
     let server = spawn_one_shot_http(payload);
     let base_url = server.url().to_string();
     let candidate = format!("url::{base_url}/datasets/org/ds/resolve/main/train/new-shard.ndjson");
-    let new_path = crate::shard_indexer::candidate_store_path(&config, &candidate);
+    let new_path = crate::download::candidate_store_path(&config, &candidate);
 
     {
-        let mut state = source.state.lock().unwrap();
-        state.materialized_rows = 1;
-        state.shards = vec![ShardIndex {
+        let mut local = source.inner.local.lock().unwrap();
+        let mut remote = source.remote.lock().unwrap();
+        local.materialized_rows = 1;
+        local.shards = vec![ShardIndex {
             path: old_path.clone(),
             global_start: 0,
             row_count: 1,
             parquet_row_groups: vec![(0, 1)],
             remote_candidate: None,
         }];
-        state.remote_candidates = Some(vec![candidate]);
-        state.next_remote_idx = 0;
+        remote.remote_candidates = Some(vec![candidate]);
+        remote.next_remote_idx = 0;
     }
     {
-        let mut cache = source.cache.lock().unwrap();
+        let mut cache = source.inner.cache.lock().unwrap();
         cache.insert(
             0,
             RowView {
@@ -645,10 +649,10 @@ fn download_next_remote_shard_clears_row_cache_when_eviction_occurs() {
         "expected at least one manifest shard to be evicted"
     );
     {
-        let state = source.state.lock().unwrap();
-        assert!(!state.shards.is_empty(), "at least one shard should remain");
+        let local = source.inner.local.lock().unwrap();
+        assert!(!local.shards.is_empty(), "at least one shard should remain");
     }
-    let cache = source.cache.lock().unwrap();
+    let cache = source.inner.cache.lock().unwrap();
     assert!(cache.rows.is_empty());
     assert!(cache.order.is_empty());
 }
@@ -672,15 +676,15 @@ fn download_next_remote_shard_skips_zero_row_download() {
     let candidate = format!("url::{base_url}/datasets/org/ds/resolve/main/train/part-empty.ndjson");
 
     {
-        let mut state = source.state.lock().unwrap();
-        state.remote_candidates = Some(vec![candidate]);
-        state.next_remote_idx = 0;
+        let mut remote = source.remote.lock().unwrap();
+        remote.remote_candidates = Some(vec![candidate]);
+        remote.next_remote_idx = 0;
     }
 
     assert!(source.download_next_remote_shard().unwrap());
-    let state = source.state.lock().unwrap();
-    assert_eq!(state.materialized_rows, 0);
-    assert!(state.shards.is_empty());
+    let local = source.inner.local.lock().unwrap();
+    assert_eq!(local.materialized_rows, 0);
+    assert!(local.shards.is_empty());
 }
 
 #[test]
@@ -697,9 +701,9 @@ fn download_next_remote_shard_parquet_stages_temp_and_persists_store_only() {
     let candidate = format!("url::{base_url}/datasets/org/ds/resolve/main/train/part-222.parquet");
 
     {
-        let mut state = source.state.lock().unwrap();
-        state.remote_candidates = Some(vec![candidate.clone()]);
-        state.next_remote_idx = 0;
+        let mut remote = source.remote.lock().unwrap();
+        remote.remote_candidates = Some(vec![candidate.clone()]);
+        remote.next_remote_idx = 0;
     }
 
     assert!(source.download_next_remote_shard().unwrap());
@@ -710,10 +714,10 @@ fn download_next_remote_shard_parquet_stages_temp_and_persists_store_only() {
     assert!(store_target.exists());
     assert!(!parquet_target.exists());
 
-    let state = source.state.lock().unwrap();
-    assert_eq!(state.shards.len(), 1);
-    assert_eq!(state.shards[0].path, store_target);
-    assert_eq!(state.materialized_rows, 2);
+    let local = source.inner.local.lock().unwrap();
+    assert_eq!(local.shards.len(), 1);
+    assert_eq!(local.shards[0].path, store_target);
+    assert_eq!(local.materialized_rows, 2);
 }
 
 #[test]
@@ -727,18 +731,19 @@ fn download_next_remote_shard_materializes_and_indexes_rows() {
     let candidate = format!("url::{base_url}/datasets/org/ds/resolve/main/train/part-001.ndjson");
 
     {
-        let mut state = source.state.lock().unwrap();
-        state.remote_candidates = Some(vec![candidate.clone()]);
-        state.remote_candidate_sizes.insert(candidate, 24);
-        state.next_remote_idx = 0;
+        let mut remote = source.remote.lock().unwrap();
+        remote.remote_candidates = Some(vec![candidate.clone()]);
+        remote.remote_candidate_sizes.insert(candidate, 24);
+        remote.next_remote_idx = 0;
     }
 
     assert!(source.download_next_remote_shard().unwrap());
 
-    let state = source.state.lock().unwrap();
-    assert_eq!(state.materialized_rows, 2);
-    assert_eq!(state.shards.len(), 1);
-    assert_eq!(state.next_remote_idx, 1);
+    let local = source.inner.local.lock().unwrap();
+    let remote = source.remote.lock().unwrap();
+    assert_eq!(local.materialized_rows, 2);
+    assert_eq!(local.shards.len(), 1);
+    assert_eq!(remote.next_remote_idx, 1);
 }
 
 #[test]
@@ -756,20 +761,25 @@ fn download_next_remote_shard_consumes_distinct_candidates_in_order() {
     let candidate_a = format!("url::{base_a}/datasets/org/ds/resolve/main/train/part-a.ndjson");
     let candidate_b = format!("url::{base_b}/datasets/org/ds/resolve/main/train/part-b.ndjson");
     {
-        let mut state = source.state.lock().unwrap();
-        state.remote_candidates = Some(vec![candidate_a.clone(), candidate_b.clone()]);
-        state.remote_candidate_sizes.insert(candidate_a.clone(), 27);
-        state.remote_candidate_sizes.insert(candidate_b.clone(), 26);
-        state.next_remote_idx = 0;
+        let mut remote = source.remote.lock().unwrap();
+        remote.remote_candidates = Some(vec![candidate_a.clone(), candidate_b.clone()]);
+        remote
+            .remote_candidate_sizes
+            .insert(candidate_a.clone(), 27);
+        remote
+            .remote_candidate_sizes
+            .insert(candidate_b.clone(), 26);
+        remote.next_remote_idx = 0;
     }
 
     assert!(source.download_next_remote_shard().unwrap());
     assert!(source.download_next_remote_shard().unwrap());
 
-    let state = source.state.lock().unwrap();
-    assert_eq!(state.next_remote_idx, 2);
-    assert_eq!(state.shards.len(), 2);
-    assert_ne!(state.shards[0].path, state.shards[1].path);
+    let local = source.inner.local.lock().unwrap();
+    let remote = source.remote.lock().unwrap();
+    assert_eq!(remote.next_remote_idx, 2);
+    assert_eq!(local.shards.len(), 2);
+    assert_ne!(local.shards[0].path, local.shards[1].path);
 }
 
 #[test]
@@ -789,11 +799,11 @@ fn download_next_remote_shard_skips_already_materialised_shard() {
     fs::write(&store_path, b"dummy").unwrap();
 
     {
-        let mut state = source.state.lock().unwrap();
-        state.remote_candidates = Some(vec![candidate.clone()]);
-        state.remote_candidate_order = vec![0];
-        state.remote_candidate_sizes.insert(candidate, 5);
-        state.next_remote_idx = 0;
+        let mut remote = source.remote.lock().unwrap();
+        remote.remote_candidates = Some(vec![candidate.clone()]);
+        remote.remote_candidate_order = vec![0];
+        remote.remote_candidate_sizes.insert(candidate, 5);
+        remote.next_remote_idx = 0;
     }
 
     // No HTTP server is running — if a real download were attempted it would fail.
@@ -802,17 +812,18 @@ fn download_next_remote_shard_skips_already_materialised_shard() {
         "should return true (candidate consumed)"
     );
 
-    let state = source.state.lock().unwrap();
+    let local = source.inner.local.lock().unwrap();
+    let remote = source.remote.lock().unwrap();
     assert_eq!(
-        state.next_remote_idx, 1,
+        remote.next_remote_idx, 1,
         "pointer advanced past cached shard"
     );
     assert_eq!(
-        state.materialized_rows, 0,
+        local.materialized_rows, 0,
         "materialized_rows unchanged — shard was already counted at startup"
     );
     assert_eq!(
-        state.shards.len(),
+        local.shards.len(),
         0,
         "no new shard added to in-memory list"
     );
@@ -830,7 +841,7 @@ fn download_next_remote_shard_detects_stale_shard_by_size() {
     // Create a real .simdr store with source_size = 100.
     let candidate =
         format!("url::{TEST_UNREACHABLE_URL}/datasets/org/ds/resolve/main/train/stale.ndjson");
-    let store_path = crate::shard_indexer::candidate_store_path(&config, &candidate);
+    let store_path = crate::download::candidate_store_path(&config, &candidate);
     fs::create_dir_all(store_path.parent().unwrap()).unwrap();
     write_simdr_fixture(&store_path, &[("r0", "row")]);
     {
@@ -852,11 +863,11 @@ fn download_next_remote_shard_detects_stale_shard_by_size() {
 
     // Set up remote candidates with expected_bytes = 200 (≠ 100).
     {
-        let mut state = source.state.lock().unwrap();
-        state.remote_candidates = Some(vec![candidate.clone()]);
-        state.remote_candidate_order = vec![0];
-        state.remote_candidate_sizes.insert(candidate, 200);
-        state.next_remote_idx = 0;
+        let mut remote = source.remote.lock().unwrap();
+        remote.remote_candidates = Some(vec![candidate.clone()]);
+        remote.remote_candidate_order = vec![0];
+        remote.remote_candidate_sizes.insert(candidate, 200);
+        remote.next_remote_idx = 0;
     }
 
     // The stale check should detect the mismatch, delete the store, and
@@ -889,7 +900,7 @@ fn download_next_remote_shard_preserves_fresh_shard_when_sizes_match() {
     // Create a store with source_size = 100 and set expected_bytes = 100.
     let candidate =
         format!("url::{TEST_UNREACHABLE_URL}/datasets/org/ds/resolve/main/train/fresh.ndjson");
-    let store_path = crate::shard_indexer::candidate_store_path(&config, &candidate);
+    let store_path = crate::download::candidate_store_path(&config, &candidate);
     fs::create_dir_all(store_path.parent().unwrap()).unwrap();
     write_simdr_fixture(&store_path, &[("r0", "row")]);
     {
@@ -909,11 +920,11 @@ fn download_next_remote_shard_preserves_fresh_shard_when_sizes_match() {
         .insert(store_path.clone(), cached_store);
 
     {
-        let mut state = source.state.lock().unwrap();
-        state.remote_candidates = Some(vec![candidate.clone()]);
-        state.remote_candidate_order = vec![0];
-        state.remote_candidate_sizes.insert(candidate, 100);
-        state.next_remote_idx = 0;
+        let mut remote = source.remote.lock().unwrap();
+        remote.remote_candidates = Some(vec![candidate.clone()]);
+        remote.remote_candidate_order = vec![0];
+        remote.remote_candidate_sizes.insert(candidate, 100);
+        remote.next_remote_idx = 0;
     }
 
     // Sizes match — should skip without any network call.
@@ -946,20 +957,20 @@ fn download_next_remote_shard_gz_materializes_true_row_count() {
     let candidate = format!("url::{base_url}/datasets/org/ds/resolve/main/train/data.jsonl.gz");
 
     {
-        let mut state = source.state.lock().unwrap();
-        state.remote_candidates = Some(vec![candidate.clone()]);
-        state
+        let mut remote = source.remote.lock().unwrap();
+        remote.remote_candidates = Some(vec![candidate.clone()]);
+        remote
             .remote_candidate_sizes
             .insert(candidate, gz_payload.len() as u64);
-        state.next_remote_idx = 0;
+        remote.next_remote_idx = 0;
     }
 
     assert!(source.download_next_remote_shard().unwrap());
 
-    let state = source.state.lock().unwrap();
+    let local = source.inner.local.lock().unwrap();
     // Materialized rows must be 5 (true count), not 1 (dummy)
-    assert_eq!(state.materialized_rows, 5);
-    assert_eq!(state.shards.len(), 1);
+    assert_eq!(local.materialized_rows, 5);
+    assert_eq!(local.shards.len(), 1);
 }
 
 #[test]
@@ -982,12 +993,12 @@ fn download_next_remote_shard_gz_invalid_json_returns_error() {
     let candidate = format!("url::{base_url}/datasets/org/ds/resolve/main/train/invalid.jsonl.gz");
 
     {
-        let mut state = source.state.lock().unwrap();
-        state.remote_candidates = Some(vec![candidate.clone()]);
-        state
+        let mut remote = source.remote.lock().unwrap();
+        remote.remote_candidates = Some(vec![candidate.clone()]);
+        remote
             .remote_candidate_sizes
             .insert(candidate, gz_payload.len() as u64);
-        state.next_remote_idx = 0;
+        remote.next_remote_idx = 0;
     }
 
     let result = source.download_next_remote_shard();
@@ -1012,12 +1023,12 @@ fn download_next_remote_shard_gz_corrupt_stream_returns_error() {
     let candidate = format!("url::{base_url}/datasets/org/ds/resolve/main/train/corrupt.jsonl.gz");
 
     {
-        let mut state = source.state.lock().unwrap();
-        state.remote_candidates = Some(vec![candidate.clone()]);
-        state
+        let mut remote = source.remote.lock().unwrap();
+        remote.remote_candidates = Some(vec![candidate.clone()]);
+        remote
             .remote_candidate_sizes
             .insert(candidate, corrupt_payload.len() as u64);
-        state.next_remote_idx = 0;
+        remote.next_remote_idx = 0;
     }
 
     let result = source.download_next_remote_shard();
@@ -1056,7 +1067,7 @@ fn download_next_remote_shard_detects_stale_shard_via_head() {
 
     // Candidate uses url:: prefix so the HEAD targets the mock server.
     let candidate = format!("url::{base_url}/resolve/main/train/stale-shard.ndjson");
-    let store_path = crate::shard_indexer::candidate_store_path(&config, &candidate);
+    let store_path = crate::download::candidate_store_path(&config, &candidate);
     fs::create_dir_all(store_path.parent().unwrap()).unwrap();
     write_simdr_fixture(&store_path, &[("r0", "row")]);
     {
@@ -1078,12 +1089,12 @@ fn download_next_remote_shard_detects_stale_shard_via_head() {
         .insert(store_path.clone(), cached_store);
 
     {
-        let mut state = source.state.lock().unwrap();
-        state.remote_candidates = Some(vec![candidate.clone()]);
-        state.remote_candidate_order = vec![0];
+        let mut remote = source.remote.lock().unwrap();
+        remote.remote_candidates = Some(vec![candidate.clone()]);
+        remote.remote_candidate_order = vec![0];
         // No expected_bytes in remote_candidate_sizes — simulates the
         // hf-hub sibling fallback where sizes are unknown.
-        state.next_remote_idx = 0;
+        remote.next_remote_idx = 0;
     }
 
     // The HEAD request returns Content-Length: 200.  The stored
@@ -1122,7 +1133,7 @@ fn download_next_remote_shard_preserves_fresh_shard_via_head() {
     let base_url = server.url().to_string();
 
     let candidate = format!("url::{base_url}/resolve/main/train/fresh-shard.ndjson");
-    let store_path = crate::shard_indexer::candidate_store_path(&config, &candidate);
+    let store_path = crate::download::candidate_store_path(&config, &candidate);
     fs::create_dir_all(store_path.parent().unwrap()).unwrap();
     write_simdr_fixture(&store_path, &[("r0", "row")]);
     {
@@ -1141,11 +1152,11 @@ fn download_next_remote_shard_preserves_fresh_shard_via_head() {
         .insert(store_path.clone(), cached_store);
 
     {
-        let mut state = source.state.lock().unwrap();
-        state.remote_candidates = Some(vec![candidate.clone()]);
-        state.remote_candidate_order = vec![0];
+        let mut remote = source.remote.lock().unwrap();
+        remote.remote_candidates = Some(vec![candidate.clone()]);
+        remote.remote_candidate_order = vec![0];
         // No expected_bytes in remote_candidate_sizes.
-        state.next_remote_idx = 0;
+        remote.next_remote_idx = 0;
     }
 
     // Sizes match (100 == 100) — should skip without download.
@@ -1174,7 +1185,7 @@ fn download_next_remote_shard_keeps_store_when_head_returns_error() {
 
     // Candidate pointing at an unreachable address — HEAD will Err.
     let candidate = format!("url::{TEST_UNREACHABLE_URL}/resolve/main/train/head-err.ndjson");
-    let store_path = crate::shard_indexer::candidate_store_path(&config, &candidate);
+    let store_path = crate::download::candidate_store_path(&config, &candidate);
     fs::create_dir_all(store_path.parent().unwrap()).unwrap();
     write_simdr_fixture(&store_path, &[("r0", "row")]);
     {
@@ -1195,11 +1206,11 @@ fn download_next_remote_shard_keeps_store_when_head_returns_error() {
         .insert(store_path.clone(), cached_store);
 
     {
-        let mut state = source.state.lock().unwrap();
-        state.remote_candidates = Some(vec![candidate.clone()]);
-        state.remote_candidate_order = vec![0];
+        let mut remote = source.remote.lock().unwrap();
+        remote.remote_candidates = Some(vec![candidate.clone()]);
+        remote.remote_candidate_order = vec![0];
         // No expected_bytes — simulates hf-hub fallback.
-        state.next_remote_idx = 0;
+        remote.next_remote_idx = 0;
     }
 
     // HEAD fails (Err) → effective_expected = None → stale check
@@ -1233,7 +1244,7 @@ fn download_next_remote_shard_keeps_store_when_head_returns_none() {
     let base_url = server.url().to_string();
 
     let candidate = format!("url::{base_url}/resolve/main/train/head-none.ndjson");
-    let store_path = crate::shard_indexer::candidate_store_path(&config, &candidate);
+    let store_path = crate::download::candidate_store_path(&config, &candidate);
     fs::create_dir_all(store_path.parent().unwrap()).unwrap();
     write_simdr_fixture(&store_path, &[("r0", "row")]);
     {
@@ -1254,11 +1265,11 @@ fn download_next_remote_shard_keeps_store_when_head_returns_none() {
         .insert(store_path.clone(), cached_store);
 
     {
-        let mut state = source.state.lock().unwrap();
-        state.remote_candidates = Some(vec![candidate.clone()]);
-        state.remote_candidate_order = vec![0];
+        let mut remote = source.remote.lock().unwrap();
+        remote.remote_candidates = Some(vec![candidate.clone()]);
+        remote.remote_candidate_order = vec![0];
         // No expected_bytes — simulates hf-hub fallback.
-        state.next_remote_idx = 0;
+        remote.next_remote_idx = 0;
     }
 
     // HEAD returns 500 → fetch_remote_size_with_runtime returns
@@ -1283,25 +1294,26 @@ fn download_next_shard_store_already_on_disk_skips_download() {
 
     // Create a candidate path and pre-create its .simdr store.
     let candidate = "url::http://mock.example.com/datasets/org/ds/resolve/main/train/shard.ndjson";
-    let store_path = crate::shard_indexer::candidate_store_path(&config, candidate);
+    let store_path = crate::download::candidate_store_path(&config, candidate);
     fs::create_dir_all(store_path.parent().unwrap()).unwrap();
     write_simdr_fixture(&store_path, &[("r1", "hello")]);
 
     {
-        let mut state = source.state.lock().unwrap();
-        state.materialized_rows = 0;
-        state.remote_candidates = Some(vec![candidate.to_string()]);
-        state.remote_candidate_sizes = HashMap::new();
-        state.next_remote_idx = 0;
-        state.remote_candidate_order = vec![0];
+        let mut local = source.inner.local.lock().unwrap();
+        let mut remote = source.remote.lock().unwrap();
+        local.materialized_rows = 0;
+        remote.remote_candidates = Some(vec![candidate.to_string()]);
+        remote.remote_candidate_sizes = HashMap::new();
+        remote.next_remote_idx = 0;
+        remote.remote_candidate_order = vec![0];
     }
 
     let result = source.download_next_remote_shard().unwrap();
     assert!(result, "should return true when store already on disk");
 
-    let state = source.state.lock().unwrap();
+    let remote = source.remote.lock().unwrap();
     assert_eq!(
-        state.next_remote_idx, 1,
+        remote.next_remote_idx, 1,
         "candidate position should be consumed"
     );
 }
@@ -1313,24 +1325,26 @@ fn len_hint_covers_known_and_empty_paths() {
     let source = test_source(config);
 
     {
-        let mut state = source.state.lock().unwrap();
-        state.materialized_rows = 5;
+        let mut local = source.inner.local.lock().unwrap();
+        let mut remote = source.remote.lock().unwrap();
+        local.materialized_rows = 5;
         // Set up remote candidates so headroom is applied
-        state.remote_candidates = Some(vec![
+        remote.remote_candidates = Some(vec![
             "url::http://a/0.parquet".to_string(),
             "url::http://a/1.parquet".to_string(),
         ]);
-        state.next_remote_idx = 0;
+        remote.next_remote_idx = 0;
     }
     // headroom = per_source_max_pool * multiplier = 10 * 3 = 30; since known (5)
     // < headroom, expansion = 30; upper = 5 + 30 = 35
     assert_eq!(source.len_hint(), Some(35));
 
     {
-        let mut state = source.state.lock().unwrap();
-        state.materialized_rows = 0;
-        state.remote_candidates = Some(vec!["url::http://a/0.parquet".to_string()]);
-        state.next_remote_idx = 0;
+        let mut local = source.inner.local.lock().unwrap();
+        let mut remote = source.remote.lock().unwrap();
+        local.materialized_rows = 0;
+        remote.remote_candidates = Some(vec!["url::http://a/0.parquet".to_string()]);
+        remote.next_remote_idx = 0;
     }
     assert_eq!(source.len_hint(), Some(1));
 }
@@ -1341,7 +1355,7 @@ fn len_hint_defaults_to_one_when_unknown_and_not_exhausted() {
     let config = test_config(dir.path().to_path_buf());
     let source = test_source(config);
     // Simulate an uninitialized source that hasn't fetched candidates yet.
-    source.state.lock().unwrap().remote_candidates = None;
+    source.remote.lock().unwrap().remote_candidates = None;
     assert_eq!(source.len_hint(), Some(1));
 }
 
@@ -1354,14 +1368,15 @@ fn len_hint_keeps_trickle_remote_expansion_after_warmup() {
     let source = test_source(config);
 
     {
-        let mut state = source.state.lock().unwrap();
-        state.materialized_rows = 8;
+        let mut local = source.inner.local.lock().unwrap();
+        let mut remote = source.remote.lock().unwrap();
+        local.materialized_rows = 8;
         // Set up remote candidates so headroom is applied
-        state.remote_candidates = Some(vec![
+        remote.remote_candidates = Some(vec![
             "url::http://a/0.parquet".to_string(),
             "url::http://a/1.parquet".to_string(),
         ]);
-        state.next_remote_idx = 0;
+        remote.next_remote_idx = 0;
     }
 
     // headroom = cache_capacity * multiplier = 4 * 2 = 8; upper = 8 + 8 = 16
@@ -1375,14 +1390,15 @@ fn len_hint_known_rows_no_headroom_when_candidates_exhausted() {
     let source = test_source(config);
 
     {
-        let mut state = source.state.lock().unwrap();
-        state.materialized_rows = 10;
-        state.remote_candidates = Some(vec![
+        let mut local = source.inner.local.lock().unwrap();
+        let mut remote = source.remote.lock().unwrap();
+        local.materialized_rows = 10;
+        remote.remote_candidates = Some(vec![
             "url::http://a/0.parquet".to_string(),
             "url::http://a/1.parquet".to_string(),
         ]);
         // All candidates already consumed — no headroom should be added.
-        state.next_remote_idx = 2;
+        remote.next_remote_idx = 2;
     }
     assert_eq!(source.len_hint(), Some(10));
 }
@@ -1394,9 +1410,10 @@ fn len_hint_known_rows_no_candidates_returns_known() {
     let source = test_source(config);
 
     {
-        let mut state = source.state.lock().unwrap();
-        state.materialized_rows = 7;
-        state.remote_candidates = None;
+        let mut local = source.inner.local.lock().unwrap();
+        let mut remote = source.remote.lock().unwrap();
+        local.materialized_rows = 7;
+        remote.remote_candidates = None;
     }
     assert_eq!(source.len_hint(), Some(7));
 }
@@ -1408,9 +1425,10 @@ fn len_hint_zero_rows_empty_candidates_returns_zero() {
     let source = test_source(config);
 
     {
-        let mut state = source.state.lock().unwrap();
-        state.materialized_rows = 0;
-        state.remote_candidates = Some(vec![]);
+        let mut local = source.inner.local.lock().unwrap();
+        let mut remote = source.remote.lock().unwrap();
+        local.materialized_rows = 0;
+        remote.remote_candidates = Some(vec![]);
     }
     assert_eq!(source.len_hint(), Some(0));
 }
@@ -1421,8 +1439,8 @@ fn reported_record_count_uses_len_hint_for_local_state() {
     let config = test_config(dir.path().to_path_buf());
     let source = test_source(config);
     {
-        let mut state = source.state.lock().unwrap();
-        state.materialized_rows = 4;
+        let mut local = source.inner.local.lock().unwrap();
+        local.materialized_rows = 4;
     }
     assert_eq!(source.reported_record_count().unwrap(), 4);
 }
@@ -1433,9 +1451,10 @@ fn reported_record_count_uses_len_hint() {
     let config = test_config(dir.path().to_path_buf());
     let source = test_source(config);
     {
-        let mut state = source.state.lock().unwrap();
-        state.materialized_rows = 10;
-        state.remote_candidates = None;
+        let mut local = source.inner.local.lock().unwrap();
+        let mut remote = source.remote.lock().unwrap();
+        local.materialized_rows = 10;
+        remote.remote_candidates = None;
     }
     assert_eq!(source.reported_record_count().unwrap(), 10);
 }
@@ -1448,14 +1467,15 @@ fn configure_sampler_updates_len_hint_headroom_via_trait_methods() {
     config.remote_expansion_headroom_multiplier = 3;
     let source = test_source(config);
     {
-        let mut state = source.state.lock().unwrap();
-        state.materialized_rows = 5;
+        let mut local = source.inner.local.lock().unwrap();
+        let mut remote = source.remote.lock().unwrap();
+        local.materialized_rows = 5;
         // Set up remote candidates so headroom is applied
-        state.remote_candidates = Some(vec![
+        remote.remote_candidates = Some(vec![
             "url::http://a/0.parquet".to_string(),
             "url::http://a/1.parquet".to_string(),
         ]);
-        state.next_remote_idx = 0;
+        remote.next_remote_idx = 0;
     }
 
     // headroom = per_source_max_pool * multiplier = 10 * 3 = 30
@@ -1494,12 +1514,12 @@ fn set_active_sampler_config_rebuilds_order_on_seed_change() {
     });
 
     {
-        let mut state = source.state.lock().unwrap();
+        let mut remote = source.remote.lock().unwrap();
         // Candidates stored sorted/immutable; order derived from seed 7, cursor 0.
         let order = build_candidate_order(&config, &candidates, 7);
-        state.remote_candidates = Some(candidates.clone());
-        state.remote_candidate_order = order.clone();
-        state.next_remote_idx = 3;
+        remote.remote_candidates = Some(candidates.clone());
+        remote.remote_candidate_order = order.clone();
+        remote.next_remote_idx = 3;
     }
 
     // Order is rebuilt every call; pointer advances to first uncached position.
@@ -1508,11 +1528,11 @@ fn set_active_sampler_config_rebuilds_order_on_seed_change() {
         ..SamplerConfig::default()
     });
     {
-        let state = source.state.lock().unwrap();
+        let remote = source.remote.lock().unwrap();
         let order = build_candidate_order(&config, &candidates, 7);
-        assert_eq!(state.remote_candidate_order, order);
+        assert_eq!(remote.remote_candidate_order, order);
         assert_eq!(
-            state.next_remote_idx, 0,
+            remote.next_remote_idx, 0,
             "order rebuilt every call: pointer lands at first uncached (no shards on disk)"
         );
     }
@@ -1523,15 +1543,15 @@ fn set_active_sampler_config_rebuilds_order_on_seed_change() {
         ..SamplerConfig::default()
     });
     {
-        let state = source.state.lock().unwrap();
+        let remote = source.remote.lock().unwrap();
         // List is immutable — same sorted candidates.
-        assert_eq!(state.remote_candidates.as_ref().unwrap(), &candidates);
+        assert_eq!(remote.remote_candidates.as_ref().unwrap(), &candidates);
         // Order is now derived from seed 18 (cursor_revision still 0).
         let expected_order = build_candidate_order(&config, &candidates, 18);
-        assert_eq!(state.remote_candidate_order, expected_order);
+        assert_eq!(remote.remote_candidate_order, expected_order);
         // No shards are materialised on disk so the pointer lands at 0
         // (the first non-materialised position in the new order).
-        assert_eq!(state.next_remote_idx, 0);
+        assert_eq!(remote.next_remote_idx, 0);
     }
 }
 
@@ -1556,10 +1576,10 @@ fn set_active_sampler_config_rebuilds_order_every_call() {
     });
 
     {
-        let mut state = source.state.lock().unwrap();
-        state.remote_candidates = Some(candidates.clone());
-        state.remote_candidate_order = Vec::new();
-        state.next_remote_idx = 0;
+        let mut remote = source.remote.lock().unwrap();
+        remote.remote_candidates = Some(candidates.clone());
+        remote.remote_candidate_order = Vec::new();
+        remote.next_remote_idx = 0;
     }
 
     // Call with seed 1 — order is built.
@@ -1569,10 +1589,10 @@ fn set_active_sampler_config_rebuilds_order_every_call() {
     });
     let order_seed1: Vec<usize>;
     {
-        let state = source.state.lock().unwrap();
+        let remote = source.remote.lock().unwrap();
         let expected = build_candidate_order(&config, &candidates, 1);
-        assert_eq!(state.remote_candidate_order, expected, "seed=1 order");
-        order_seed1 = state.remote_candidate_order.clone();
+        assert_eq!(remote.remote_candidate_order, expected, "seed=1 order");
+        order_seed1 = remote.remote_candidate_order.clone();
     }
 
     // Call with seed 2 — order changes.
@@ -1581,11 +1601,11 @@ fn set_active_sampler_config_rebuilds_order_every_call() {
         ..SamplerConfig::default()
     });
     {
-        let state = source.state.lock().unwrap();
+        let remote = source.remote.lock().unwrap();
         let expected = build_candidate_order(&config, &candidates, 2);
-        assert_eq!(state.remote_candidate_order, expected, "seed=2 order");
+        assert_eq!(remote.remote_candidate_order, expected, "seed=2 order");
         assert_ne!(
-            state.remote_candidate_order, order_seed1,
+            remote.remote_candidate_order, order_seed1,
             "different seed must produce different order"
         );
     }
@@ -1630,13 +1650,14 @@ fn set_active_sampler_config_skips_materialized_shards_after_seed_change() {
         .collect();
 
     {
-        let mut state = source.state.lock().unwrap();
+        let mut local = source.inner.local.lock().unwrap();
+        let mut remote = source.remote.lock().unwrap();
         let order_7 = build_candidate_order(&config, &candidates, 7);
-        state.remote_candidates = Some(candidates.clone());
-        state.remote_candidate_order = order_7;
-        state.next_remote_idx = 0;
-        state.shards = shards_to_inject;
-        state.materialized_rows = materialised_count * 100;
+        remote.remote_candidates = Some(candidates.clone());
+        remote.remote_candidate_order = order_7;
+        remote.next_remote_idx = 0;
+        local.shards = shards_to_inject;
+        local.materialized_rows = materialised_count * 100;
     }
 
     // Change the seed — must advance pointer past the 3 materialised shards
@@ -1647,14 +1668,14 @@ fn set_active_sampler_config_skips_materialized_shards_after_seed_change() {
     });
 
     {
-        let state = source.state.lock().unwrap();
+        let remote = source.remote.lock().unwrap();
         assert_eq!(
-            state.remote_candidate_order,
+            remote.remote_candidate_order,
             build_candidate_order(&config, &candidates, 18),
             "order must be rebuilt from new seed"
         );
         assert_eq!(
-            state.next_remote_idx, materialised_count,
+            remote.next_remote_idx, materialised_count,
             "pointer must skip the {} already-materialised shards in the new order, \
                   not reset to 0",
             materialised_count
@@ -1674,7 +1695,7 @@ fn parquet_manifest_fetched_exactly_once_per_candidate_list_population() {
     let config = test_config(dir.path().to_path_buf());
     let mut source = test_source(config);
     // Reset to None so the first ensure_row_available() triggers the lazy fetch.
-    source.state.lock().unwrap().remote_candidates = None;
+    source.remote.lock().unwrap().remote_candidates = None;
 
     let shard_payload = b"{\"text\":\"hello\"}\n".to_vec();
     // Counting manifest+shard server: 4 slots so a second /parquet hit is caught.
@@ -1712,11 +1733,11 @@ fn clone_shares_state_arc_references() {
 
     // Modify state through one, verify through the other
     {
-        let mut state = source.state.lock().unwrap();
-        state.materialized_rows = 42;
+        let mut local = source.inner.local.lock().unwrap();
+        local.materialized_rows = 42;
     }
-    let cloned_state = cloned.state.lock().unwrap();
-    assert_eq!(cloned_state.materialized_rows, 42);
+    let local = cloned.inner.local.lock().unwrap();
+    assert_eq!(local.materialized_rows, 42);
 }
 
 #[test]
@@ -1817,7 +1838,10 @@ fn default_triplet_recipes_standard_mode() {
 fn shard_size_bytes_returns_zero_for_missing_path() {
     let dir = tempdir().unwrap();
     let missing = dir.path().join("missing.file");
-    assert_eq!(HuggingFaceRowSource::shard_size_bytes(&missing), 0);
+    assert_eq!(
+        triplets_parquet_source::ParquetRowSource::shard_size_bytes(&missing),
+        0
+    );
 }
 
 #[test]
@@ -1826,7 +1850,7 @@ fn shard_size_bytes_returns_nonzero_for_existing_file() {
     let path = dir.path().join("test.simdr");
     std::fs::write(&path, b"hello world").unwrap();
     assert_eq!(
-        crate::source_core::HuggingFaceRowSource::shard_size_bytes(&path),
+        triplets_parquet_source::ParquetRowSource::shard_size_bytes(&path),
         11
     );
 }
@@ -1941,14 +1965,14 @@ fn refresh_limit_none_reads_up_to_total() {
     let mut config = test_config(dir.path().to_path_buf());
     config.refresh_batch_multiplier = 1;
     let source = test_source(config.clone());
-    let shard = index_single_shard(&config, &simdr_path, 0)
+    let shard = index_single_shard(source.inner.config(), &simdr_path, 0)
         .unwrap()
         .0
         .unwrap();
     {
-        let mut state = source.state.lock().unwrap();
-        state.materialized_rows = 2;
-        state.shards = vec![shard];
+        let mut local = source.inner.local.lock().unwrap();
+        local.materialized_rows = 2;
+        local.shards = vec![shard];
     }
 
     let snapshot = source.refresh(None, None).unwrap();
@@ -1967,14 +1991,14 @@ fn refresh_reads_local_rows_and_advances_cursor() {
     let mut config = test_config(dir.path().to_path_buf());
     config.refresh_batch_multiplier = 1;
     let source = test_source(config.clone());
-    let shard = index_single_shard(&config, &simdr_path, 0)
+    let shard = index_single_shard(source.inner.config(), &simdr_path, 0)
         .unwrap()
         .0
         .unwrap();
     {
-        let mut state = source.state.lock().unwrap();
-        state.materialized_rows = shard.row_count;
-        state.shards = vec![shard];
+        let mut local = source.inner.local.lock().unwrap();
+        local.materialized_rows = shard.row_count;
+        local.shards = vec![shard];
     }
 
     let snapshot = source.refresh(None, Some(2)).unwrap();
@@ -1989,8 +2013,8 @@ fn refresh_handles_empty_total_and_cursor_wrap() {
     let source = test_source(config.clone());
 
     {
-        let mut state = source.state.lock().unwrap();
-        state.materialized_rows = 0;
+        let mut local = source.inner.local.lock().unwrap();
+        local.materialized_rows = 0;
     }
     let empty = source.refresh(None, Some(5)).unwrap();
     assert!(empty.records.is_empty());
@@ -2000,14 +2024,14 @@ fn refresh_handles_empty_total_and_cursor_wrap() {
     write_simdr_fixture(&simdr_path, &[("a", "A"), ("b", "B")]);
     let cfg2 = config;
     let source2 = test_source(cfg2.clone());
-    let shard = index_single_shard(&cfg2, &simdr_path, 0)
+    let shard = index_single_shard(source2.inner.config(), &simdr_path, 0)
         .unwrap()
         .0
         .unwrap();
     {
-        let mut state = source2.state.lock().unwrap();
-        state.materialized_rows = 2;
-        state.shards = vec![shard];
+        let mut local = source2.inner.local.lock().unwrap();
+        local.materialized_rows = 2;
+        local.shards = vec![shard];
     }
     let cursor = SourceCursor {
         last_seen: Utc::now(),
@@ -2033,15 +2057,15 @@ fn refresh_order_uses_sampler_seed_for_local_rows() {
     let source_a = test_source(config.clone());
     let source_b = test_source(config.clone());
     let source_c = test_source(config.clone());
-    let shard = index_single_shard(&config, &simdr_path, 0)
+    let shard = index_single_shard(source_a.inner.config(), &simdr_path, 0)
         .unwrap()
         .0
         .unwrap();
 
     for source in [&source_a, &source_b, &source_c] {
-        let mut state = source.state.lock().unwrap();
-        state.materialized_rows = 12;
-        state.shards = vec![shard.clone()];
+        let mut local = source.inner.local.lock().unwrap();
+        local.materialized_rows = 12;
+        local.shards = vec![shard.clone()];
     }
 
     let seed_1 = SamplerConfig {
@@ -2109,14 +2133,14 @@ fn next_text_batch_produces_distinct_cursor_values_per_call() {
     config.parquet_endpoint = TEST_UNREACHABLE_URL.to_string();
 
     let source = HuggingFaceRowSource::new(config).unwrap();
-    let shard_idx = index_single_shard(&source.config, &simdr_path, 0)
+    let shard_idx = index_single_shard(source.inner.config(), &simdr_path, 0)
         .unwrap()
         .0
         .unwrap();
     {
-        let mut state = source.state.lock().unwrap();
-        state.materialized_rows = shard_idx.row_count;
-        state.shards = vec![shard_idx];
+        let mut local = source.inner.local.lock().unwrap();
+        local.materialized_rows = shard_idx.row_count;
+        local.shards = vec![shard_idx];
     }
 
     // Pre-load a PersistedSamplerState with cursor=0.
@@ -2178,19 +2202,22 @@ fn next_batch_methods_rebuild_shard_order_with_step() {
              cfg.hf_token = None;
              cfg.parquet_endpoint = TEST_UNREACHABLE_URL.to_string();
              let source = HuggingFaceRowSource::new(cfg).unwrap();
-             let idx = index_single_shard(
-                 &source.config, &simdr_path, 0).unwrap().0.unwrap();
+             let idx = index_single_shard(source.inner.config(), &simdr_path, 0)
+                 .unwrap()
+                 .0
+                 .unwrap();
              {
-                 let mut st = source.state.lock().unwrap();
-                 st.materialized_rows = idx.row_count;
-                 st.shards = vec![idx];
+                 let mut local = source.inner.local.lock().unwrap();
+                 let mut remote = source.remote.lock().unwrap();
+                 local.materialized_rows = idx.row_count;
+                 local.shards = vec![idx];
                  let cand: Vec<String> = (0..5).map(|i|
                      format!("url::http://h/d/resolve/main/train/p-{i:04}.ndjson")
                  ).collect();
-                 st.remote_candidates = Some(cand.clone());
-                 st.remote_candidate_order =
+                 remote.remote_candidates = Some(cand.clone());
+                 remote.remote_candidate_order =
                      build_candidate_order(&source.config, &cand, 0);
-                 st.next_remote_idx = 0;
+                 remote.next_remote_idx = 0;
              }
              let split = Arc::new(
                  DeterministicSplitStore::new(SplitRatios { train: 1.0, validation: 0.0, test: 0.0 }, 777).unwrap());
@@ -2204,31 +2231,31 @@ fn next_batch_methods_rebuild_shard_order_with_step() {
 
     // next_text_batch
     let (source, sampler, _tmp) = setup();
-    let before = source.state.lock().unwrap().remote_candidate_order.clone();
+    let before = source.remote.lock().unwrap().remote_candidate_order.clone();
     sampler.next_text_batch(SplitLabel::Train).unwrap();
     assert_ne!(
         before,
-        source.state.lock().unwrap().remote_candidate_order,
+        source.remote.lock().unwrap().remote_candidate_order,
         "next_text_batch must change shard order"
     );
 
     // next_pair_batch
     let (source, sampler, _tmp) = setup();
-    let before = source.state.lock().unwrap().remote_candidate_order.clone();
+    let before = source.remote.lock().unwrap().remote_candidate_order.clone();
     let _ = sampler.next_pair_batch(SplitLabel::Train);
     assert_ne!(
         before,
-        source.state.lock().unwrap().remote_candidate_order,
+        source.remote.lock().unwrap().remote_candidate_order,
         "next_pair_batch must change shard order"
     );
 
     // next_triplet_batch
     let (source, sampler, _tmp) = setup();
-    let before = source.state.lock().unwrap().remote_candidate_order.clone();
+    let before = source.remote.lock().unwrap().remote_candidate_order.clone();
     let _ = sampler.next_triplet_batch(SplitLabel::Train);
     assert_ne!(
         before,
-        source.state.lock().unwrap().remote_candidate_order,
+        source.remote.lock().unwrap().remote_candidate_order,
         "next_triplet_batch must change shard order"
     );
 }
@@ -2250,4 +2277,21 @@ fn manifest_cache_rootjoins_parquet_manifest_dir() {
     let source = test_source(config);
     let root = source.manifest_cache_root();
     assert!(root.ends_with(crate::constants::HF_PARQUET_MANIFEST_DIR));
+}
+
+#[test]
+fn safe_test_source_drop_joins_leaked_expansion_thread() {
+    // Covers the SafeTestSource teardown path that joins a still-running
+    // expansion thread instead of leaking it (which would deadlock later
+    // tests on EXPANSION_GATE).
+    let dir = tempdir().unwrap();
+    let source = test_source(test_config(dir.path().to_path_buf()));
+    {
+        let handle = std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        });
+        *source.expansion_thread.lock().unwrap() = Some(handle);
+    }
+    // Drop joins the thread; would panic on deadlock via recv_timeout.
+    drop(source);
 }

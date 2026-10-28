@@ -13,26 +13,25 @@ use tracing::warn;
 
 use crate::constants::{HF_SHARD_STORE_META_ROWS_KEY, HF_TEMP_DOWNLOAD_PREFIX};
 use crate::file_utils::{is_gzip_path, is_transient_text, resolve_inner_extension};
-use crate::huggingface_source::{ParquetGroupKey, ParquetGroupRequest, RowTextField, RowView};
+use crate::row_view::{ParquetGroupKey, ParquetGroupRequest, RowTextField, RowView};
 use crate::shard_index::{is_store_shard_path, row_store_row_key, shard_store_path_for};
-use crate::source_core::HuggingFaceRowSource;
+use crate::source::ParquetRowSource;
 use crate::types::ShardIndex;
 use triplets_core::SamplerError;
 use triplets_core::data::{DataRecord, QualityScore, SectionRole};
 use triplets_core::utils::make_section;
 
 /// Parse a raw row payload into normalized `RowView` fields.
-pub(crate) fn parse_row(
-    source: &HuggingFaceRowSource,
+pub fn parse_row(
+    source: &ParquetRowSource,
     absolute_idx: usize,
     row_value: &Value,
 ) -> Result<Option<RowView>, SamplerError> {
     if !source.config.has_explicit_mapping() {
         return Err(SamplerError::SourceInconsistent {
             source_id: source.config.source_id.clone(),
-            details:
-                "huggingface row parsing requires explicit field mapping; no columns configured"
-                    .to_string(),
+            details: "parquet row parsing requires explicit field mapping; no columns configured"
+                .to_string(),
         });
     }
 
@@ -50,12 +49,7 @@ pub(crate) fn parse_row(
         .as_ref()
         .and_then(|col| resolve_json_path(row_obj, col))
         .and_then(|v| value_to_text(&v))
-        .unwrap_or_else(|| {
-            format!(
-                "{}:{}:{}",
-                source.config.dataset_name, source.config.split_name, absolute_idx
-            )
-        });
+        .unwrap_or_else(|| format!("{}:{}", source.config.row_id_namespace, absolute_idx));
 
     let mut text_fields = Vec::new();
     let use_role_columns = !source.config.anchor_columns.is_empty()
@@ -129,8 +123,8 @@ pub(crate) fn parse_row(
 }
 
 /// Convert a `RowView` into a sampler `DataRecord`.
-pub(crate) fn row_to_record(
-    source: &HuggingFaceRowSource,
+pub fn row_to_record(
+    source: &ParquetRowSource,
     row: &RowView,
     row_index: u64,
 ) -> Result<Option<DataRecord>, SamplerError> {
@@ -178,11 +172,7 @@ pub(crate) fn row_to_record(
             .config
             .trust_override
             .map_or_else(QualityScore::default, |t| QualityScore { trust: t }),
-        taxonomy: vec![
-            format!("dataset={}", source.config.dataset_name),
-            format!("config={}", source.config.config_name),
-            format!("split={}", source.config.split_name),
-        ],
+        taxonomy: source.config.taxonomy.clone(),
         sections,
         meta_prefix: None,
         label: None,
@@ -190,8 +180,8 @@ pub(crate) fn row_to_record(
 }
 
 /// Materialize records for requested indices into output buffer.
-pub(crate) fn read_row_batch(
-    source: &HuggingFaceRowSource,
+pub fn read_row_batch(
+    source: &ParquetRowSource,
     indices: &[usize],
     out: &mut Vec<DataRecord>,
     limit: Option<usize>,
@@ -201,8 +191,19 @@ pub(crate) fn read_row_batch(
 
     let mut fetched = HashMap::with_capacity(sorted.len());
     let mut pending = Vec::new();
+    // Snapshot the materialized frontier once: indices beyond it resolve to
+    // `None` (remote-backed wrappers expand first via their own ensure step,
+    // then delegate here).
+    let materialized = source
+        .local
+        .lock()
+        .map_err(|_| SamplerError::SourceUnavailable {
+            source_id: source.config.source_id.clone(),
+            reason: "parquet row source state lock poisoned".to_string(),
+        })?
+        .materialized_rows;
     for idx in &sorted {
-        if !source.ensure_row_available(*idx)? {
+        if *idx >= materialized {
             fetched.insert(*idx, None);
             continue;
         }
@@ -212,7 +213,7 @@ pub(crate) fn read_row_batch(
             .lock()
             .map_err(|_| SamplerError::SourceUnavailable {
                 source_id: source.config.source_id.clone(),
-                reason: "huggingface row cache lock poisoned".to_string(),
+                reason: "row cache lock poisoned".to_string(),
             })?
             .get(*idx)
         {
@@ -226,16 +227,16 @@ pub(crate) fn read_row_batch(
 
     if !pending.is_empty() {
         let resolutions = {
-            let state = source
-                .state
+            let local = source
+                .local
                 .lock()
                 .map_err(|_| SamplerError::SourceUnavailable {
                     source_id: source.config.source_id.clone(),
-                    reason: "huggingface source state lock poisoned".to_string(),
+                    reason: "parquet row source state lock poisoned".to_string(),
                 })?;
             let mut resolved = Vec::with_capacity(pending.len());
             for idx in &pending {
-                let (shard, local_idx) = crate::shard_indexer::locate_shard(&state.shards, *idx)
+                let (shard, local_idx) = crate::shard_indexer::locate_shard(&local.shards, *idx)
                     .ok_or_else(|| SamplerError::SourceUnavailable {
                         source_id: source.config.source_id.clone(),
                         reason: format!("row index out of range: {idx}"),
@@ -317,7 +318,7 @@ pub(crate) fn read_row_batch(
                                 .lock()
                                 .map_err(|_| SamplerError::SourceUnavailable {
                                     source_id: source.config.source_id.clone(),
-                                    reason: "huggingface row cache lock poisoned".to_string(),
+                                    reason: "row cache lock poisoned".to_string(),
                                 })?
                                 .insert(idx, row.clone(), source.config.cache_capacity);
                             fetched.insert(idx, Some(record));
@@ -353,7 +354,7 @@ pub(crate) fn read_row_batch(
                 .lock()
                 .map_err(|_| SamplerError::SourceUnavailable {
                     source_id: source.config.source_id.clone(),
-                    reason: "huggingface parquet cache lock poisoned".to_string(),
+                    reason: "parquet cache lock poisoned".to_string(),
                 })?
                 .row_group_rows_for(
                     &source.config.source_id,
@@ -389,7 +390,7 @@ pub(crate) fn read_row_batch(
                             .lock()
                             .map_err(|_| SamplerError::SourceUnavailable {
                                 source_id: source.config.source_id.clone(),
-                                reason: "huggingface row cache lock poisoned".to_string(),
+                                reason: "row cache lock poisoned".to_string(),
                             })?
                             .insert(idx, row, source.config.cache_capacity);
                         fetched.insert(idx, record);
@@ -431,7 +432,7 @@ pub(crate) fn read_row_batch(
 
 /// Flush a batch of key-value pairs to the row store.
 fn flush_batch(
-    source: &HuggingFaceRowSource,
+    source: &ParquetRowSource,
     store: &DataStore,
     batch: &[(Vec<u8>, Vec<u8>)],
 ) -> Result<(), SamplerError> {
@@ -457,7 +458,7 @@ fn is_json_file(path: &std::path::Path) -> bool {
 }
 
 /// Peek at the first non-whitespace byte of a buffered reader without consuming it.
-pub(crate) fn peek_first_non_whitespace(reader: &mut (impl BufRead + ?Sized)) -> Option<u8> {
+pub fn peek_first_non_whitespace(reader: &mut (impl BufRead + ?Sized)) -> Option<u8> {
     loop {
         let buf = reader.fill_buf().ok()?;
         let &byte = buf.first()?;
@@ -471,7 +472,7 @@ pub(crate) fn peek_first_non_whitespace(reader: &mut (impl BufRead + ?Sized)) ->
 
 /// Visitor that streams JSON array elements one at a time for O(1) memory usage.
 struct StreamingArrayVisitor<'a> {
-    source: &'a HuggingFaceRowSource,
+    source: &'a ParquetRowSource,
     shard: &'a ShardIndex,
     served_rows: &'a mut usize,
     batch: &'a mut Vec<(Vec<u8>, Vec<u8>)>,
@@ -521,8 +522,8 @@ impl<'de> Visitor<'de> for StreamingArrayVisitor<'_> {
 }
 
 /// Transcode a JSON array shard via streaming deserialization for O(1) memory.
-pub(crate) fn transcode_json_array_streaming(
-    source: &HuggingFaceRowSource,
+pub fn transcode_json_array_streaming(
+    source: &ParquetRowSource,
     shard: &ShardIndex,
     reader: &mut dyn BufRead,
     store: &DataStore,
@@ -553,8 +554,11 @@ pub(crate) fn transcode_json_array_streaming(
     Ok(served_rows)
 }
 
-pub(crate) fn transcode_transient_shard_to_store(
-    source: &HuggingFaceRowSource,
+/// Transcode a transient (parquet/text/gzip) shard into a `.simdr` row store.
+///
+/// Returns the replacement store shard, or `None` when nothing materialized.
+pub fn transcode_transient_shard_to_store(
+    source: &ParquetRowSource,
     shard: &ShardIndex,
 ) -> Result<Option<ShardIndex>, SamplerError> {
     if is_store_shard_path(&shard.path) {
@@ -562,14 +566,14 @@ pub(crate) fn transcode_transient_shard_to_store(
     }
 
     let store_path = shard_store_path_for(&shard.path);
-    let in_manifest = shard.path.starts_with(source.manifest_cache_root());
+    let in_transient_dir = source.config.in_transient_dir(&shard.path);
     let is_temp_download = shard
         .path
         .file_name()
         .unwrap_or_default()
         .to_string_lossy()
         .starts_with(HF_TEMP_DOWNLOAD_PREFIX);
-    let can_delete_transient = in_manifest || is_temp_download;
+    let can_delete_transient = in_transient_dir || is_temp_download;
 
     let store = crate::shard_indexer::get_or_open_shard_store(source, &store_path)?;
     if store_path.exists() {
@@ -582,7 +586,7 @@ pub(crate) fn transcode_transient_shard_to_store(
                 && let Err(err) = fs::remove_file(&shard.path)
             {
                 warn!(
-                    "[triplets:hf] failed removing stale transient shard after store hit {}: {}",
+                    "[triplets:parquet] failed removing stale transient shard after store hit {}: {}",
                     shard.path.display(),
                     err
                 );
@@ -674,7 +678,7 @@ pub(crate) fn transcode_transient_shard_to_store(
                 .lock()
                 .map_err(|_| SamplerError::SourceUnavailable {
                     source_id: source.config.source_id.clone(),
-                    reason: "huggingface parquet cache lock poisoned".to_string(),
+                    reason: "parquet cache lock poisoned".to_string(),
                 })?
                 .row_group_rows_for(
                     &source.config.source_id,
@@ -737,20 +741,16 @@ pub(crate) fn transcode_transient_shard_to_store(
     }))
 }
 
-pub(crate) fn encode_row_view(
-    source: &HuggingFaceRowSource,
-    row: &RowView,
-) -> Result<Vec<u8>, SamplerError> {
+/// Serialize a row view into a row-store payload.
+pub fn encode_row_view(source: &ParquetRowSource, row: &RowView) -> Result<Vec<u8>, SamplerError> {
     serde_json::to_vec(row).map_err(|err| SamplerError::SourceUnavailable {
         source_id: source.config.source_id.clone(),
         reason: format!("failed encoding row-view payload: {err}"),
     })
 }
 
-pub(crate) fn decode_row_view(
-    source: &HuggingFaceRowSource,
-    bytes: &[u8],
-) -> Result<RowView, SamplerError> {
+/// Deserialize a row view from a row-store payload.
+pub fn decode_row_view(source: &ParquetRowSource, bytes: &[u8]) -> Result<RowView, SamplerError> {
     serde_json::from_slice(bytes).map_err(|err| SamplerError::SourceUnavailable {
         source_id: source.config.source_id.clone(),
         reason: format!("failed decoding row-view payload: {err}"),
@@ -763,7 +763,7 @@ pub(crate) fn decode_row_view(
 /// ClassLabel-style integer columns.  When the value is an integer `n` and
 /// `label_names[n]` exists, that label string is returned instead of the
 /// raw numeric string.
-pub(crate) fn value_to_text(value: &Value) -> Option<String> {
+pub fn value_to_text(value: &Value) -> Option<String> {
     match value {
         Value::Null => None,
         Value::String(s) => {
@@ -795,10 +795,7 @@ pub(crate) fn value_to_text(value: &Value) -> Option<String> {
 ///
 /// Returns `None` when any segment of the path is missing or when an
 /// intermediate value is not a JSON object.
-pub(crate) fn resolve_json_path(
-    row_obj: &serde_json::Map<String, Value>,
-    name: &str,
-) -> Option<Value> {
+pub fn resolve_json_path(row_obj: &serde_json::Map<String, Value>, name: &str) -> Option<Value> {
     let mut current = Value::Object(row_obj.clone());
     for segment in name.split('.') {
         current = match current {
@@ -836,7 +833,7 @@ fn coalesce_field(
 /// as `coalesce_field`).  For lists, each non-empty element becomes a
 /// separate field.  Empty/blank elements are skipped.  Returns `None`
 /// when no non-empty elements are found.
-pub(crate) fn coalesce_list_field(name: &str, value: &Value) -> Option<Vec<RowTextField>> {
+pub fn coalesce_list_field(name: &str, value: &Value) -> Option<Vec<RowTextField>> {
     match value {
         Value::Array(arr) => {
             let fields: Vec<RowTextField> = arr
@@ -865,8 +862,8 @@ pub(crate) fn coalesce_list_field(name: &str, value: &Value) -> Option<Vec<RowTe
 }
 
 /// Decode one line from a non-parquet shard into an object-like row payload.
-pub(crate) fn parse_non_parquet_line(
-    source: &HuggingFaceRowSource,
+pub fn parse_non_parquet_line(
+    source: &ParquetRowSource,
     shard: &ShardIndex,
     local_idx: usize,
     line: &str,
@@ -921,8 +918,9 @@ pub(crate) fn parse_non_parquet_line(
     }
 }
 
-pub(crate) fn read_store_row_count(
-    source: &HuggingFaceRowSource,
+/// Read the materialized row count recorded in a row store.
+pub fn read_store_row_count(
+    source: &ParquetRowSource,
     store: &DataStore,
 ) -> Result<usize, SamplerError> {
     let Some(entry) = store.read(HF_SHARD_STORE_META_ROWS_KEY).map_err(|err| {
@@ -947,8 +945,9 @@ pub(crate) fn read_store_row_count(
     Ok(u64::from_le_bytes(raw) as usize)
 }
 
-pub(crate) fn write_store_row_count(
-    source: &HuggingFaceRowSource,
+/// Record the materialized row count in a row store.
+pub fn write_store_row_count(
+    source: &ParquetRowSource,
     store: &DataStore,
     rows: usize,
 ) -> Result<(), SamplerError> {

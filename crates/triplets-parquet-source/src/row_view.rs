@@ -12,37 +12,52 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use triplets_core::SamplerError;
 
+/// One named text field extracted from a row (column name + text).
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct RowTextField {
-    pub(crate) name: String,
-    pub(crate) text: String,
+pub struct RowTextField {
+    /// Column (or dotted path) this text came from.
+    pub name: String,
+    /// Extracted non-empty text.
+    pub text: String,
 }
 
+/// Normalized view of one dataset row: id plus extracted text fields.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct RowView {
-    pub(crate) row_id: Option<String>,
-    pub(crate) timestamp: Option<DateTime<Utc>>,
-    pub(crate) text_fields: Vec<RowTextField>,
+pub struct RowView {
+    /// Stable row id (explicit column or synthetic fallback).
+    pub row_id: Option<String>,
+    /// Row timestamp when the source provides one.
+    pub timestamp: Option<DateTime<Utc>>,
+    /// Extracted text fields in mapping order.
+    pub text_fields: Vec<RowTextField>,
 }
 
+/// Cache of opened parquet readers and decoded row groups.
 #[derive(Default)]
-pub(crate) struct ParquetCache {
-    pub(crate) readers: HashMap<PathBuf, Arc<SerializedFileReader<File>>>,
-    pub(crate) row_groups: HashMap<(PathBuf, usize), Arc<Vec<Value>>>,
-    pub(crate) row_group_order: VecDeque<(PathBuf, usize)>,
+pub struct ParquetCache {
+    /// Open file readers by shard path.
+    pub readers: HashMap<PathBuf, Arc<SerializedFileReader<File>>>,
+    /// Decoded row-group rows by `(path, group)` with LRU order below.
+    pub row_groups: HashMap<(PathBuf, usize), Arc<Vec<Value>>>,
+    /// LRU order for `row_groups` eviction.
+    pub row_group_order: VecDeque<(PathBuf, usize)>,
 }
 
+/// Cached eligible-row index keyed by shard-layout signature.
 #[derive(Default)]
 #[allow(dead_code)]
-pub(crate) struct EligibleIndexCache {
-    pub(crate) signature: Option<u64>,
-    pub(crate) rows: Option<Arc<Vec<usize>>>,
-    pub(crate) shards: Vec<ShardIndex>,
+pub struct EligibleIndexCache {
+    /// Shard-layout signature this index was built for.
+    pub signature: Option<u64>,
+    /// Eligible absolute row indices.
+    pub rows: Option<Arc<Vec<usize>>>,
+    /// Shard layout the cached rows were derived from.
+    pub shards: Vec<ShardIndex>,
 }
 
 impl ParquetCache {
     /// Return a cached parquet reader for `path`, opening and caching it when missing.
-    pub(crate) fn reader_for(
+    pub fn reader_for(
         &mut self,
         source_id: &str,
         path: &Path,
@@ -65,7 +80,8 @@ impl ParquetCache {
         Ok(reader)
     }
 
-    pub(crate) fn row_group_rows_for(
+    /// Return decoded rows for a parquet row group, caching up to capacity.
+    pub fn row_group_rows_for(
         &mut self,
         source_id: &str,
         path: &Path,
@@ -134,10 +150,8 @@ impl ParquetCache {
         Ok(rows)
     }
 
-    pub(crate) fn refresh_row_group_order(
-        order: &mut VecDeque<(PathBuf, usize)>,
-        key: &(PathBuf, usize),
-    ) {
+    /// Refresh LRU order for a row-group key (most-recently-used last).
+    pub fn refresh_row_group_order(order: &mut VecDeque<(PathBuf, usize)>, key: &(PathBuf, usize)) {
         if order.is_empty() {
             return;
         }
@@ -147,20 +161,23 @@ impl ParquetCache {
     }
 }
 
+/// Bounded decoded-row cache keyed by absolute row index.
 #[derive(Default)]
-pub(crate) struct RowCache {
-    pub(crate) rows: HashMap<usize, RowView>,
-    pub(crate) order: VecDeque<usize>,
+pub struct RowCache {
+    /// Cached rows by absolute index.
+    pub rows: HashMap<usize, RowView>,
+    /// Insertion order for oldest-first eviction.
+    pub order: VecDeque<usize>,
 }
 
 impl RowCache {
     /// Return a cloned cached row by absolute index.
-    pub(crate) fn get(&self, idx: usize) -> Option<RowView> {
+    pub fn get(&self, idx: usize) -> Option<RowView> {
         self.rows.get(&idx).cloned()
     }
 
     /// Insert or refresh a cached row and evict oldest entries over `capacity`.
-    pub(crate) fn insert(&mut self, idx: usize, row: RowView, capacity: usize) {
+    pub fn insert(&mut self, idx: usize, row: RowView, capacity: usize) {
         if capacity == 0 {
             return;
         }
@@ -178,6 +195,9 @@ impl RowCache {
     }
 }
 
-pub(crate) type ParquetGroupKey = (PathBuf, usize);
-pub(crate) type ParquetGroupRequest = (usize, usize, ShardIndex);
-pub(crate) type ParquetManifestCandidates = (Vec<String>, HashMap<String, u64>, usize);
+/// Cache key for one parquet row-group request: shard path + group position.
+pub type ParquetGroupKey = (PathBuf, usize);
+/// One row-group read request: absolute index, in-group offset, shard.
+pub type ParquetGroupRequest = (usize, usize, ShardIndex);
+/// Remote manifest listing: candidates, per-candidate sizes, total rows.
+pub type ParquetManifestCandidates = (Vec<String>, HashMap<String, u64>, usize);

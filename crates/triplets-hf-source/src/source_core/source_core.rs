@@ -1,11 +1,6 @@
+//! Hugging Face row source: remote download/expansion over a generic local reader.
 use crate::config::HuggingFaceRowsConfig;
-use crate::constants::{
-    HF_PARQUET_MANIFEST_DIR, HF_REMOTE_BOOTSTRAP_SHARDS, HF_SHARD_STORE_SOURCE_SIZE_KEY,
-};
-use crate::constants::{
-    HF_RECIPE_ANCHOR_ANCHOR_WRONG_ARTICLE, HF_RECIPE_ANCHOR_CONTEXT_WRONG_ARTICLE,
-    HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE,
-};
+use crate::constants::{HF_REMOTE_BOOTSTRAP_SHARDS, HF_SHARD_STORE_SOURCE_SIZE_KEY};
 #[cfg(test)]
 use crate::download::list_remote_candidates_from_parquet_manifest_with_runtime;
 use crate::download::{
@@ -14,30 +9,46 @@ use crate::download::{
     first_uncached_order_position, format_shard_label, list_remote_candidates_with_runtime,
     remote_url_for_candidate, shared_http_runtime, validate_token_with_runtime,
 };
-#[cfg(test)]
-use crate::huggingface_source::ParquetManifestCandidates;
-use crate::huggingface_source::{EligibleIndexCache, ParquetCache, RowCache};
-use crate::rows;
-use crate::shard_index::{
-    build_shard_index, index_single_shard, is_store_shard_path, shard_store_path_for,
+use triplets_parquet_source::ParquetRowSource;
+use triplets_parquet_source::shard_index::{
+    index_single_shard, is_store_shard_path, shard_store_path_for,
 };
-use crate::shard_indexer;
-use crate::types::SourceState;
 
 use chrono::Utc;
 use reqwest_drive::ClientWithMiddleware;
 use simd_r_drive::storage_engine::traits::{DataStoreReader, DataStoreWriter};
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tracing::{debug, info, warn};
 use triplets_core::SamplerError;
-use triplets_core::config::{NegativeStrategy, SamplerConfig, Selector, TripletRecipe};
-use triplets_core::data::SectionRole;
+use triplets_core::config::SamplerConfig;
 use triplets_core::source::{DataSource, SourceCursor, SourceSnapshot};
+
+/// Remote download frontier for a [`HuggingFaceRowSource`].
+///
+/// Split out of the old unified `SourceState`: the local row frontier
+/// (`shards`, `materialized_rows`) is owned by the inner
+/// [`ParquetRowSource`]; this tracks only what remains to be fetched.
+/// Newly downloaded shards merge into the local index via
+/// [`ParquetRowSource::ingest_shard`].
+#[derive(Debug, Default)]
+pub(crate) struct HfRemoteState {
+    /// Sorted, immutable list of all remote candidate identifiers.  Never
+    /// shuffled in-place — ordering is expressed via `remote_candidate_order`.
+    pub(crate) remote_candidates: Option<Vec<String>>,
+    pub(crate) remote_candidate_sizes: HashMap<String, u64>,
+    /// Seed-derived permutation of indices into `remote_candidates`.  For a
+    /// given (seed, total) this is always the same sequence, regardless of
+    /// how many shards have been consumed previously.
+    pub(crate) remote_candidate_order: Vec<usize>,
+    pub(crate) next_remote_idx: usize,
+}
 
 /// Bulk-oriented Hugging Face source backed by local shard files.
 ///
@@ -74,8 +85,7 @@ use triplets_core::source::{DataSource, SourceCursor, SourceSnapshot};
 /// current cycle.  The skipped position becomes available again when the candidate
 /// list is next rebuilt, which happens on:
 ///
-/// * **Disk-cap eviction** — `sync_shard_state_from_disk_locked` nulls
-///   `remote_candidates` and resets `next_remote_idx` to 0 whenever the cache
+/// * **Disk-cap eviction** — the remote frontier resets whenever the cache
 ///   manager removes any shard from disk.  The next expansion cycle re-fetches the
 ///   HF manifest, rebuilds the permutation, and advances the cursor past shards
 ///   still present on disk via `first_uncached_order_position`.
@@ -93,6 +103,7 @@ use triplets_core::source::{DataSource, SourceCursor, SourceSnapshot};
 /// is non-fatal and only produces a warning.
 pub struct HuggingFaceRowSource {
     pub(crate) config: HuggingFaceRowsConfig,
+    pub(crate) inner: ParquetRowSource,
     pub(crate) http_runtime: Arc<tokio::runtime::Runtime>,
     /// Reusable HTTP client with pooled TCP/TLS connections, throttling, and
     /// exponential backoff for retries.
@@ -113,11 +124,7 @@ pub struct HuggingFaceRowSource {
     /// production, you won't get automatic retry — compile with `--release`
     /// to enable it.
     pub(crate) http_client: ClientWithMiddleware,
-    pub(crate) sampler_config: Arc<Mutex<Option<SamplerConfig>>>,
-    pub(crate) state: Arc<Mutex<SourceState>>,
-    pub(crate) cache: Arc<Mutex<RowCache>>,
-    pub(crate) parquet_cache: Arc<Mutex<ParquetCache>>,
-    pub(crate) eligible_index: Arc<Mutex<EligibleIndexCache>>,
+    pub(crate) remote: Arc<Mutex<HfRemoteState>>,
     /// Handle to the running background shard-expansion thread, if any.
     /// `is_finished()` returns true once the thread exits for any reason
     /// including panic, so this can never get permanently stuck the way
@@ -129,13 +136,10 @@ impl Clone for HuggingFaceRowSource {
     fn clone(&self) -> Self {
         Self {
             config: self.config.clone(),
+            inner: self.inner.clone(),
             http_runtime: Arc::clone(&self.http_runtime),
             http_client: self.http_client.clone(),
-            sampler_config: Arc::clone(&self.sampler_config),
-            state: Arc::clone(&self.state),
-            cache: Arc::clone(&self.cache),
-            parquet_cache: Arc::clone(&self.parquet_cache),
-            eligible_index: Arc::clone(&self.eligible_index),
+            remote: Arc::clone(&self.remote),
             expansion_thread: Arc::clone(&self.expansion_thread),
         }
     }
@@ -165,23 +169,14 @@ impl HuggingFaceRowSource {
             validate_token_with_runtime(&http_client, &config, &http_runtime)?;
         }
 
-        fs::create_dir_all(&config.snapshot_dir).map_err(|err| {
-            SamplerError::SourceUnavailable {
-                source_id: config.source_id.clone(),
-                reason: format!(
-                    "failed creating snapshot_dir {}: {err}",
-                    config.snapshot_dir.display()
-                ),
-            }
-        })?;
-
         info!(
             "[triplets:hf] {} indexing local shards in {}",
             config.source_id,
             config.snapshot_dir.display()
         );
-        let (shards, discovered) = build_shard_index(&config).unwrap_or_default();
-        if discovered == 0 {
+        let inner =
+            ParquetRowSource::new(triplets_parquet_source::ParquetRowsConfig::from(&config))?;
+        if inner.materialized_row_count() == 0 {
             info!(
                 "[triplets:hf] {} no local shards found in {} — lazy remote download enabled",
                 config.source_id,
@@ -189,89 +184,49 @@ impl HuggingFaceRowSource {
             );
         }
 
-        let materialized_rows = discovered;
-
         info!(
             "[triplets:hf] {} source ready in {:.2}s (rows={}, shards={})",
             config.source_id,
             start_new.elapsed().as_secs_f64(),
-            materialized_rows,
-            shards.len()
+            inner.materialized_row_count(),
+            inner.shard_count(),
         );
 
-        let source = Self {
+        Ok(Self {
             config,
+            inner,
             http_runtime,
             http_client,
-            sampler_config: Arc::new(Mutex::new(None)),
-            state: Arc::new(Mutex::new(SourceState {
-                materialized_rows,
-                shards,
-                remote_candidates: None,
-                remote_candidate_sizes: HashMap::new(),
-                next_remote_idx: 0,
-                remote_candidate_order: Vec::new(),
-            })),
-            cache: Arc::new(Mutex::new(RowCache::default())),
-            parquet_cache: Arc::new(Mutex::new(ParquetCache::default())),
-            eligible_index: Arc::new(Mutex::new(EligibleIndexCache::default())),
+            remote: Arc::new(Mutex::new(HfRemoteState::default())),
             expansion_thread: Arc::new(Mutex::new(None)),
-        };
-
-        // Post-initialization: transcode any local transient files to .simdr stores
-        // with pre-corrected global offsets to prevent synthetic ID collisions.
-        {
-            let mut state = source
-                .state
-                .lock()
-                .map_err(|_| SamplerError::SourceUnavailable {
-                    source_id: source.config.source_id.clone(),
-                    reason: "huggingface source state lock poisoned".to_string(),
-                })?;
-            let mut running_total = 0usize;
-            let mut transcoded_shards = Vec::with_capacity(state.shards.len());
-            for mut shard in state.shards.drain(..) {
-                shard.global_start = running_total;
-                if let Some(transcoded) = rows::transcode_transient_shard_to_store(&source, &shard)?
-                {
-                    running_total = running_total.saturating_add(transcoded.row_count);
-                    transcoded_shards.push(transcoded);
-                }
-            }
-            state.shards = transcoded_shards;
-            state.materialized_rows = running_total;
-        }
-
-        Ok(source)
+        })
     }
 
     pub(crate) fn set_active_sampler_config(&self, config: &SamplerConfig) {
-        if let Ok(mut slot) = self.sampler_config.lock() {
-            *slot = Some(config.clone());
-        }
+        self.inner.set_active_sampler_config(config);
 
         // Rebuild the permuted order index whenever this is called (every
         // actually influences the shard download order.  Already-downloaded
         // shards are skipped via first_uncached_order_position regardless of
         // the permutation, so no re-downloads occur from re-ordering.
-        if let Ok(mut state) = self.state.lock()
-            && let Some(candidates) = state.remote_candidates.clone()
+        if let Ok(mut remote) = self.remote.lock()
+            && let Some(candidates) = remote.remote_candidates.clone()
         {
             let new_order = build_candidate_order(&self.config, &candidates, config.seed);
-            let next_idx =
-                first_uncached_order_position(&self.config, &candidates, &new_order, &state.shards);
-            state.remote_candidate_order = new_order;
-            state.next_remote_idx = next_idx;
+            let next_idx = first_uncached_order_position(
+                &self.config,
+                &candidates,
+                &new_order,
+                &self.inner.shards_snapshot(),
+            );
+            remote.remote_candidate_order = new_order;
+            remote.next_remote_idx = next_idx;
         }
     }
 
     #[cfg(test)]
     fn active_or_default_sampler_config(&self) -> SamplerConfig {
-        self.sampler_config
-            .lock()
-            .ok()
-            .and_then(|slot| slot.clone())
-            .unwrap_or_default()
+        self.inner.sampler_config_snapshot().unwrap_or_default()
     }
 
     #[cfg(test)]
@@ -295,55 +250,14 @@ impl HuggingFaceRowSource {
         <Self as DataSource>::reported_record_count(self, &config)
     }
 
-    /// Compute the effective internal row read target from refresh `limit`.
-    pub(crate) fn effective_refresh_batch_target(&self, limit: usize) -> usize {
-        let multiplier = self.config.refresh_batch_multiplier.max(1);
-        limit.saturating_mul(multiplier)
-    }
-
     /// Compute dynamic `len_hint` headroom rows based on sampler and source config.
     pub(crate) fn effective_expansion_headroom_rows(&self) -> usize {
         let multiplier = self.config.remote_expansion_headroom_multiplier.max(1);
-        let base = self
-            .sampler_config
-            .lock()
-            .ok()
-            .and_then(|config| config.as_ref().map(|value| value.per_source_max_pool))
-            .unwrap_or(self.config.cache_capacity)
-            .max(1);
-        base.saturating_mul(multiplier)
+        self.inner.active_pool_size().saturating_mul(multiplier)
     }
 
     pub(crate) fn configured_sampler_seed(&self) -> Result<u64, SamplerError> {
-        self.sampler_config
-            .lock()
-            .map_err(|_| SamplerError::SourceUnavailable {
-                source_id: self.config.source_id.clone(),
-                reason: "huggingface sampler-config lock poisoned".to_string(),
-            })?
-            .as_ref()
-            .map(|config| config.seed)
-            .ok_or_else(|| SamplerError::SourceInconsistent {
-                source_id: self.config.source_id.clone(),
-                details: "huggingface source sampler configuration not provided".to_string(),
-            })
-    }
-
-    pub(crate) fn paging_seed(&self, total: usize) -> Result<u64, SamplerError> {
-        let sampler_seed = self.configured_sampler_seed()?;
-        Ok(triplets_core::source::IndexablePager::seed_for_sampler(
-            &self.config.source_id,
-            total,
-            sampler_seed,
-        ))
-    }
-
-    pub(crate) fn normalized_shard_extensions(config: &HuggingFaceRowsConfig) -> Vec<String> {
-        config
-            .shard_extensions
-            .iter()
-            .map(|value| value.trim().trim_start_matches('.').to_ascii_lowercase())
-            .collect::<Vec<_>>()
+        self.inner.configured_sampler_seed()
     }
 
     /// Resolve and filter remote shard candidates from manifest or repository listing.
@@ -360,18 +274,13 @@ impl HuggingFaceRowSource {
     pub(crate) fn list_remote_candidates_from_parquet_manifest(
         http_client: &ClientWithMiddleware,
         config: &HuggingFaceRowsConfig,
-    ) -> Result<ParquetManifestCandidates, SamplerError> {
+    ) -> Result<triplets_parquet_source::row_view::ParquetManifestCandidates, SamplerError> {
         list_remote_candidates_from_parquet_manifest_with_runtime(http_client, config, None)
-    }
-
-    /// Return on-disk size for a shard path, or 0 if metadata lookup fails.
-    pub(crate) fn shard_size_bytes(path: &Path) -> u64 {
-        fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
     }
 
     /// Return root directory used for manifest-cached remote shards.
     pub(crate) fn manifest_cache_root(&self) -> PathBuf {
-        self.config.snapshot_dir.join(HF_PARQUET_MANIFEST_DIR)
+        self.config.manifest_cache_root()
     }
 
     /// Ensure row index is available, expanding remote shard set lazily if needed.
@@ -390,34 +299,34 @@ impl HuggingFaceRowSource {
         let mut fetched_candidates = false;
         loop {
             {
-                let state = self
-                    .state
+                let remote = self
+                    .remote
                     .lock()
                     .map_err(|_| SamplerError::SourceUnavailable {
                         source_id: self.config.source_id.clone(),
                         reason: "huggingface source state lock poisoned".to_string(),
                     })?;
 
-                if idx < state.materialized_rows {
+                if idx < self.inner.materialized_row_count() {
                     return Ok(true);
                 }
 
-                if let Some(candidates) = &state.remote_candidates
-                    && state.next_remote_idx >= candidates.len()
+                if let Some(candidates) = &remote.remote_candidates
+                    && remote.next_remote_idx >= candidates.len()
                 {
                     return Ok(false);
                 }
             }
 
             let need_candidates = {
-                let state = self
-                    .state
+                let remote = self
+                    .remote
                     .lock()
                     .map_err(|_| SamplerError::SourceUnavailable {
                         source_id: self.config.source_id.clone(),
                         reason: "huggingface source state lock poisoned".to_string(),
                     })?;
-                state.remote_candidates.is_none()
+                remote.remote_candidates.is_none()
             };
 
             if need_candidates {
@@ -431,14 +340,14 @@ impl HuggingFaceRowSource {
                 }
                 fetched_candidates = true;
 
-                let mut state = self
-                    .state
-                    .lock()
-                    .map_err(|_| SamplerError::SourceUnavailable {
-                        source_id: self.config.source_id.clone(),
-                        reason: "huggingface source state lock poisoned".to_string(),
-                    })?;
-                if state.remote_candidates.is_none() {
+                let mut remote =
+                    self.remote
+                        .lock()
+                        .map_err(|_| SamplerError::SourceUnavailable {
+                            source_id: self.config.source_id.clone(),
+                            reason: "huggingface source state lock poisoned".to_string(),
+                        })?;
+                if remote.remote_candidates.is_none() {
                     let (mut candidates, candidate_sizes) = list_remote_candidates_with_runtime(
                         &self.http_client,
                         &self.config,
@@ -458,24 +367,24 @@ impl HuggingFaceRowSource {
                         &self.config,
                         &candidates,
                         &order,
-                        &state.shards,
+                        &self.inner.shards_snapshot(),
                     );
 
-                    state.remote_candidates = Some(candidates);
-                    state.remote_candidate_order = order;
-                    state.remote_candidate_sizes = candidate_sizes;
-                    state.next_remote_idx = next_idx;
+                    remote.remote_candidates = Some(candidates);
+                    remote.remote_candidate_order = order;
+                    remote.remote_candidate_sizes = candidate_sizes;
+                    remote.next_remote_idx = next_idx;
 
-                    let candidate_count = state
+                    let candidate_count = remote
                         .remote_candidates
                         .as_ref()
                         .map(|values| values.len())
                         .unwrap_or(0);
-                    let bootstrap_needed = state.materialized_rows == 0
+                    let bootstrap_needed = self.inner.materialized_row_count() == 0
                         && candidate_count > 0
-                        && state.next_remote_idx == 0;
-                    let known_rows = state.materialized_rows;
-                    let shard_count = state.shards.len();
+                        && remote.next_remote_idx == 0;
+                    let known_rows = self.inner.materialized_row_count();
+                    let shard_count = self.inner.shard_count();
                     info!(
                         "[triplets:hf] {} state: candidates={} known_rows={} active_shards={} disk_cap={}",
                         self.config.source_id,
@@ -490,7 +399,7 @@ impl HuggingFaceRowSource {
                             ))
                             .unwrap_or_else(|| "disabled".to_string()),
                     );
-                    drop(state);
+                    drop(remote);
 
                     if bootstrap_needed {
                         let bootstrap_target = HF_REMOTE_BOOTSTRAP_SHARDS.min(candidate_count);
@@ -509,7 +418,7 @@ impl HuggingFaceRowSource {
                         );
                     }
                 } else {
-                    drop(state);
+                    drop(remote);
                 }
                 continue;
             }
@@ -517,12 +426,6 @@ impl HuggingFaceRowSource {
                 return Ok(false);
             }
         }
-    }
-
-    pub(crate) fn is_parquet_path(path: &Path) -> bool {
-        path.extension()
-            .and_then(|value| value.to_str())
-            .is_some_and(|value| value.eq_ignore_ascii_case("parquet"))
     }
 
     /// Download a shard URL and materialize it under snapshot dir.
@@ -543,7 +446,9 @@ impl HuggingFaceRowSource {
             None,
         )
     }
+}
 
+impl HuggingFaceRowSource {
     /// Download and register the next remote shard candidate.
     ///
     /// If the shard's store file already exists on disk (materialised from a previous
@@ -552,35 +457,35 @@ impl HuggingFaceRowSource {
     /// position is consumed either way, but no redundant network traffic occurs.
     pub(crate) fn download_next_remote_shard(&self) -> Result<bool, SamplerError> {
         let (remote_total, cached_shards, candidate_idx, remote_path, expected_bytes) = {
-            let mut state = self
-                .state
+            let mut remote = self
+                .remote
                 .lock()
                 .map_err(|_| SamplerError::SourceUnavailable {
                     source_id: self.config.source_id.clone(),
                     reason: "huggingface source state lock poisoned".to_string(),
                 })?;
             {
-                let Some(candidates) = &state.remote_candidates else {
+                let Some(candidates) = &remote.remote_candidates else {
                     return Ok(false);
                 };
-                if state.next_remote_idx >= candidates.len() {
+                if remote.next_remote_idx >= candidates.len() {
                     return Ok(false);
                 }
-                let sequence_pos = state.next_remote_idx;
+                let sequence_pos = remote.next_remote_idx;
                 let remote_total = candidates.len();
-                let cached_shards = state.shards.len();
+                let cached_shards = self.inner.shard_count();
                 // Use the seed-derived order index so the mapping from position →
                 // shard is stable and independent of how many shards were previously
                 // consumed.  Fall back to direct indexing only if the order vec is
                 // somehow not populated (should never happen after candidates are set).
-                let candidate_idx = state
+                let candidate_idx = remote
                     .remote_candidate_order
                     .get(sequence_pos)
                     .copied()
                     .unwrap_or(sequence_pos);
                 let remote_path = candidates[candidate_idx].clone();
-                let expected_bytes = state.remote_candidate_sizes.get(&remote_path).copied();
-                state.next_remote_idx += 1;
+                let expected_bytes = remote.remote_candidate_sizes.get(&remote_path).copied();
+                remote.next_remote_idx += 1;
 
                 // If this shard is already materialised on disk (from a previous run),
                 // skip the download — it is already counted in materialized_rows via
@@ -594,7 +499,7 @@ impl HuggingFaceRowSource {
                 // When the manifest does not provide a size, a lightweight HTTP HEAD
                 // size from `Content-Length` so that staleness detection still works
                 // without depending on the datasets-server API.
-                let store_path = shard_indexer::candidate_store_path(&self.config, &remote_path);
+                let store_path = crate::download::candidate_store_path(&self.config, &remote_path);
                 if store_path.exists() {
                     // Resolve the expected remote size: prefer the manifest-provided
                     // value, but fall back to an HTTP HEAD request so staleness
@@ -633,7 +538,8 @@ impl HuggingFaceRowSource {
                         // If the handle isn't cached yet, the store was just loaded
                         // and we'll catch staleness on the next cycle.
                         let stale = self
-                            .config
+                            .inner
+                            .config()
                             .store_cache
                             .lock_ok()
                             .and_then(|cache| cache.get(&store_path).cloned())
@@ -661,7 +567,10 @@ impl HuggingFaceRowSource {
                                 stale,
                                 expected,
                             );
-                            crate::disk_cache::remove_stale_store(&self.config, &store_path);
+                            triplets_parquet_source::store_cache::remove_stale_store(
+                                self.inner.config(),
+                                &store_path,
+                            );
                         }
                     }
 
@@ -699,18 +608,11 @@ impl HuggingFaceRowSource {
             Some(self.http_runtime.as_ref()),
         )?;
 
-        let global_start = {
-            let state = self
-                .state
-                .lock()
-                .map_err(|_| SamplerError::SourceUnavailable {
-                    source_id: self.config.source_id.clone(),
-                    reason: "huggingface source state lock poisoned".to_string(),
-                })?;
-            state.materialized_rows
-        };
-
-        let (maybe_shard, _) = index_single_shard(&self.config, &local_path, global_start)?;
+        // Provisional offset for indexing; the authoritative assignment
+        // happens inside `ingest_shard` under the local-frontier lock.
+        let provisional_start = self.inner.materialized_row_count();
+        let (maybe_shard, _) =
+            index_single_shard(self.inner.config(), &local_path, provisional_start)?;
         let Some(shard) = maybe_shard else {
             warn!(
                 "[triplets:hf] downloaded shard had zero rows and was skipped: {}",
@@ -718,14 +620,6 @@ impl HuggingFaceRowSource {
             );
             return Ok(true);
         };
-
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| SamplerError::SourceUnavailable {
-                source_id: self.config.source_id.clone(),
-                reason: "huggingface source state lock poisoned".to_string(),
-            })?;
 
         let rows_to_add = shard.row_count;
         // All rows from this shard are now available.  A per-shard cap was
@@ -738,7 +632,6 @@ impl HuggingFaceRowSource {
         }
 
         let mut shard = shard;
-        shard.global_start = state.materialized_rows;
         shard.row_count = rows_to_add;
         shard
             .parquet_row_groups
@@ -748,8 +641,10 @@ impl HuggingFaceRowSource {
             *count = (*count).min(allowed);
         }
 
-        drop(state);
-        let mut shard = match rows::transcode_transient_shard_to_store(self, &shard)? {
+        let mut shard = match triplets_parquet_source::rows::transcode_transient_shard_to_store(
+            &self.inner,
+            &shard,
+        )? {
             Some(shard) => shard,
             None => return Ok(true),
         };
@@ -762,7 +657,8 @@ impl HuggingFaceRowSource {
                 // Drop the active DataStore handle before rename/remove to avoid
                 // file lock violations on Windows.
                 let _ = self
-                    .config
+                    .inner
+                    .config()
                     .store_cache
                     .lock_ok()
                     .map(|mut cache| cache.remove(&shard.path));
@@ -825,64 +721,53 @@ impl HuggingFaceRowSource {
         });
         if source_size > 0 {
             // Force the engine to acquire the handle using the new canonical path.
-            if let Ok(store) = shard_indexer::get_or_open_shard_store(self, &shard.path) {
+            if let Ok(store) = triplets_parquet_source::shard_indexer::get_or_open_shard_store(
+                &self.inner,
+                &shard.path,
+            ) {
                 let _ = store.write(HF_SHARD_STORE_SOURCE_SIZE_KEY, &source_size.to_le_bytes());
             }
         }
 
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| SamplerError::SourceUnavailable {
-                source_id: self.config.source_id.clone(),
-                reason: "huggingface source state lock poisoned".to_string(),
-            })?;
-        state.materialized_rows += shard.row_count;
         shard.remote_candidate = Some(remote_path.clone());
-        state.shards.push(shard);
-        drop(state);
-        shard_indexer::invalidate_eligible_index(self);
+        // Hot-reload into the generic local index: assigns global_start,
+        // bumps materialized_rows, and invalidates the eligible-row index
+        // under the local-frontier lock.
+        self.inner.ingest_shard(shard)?;
 
-        let mut state = self
-            .state
+        // Enforce the disk cap (clears row caches + eligible index when
+        // anything was evicted, all inside the generic layer).
+        let evicted_any = self.inner.enforce_disk_cap()?;
+        if evicted_any {
+            // Mirror the old sync behavior: evicted shards must be
+            // re-downloaded, so reset the remote download frontier.
+            if let Ok(mut remote) = self.remote.lock() {
+                remote.remote_candidates = None;
+                remote.remote_candidate_order = Vec::new();
+                remote.next_remote_idx = 0;
+            }
+        }
+
+        let materialized_rows = self.inner.materialized_row_count();
+        let shard_count = self.inner.shard_count();
+        let total_remote = self
+            .remote
             .lock()
-            .map_err(|_| SamplerError::SourceUnavailable {
-                source_id: self.config.source_id.clone(),
-                reason: "huggingface source state lock poisoned".to_string(),
-            })?;
-
-        let evicted_any = shard_indexer::enforce_disk_cap_locked(self, &mut state, &local_path)?;
-        let materialized_rows = state.materialized_rows;
-        let shard_count = state.shards.len();
-        let total_remote = state
-            .remote_candidates
-            .as_ref()
-            .map(|c| c.len())
+            .map(|remote| {
+                remote
+                    .remote_candidates
+                    .as_ref()
+                    .map(|c| c.len())
+                    .unwrap_or(0)
+            })
             .unwrap_or(0);
-        let active_shards = state.shards.clone();
-        let usage_bytes = shard_indexer::manifest_usage_bytes_locked(self, &state);
+        let usage_bytes = self.inner.usage_bytes_under(&self.manifest_cache_root());
         let usage_gib = usage_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
         let cap_str = self
             .config
             .local_disk_cap_bytes
             .map(|bytes| format!("{:.2} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0)))
             .unwrap_or_else(|| "disabled".to_string());
-        drop(state);
-        shard_indexer::prune_store_cache_to_shards(self, &active_shards);
-
-        if evicted_any {
-            if let Ok(mut cache) = self.cache.lock() {
-                cache.rows.clear();
-                cache.order.clear();
-            }
-            if let Ok(mut parquet_cache) = self.parquet_cache.lock() {
-                parquet_cache.readers.clear();
-                parquet_cache.row_groups.clear();
-                parquet_cache.row_group_order.clear();
-            }
-            shard_indexer::invalidate_eligible_index(self);
-        }
-
         // `shard_count` is the number of shards currently on disk; `total_remote` is
         // how many shards the remote manifest reports in total for this dataset.
         info!(
@@ -955,22 +840,28 @@ impl HuggingFaceRowSource {
 
     /// Return the current index-domain upper bound for refresh paging.
     pub(crate) fn len_hint(&self) -> Option<usize> {
-        let state = self.state.lock().ok()?;
-        let known = state.materialized_rows;
+        let known = self.inner.materialized_row_count();
         if known > 0 {
             let mut upper = known;
-            if let Some(ref candidates) = state.remote_candidates
-                && state.next_remote_idx < candidates.len()
+            if let Ok(remote) = self.remote.lock()
+                && let Some(ref candidates) = remote.remote_candidates
+                && remote.next_remote_idx < candidates.len()
             {
                 let headroom = self.effective_expansion_headroom_rows();
                 upper = known.saturating_add(headroom);
             }
             return Some(upper.max(known));
         }
-        if state
-            .remote_candidates
-            .as_ref()
-            .is_some_and(|c| c.is_empty())
+        if self
+            .remote
+            .lock()
+            .map(|remote| {
+                remote
+                    .remote_candidates
+                    .as_ref()
+                    .is_some_and(|c| c.is_empty())
+            })
+            .unwrap_or(false)
         {
             return Some(0);
         }
@@ -985,6 +876,10 @@ impl DataSource for HuggingFaceRowSource {
     }
 
     /// Refresh source records for the requested cursor and row limit.
+    ///
+    /// Pages only over materialized local rows (delegated to the inner
+    /// generic reader, so reads are always instant); remote expansion
+    /// happens via bootstrap below and the background thread after reads.
     fn refresh(
         &self,
         config: &SamplerConfig,
@@ -992,157 +887,38 @@ impl DataSource for HuggingFaceRowSource {
         limit: Option<usize>,
     ) -> Result<SourceSnapshot, SamplerError> {
         self.set_active_sampler_config(config);
-        let hinted_total = self.len_hint().unwrap_or(0);
-        let max = limit.unwrap_or(hinted_total);
 
-        // Page only over rows that are already on disk.  len_hint() includes
-        // expansion headroom beyond materialized_rows; generating indices into
-        // that range forces ensure_row_available() to download a shard
-        // synchronously mid-read-loop, which blocks for minutes on large
-        // datasets.  Instead, reads are always instant (materialized only),
-        // and a single shard expansion is triggered AFTER the reads complete
-        // so the next refresh call automatically has more rows available.
-        // This way every remote shard is eventually consumed without ever
-        // blocking on the hot read path.
-        let total = {
-            let materialized = {
-                let state = self
-                    .state
-                    .lock()
-                    .map_err(|_| SamplerError::SourceUnavailable {
-                        source_id: self.config.source_id.clone(),
-                        reason: "huggingface source state lock poisoned".to_string(),
-                    })?;
-                state.materialized_rows
-            };
-            if materialized == 0 {
-                // Bootstrap: discover candidates and download the first shard so
-                // the read loop below has rows to work with.  ensure_row_available
-                // handles candidate discovery and the initial shard download.  If
-                // bootstrap fails (no remote dataset, all local rows skipped during
-                // transcoding), return an empty snapshot rather than an error.
-                match self.ensure_row_available(0) {
-                    Ok(true) => {
-                        self.state
-                            .lock()
-                            .map_err(|_| SamplerError::SourceUnavailable {
-                                source_id: self.config.source_id.clone(),
-                                reason: "huggingface source state lock poisoned".to_string(),
-                            })?
-                            .materialized_rows
-                    }
-                    Ok(false) | Err(_) => {
-                        return Ok(SourceSnapshot {
-                            records: Vec::new(),
-                            cursor: SourceCursor {
-                                last_seen: Utc::now(),
-                                revision: 0,
-                            },
-                        });
-                    }
+        if self.inner.materialized_row_count() == 0 {
+            // Bootstrap: discover candidates and download the first shard so
+            // the read loop below has rows to work with.  ensure_row_available
+            // handles candidate discovery and the initial shard download.  If
+            // bootstrap fails (no remote dataset, all local rows skipped during
+            // transcoding), return an empty snapshot rather than an error.
+            match self.ensure_row_available(0) {
+                Ok(true) => {}
+                Ok(false) | Err(_) => {
+                    return Ok(SourceSnapshot {
+                        records: Vec::new(),
+                        cursor: SourceCursor {
+                            last_seen: Utc::now(),
+                            revision: 0,
+                        },
+                    });
                 }
-            } else {
-                materialized
             }
-        };
-
-        if total == 0 {
-            return Ok(SourceSnapshot {
-                records: Vec::new(),
-                cursor: SourceCursor {
-                    last_seen: Utc::now(),
-                    revision: 0,
-                },
-            });
-        }
-
-        let mut start = cursor.map(|state| state.revision as usize).unwrap_or(0);
-        if start >= total {
-            start = 0;
-        }
-
-        let source_id = self.config.source_id.clone();
-        let seed = self.paging_seed(total)?;
-        let mut permutation =
-            triplets_core::source::IndexPermutation::new(total, seed, start as u64);
-
-        let mut records = Vec::new();
-        let read_batch_target = self.effective_refresh_batch_target(max);
-        let mut pending_indices = Vec::with_capacity(read_batch_target);
-        let should_report = total >= 10_000 || max >= 1_024;
-        let report_every = Duration::from_millis(750);
-        let refresh_start = Instant::now();
-        let mut last_report = refresh_start;
-        let mut attempts = 0usize;
-
-        if should_report {
-            info!(
-                "[triplets:source] refresh start source='{}' total={} target={}",
-                source_id, total, max
-            );
-        }
-
-        while attempts < total && records.len() < max {
-            pending_indices.clear();
-            let remaining_attempts = total.saturating_sub(attempts);
-            let to_collect = read_batch_target.min(remaining_attempts);
-            for _ in 0..to_collect {
-                if records.len() + pending_indices.len() >= max {
-                    break;
-                }
-                pending_indices.push(permutation.next());
-                attempts += 1;
-            }
-
-            if pending_indices.is_empty() {
-                break;
-            }
-
-            if should_report {
-                info!(
-                    "[triplets:source] refresh batch source='{}' batch_size={} attempted={} fetched={} elapsed={:.1}s",
-                    source_id,
-                    pending_indices.len(),
-                    attempts,
-                    records.len(),
-                    refresh_start.elapsed().as_secs_f64()
-                );
-            }
-
-            rows::read_row_batch(self, &pending_indices, &mut records, Some(max))?;
-
-            if should_report && last_report.elapsed() >= report_every {
-                info!(
-                    "[triplets:source] refresh progress source='{}' attempted={}/{} fetched={}/{} elapsed={:.1}s",
-                    source_id,
-                    attempts,
-                    total,
-                    records.len(),
-                    max,
-                    refresh_start.elapsed().as_secs_f64()
-                );
-                last_report = Instant::now();
+            if self.inner.materialized_row_count() == 0 {
+                return Ok(SourceSnapshot {
+                    records: Vec::new(),
+                    cursor: SourceCursor {
+                        last_seen: Utc::now(),
+                        revision: 0,
+                    },
+                });
             }
         }
 
-        if should_report {
-            info!(
-                "[triplets:source] refresh done source='{}' attempted={} fetched={} elapsed={:.2}s",
-                source_id,
-                attempts,
-                records.len(),
-                refresh_start.elapsed().as_secs_f64()
-            );
-        }
-
-        // Use the seed-derived permutation cursor as the returned revision
-        // so the next refresh continues from where this one left off.
-        let next_start = permutation.cursor();
-        let last_seen = records
-            .iter()
-            .map(|record| record.updated_at)
-            .max()
-            .unwrap_or_else(Utc::now);
+        let snapshot =
+            <ParquetRowSource as DataSource>::refresh(&self.inner, config, cursor, limit)?;
 
         // Fire background shard expansion via the shared helper.  The helper
         // is also called by the ingestion manager on every scheduling cycle
@@ -1150,13 +926,7 @@ impl DataSource for HuggingFaceRowSource {
         // is skipped), so expansion continues across long epochs.
         crate::expansion::trigger_expansion_if_needed(self);
 
-        Ok(SourceSnapshot {
-            records,
-            cursor: SourceCursor {
-                last_seen,
-                revision: next_start as u64,
-            },
-        })
+        Ok(snapshot)
     }
 
     /// Return exact reported record count from current len hint.
@@ -1171,70 +941,7 @@ impl DataSource for HuggingFaceRowSource {
     }
 
     /// Return mixed default triplet recipes used by Hugging Face row sources.
-    fn default_triplet_recipes(&self) -> Vec<TripletRecipe> {
-        // Dict-dataset mode: negative_columns is set, meaning negatives come
-        // from the same row rather than different records.
-        if !self.config.negative_columns.is_empty() {
-            return vec![TripletRecipe {
-                name: "huggingface_dict_anchor_positive_same_record".into(),
-                anchor: Selector::Role(SectionRole::Anchor),
-                positive_selector: Selector::Role(SectionRole::Context),
-                negative_selector: Selector::Role(SectionRole::Context),
-                negative_strategy: NegativeStrategy::SameRecord,
-                weight: 1.0,
-                instruction: None,
-                allow_same_anchor_positive: false,
-                retrieval_sampling: None,
-            }];
-        }
-
-        // Text-columns mode: anchor_columns is empty and only a plain text column is
-        // mapped.  In this configuration every record's Anchor and Context sections
-        // carry identical text (the single text field is duplicated by row_to_record).
-        // Emit a single SimCSE-style recipe that deliberately allows same-text pairs:
-        // the negative comes from a different record, and the model's dropout layers
-        // provide the necessary embedding variation between the two identical slots.
-        if self.config.anchor_columns.is_empty() {
-            return vec![TripletRecipe {
-                name: HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE.into(),
-                anchor: Selector::Role(SectionRole::Anchor),
-                positive_selector: Selector::Role(SectionRole::Context),
-                negative_selector: Selector::Role(SectionRole::Context),
-                negative_strategy: NegativeStrategy::WrongArticle,
-                weight: 1.0,
-                instruction: None,
-                allow_same_anchor_positive: true,
-                retrieval_sampling: None,
-            }];
-        }
-
-        vec![
-            // Majority lane remains context negatives for broad coverage and
-            // stable optimization across varied HF schemas.
-            TripletRecipe {
-                name: HF_RECIPE_ANCHOR_CONTEXT_WRONG_ARTICLE.into(),
-                anchor: Selector::Role(SectionRole::Anchor),
-                positive_selector: Selector::Role(SectionRole::Context),
-                negative_selector: Selector::Role(SectionRole::Context),
-                negative_strategy: NegativeStrategy::WrongArticle,
-                weight: 0.75,
-                instruction: None,
-                allow_same_anchor_positive: false,
-                retrieval_sampling: None,
-            },
-            // Medium-hard lane adds anchor-as-negative pressure to improve
-            // discrimination between title-like anchor fields.
-            TripletRecipe {
-                name: HF_RECIPE_ANCHOR_ANCHOR_WRONG_ARTICLE.into(),
-                anchor: Selector::Role(SectionRole::Anchor),
-                positive_selector: Selector::Role(SectionRole::Context),
-                negative_selector: Selector::Role(SectionRole::Anchor),
-                negative_strategy: NegativeStrategy::WrongArticle,
-                weight: 0.25,
-                instruction: None,
-                allow_same_anchor_positive: false,
-                retrieval_sampling: None,
-            },
-        ]
+    fn default_triplet_recipes(&self) -> Vec<triplets_core::config::TripletRecipe> {
+        <ParquetRowSource as DataSource>::default_triplet_recipes(&self.inner)
     }
 }

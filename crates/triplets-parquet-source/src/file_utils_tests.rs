@@ -1,4 +1,4 @@
-use super::*;
+use crate::file_utils::*;
 use std::path::Path;
 
 #[test]
