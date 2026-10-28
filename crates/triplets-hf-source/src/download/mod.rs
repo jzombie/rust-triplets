@@ -7,9 +7,9 @@ pub(crate) use download::{
     shard_candidate_seed, shuffle_candidates_deterministically, target_matches_expected_size,
 };
 pub(crate) use download::{
-    build_candidate_order, candidate_target_path, download_and_materialize_shard_with_runtime,
-    first_uncached_order_position, format_shard_label, shared_http_runtime,
-    validate_token_with_runtime,
+    build_candidate_order, candidate_store_path, candidate_target_path,
+    download_and_materialize_shard_with_runtime, first_uncached_order_position, format_shard_label,
+    shared_http_runtime, validate_token_with_runtime,
 };
 pub use download::{
     build_http_client, build_http_runtime, fetch_remote_size_with_runtime,

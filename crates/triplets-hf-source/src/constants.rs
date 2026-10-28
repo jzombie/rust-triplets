@@ -16,21 +16,13 @@ pub const HF_REMOTE_EXPANSION_HEADROOM_MULTIPLIER: usize = 4;
 /// Number of initial remote shards to materialize when bootstrapping an empty
 /// local snapshot before regular lazy expansion.
 pub const HF_REMOTE_BOOTSTRAP_SHARDS: usize = 1;
-/// Multiplies the source `refresh` limit passed by `IngestionManager`
-/// (`step.unwrap_or(max_records)`) to set this source's internal row-read
-/// batch target for each refresh pass.
-pub const HF_REFRESH_BATCH_MULTIPLIER: usize = 8;
-
-/// Extension used by persisted per-shard row-store files.
-pub const HF_SHARD_STORE_EXTENSION: &str = "simdr";
-/// Key prefix for individual row payload entries in shard row stores.
-pub const HF_SHARD_STORE_ROW_PREFIX: &[u8] = b"rowv1|";
-/// Metadata key storing row counts in shard row stores.
-pub const HF_SHARD_STORE_META_ROWS_KEY: &[u8] = b"meta|rows";
-/// Metadata key storing the original source shard size from the remote
-/// manifest at download time.  Compared against the current manifest on
-/// subsequent cycles to detect out-of-date shards.
-pub const HF_SHARD_STORE_SOURCE_SIZE_KEY: &[u8] = b"meta|source_size";
+// Row-store format, refresh batching, temp-download, and recipe constants
+// live in `triplets-parquet-source` and are re-exported here for compatibility.
+pub use triplets_parquet_source::constants::HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE;
+pub(crate) use triplets_parquet_source::constants::{
+    HF_REFRESH_BATCH_MULTIPLIER, HF_SHARD_STORE_EXTENSION, HF_SHARD_STORE_SOURCE_SIZE_KEY,
+    HF_TEMP_DOWNLOAD_PREFIX,
+};
 /// Directory segment used when no split is specified (all-splits mode).
 /// Must not collide with any real HF split name; HF split names never start with `_`.
 pub const HF_ALL_SPLITS_DIR: &str = "_all";
@@ -124,10 +116,6 @@ pub const ENV_TRIPLETS_HF_WHOAMI_ENDPOINT: &str = "TRIPLETS_HF_WHOAMI_ENDPOINT";
 /// Managed cache group for Hugging Face snapshot-backed sources.
 pub const HF_GROUP: &str = "triplets/huggingface";
 
-/// Prefix for temporary download files created by `allocate_temp_download_path`.
-/// Used to identify temp files that can be safely deleted after transcoding.
-pub const HF_TEMP_DOWNLOAD_PREFIX: &str = "triplets_hf_";
-
 /// Default file extension when the original filename has no extension.
 /// Used as fallback when building temp download paths.
 pub const HF_TEMP_DEFAULT_EXTENSION: &str = "part";
@@ -144,13 +132,3 @@ pub(crate) const HF_SOURCE_KEY_TEXT_COLUMNS: &str = "text_columns";
 pub(crate) const HF_SOURCE_KEY_TRUST: &str = "trust";
 pub(crate) const HF_SOURCE_KEY_WEIGHT: &str = "weight";
 pub(crate) const HF_SOURCE_KEY_SOURCE_ID: &str = "source_id";
-
-// ---------------------------------------------------------------------------
-// ── Recipe constants ─────────────────────────────────────
-
-/// Default HF text-columns-mode SimCSE-style recipe name.
-pub const HF_RECIPE_TEXT_SIMCSE_WRONG_ARTICLE: &str = "huggingface_text_simcse_wrong_article";
-pub(crate) const HF_RECIPE_ANCHOR_CONTEXT_WRONG_ARTICLE: &str =
-    "huggingface_anchor_context_wrong_article";
-pub(crate) const HF_RECIPE_ANCHOR_ANCHOR_WRONG_ARTICLE: &str =
-    "huggingface_anchor_anchor_wrong_article";

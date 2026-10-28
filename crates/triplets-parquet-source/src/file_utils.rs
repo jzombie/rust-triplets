@@ -8,7 +8,7 @@ use std::path::Path;
 /// - `file.parquet` → `Some("parquet")`
 /// - `file.gz` → `None` (no inner format)
 /// - `file.simdr` → `Some("simdr")`
-pub(crate) fn resolve_inner_extension(path: &Path) -> Option<String> {
+pub fn resolve_inner_extension(path: &Path) -> Option<String> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())?
@@ -29,15 +29,22 @@ pub(crate) fn resolve_inner_extension(path: &Path) -> Option<String> {
 }
 
 /// Check if a file path has a gzip compression extension.
-pub(crate) fn is_gzip_path(path: &Path) -> bool {
+pub fn is_gzip_path(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|ext| ext.eq_ignore_ascii_case("gz"))
 }
 
+/// Check if a file path has a parquet extension.
+pub fn is_parquet_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("parquet"))
+}
+
 // TODO: Obtain list from centralized place
 /// Check if a file path is a text-based format that should be transcoded to .simdr.
-pub(crate) fn is_transient_text(path: &Path) -> bool {
+pub fn is_transient_text(path: &Path) -> bool {
     resolve_inner_extension(path)
         .is_some_and(|ext| ext == "jsonl" || ext == "ndjson" || ext == "json" || ext == "txt")
 }

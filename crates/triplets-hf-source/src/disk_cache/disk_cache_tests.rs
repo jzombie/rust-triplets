@@ -1,7 +1,7 @@
 use super::*;
 use crate::constants::{HF_ALL_SPLITS_DIR, HF_GROUP};
 use crate::disk_cache::ensure_cache_group;
-use crate::test_utils::{test_config, with_current_dir};
+use crate::test_utils::with_current_dir;
 use serial_test::serial;
 use simd_r_drive::storage_engine::DataStore;
 use std::fs;
@@ -149,11 +149,12 @@ fn ensure_cache_group_reports_error() {
 #[test]
 fn open_store_via_cache_inserts_and_reuses() {
     let dir = tempdir().unwrap();
-    let config = test_config(dir.path().to_path_buf());
+    let config = triplets_parquet_source::fixtures::test_config(dir.path().to_path_buf());
     let path = dir.path().join("store.simdr");
     let store = DataStore::open(&path).unwrap();
     drop(store);
-    let first = crate::disk_cache::open_store_via_cache(&config, &path).unwrap();
-    let second = crate::disk_cache::open_store_via_cache(&config, &path).unwrap();
+    let first = triplets_parquet_source::store_cache::open_store_via_cache(&config, &path).unwrap();
+    let second =
+        triplets_parquet_source::store_cache::open_store_via_cache(&config, &path).unwrap();
     assert!(Arc::ptr_eq(&first, &second));
 }

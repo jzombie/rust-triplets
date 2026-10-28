@@ -32,13 +32,14 @@ fn trigger_expansion_if_needed_starts_background_thread() {
     source.http_client = reqwest_drive::ClientBuilder::new(inner_client).build();
 
     {
-        let mut state = source.state.lock().unwrap();
-        state.materialized_rows = 5;
-        state.remote_candidates = Some(vec![
+        let mut local = source.inner.local.lock().unwrap();
+        let mut remote = source.remote.lock().unwrap();
+        local.materialized_rows = 5;
+        remote.remote_candidates = Some(vec![
             "url::http://127.0.0.1:1/ds/resolve/main/train/000.ndjson".to_string(),
         ]);
-        state.next_remote_idx = 0;
-        state.remote_candidate_order = vec![0];
+        remote.next_remote_idx = 0;
+        remote.remote_candidate_order = vec![0];
     }
     assert!(source.expansion_thread.lock().unwrap().is_none());
     crate::expansion::trigger_expansion_if_needed(&source);
@@ -61,10 +62,11 @@ fn trigger_expansion_if_needed_skips_when_all_remote_candidates_consumed() {
     let config = test_config(dir.path().to_path_buf());
     let source = test_source(config);
     {
-        let mut state = source.state.lock().unwrap();
-        state.materialized_rows = 100;
-        state.remote_candidates = Some(vec!["done".to_string()]);
-        state.next_remote_idx = 1;
+        let mut local = source.inner.local.lock().unwrap();
+        let mut remote = source.remote.lock().unwrap();
+        local.materialized_rows = 100;
+        remote.remote_candidates = Some(vec!["done".to_string()]);
+        remote.next_remote_idx = 1;
     }
     crate::expansion::trigger_expansion_if_needed(&source);
     assert!(source.expansion_thread.lock().unwrap().is_none());
@@ -76,8 +78,8 @@ fn trigger_expansion_if_needed_skips_when_total_rows_is_zero() {
     let config = test_config(dir.path().to_path_buf());
     let source = test_source(config);
     {
-        let mut state = source.state.lock().unwrap();
-        state.materialized_rows = 0;
+        let mut local = source.inner.local.lock().unwrap();
+        local.materialized_rows = 0;
     }
     crate::expansion::trigger_expansion_if_needed(&source);
     assert!(source.expansion_thread.lock().unwrap().is_none());

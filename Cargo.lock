@@ -2687,8 +2687,6 @@ dependencies = [
  "chrono",
  "filetime",
  "flate2",
- "parquet",
- "rayon",
  "reqwest",
  "reqwest-drive",
  "serde",
@@ -2702,7 +2700,7 @@ dependencies = [
  "tracing-subscriber",
  "triplets-core",
  "triplets-hf-source",
- "walkdir",
+ "triplets-parquet-source",
 ]
 
 [[package]]
@@ -2714,6 +2712,27 @@ dependencies = [
  "triplets-core",
  "triplets-offline-embedder",
  "triplets-srd-source",
+]
+
+[[package]]
+name = "triplets-parquet-source"
+version = "0.30.1-alpha"
+dependencies = [
+ "cache-manager",
+ "chrono",
+ "flate2",
+ "parquet",
+ "rayon",
+ "serde",
+ "serde_json",
+ "simd-r-drive",
+ "siphasher",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
+ "triplets-core",
+ "triplets-parquet-source",
+ "walkdir",
 ]
 
 [[package]]
