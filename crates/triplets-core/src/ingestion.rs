@@ -426,19 +426,6 @@ impl IngestionManager {
         self.epoch
     }
 
-    /// Reset all raw source stream cursors and drain per-source buffers.
-    ///
-    /// Use this only when starting a deterministic replay from a specific
-    /// epoch (e.g. explicit `set_epoch` calls). A clean-start reset ensures
-    /// the new permutation begins at position 0 of the permuted index space.
-    pub(crate) fn reset_stream_cursors(&mut self) {
-        for state in &mut self.sources {
-            state.cursor = None;
-            state.buffer.clear();
-            state.cache.clear();
-        }
-    }
-
     /// Register a source for on-demand ingestion.
     ///
     /// Returns an error if the source's `id()` matches the reserved `__*__`
