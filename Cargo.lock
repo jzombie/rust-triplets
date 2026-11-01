@@ -2605,7 +2605,7 @@ dependencies = [
 
 [[package]]
 name = "triplets"
-version = "0.30.1-alpha"
+version = "0.31.0-alpha"
 dependencies = [
  "bitcode",
  "bm25",
@@ -2639,7 +2639,7 @@ dependencies = [
 
 [[package]]
 name = "triplets-core"
-version = "0.30.1-alpha"
+version = "0.31.0-alpha"
 dependencies = [
  "bitcode",
  "bm25",
@@ -2665,7 +2665,7 @@ dependencies = [
 
 [[package]]
 name = "triplets-debug"
-version = "0.30.1-alpha"
+version = "0.31.0-alpha"
 dependencies = [
  "cache-manager",
  "chrono",
@@ -2681,14 +2681,12 @@ dependencies = [
 
 [[package]]
 name = "triplets-hf-source"
-version = "0.30.1-alpha"
+version = "0.31.0-alpha"
 dependencies = [
  "cache-manager",
  "chrono",
  "filetime",
  "flate2",
- "parquet",
- "rayon",
  "reqwest",
  "reqwest-drive",
  "serde",
@@ -2702,12 +2700,12 @@ dependencies = [
  "tracing-subscriber",
  "triplets-core",
  "triplets-hf-source",
- "walkdir",
+ "triplets-parquet-source",
 ]
 
 [[package]]
 name = "triplets-offline-embedder"
-version = "0.30.1-alpha"
+version = "0.31.0-alpha"
 dependencies = [
  "simd-r-drive",
  "tempfile",
@@ -2717,8 +2715,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "triplets-parquet-source"
+version = "0.31.0-alpha"
+dependencies = [
+ "cache-manager",
+ "chrono",
+ "flate2",
+ "parquet",
+ "rayon",
+ "serde",
+ "serde_json",
+ "simd-r-drive",
+ "siphasher",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
+ "triplets-core",
+ "triplets-parquet-source",
+ "walkdir",
+]
+
+[[package]]
 name = "triplets-srd-source"
-version = "0.30.1-alpha"
+version = "0.31.0-alpha"
 dependencies = [
  "chrono",
  "simd-r-drive",

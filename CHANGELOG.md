@@ -5,6 +5,57 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [0.31.0-alpha] - 2026-11-01
+
+### Added
+
+- **Generic parquet reader crate (#59).** New `triplets-parquet-source`
+  crate owns the network-independent half of row ingestion, extracted from
+  `triplets-hf-source` with no row-parsing behavior change: column mapping
+  (`text`/`anchor`/`positive`/`negative`/`context`) into `RowView`,
+  deterministic shard indexing with parquet row-group maps, `.simdr`
+  row-store transcoding/caching, and `ParquetRowSource` (`DataSource`
+  impl). `ParquetRowsConfig` carries caller-provided `row_id_namespace`
+  and `taxonomy` instead of baked-in dataset identity. The new crate has
+  no network dependencies (no `reqwest`).
+- **`ParquetRowSource::ingest_shard` hot-reload hook.** Remote-backed
+  wrappers merge freshly materialized shards under the local-frontier
+  lock (`global_start` assigned at push, eligible-row index invalidated),
+  so concurrent background downloads and readers never collide.
+  `HuggingFaceRowSource` is now `{ inner: ParquetRowSource, remote
+  frontier + HTTP state }` and delegates reads; download, manifest
+  expansion, tokens, and `dataset/config/split` identity stay in
+  `triplets-hf-source`.
+- **Local parquet examples and sample dataset.** `make_sample_parquet`
+  generates `crates/triplets-parquet-source/example-dataset/` (two small
+  `(id, title, body, date)` files); `local_ingest` ingests any local
+  parquet dir with CLI-driven column mapping (`--text/--anchor/
+  --positive/--context/--id/--limit/--namespace`, plus `--schema` to
+  print file schemas). No environment variables involved.
+
+### Changed
+
+- `triplets-hf-source` dropped its `parquet`/`rayon`/`walkdir`
+  dependencies (`flate2`/`filetime` moved to dev-dependencies); public
+  API preserved (`HuggingFaceRowSource`, `HuggingFaceRowsConfig`,
+  builders, `download` module, recipe constants via re-export).
+- Transcoded `.simdr` sidecars freeze parsed rows at transcode time:
+  changing the column mapping requires deleting the sidecars (now
+  git-ignored via `*.simdr`). One input file always yields one store;
+  sharding is concatenation of files, not auto-splitting.
+
+### Fixed
+
+- **Epoch streaming no longer replays the head window.** `set_epoch` used
+  to rewind ingestion stream cursors on every epoch, so each epoch re-drew
+  the same leading slice of the corpus. Stream cursors now survive epoch
+  boundaries. Each epoch continues ingestion past the previous epoch's
+  window while draw order still re-permutes per epoch. The
+  `reset_stream_cursors` rewind primitive is deleted entirely (no callers,
+  no replacement). Regression test
+  `consecutive_epochs_draw_disjoint_windows_without_replay` drains two
+  consecutive epochs and asserts zero overlap between windows.
+
 ## [0.30.1-alpha] - 2026-10-27
 
 ### Changed

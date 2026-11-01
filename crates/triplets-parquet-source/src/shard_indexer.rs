@@ -2,29 +2,24 @@ use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use cache_manager::{CacheRoot, EvictPolicy};
 use simd_r_drive::storage_engine::DataStore;
 use siphasher::sip::SipHasher;
 
-use crate::config::HuggingFaceRowsConfig;
-use crate::constants::HF_PARQUET_MANIFEST_DIR;
-use crate::download::candidate_target_path;
-use crate::huggingface_source::EligibleIndexCache;
+use crate::config::ParquetRowsConfig;
+use crate::row_view::EligibleIndexCache;
 use crate::rows;
-use crate::shard_index::{is_store_shard_path, shard_store_path_for};
-use crate::source_core::HuggingFaceRowSource;
-use crate::types::{ShardIndex, SourceState};
+use crate::shard_index::is_store_shard_path;
+use crate::source::ParquetRowSource;
+use crate::types::{LocalShardState, ShardIndex};
 use triplets_core::SamplerError;
 
-pub(crate) fn candidate_store_path(config: &HuggingFaceRowsConfig, candidate: &str) -> PathBuf {
-    shard_store_path_for(&candidate_target_path(config, candidate))
-}
-
-pub(crate) fn open_shard_store(
-    config: &HuggingFaceRowsConfig,
+/// Open (creating parent dirs) the `.simdr` row store at a path.
+pub fn open_shard_store(
+    config: &ParquetRowsConfig,
     shard_store_path: &Path,
 ) -> Result<DataStore, SamplerError> {
     if let Some(parent) = shard_store_path.parent() {
@@ -45,8 +40,9 @@ pub(crate) fn open_shard_store(
     })
 }
 
-pub(crate) fn get_or_open_shard_store(
-    source: &HuggingFaceRowSource,
+/// Get a cached row-store handle or open and cache it.
+pub fn get_or_open_shard_store(
+    source: &ParquetRowSource,
     shard_store_path: &Path,
 ) -> Result<Arc<DataStore>, SamplerError> {
     let mut cache = source.config.store_cache.lock()?;
@@ -60,7 +56,8 @@ pub(crate) fn get_or_open_shard_store(
     Ok(entry.clone())
 }
 
-pub(crate) fn prune_store_cache_to_shards(source: &HuggingFaceRowSource, shards: &[ShardIndex]) {
+/// Drop cached store handles for shards no longer indexed.
+pub fn prune_store_cache_to_shards(source: &ParquetRowSource, shards: &[ShardIndex]) {
     let keep = shards
         .iter()
         .map(|shard| shard.path.clone())
@@ -70,14 +67,16 @@ pub(crate) fn prune_store_cache_to_shards(source: &HuggingFaceRowSource, shards:
     }
 }
 
-pub(crate) fn invalidate_eligible_index(source: &HuggingFaceRowSource) {
+/// Clear the cached eligible-row index (call after index mutations).
+pub fn invalidate_eligible_index(source: &ParquetRowSource) {
     if let Ok(mut cache) = source.eligible_index.lock() {
         *cache = EligibleIndexCache::default();
     }
 }
 
 #[allow(dead_code)]
-pub(crate) fn shard_signature(shards: &[ShardIndex]) -> u64 {
+/// Hash of the shard layout, used to key the eligible-row index cache.
+pub fn shard_signature(shards: &[ShardIndex]) -> u64 {
     let mut hasher = SipHasher::new();
     for shard in shards {
         shard.path.hash(&mut hasher);
@@ -88,8 +87,9 @@ pub(crate) fn shard_signature(shards: &[ShardIndex]) -> u64 {
     hasher.finish()
 }
 #[allow(dead_code)]
-pub(crate) fn build_eligible_rows_from_shards(
-    source: &HuggingFaceRowSource,
+/// Collect eligible absolute row indices from shards (parses rows).
+pub fn build_eligible_rows_from_shards(
+    source: &ParquetRowSource,
     shards: &[ShardIndex],
 ) -> Result<Vec<usize>, SamplerError> {
     let mut eligible = Vec::new();
@@ -111,7 +111,7 @@ pub(crate) fn build_eligible_rows_from_shards(
                 .lock()
                 .map_err(|_| SamplerError::SourceUnavailable {
                     source_id: source.config.source_id.clone(),
-                    reason: "huggingface parquet cache lock poisoned".to_string(),
+                    reason: "parquet cache lock poisoned".to_string(),
                 })?
                 .row_group_rows_for(
                     &source.config.source_id,
@@ -140,18 +140,17 @@ pub(crate) fn build_eligible_rows_from_shards(
 }
 
 #[allow(dead_code)]
-pub(crate) fn eligible_rows(
-    source: &HuggingFaceRowSource,
-) -> Result<Arc<Vec<usize>>, SamplerError> {
+/// Cached eligible absolute row indices for the current shard layout.
+pub fn eligible_rows(source: &ParquetRowSource) -> Result<Arc<Vec<usize>>, SamplerError> {
     let (signature, shards) = {
-        let state = source
-            .state
+        let local = source
+            .local
             .lock()
             .map_err(|_| SamplerError::SourceUnavailable {
                 source_id: source.config.source_id.clone(),
-                reason: "huggingface source state lock poisoned".to_string(),
+                reason: "parquet row source state lock poisoned".to_string(),
             })?;
-        (shard_signature(&state.shards), state.shards.clone())
+        (shard_signature(&local.shards), local.shards.clone())
     };
 
     if let Ok(cache) = source.eligible_index.lock()
@@ -187,7 +186,7 @@ pub(crate) fn eligible_rows(
                 .lock()
                 .map_err(|_| SamplerError::SourceUnavailable {
                     source_id: source.config.source_id.clone(),
-                    reason: "huggingface eligible-index cache lock poisoned".to_string(),
+                    reason: "eligible-index cache lock poisoned".to_string(),
                 })?;
         writable.signature = Some(signature);
         writable.shards = shards;
@@ -201,7 +200,7 @@ pub(crate) fn eligible_rows(
         .lock()
         .map_err(|_| SamplerError::SourceUnavailable {
             source_id: source.config.source_id.clone(),
-            reason: "huggingface eligible-index cache lock poisoned".to_string(),
+            reason: "eligible-index cache lock poisoned".to_string(),
         })?;
     cache.signature = Some(signature);
     cache.shards = shards;
@@ -210,7 +209,7 @@ pub(crate) fn eligible_rows(
 }
 
 /// Recompute shard `global_start` offsets and total materialized row count.
-pub(crate) fn recompute_shard_offsets(state: &mut SourceState) {
+pub fn recompute_shard_offsets(state: &mut LocalShardState) {
     let mut running = 0usize;
     for shard in &mut state.shards {
         shard.global_start = running;
@@ -220,31 +219,30 @@ pub(crate) fn recompute_shard_offsets(state: &mut SourceState) {
 }
 
 /// Sync in-memory shard state from current on-disk snapshot tree.
-pub(crate) fn sync_shard_state_from_disk_locked(
-    _source: &HuggingFaceRowSource,
-    state: &mut SourceState,
-) {
-    // If any shards have been evicted by the cache manager, remove them from
-    // the in-memory index and reset the candidate list so the next expansion
-    // cycle re-queries HF.  `all_candidates_from_parquet_manifest` returns every
-    // shard from the manifest; evicted ones will be re-downloaded on next iteration.
+///
+/// Drops indexed shards whose files no longer exist and recomputes offsets.
+/// Returns `true` when any shard was missing, so remote-backed wrappers can
+/// reset their download frontier (evicted shards must be re-fetched).
+pub fn sync_shard_state_from_disk_locked(state: &mut LocalShardState) -> bool {
     let any_missing = state.shards.iter().any(|shard| !shard.path.exists());
     state.shards.retain(|shard| shard.path.exists());
     recompute_shard_offsets(state);
-    if any_missing {
-        state.remote_candidates = None;
-        state.remote_candidate_order = Vec::new();
-        state.next_remote_idx = 0;
-    }
+    any_missing
 }
 
-/// Apply cache-manager eviction policy to manifest shards and sync in-memory state.
-pub(crate) fn enforce_disk_cap_locked(
-    source: &HuggingFaceRowSource,
-    state: &mut SourceState,
-    _protected_path: &Path,
+/// Apply cache-manager eviction policy to managed shards and sync in-memory state.
+///
+/// Eviction applies to `managed_subdir` under `snapshot_dir` when both it
+/// and `local_disk_cap_bytes` are configured; otherwise returns `false`
+/// without touching anything.
+pub fn enforce_disk_cap_locked(
+    source: &ParquetRowSource,
+    state: &mut LocalShardState,
 ) -> Result<bool, SamplerError> {
-    let Some(cap_bytes) = source.config.local_disk_cap_bytes else {
+    let (Some(cap_bytes), Some(managed_subdir)) = (
+        source.config.local_disk_cap_bytes,
+        source.config.managed_subdir.as_deref(),
+    ) else {
         return Ok(false);
     };
 
@@ -260,16 +258,16 @@ pub(crate) fn enforce_disk_cap_locked(
 
     let cache_root = CacheRoot::from_root(&source.config.snapshot_dir);
     cache_root
-        .ensure_group_with_policy(HF_PARQUET_MANIFEST_DIR, Some(&policy))
+        .ensure_group_with_policy(managed_subdir, Some(&policy))
         .map_err(|err| SamplerError::SourceUnavailable {
             source_id: source.config.source_id.clone(),
             reason: format!(
-                "failed applying manifest cache eviction policy under {}: {err}",
+                "failed applying managed cache eviction policy under {}: {err}",
                 source.config.snapshot_dir.display()
             ),
         })?;
 
-    sync_shard_state_from_disk_locked(source, state);
+    sync_shard_state_from_disk_locked(state);
     let after = state
         .shards
         .iter()
@@ -278,22 +276,18 @@ pub(crate) fn enforce_disk_cap_locked(
     Ok(before != after)
 }
 
-/// Return total on-disk bytes used by manifest-backed shards.
-pub(crate) fn manifest_usage_bytes_locked(
-    source: &HuggingFaceRowSource,
-    state: &SourceState,
-) -> u64 {
-    let manifest_root = source.manifest_cache_root();
+/// Return total on-disk bytes used by transient-managed shards.
+pub fn managed_usage_bytes_locked(source: &ParquetRowSource, state: &LocalShardState) -> u64 {
     state
         .shards
         .iter()
-        .filter(|shard| shard.path.starts_with(&manifest_root))
-        .map(|shard| HuggingFaceRowSource::shard_size_bytes(&shard.path))
+        .filter(|shard| source.config.in_transient_dir(&shard.path))
+        .map(|shard| ParquetRowSource::shard_size_bytes(&shard.path))
         .sum::<u64>()
 }
 
 /// Locate containing shard and local offset for a global row index.
-pub(crate) fn locate_shard(shards: &[ShardIndex], idx: usize) -> Option<(&ShardIndex, usize)> {
+pub fn locate_shard(shards: &[ShardIndex], idx: usize) -> Option<(&ShardIndex, usize)> {
     let pos = shards
         .binary_search_by(|shard| {
             if idx < shard.global_start {
@@ -310,8 +304,8 @@ pub(crate) fn locate_shard(shards: &[ShardIndex], idx: usize) -> Option<(&ShardI
 }
 
 /// Locate parquet row-group and in-group row offset for a local row index.
-pub(crate) fn locate_parquet_group(
-    source: &HuggingFaceRowSource,
+pub fn locate_parquet_group(
+    source: &ParquetRowSource,
     shard: &ShardIndex,
     local_idx: usize,
 ) -> Result<(usize, usize), SamplerError> {

@@ -167,4 +167,48 @@ impl HuggingFaceRowsConfig {
             || !self.context_columns.is_empty()
             || !self.text_columns.is_empty()
     }
+
+    /// Snapshot directory for manifest-cached remote shards.
+    pub(crate) fn manifest_cache_root(&self) -> PathBuf {
+        self.snapshot_dir
+            .join(crate::constants::HF_PARQUET_MANIFEST_DIR)
+    }
+}
+
+impl From<&HuggingFaceRowsConfig> for triplets_parquet_source::ParquetRowsConfig {
+    /// Project HF identity into generic row-reader config.
+    ///
+    /// Record-id fallback becomes `{dataset}:{split}:{row_index}` and
+    /// taxonomy becomes `[dataset=…, config=…, split=…]`, matching the
+    /// historical layout.  The manifest cache root is registered as the
+    /// crate-managed transient dir (with eviction scoped to it), and the
+    /// store cache is shared (cloned `Arc`) so both configs see one pool.
+    fn from(config: &HuggingFaceRowsConfig) -> Self {
+        let mut parquet = triplets_parquet_source::ParquetRowsConfig::new(
+            config.source_id.clone(),
+            config.snapshot_dir.clone(),
+            format!("{}:{}", config.dataset_name, config.split_name),
+            vec![
+                format!("dataset={}", config.dataset_name),
+                format!("config={}", config.config_name),
+                format!("split={}", config.split_name),
+            ],
+        );
+        parquet.shard_extensions = config.shard_extensions.clone();
+        parquet.transient_dirs = vec![config.manifest_cache_root()];
+        parquet.managed_subdir = Some(crate::constants::HF_PARQUET_MANIFEST_DIR.to_string());
+        parquet.cache_capacity = config.cache_capacity;
+        parquet.parquet_row_group_cache_capacity = config.parquet_row_group_cache_capacity;
+        parquet.refresh_batch_multiplier = config.refresh_batch_multiplier;
+        parquet.local_disk_cap_bytes = config.local_disk_cap_bytes;
+        parquet.id_column = config.id_column.clone();
+        parquet.text_columns = config.text_columns.clone();
+        parquet.anchor_columns = config.anchor_columns.clone();
+        parquet.positive_columns = config.positive_columns.clone();
+        parquet.negative_columns = config.negative_columns.clone();
+        parquet.context_columns = config.context_columns.clone();
+        parquet.trust_override = config.trust_override;
+        parquet.store_cache = config.store_cache.clone();
+        parquet
+    }
 }

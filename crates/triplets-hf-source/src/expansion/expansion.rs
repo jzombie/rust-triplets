@@ -16,13 +16,13 @@ pub(crate) static EXPANSION_GATE: std::sync::OnceLock<std::sync::Mutex<()>> =
 /// expansion from stalling for long epochs.
 pub(crate) fn trigger_expansion_if_needed(source: &HuggingFaceRowSource) {
     let needs_expansion = source
-        .state
+        .remote
         .lock()
-        .map(|state| {
-            let all_consumed = state
+        .map(|remote| {
+            let all_consumed = remote
                 .remote_candidates
                 .as_ref()
-                .is_some_and(|c| state.next_remote_idx >= c.len());
+                .is_some_and(|c| remote.next_remote_idx >= c.len());
             !all_consumed
         })
         .unwrap_or(false);
@@ -54,16 +54,12 @@ pub(crate) fn trigger_expansion_if_needed(source: &HuggingFaceRowSource) {
 
             // If candidates not yet fetched, discover them first.
             let needs_candidates = source
-                .state
+                .remote
                 .lock()
                 .map(|s| s.remote_candidates.is_none())
                 .unwrap_or(false);
             if needs_candidates {
-                let target = source
-                    .state
-                    .lock()
-                    .map(|s| s.materialized_rows)
-                    .unwrap_or(0);
+                let target = source.inner.materialized_row_count();
                 if let Err(err) = source.ensure_row_available(target) {
                     warn!(
                         "[triplets:hf] background expansion (candidate fetch) error \

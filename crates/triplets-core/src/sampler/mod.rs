@@ -561,7 +561,11 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         self.epoch_tracker.force_epoch(epoch);
         self.epoch = epoch;
         self.ingestion.set_epoch(epoch);
-        self.ingestion.reset_stream_cursors();
+        // NOTE: stream cursors are intentionally NOT rewound here. Each epoch
+        // continues ingestion past the previous epoch's window (an infinite
+        // forward stream); only a fresh sampler starts at the head. Draw
+        // ORDER still re-permutes per epoch below, and already-emitted rows
+        // stay off-limits via the surviving dedup state.
         // Reset epoch step at epoch boundary so each epoch
         // starts with step=0, giving deterministic step sequences.
         self.ingestion.reset_epoch_step();
@@ -2749,9 +2753,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     }
 
     /// Check whether `sample` passes both per-batch and per-window text dedup.
-    /// The per-batch set is never cleared mid-batch (survives epoch advances),
-    /// while `emitted_text_hashes` is cleared on epoch advance to allow fresh
-    /// permutations.  Both must pass for the sample to be emitted.
+    /// The per-batch set is never cleared mid-batch (survives epoch advances).
+    /// Both must pass for the sample to be emitted.
     fn try_emit_text_sample(
         &mut self,
         sample: &TextSample,
@@ -3686,7 +3689,10 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         inner.register_source(source)
     }
 
-    /// Force sampler epoch to `epoch` (advanced deterministic replay control).
+    /// Advance the sampler epoch, re-permuting draw order while continuing
+    /// ingestion forward. Consecutive epochs draw disjoint rows (an infinite
+    /// forward stream); only a fresh sampler with the same seed reproduces
+    /// an epoch's rows.
     pub fn set_epoch(&self, epoch: u64) -> Result<(), SamplerError> {
         let mut inner = self.inner.lock().unwrap();
         inner.set_epoch(epoch)

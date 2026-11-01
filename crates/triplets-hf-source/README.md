@@ -5,6 +5,17 @@ Hugging Face integration for the [triplets](https://crates.io/crates/triplets) d
 For full documentation on configuring sources, sampling, chunking, and pipeline orchestration,
 see the [main triplets README](https://github.com/jzombie/rust-triplets/blob/main/README.md) on GitHub.
 
+## Crate Split: `triplets-parquet-source`
+
+The network-independent half of row ingestion — column mapping into
+`RowView`, deterministic shard indexing, parquet row-group reads, and
+`.simdr` row-store transcoding/caching (`ParquetRowSource`) — lives in
+the [`triplets-parquet-source`](https://crates.io/crates/triplets-parquet-source)
+crate, which has no network dependencies. This crate keeps only the
+Hugging Face concerns (hub downloads, manifest expansion, tokens,
+per-dataset identity): `HuggingFaceRowSource` wraps `ParquetRowSource`
+and merges background downloads via its `ingest_shard` hot-reload hook.
+
 ## Random Access Hugging Face Source Acceleration
 
 The crate provides O(1) random access to rows through `.simdr` stores backed by [`simd-r-drive`](https://crates.io/crates/simd-r-drive). Transient files (parquet, jsonl.gz, ndjson) are transcoded to `.simdr` format for efficient random-access reads. Parquet files additionally use row-group indexing (`parquet_row_group_map`) to enable targeted reads from specific row groups without scanning the entire file.

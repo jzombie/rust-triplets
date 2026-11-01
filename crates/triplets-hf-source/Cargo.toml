@@ -18,9 +18,6 @@ keywords = [
 [dependencies]
 cache-manager = { workspace = true }
 chrono = { workspace = true }
-flate2 = { workspace = true }
-parquet = { workspace = true }
-rayon = { workspace = true }
 reqwest = { workspace = true }
 reqwest-drive = { workspace = true }
 serde = { workspace = true }
@@ -31,10 +28,11 @@ tempfile = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 triplets-core = { workspace = true }
-walkdir = { workspace = true }
+triplets-parquet-source = { workspace = true }
 
 [dev-dependencies]
 filetime = { workspace = true }
+flate2 = { workspace = true }
 serial_test = { workspace = true }
 tracing-subscriber = { workspace = true }
 

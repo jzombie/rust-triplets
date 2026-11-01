@@ -1,5 +1,5 @@
-use super::*;
-use crate::test_utils::write_parquet_fixture;
+use crate::fixtures::write_parquet_fixture;
+use crate::row_view::*;
 use std::collections::VecDeque;
 use std::fs;
 use std::path::PathBuf;
@@ -158,7 +158,7 @@ fn parquet_cache_refresh_row_group_order_removes_existing() {
     order.push_back(key2.clone());
 
     // refresh_row_group_order removes the existing entry
-    crate::huggingface_source::ParquetCache::refresh_row_group_order(&mut order, &key1);
+    crate::row_view::ParquetCache::refresh_row_group_order(&mut order, &key1);
 
     assert_eq!(order.len(), 1);
     assert_eq!(order[0], key2);
@@ -174,7 +174,7 @@ fn parquet_cache_refresh_row_group_order_noop_for_missing_key() {
     order.push_back(key1.clone());
 
     // Refreshing a key not in the order should be a noop
-    crate::huggingface_source::ParquetCache::refresh_row_group_order(&mut order, &key2);
+    crate::row_view::ParquetCache::refresh_row_group_order(&mut order, &key2);
 
     assert_eq!(order.len(), 1);
     assert_eq!(order[0], key1);
@@ -186,6 +186,6 @@ fn parquet_cache_refresh_row_group_order_noop_for_empty() {
 
     let mut order = VecDeque::new();
     let key = (PathBuf::from("a.parquet"), 0);
-    crate::huggingface_source::ParquetCache::refresh_row_group_order(&mut order, &key);
+    crate::row_view::ParquetCache::refresh_row_group_order(&mut order, &key);
     assert!(order.is_empty());
 }

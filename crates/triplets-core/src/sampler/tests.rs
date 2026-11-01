@@ -11578,6 +11578,104 @@ fn different_epochs_produce_different_record_orderings() {
 }
 
 #[test]
+fn consecutive_epochs_draw_disjoint_windows_without_replay() {
+    // Streaming contract for set_epoch: re-permute draw order AND keep
+    // ingesting forward. Epoch 0 drains the leading window; epoch 1 must
+    // continue past it, not replay it. Only a fresh sampler with the same
+    // seed reproduces an epoch's rows.
+    //
+    // Regression: set_epoch used to reset_stream_cursors, replaying the
+    // leading slice on every boundary. In training that meant every epoch
+    // re-drew the same leading window (reshuffled, so order-based tests
+    // stayed green while the corpus never advanced).
+    //
+    // Store (6000 records) >> ingestion window (2048 default pool):
+    // 16 batches x 128 rows per epoch. Disjoint windows => Jaccard ~0;
+    // replayed window => Jaccard ~1.
+    use std::collections::HashSet;
+
+    let split = SplitRatios {
+        train: 1.0,
+        validation: 0.0,
+        test: 0.0,
+    };
+    let store = Arc::new(DeterministicSplitStore::new(split, 77).unwrap());
+    let records: Vec<DataRecord> = (0..6000)
+        .map(|i| {
+            trader_record(
+                &format!("epoch_stream::rec_{i:05}"),
+                "2025-01-01",
+                &format!("Title {i}"),
+                &format!("Body {i} with enough context for sampling"),
+            )
+        })
+        .collect();
+
+    let config = SamplerConfig {
+        seed: 77,
+        batch_size: 128,
+        recipes: vec![TripletRecipe {
+            name: "epoch_stream".into(),
+            anchor: Selector::Role(SectionRole::Anchor),
+            positive_selector: Selector::Role(SectionRole::Context),
+            negative_selector: Selector::Role(SectionRole::Context),
+            negative_strategy: NegativeStrategy::WrongArticle,
+            weight: 1.0,
+            instruction: None,
+            allow_same_anchor_positive: false,
+            retrieval_sampling: None,
+        }],
+        text_recipes: Vec::new(),
+        allowed_splits: vec![SplitLabel::Train],
+        ..SamplerConfig::default()
+    };
+
+    let sampler = TripletSampler::new(config, store);
+    sampler
+        .register_source(Box::new(InMemorySource::from_records(
+            "epoch_stream",
+            records,
+        )))
+        .unwrap();
+
+    let drain_epoch = |epoch: u64| -> HashSet<String> {
+        sampler.set_epoch(epoch).unwrap();
+        let mut texts = HashSet::new();
+        for _ in 0..16 {
+            let batch = sampler
+                .next_text_batch(SplitLabel::Train)
+                .expect("epoch batch must succeed");
+            texts.extend(batch.samples.iter().map(|s| s.chunk.text.clone()));
+        }
+        texts
+    };
+
+    let ep0 = drain_epoch(0);
+    eprintln!("EP0 unique texts={}", ep0.len());
+    assert!(
+        ep0.len() >= 1500,
+        "epoch 0 must drain a full window, got {} unique rows",
+        ep0.len()
+    );
+    let ep1 = drain_epoch(1);
+    eprintln!("EP1 unique texts={}", ep1.len());
+    assert!(
+        ep1.len() >= 1500,
+        "epoch 1 must drain a full window, got {} unique rows",
+        ep1.len()
+    );
+    let inter = ep1.intersection(&ep0).count();
+    let union = ep1.union(&ep0).count();
+    let jaccard = inter as f64 / union.max(1) as f64;
+    eprintln!("text-Jaccard {jaccard:.3} ({inter}/{union})");
+    assert!(
+        jaccard < 0.05,
+        "epoch 1 replayed epoch 0's texts (Jaccard {jaccard:.3}, \
+         {inter}/{union}): set_epoch rewinds ingestion instead of streaming it",
+    );
+}
+
+#[test]
 fn resumed_sampler_uses_persisted_epoch_seed() {
     // Guarantee: when a sampler resumes from persisted state at epoch N it
     // must produce a genuinely different record ordering than epoch 0 —

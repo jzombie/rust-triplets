@@ -1,0 +1,29 @@
+[package]
+name = "triplets-parquet-source"
+description = "Generic local-parquet row source for the triplets data pipeline framework. Column mapping, shard indexing, and row-store caching shared by remote-backed sources (e.g. Hugging Face)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+categories = ["algorithms", "artificial-intelligence", "science", "text-processing"]
+keywords = ["train-test-split", "parquet", "dataset-sampling", "preprocessing"]
+
+[dependencies]
+cache-manager = { workspace = true }
+chrono = { workspace = true }
+flate2 = { workspace = true }
+parquet = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+simd-r-drive = { workspace = true }
+siphasher = { workspace = true }
+tracing = { workspace = true }
+triplets-core = { workspace = true }
+walkdir = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tracing-subscriber = { workspace = true }
+triplets-parquet-source = { path = "." }

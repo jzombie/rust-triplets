@@ -11,11 +11,12 @@ use crate::constants::{
     HF_THROTTLE_ADAPTIVE_JITTER_MS, HF_THROTTLE_BASE_DELAY_MS, HF_THROTTLE_MAX_CONCURRENT,
     HF_THROTTLE_MAX_RETRIES,
 };
-use crate::file_utils::{is_gzip_path, is_transient_text, resolve_inner_extension};
-use crate::huggingface_source::ParquetManifestCandidates;
-use crate::shard_index::shard_store_path_for;
-use crate::source_core::HuggingFaceRowSource;
-use crate::types::ShardIndex;
+use triplets_parquet_source::file_utils::{
+    is_gzip_path, is_transient_text, resolve_inner_extension,
+};
+use triplets_parquet_source::row_view::ParquetManifestCandidates;
+use triplets_parquet_source::shard_index::shard_store_path_for;
+use triplets_parquet_source::types::ShardIndex;
 
 use reqwest_drive::ClientWithMiddleware;
 use serde_json::Value;
@@ -137,7 +138,7 @@ pub fn build_http_client(
 
 /// Validate a configured `hf_token` against the Hugging Face whoami endpoint.
 ///
-/// Called once during [`HuggingFaceRowSource::new`] when `config.hf_token` is
+/// Called once during [`crate::source_core::HuggingFaceRowSource::new`] when `config.hf_token` is
 /// `Some`.  Returns `Err(SamplerError::SourceUnavailable)` for any non-2xx
 /// response (including 401 Unauthorized for invalid/expired tokens) so that
 /// callers get a clear error at construction time rather than silent failures
@@ -267,7 +268,9 @@ pub(crate) fn all_candidates_from_parquet_manifest(
     config: &HuggingFaceRowsConfig,
     json: &Value,
 ) -> Result<ParquetManifestCandidates, SamplerError> {
-    let accepted = HuggingFaceRowSource::normalized_shard_extensions(config);
+    let accepted = triplets_parquet_source::ParquetRowSource::normalized_shard_extensions(
+        &config.shard_extensions,
+    );
 
     let mut candidates = Vec::new();
     let mut candidate_sizes = HashMap::new();
@@ -472,6 +475,11 @@ pub(crate) fn candidate_target_path(config: &HuggingFaceRowsConfig, candidate: &
     config.snapshot_dir.join(candidate)
 }
 
+/// Map a remote candidate to its canonical `.simdr` row-store path.
+pub(crate) fn candidate_store_path(config: &HuggingFaceRowsConfig, candidate: &str) -> PathBuf {
+    shard_store_path_for(&candidate_target_path(config, candidate))
+}
+
 /// Validate target file size against expected bytes when available.
 ///
 /// When `expected_bytes` is `Some(N)` with N > 0, the local file must have
@@ -589,7 +597,7 @@ pub(crate) fn first_uncached_order_position(
     order
         .iter()
         .position(|&idx| {
-            !existing.contains(&crate::shard_indexer::candidate_store_path(
+            !existing.contains(&crate::download::candidate_store_path(
                 config,
                 &candidates[idx],
             ))
@@ -710,7 +718,7 @@ pub(crate) fn download_and_materialize_shard_with_runtime(
     }
 
     // ── Download ──────────────────────────────────────────────────────────
-    let is_transient = HuggingFaceRowSource::is_parquet_path(&target)
+    let is_transient = triplets_parquet_source::file_utils::is_parquet_path(&target)
         || is_gzip_path(&target)
         || is_transient_text(&target);
 

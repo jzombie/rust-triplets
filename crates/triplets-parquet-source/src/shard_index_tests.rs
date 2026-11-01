@@ -1,10 +1,9 @@
-use super::*;
 use crate::constants::{
-    HF_PARQUET_MANIFEST_DIR, HF_SHARD_STORE_EXTENSION, HF_SHARD_STORE_META_ROWS_KEY,
-    HF_SHARD_STORE_ROW_PREFIX,
+    HF_SHARD_STORE_EXTENSION, HF_SHARD_STORE_META_ROWS_KEY, HF_SHARD_STORE_ROW_PREFIX,
 };
-use crate::test_utils::write_parquet_fixture;
-use crate::test_utils::{test_config, write_simdr_fixture};
+use crate::fixtures::write_parquet_fixture;
+use crate::fixtures::{test_config, write_simdr_fixture};
+use crate::shard_index::*;
 use simd_r_drive::storage_engine::DataStore;
 use simd_r_drive::storage_engine::traits::DataStoreWriter;
 use std::fs;
@@ -24,11 +23,11 @@ fn build_shard_index_ignores_manifest_non_shard_artifacts() {
     let local = dir.path().join("local.ndjson");
     fs::write(&local, b"{\"id\":\"l1\",\"text\":\"x\"}\n").unwrap();
 
-    // A .ndjson file under _parquet_manifest is a non-shard artifact and
+    // A .ndjson file under the transient dir is a non-shard artifact and
     // must NOT be indexed (it does not match HF_SHARD_STORE_EXTENSION).
     let manifest_meta = dir
         .path()
-        .join("_parquet_manifest")
+        .join(crate::fixtures::TEST_TRANSIENT_DIR)
         .join("main/train/cached.ndjson");
     fs::create_dir_all(manifest_meta.parent().unwrap()).unwrap();
     fs::write(&manifest_meta, b"{\"id\":\"r1\",\"text\":\"y\"}\n").unwrap();
@@ -41,18 +40,18 @@ fn build_shard_index_ignores_manifest_non_shard_artifacts() {
 
 #[test]
 fn build_shard_index_indexes_simdr_stores_under_manifest() {
-    // Remote-sourced shards are stored as .simdr stores under
-    // _parquet_manifest after transcoding from parquet.  build_shard_index
+    // Wrapper-managed shards are stored as .simdr stores under the
+    // transient dir after transcoding from parquet.  build_shard_index
     // must discover and index them so materialized_rows is correct on
     // restart — the regression that caused every refresh to return 0 rows.
     let dir = tempdir().unwrap();
     let config = test_config(dir.path().to_path_buf());
 
-    // A .simdr store under _parquet_manifest (simulates a previously
-    // downloaded and transcoded remote shard).
+    // A .simdr store under the transient dir (simulates a previously
+    // materialized remote shard).
     let store_path = dir
         .path()
-        .join("_parquet_manifest")
+        .join(crate::fixtures::TEST_TRANSIENT_DIR)
         .join("refs%2Fconvert%2Fparquet/20231101.en/train/0000.simdr");
     fs::create_dir_all(store_path.parent().unwrap()).unwrap();
     write_simdr_fixture(&store_path, &[("row0", "hello"), ("row1", "world")]);
@@ -60,7 +59,7 @@ fn build_shard_index_indexes_simdr_stores_under_manifest() {
     // A non-shard metadata file that must be ignored.
     let seq_state_path = dir
         .path()
-        .join("_parquet_manifest")
+        .join(crate::fixtures::TEST_TRANSIENT_DIR)
         .join("_sequence_state.json");
     fs::write(&seq_state_path, b"{}").unwrap();
 
@@ -97,7 +96,7 @@ fn build_shard_index_errors_when_no_matching_extensions() {
 
 #[test]
 fn build_shard_index_errors_when_parquet_present_but_not_accepted() {
-    // Suppress the expected WARN "found persisted parquet under … (transient-only policy)"
+    // Suppress the expected WARN "found parquet under … transient-only policy"
     // that fires when parquet files are present in the snapshot dir but parquet is not
     // listed in shard_extensions.  That warn is correct production behaviour; this test
     // only cares that the function returns an error, not the diagnostic message.
@@ -148,7 +147,7 @@ fn build_shard_index_prunes_orphaned_remote_transients() {
 
     // Create a transient file inside _parquet_manifest/ (simulates a
     // crashed/truncated remote download).
-    let manifest_root = dir.path().join(HF_PARQUET_MANIFEST_DIR);
+    let manifest_root = dir.path().join(crate::fixtures::TEST_TRANSIENT_DIR);
     fs::create_dir_all(&manifest_root).unwrap();
     let orphan = manifest_root.join("orphaned_shard.ndjson");
     fs::write(&orphan, b"{\"id\":\"r1\",\"text\":\"x\"}\n").unwrap();
@@ -177,18 +176,18 @@ fn is_store_shard_path_detects_simdr_extension() {
 
 #[test]
 fn is_parquet_path_recognizes_parquet_extension() {
-    assert!(crate::source_core::HuggingFaceRowSource::is_parquet_path(
-        Path::new("data/train.parquet")
-    ));
-    assert!(crate::source_core::HuggingFaceRowSource::is_parquet_path(
-        Path::new("data/train.PARQUET")
-    ));
-    assert!(!crate::source_core::HuggingFaceRowSource::is_parquet_path(
-        Path::new("data/train.jsonl")
-    ));
-    assert!(!crate::source_core::HuggingFaceRowSource::is_parquet_path(
-        Path::new("data/train.txt")
-    ));
+    assert!(crate::file_utils::is_parquet_path(Path::new(
+        "data/train.parquet"
+    )));
+    assert!(crate::file_utils::is_parquet_path(Path::new(
+        "data/train.PARQUET"
+    )));
+    assert!(!crate::file_utils::is_parquet_path(Path::new(
+        "data/train.jsonl"
+    )));
+    assert!(!crate::file_utils::is_parquet_path(Path::new(
+        "data/train.txt"
+    )));
 }
 
 #[test]
@@ -319,7 +318,7 @@ fn build_shard_index_empty_directory_returns_error() {
 fn build_shard_index_prunes_orphaned_transients_in_manifest() {
     let dir = tempdir().unwrap();
     let config = test_config(dir.path().to_path_buf());
-    let manifest_dir = dir.path().join(HF_PARQUET_MANIFEST_DIR);
+    let manifest_dir = dir.path().join(crate::fixtures::TEST_TRANSIENT_DIR);
     fs::create_dir_all(&manifest_dir).unwrap();
 
     // Create an orphaned transient file in the manifest directory

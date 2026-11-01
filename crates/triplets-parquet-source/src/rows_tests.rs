@@ -1,10 +1,11 @@
-use super::*;
 use crate::constants::HF_SHARD_STORE_META_ROWS_KEY;
-use crate::huggingface_source::{RowTextField, RowView};
-use crate::shard_index::{index_single_shard, shard_store_path_for};
-use crate::test_utils::{
+use crate::fixtures::{
     test_config, test_source, write_gzip_fixture, write_parquet_fixture, write_simdr_fixture,
 };
+use crate::row_view::{RowTextField, RowView};
+use crate::rows::*;
+use crate::shard_index::{index_single_shard, shard_store_path_for};
+use crate::source::ParquetRowSource;
 use crate::types::ShardIndex;
 use chrono::Utc;
 use serde_json::json;
@@ -76,10 +77,7 @@ fn coalesce_list_field_bool_returns_some() {
 
 // ── Phase 1b: parse_non_parquet_line ───────────────────────────────────
 
-fn make_source_and_shard(
-    dir: &tempfile::TempDir,
-    ext: &str,
-) -> (crate::test_utils::SafeTestSource, ShardIndex) {
+fn make_source_and_shard(dir: &tempfile::TempDir, ext: &str) -> (ParquetRowSource, ShardIndex) {
     let config = test_config(dir.path().to_path_buf());
     let source = test_source(config);
     let path = dir.path().join(format!("shard.{ext}"));
@@ -305,7 +303,7 @@ fn parse_row_falls_back_to_synthetic_id_when_missing_id_column() {
     let row = parse_row(&source, 42, &json!({"text": "hello"}))
         .unwrap()
         .unwrap();
-    assert_eq!(row.row_id, Some("org/dataset:train:42".to_string()));
+    assert_eq!(row.row_id, Some("test:42".to_string()));
 }
 
 #[test]
@@ -685,7 +683,7 @@ fn row_to_record_builds_expected_sections() {
     assert_eq!(record.sections.len(), 3);
     assert_eq!(record.sections[0].role, SectionRole::Anchor);
     assert_eq!(record.sections[1].role, SectionRole::Context);
-    assert_eq!(record.id, "hf_test::abc");
+    assert_eq!(record.id, "parquet_test::abc");
 }
 
 #[test]
@@ -752,7 +750,7 @@ fn read_row_batch_errors_when_row_not_mappable_to_shard() {
     let config = test_config(dir.path().to_path_buf());
     let source = test_source(config);
     {
-        let mut state = source.state.lock().unwrap();
+        let mut state = source.local.lock().unwrap();
         state.materialized_rows = 1;
         state.shards.clear();
     }
@@ -771,7 +769,7 @@ fn read_row_batch_errors_when_parquet_local_offsets_are_missing() {
     let source = test_source(config);
 
     {
-        let mut state = source.state.lock().unwrap();
+        let mut state = source.local.lock().unwrap();
         state.materialized_rows = 3;
         state.shards = vec![ShardIndex {
             path,
@@ -796,7 +794,7 @@ fn read_row_batch_errors_when_parquet_reader_cannot_open_file() {
     let config = test_config(dir.path().to_path_buf());
     let source = test_source(config);
     {
-        let mut state = source.state.lock().unwrap();
+        let mut state = source.local.lock().unwrap();
         state.materialized_rows = 1;
         state.shards = vec![ShardIndex {
             path: dir.path().join("missing.parquet"),
@@ -818,9 +816,8 @@ fn read_row_batch_skips_unavailable_indices_without_error() {
     let config = test_config(dir.path().to_path_buf());
     let source = test_source(config);
     {
-        let mut state = source.state.lock().unwrap();
+        let mut state = source.local.lock().unwrap();
         state.materialized_rows = 0;
-        state.remote_candidates = Some(Vec::new());
     }
 
     let mut out = Vec::new();
@@ -838,7 +835,7 @@ fn read_row_batch_reads_parquet_rows_and_uses_cache_on_repeat() {
     let source = test_source(config.clone());
     let shard = index_single_shard(&config, &path, 0).unwrap().0.unwrap();
     {
-        let mut state = source.state.lock().unwrap();
+        let mut state = source.local.lock().unwrap();
         state.materialized_rows = 2;
         state.shards = vec![shard];
     }
@@ -860,7 +857,7 @@ fn read_row_batch_uses_cached_rows_and_respects_limit() {
     let source = test_source(config.clone());
 
     {
-        let mut state = source.state.lock().unwrap();
+        let mut state = source.local.lock().unwrap();
         state.materialized_rows = 2;
     }
 
@@ -901,7 +898,7 @@ fn read_row_batch_errors_on_invalid_json_line() {
     let source = test_source(config.clone());
     let shard = index_single_shard(&config, &path, 0).unwrap().0.unwrap();
     {
-        let mut state = source.state.lock().unwrap();
+        let mut state = source.local.lock().unwrap();
         state.materialized_rows = 1;
         state.shards = vec![shard];
     }
@@ -1233,7 +1230,7 @@ fn transcode_manifest_dir_file_cleans_up() {
     let source = test_source(config.clone());
 
     // Create a .ndjson file inside the _parquet_manifest directory.
-    let manifest_root = source.manifest_cache_root();
+    let manifest_root = dir.path().join(crate::fixtures::TEST_TRANSIENT_DIR);
     fs::create_dir_all(&manifest_root).unwrap();
     let transient_path = manifest_root.join("remote_shard.ndjson");
     fs::write(&transient_path, r#"{"id":"r1","text":"data"}"#).unwrap();
@@ -1422,4 +1419,57 @@ fn transcode_json_array_streaming_trailing_batch_flush() {
     let store = crate::shard_indexer::get_or_open_shard_store(&source, &store_path).unwrap();
     let served = transcode_json_array_streaming(&source, &shard, &mut reader, &store).unwrap();
     assert_eq!(served, 5);
+}
+
+#[test]
+fn parse_row_skips_when_anchor_candidate_missing() {
+    let dir = tempdir().unwrap();
+    let mut config = test_config(dir.path().to_path_buf());
+    config.anchor_columns = vec!["missing_col".to_string()];
+    config.positive_columns = vec!["text".to_string()];
+    let source = test_source(config);
+    let row = parse_row(&source, 0, &json!({"text": "hello"})).unwrap();
+    assert!(row.is_none(), "row without anchor content must be skipped");
+}
+
+#[test]
+fn parse_row_skips_when_positive_candidate_missing() {
+    let dir = tempdir().unwrap();
+    let mut config = test_config(dir.path().to_path_buf());
+    config.anchor_columns = vec!["text".to_string()];
+    config.positive_columns = vec!["missing_col".to_string()];
+    let source = test_source(config);
+    let row = parse_row(&source, 0, &json!({"text": "hello"})).unwrap();
+    assert!(
+        row.is_none(),
+        "row without positive content must be skipped"
+    );
+}
+
+#[test]
+fn parse_row_skips_when_context_column_missing_or_blank() {
+    let dir = tempdir().unwrap();
+    let mut config = test_config(dir.path().to_path_buf());
+    config.anchor_columns = vec!["text".to_string()];
+    config.positive_columns = vec!["text".to_string()];
+    config.context_columns = vec!["ctx".to_string()];
+    let source = test_source(config);
+    let row = parse_row(&source, 0, &json!({"text": "hello"})).unwrap();
+    assert!(row.is_none(), "row with missing context must be skipped");
+    let row = parse_row(&source, 1, &json!({"text": "hello", "ctx": "  "})).unwrap();
+    assert!(row.is_none(), "row with blank context must be skipped");
+}
+
+#[test]
+fn parse_row_skips_when_negative_column_missing_or_blank() {
+    let dir = tempdir().unwrap();
+    let mut config = test_config(dir.path().to_path_buf());
+    config.anchor_columns = vec!["text".to_string()];
+    config.positive_columns = vec!["text".to_string()];
+    config.negative_columns = vec!["negs".to_string()];
+    let source = test_source(config);
+    let row = parse_row(&source, 0, &json!({"text": "hello"})).unwrap();
+    assert!(row.is_none(), "row with missing negatives must be skipped");
+    let row = parse_row(&source, 1, &json!({"text": "hello", "negs": []})).unwrap();
+    assert!(row.is_none(), "row with empty negatives must be skipped");
 }

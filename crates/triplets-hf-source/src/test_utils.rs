@@ -9,9 +9,7 @@
 /// server.
 pub const TEST_UNREACHABLE_URL: &str = "http://127.0.0.1:1";
 
-use std::collections::HashMap;
 use std::env;
-use std::fs::File;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -21,21 +19,13 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use crate::config::HuggingFaceRowsConfig;
-use crate::constants::{HF_SHARD_STORE_META_ROWS_KEY, HF_SHARD_STORE_ROW_PREFIX};
 use crate::download::build_http_runtime;
-use crate::huggingface_source::{
-    EligibleIndexCache, ParquetCache, RowCache, RowTextField, RowView,
-};
-use crate::source_core::HuggingFaceRowSource;
-use crate::types::SourceState;
-use parquet::data_type::{ByteArray, ByteArrayType};
-use parquet::file::properties::WriterProperties;
-use parquet::file::writer::SerializedFileWriter;
-use parquet::schema::parser::parse_message_type;
+use crate::source_core::{HfRemoteState, HuggingFaceRowSource};
 use reqwest_drive::ClientWithMiddleware;
-use simd_r_drive::DataStore;
-use simd_r_drive::storage_engine::traits::DataStoreWriter;
 use triplets_core::config::SamplerConfig;
+// Fixture-file writers live in the generic parquet crate now.
+#[cfg(test)]
+pub(crate) use triplets_parquet_source::fixtures::{write_parquet_fixture, write_simdr_fixture};
 
 // ---------------------------------------------------------------------------
 // HfMockServer — full-featured mock HF datasets-server
@@ -362,46 +352,6 @@ pub(crate) fn test_config(snapshot_dir: PathBuf) -> HuggingFaceRowsConfig {
 }
 
 #[allow(dead_code)]
-pub(crate) fn write_simdr_fixture(path: &Path, rows: &[(&str, &str)]) {
-    // Create/open the simd-r-drive DataStore and write row-view entries
-    let store = DataStore::open(path).expect("open simdr store");
-    if rows.is_empty() {
-        store
-            .write(HF_SHARD_STORE_META_ROWS_KEY, &(0u64).to_le_bytes())
-            .expect("write meta");
-        return;
-    }
-
-    let mut batch: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-    for (i, (id, text)) in rows.iter().enumerate() {
-        let row = RowView {
-            row_id: Some(id.to_string()),
-            timestamp: None,
-            text_fields: vec![RowTextField {
-                name: "text".to_string(),
-                text: text.to_string(),
-            }],
-        };
-        let payload = serde_json::to_vec(&row).expect("encode row");
-        let mut key = HF_SHARD_STORE_ROW_PREFIX.to_vec();
-        key.extend_from_slice(&(i as u64).to_le_bytes());
-        batch.push((key, payload));
-    }
-
-    let refs: Vec<(&[u8], &[u8])> = batch
-        .iter()
-        .map(|(k, v)| (k.as_slice(), v.as_slice()))
-        .collect();
-    store.batch_write(&refs).expect("batch write");
-    store
-        .write(
-            HF_SHARD_STORE_META_ROWS_KEY,
-            &(rows.len() as u64).to_le_bytes(),
-        )
-        .expect("write meta");
-}
-
-#[allow(dead_code)]
 pub(crate) fn test_http_client() -> ClientWithMiddleware {
     use reqwest_drive::ClientBuilder;
 
@@ -419,27 +369,23 @@ pub(crate) fn test_source(config: HuggingFaceRowsConfig) -> SafeTestSource {
     // Use a non-throttled client in tests — mock servers serve a single
     // request then shut down, so retry backoff would add unnecessary delay.
     let http_client = test_http_client();
+    let inner = triplets_parquet_source::ParquetRowSource::new_empty(
+        triplets_parquet_source::ParquetRowsConfig::from(&config),
+    );
     let source = HuggingFaceRowSource {
         config,
+        inner,
         http_runtime,
         http_client,
-        sampler_config: Arc::new(Mutex::new(None)),
-        state: Arc::new(Mutex::new(SourceState {
-            materialized_rows: 0,
-            shards: Vec::new(),
+        remote: Arc::new(Mutex::new(HfRemoteState {
             // Use Some(vec![]) rather than None so that trigger_expansion_if_needed
             // treats this source as "no remote candidates" and never spawns a
             // background thread that would make live network calls during tests.
             // Tests that explicitly exercise the remote-fetch path reset this field
             // to None before the call under test.
             remote_candidates: Some(vec![]),
-            remote_candidate_sizes: HashMap::new(),
-            next_remote_idx: 0,
-            remote_candidate_order: Vec::new(),
+            ..HfRemoteState::default()
         })),
-        cache: Arc::new(Mutex::new(RowCache::default())),
-        parquet_cache: Arc::new(Mutex::new(ParquetCache::default())),
-        eligible_index: Arc::new(Mutex::new(EligibleIndexCache::default())),
         expansion_thread: Arc::new(Mutex::new(None)),
     };
     source.set_active_sampler_config(&SamplerConfig {
@@ -554,60 +500,4 @@ pub(crate) fn with_current_dir<R>(dir: &Path, run: impl FnOnce() -> R) -> R {
     let _restore = CwdRestore { previous };
     env::set_current_dir(dir).expect("set cwd");
     run()
-}
-
-#[allow(dead_code)]
-pub(crate) fn write_parquet_fixture(path: &Path, rows: &[(&str, &str)]) {
-    let schema = Arc::new(
-        parse_message_type(
-            "message test_schema {
-                    REQUIRED BINARY id (UTF8);
-                    REQUIRED BINARY text (UTF8);
-                }",
-        )
-        .unwrap(),
-    );
-    let props = Arc::new(WriterProperties::builder().build());
-    let file = File::create(path).unwrap();
-    let mut writer = SerializedFileWriter::new(file, schema, props).unwrap();
-    let mut row_group = writer.next_row_group().unwrap();
-
-    if let Some(mut col_writer) = row_group.next_column().unwrap() {
-        let values = rows
-            .iter()
-            .map(|(id, _)| ByteArray::from(*id))
-            .collect::<Vec<_>>();
-        col_writer
-            .typed::<ByteArrayType>()
-            .write_batch(&values, None, None)
-            .unwrap();
-        col_writer.close().unwrap();
-    }
-
-    if let Some(mut col_writer) = row_group.next_column().unwrap() {
-        let values = rows
-            .iter()
-            .map(|(_, text)| ByteArray::from(*text))
-            .collect::<Vec<_>>();
-        col_writer
-            .typed::<ByteArrayType>()
-            .write_batch(&values, None, None)
-            .unwrap();
-        col_writer.close().unwrap();
-    }
-
-    assert!(row_group.next_column().unwrap().is_none());
-    row_group.close().unwrap();
-    writer.close().unwrap();
-}
-
-#[cfg(test)]
-pub(crate) fn write_gzip_fixture(path: &std::path::Path, content: &[u8]) {
-    use flate2::Compression;
-    use flate2::write::GzEncoder;
-    use std::io::Write;
-    let file = std::fs::File::create(path).unwrap();
-    let mut encoder = GzEncoder::new(file, Compression::default());
-    encoder.write_all(content).unwrap();
-    encoder.finish().unwrap();
 }

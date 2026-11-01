@@ -2,7 +2,6 @@ use super::*;
 use crate::constants::{
     ENV_TRIPLETS_HF_WHOAMI_ENDPOINT, HF_DATASETS_BASE_URL, HF_REMOTE_URL_PREFIX,
 };
-use crate::shard_index::shard_store_path_for;
 use crate::source_core::HuggingFaceRowSource;
 use crate::test_utils::{
     TEST_UNREACHABLE_URL, TestHttpServer, spawn_one_shot_http, test_config, test_http_client,
@@ -16,6 +15,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 use triplets_core::SamplerError;
+use triplets_parquet_source::shard_index::shard_store_path_for;
 
 #[test]
 fn remote_url_for_candidate_constructs_correct_urls() {
@@ -1134,7 +1134,7 @@ fn download_shard_store_already_exists_returns_cached() {
 
     let remote_path =
         "url::http://mock.example.com/datasets/org/ds/resolve/main/train/shard.ndjson";
-    let store_path = crate::shard_indexer::candidate_store_path(&config, remote_path);
+    let store_path = crate::download::candidate_store_path(&config, remote_path);
     fs::create_dir_all(store_path.parent().unwrap()).unwrap();
     write_simdr_fixture(&store_path, &[("r1", "cached")]);
 
@@ -1355,4 +1355,49 @@ fn extract_next_link_url_rel_next_without_quotes() {
     );
     let result = extract_next_link_url(&headers, "https://example.com/current");
     assert_eq!(result.as_deref(), Some("https://example.com/next"));
+}
+
+#[test]
+fn candidate_store_path_maps_via_target_path() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+    let candidate = "url::https://host/ds/resolve/main/train/data-000.parquet";
+    let target = candidate_target_path(&config, candidate);
+    let store = candidate_store_path(&config, candidate);
+    assert_eq!(store, target.with_extension("simdr"));
+}
+
+#[test]
+fn first_uncached_order_position_returns_first_missing() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+    let candidates = vec![
+        "url::http://a/0.parquet".to_string(),
+        "url::http://a/1.parquet".to_string(),
+    ];
+    let order = vec![0, 1];
+    // No shards on disk — first position is uncached
+    let pos = first_uncached_order_position(&config, &candidates, &order, &[]);
+    assert_eq!(pos, 0);
+}
+
+#[test]
+fn first_uncached_order_position_returns_len_when_all_cached() {
+    use triplets_parquet_source::types::ShardIndex;
+
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path().to_path_buf());
+    let candidates = vec!["url::http://a/0.parquet".to_string()];
+    let order = vec![0];
+    // Build a shard index whose path matches the candidate store path
+    let store_path = candidate_store_path(&config, &candidates[0]);
+    let shards = vec![ShardIndex {
+        path: store_path,
+        global_start: 0,
+        row_count: 1,
+        parquet_row_groups: Vec::new(),
+        remote_candidate: None,
+    }];
+    let pos = first_uncached_order_position(&config, &candidates, &order, &shards);
+    assert_eq!(pos, 1); // candidates.len() = all cached
 }
