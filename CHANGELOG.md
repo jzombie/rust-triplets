@@ -44,6 +44,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
   git-ignored via `*.simdr`). One input file always yields one store;
   sharding is concatenation of files, not auto-splitting.
 
+### Fixed
+
+- **Epoch streaming no longer replays the head window.** `set_epoch` used
+  to rewind ingestion stream cursors on every epoch, so each epoch re-drew
+  the same leading slice of the corpus. Stream cursors now survive epoch
+  boundaries. Rach epoch continues ingestion past the previous epoch's
+  window while draw order still re-permutes per epoch. The
+  `reset_stream_cursors` rewind primitive is deleted entirely (no callers,
+  no replacement). Regression test
+  `consecutive_epochs_draw_disjoint_windows_without_replay` drains two
+  consecutive epochs and asserts zero overlap between windows.
+
 ## [0.30.1-alpha] - 2026-10-27
 
 ### Changed
