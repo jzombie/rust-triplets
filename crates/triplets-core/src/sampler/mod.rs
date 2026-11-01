@@ -2753,9 +2753,8 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
     }
 
     /// Check whether `sample` passes both per-batch and per-window text dedup.
-    /// The per-batch set is never cleared mid-batch (survives epoch advances),
-    /// while `emitted_text_hashes` is cleared on epoch advance to allow fresh
-    /// permutations.  Both must pass for the sample to be emitted.
+    /// The per-batch set is never cleared mid-batch (survives epoch advances).
+    /// Both must pass for the sample to be emitted.
     fn try_emit_text_sample(
         &mut self,
         sample: &TextSample,
