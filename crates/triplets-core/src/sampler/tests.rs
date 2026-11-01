@@ -11638,7 +11638,7 @@ fn consecutive_epochs_draw_disjoint_windows_without_replay() {
         )))
         .unwrap();
 
-    let mut drain_epoch = |epoch: u64| -> HashSet<String> {
+    let drain_epoch = |epoch: u64| -> HashSet<String> {
         sampler.set_epoch(epoch).unwrap();
         let mut texts = HashSet::new();
         for _ in 0..16 {
