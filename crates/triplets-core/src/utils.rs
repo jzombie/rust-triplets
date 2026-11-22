@@ -167,13 +167,18 @@ mod tests {
 
     #[test]
     fn system_time_to_utc_falls_back_for_out_of_range_time() {
-        // jiff::Timestamp covers a bounded range; a SystemTime far outside it
-        // (representable as a timespec but not as a Timestamp) exercises the
-        // saturation fallback instead of panicking.
-        let far_future = std::time::SystemTime::UNIX_EPOCH
-            .checked_add(std::time::Duration::from_secs(100_000_000_000_000))
-            .expect("far-future SystemTime must be representable");
-        assert!(Timestamp::try_from(far_future).is_err());
+        // jiff::Timestamp covers civil years -9999..=9999; a SystemTime past
+        // that (still representable as a platform timespec/FILETIME)
+        // exercises the saturation fallback instead of panicking. Probe
+        // upward so the test stays portable: Windows SystemTime tops out at
+        // year 30827, so one fixed giant offset is not representable there.
+        let far_future = [300_000_000_000u64, 500_000_000_000, 800_000_000_000]
+            .into_iter()
+            .filter_map(|secs| {
+                std::time::SystemTime::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(secs))
+            })
+            .find(|time| Timestamp::try_from(*time).is_err())
+            .expect("platform must represent a SystemTime past Timestamp::MAX");
         let before = Timestamp::now();
         let fallback = system_time_to_utc(far_future);
         let after = Timestamp::now();
