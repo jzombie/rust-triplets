@@ -551,6 +551,34 @@ mod tests {
     }
 
     #[test]
+    fn refresh_with_out_of_range_cursor_wraps_to_walk_start() {
+        let dir = TempDir::new().unwrap();
+        make_pair_store(&dir, 4);
+        let source = SrdSource::open(
+            &dir.path().join("data.srd"),
+            "test",
+            TEST_EMB_DIM,
+            Some(SrdMode::Pair),
+        )
+        .unwrap();
+
+        let config = SamplerConfig::default();
+        let head = source.refresh(&config, None, Some(4)).unwrap();
+
+        // Foreign/stale revisions (e.g. persisted by an older file-offset
+        // build) fold back to the walk start instead of stalling the stream.
+        let stale = SourceCursor {
+            last_seen: Timestamp::now(),
+            revision: u64::MAX,
+        };
+        let wrapped = source.refresh(&config, Some(&stale), Some(4)).unwrap();
+        let head_ids: Vec<&str> = head.records.iter().map(|r| r.id.as_str()).collect();
+        let wrapped_ids: Vec<&str> = wrapped.records.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(wrapped_ids, head_ids);
+        assert!(wrapped.cursor.revision < 4);
+    }
+
+    #[test]
     fn empty_store_returns_empty_records() {
         let dir = TempDir::new().unwrap();
         let store = DataStore::open(&dir.path().join("data.srd")).unwrap();

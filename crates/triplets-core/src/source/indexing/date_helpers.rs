@@ -160,6 +160,11 @@ mod tests {
             None
         );
         assert_eq!(parse_publication_date_from_year_folder("2026", "bad"), None);
+        // Years outside the civil-date i16 range are rejected, not wrapped.
+        assert_eq!(
+            parse_publication_date_from_year_folder("99999", "02-14"),
+            None
+        );
     }
 
     #[test]
@@ -214,6 +219,11 @@ mod tests {
         );
         assert_eq!(
             parse_publication_date_from_month_range_folder("2026", "2026"),
+            None
+        );
+        // Years outside the civil-date i16 range are rejected, not wrapped.
+        assert_eq!(
+            parse_publication_date_from_month_range_folder("99999", "Jan + Feb"),
             None
         );
     }

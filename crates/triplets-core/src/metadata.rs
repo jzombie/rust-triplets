@@ -93,6 +93,11 @@ mod tests {
         assert!(values.contains(&"2025-02-25".to_string()));
         assert!(values.contains(&"02/25/2025".to_string()));
         assert!(values.contains(&"25.02.2025".to_string()));
+        // Month-name variants come from the manual month tables (no strftime):
+        // pin each spelling, including the dotted vs. undotted short form.
+        assert!(values.contains(&"Feb. 25, 2025".to_string()));
+        assert!(values.contains(&"February 25, 2025".to_string()));
+        assert!(values.contains(&"Feb 25, 2025".to_string()));
 
         let mut uniq = values.clone();
         uniq.sort();

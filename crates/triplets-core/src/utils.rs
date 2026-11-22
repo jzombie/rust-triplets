@@ -166,6 +166,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn system_time_to_utc_falls_back_for_out_of_range_time() {
+        // jiff::Timestamp covers a bounded range; a SystemTime far outside it
+        // (representable as a timespec but not as a Timestamp) exercises the
+        // saturation fallback instead of panicking.
+        let far_future = std::time::SystemTime::UNIX_EPOCH
+            .checked_add(std::time::Duration::from_secs(100_000_000_000_000))
+            .expect("far-future SystemTime must be representable");
+        assert!(Timestamp::try_from(far_future).is_err());
+        let before = Timestamp::now();
+        let fallback = system_time_to_utc(far_future);
+        let after = Timestamp::now();
+        assert!(fallback >= before && fallback <= after);
+    }
+
+    #[test]
     fn normalize_inline_whitespace_collapses_runs() {
         let nl = platform_newline();
         let input = format!("Alpha{nl}{nl}  Beta\tGamma");
