@@ -31,8 +31,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - **`SrdSource::refresh` ignores RNG — now deterministic random sampling
   (#192).** Refresh used the cursor as a plain file offset and marched
   through `data.srd` in file order epoch after epoch, presenting coherent
-  domain blocks as regime shifts (observed: 30+ steps at 0.169–0.178
-  train-MRR dip with val flat on 69G+74G stores). Refresh now draws a
+  domain blocks as regime shifts (see #192 for the observed training
+  impact). Refresh now draws a
   deterministic seed-derived window through a permutation of the index
   domain, seeded by
   `IndexablePager::seed_for_sampler(source_id, total, config.seed)` (the
