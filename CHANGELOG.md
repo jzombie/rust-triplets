@@ -5,6 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [UNRELEASED]
+
+### Added
+
+- **Workspace lint gate for unused dependencies.** New
+  `[workspace.lints.cargo] unused_workspace_dependencies = "deny"` in the
+  root manifest, inherited via `[lints] workspace = true` in all seven
+  member manifests. An unused workspace dependency is now a hard manifest
+  error (`could not parse workspace`) instead of a warning, so the repo
+  cannot build with dead dependency entries.
+
+### Changed
+
+- **BREAKING: `SrdSource` cursor semantics (#192).** Cursor `revision` is now
+  a position in the seed-derived permutation walk, folded into `[0, total)`
+  exactly like every other pager (`IndexablePager`, `ParquetRowSource`,
+  file-corpus pager) — no longer a file offset. Previously persisted SRD
+  cursors (file offsets) will be reinterpreted as walk positions on upgrade —
+  a one-time stream repositioning. The old sequential file-offset pagination
+  was the bug being fixed, so no compatibility shim is kept.
+
+### Fixed
+
+- **`SrdSource::refresh` ignores RNG — now deterministic random sampling
+  (#192).** Refresh used the cursor as a plain file offset and marched
+  through `data.srd` in file order epoch after epoch, presenting coherent
+  domain blocks as regime shifts (observed: 30+ steps at 0.169–0.178
+  train-MRR dip with val flat on 69G+74G stores). Refresh now draws a
+  deterministic seed-derived window through a permutation of the index
+  domain, seeded by
+  `IndexablePager::seed_for_sampler(source_id, total, config.seed)` (the
+  ingestion manager already mixes `derive_epoch_seed(base, epoch) ^ step`
+  into `config.seed`). Same `(source_id, total, seed, cursor)` always yields
+  the same window; different seeds/epochs/steps draw independent random
+  subsets from across the corpus (expected overlap ~`window^2/total`,
+  negligible at 10M+ rows) instead of adjacent file slices. Like the other
+  pagers, no cross-window non-repetition is promised — the corpus is an
+  infinite stream; what kills the regime-shift pathology is that no window
+  is ever a coherent file-ordered block. The permutation is driven manually
+  rather than via `IndexablePager` (single `batch_read_entries` call, no
+  per-row materialization for 10M+-row stores). The stream contract holds:
+  `set_epoch` never rewinds cursors, and
+  `consecutive_epochs_draw_disjoint_windows_without_replay` still passes.
+- **Removed unused `triplets-offline-embedder` workspace dependency entry.**
+  No manifest referenced it via `workspace = true`; the crate remains a
+  workspace member and still builds. The new deny lint would now catch any
+  recurrence at manifest-parse time.
+
 ## [0.31.0-alpha] - 2026-11-01
 
 ### Added

@@ -357,28 +357,8 @@ impl IndexPermutation {
     }
 
     /// Current consumption cursor position.
-    ///
-    /// NOTE: this folds the raw counter into `[0, total)`, discarding how
-    /// many domain positions were rejected as out of range. When `total` is
-    /// not a power of two, resuming a walk from this value can replay
-    /// already-seen indices before the corpus is covered. Sources that resume
-    /// a fixed-seed walk across refreshes and need without-replacement
-    /// tiling must persist [`IndexPermutation::raw_counter`] instead.
     pub fn cursor(&self) -> usize {
         (self.counter as usize) % (self.total as usize)
-    }
-
-    /// Raw consumption counter (domain positions consumed, including ones
-    /// rejected as out of range).
-    ///
-    /// Unlike [`IndexPermutation::cursor`], which folds the counter into
-    /// `[0, total)` and loses rejection information, the raw counter preserves
-    /// exact stream position: resuming a fixed-seed permutation from it yields
-    /// disjoint windows with no repeats until a full domain cycle completes.
-    /// Sources that need without-replacement streaming across refreshes
-    /// should persist this (not `cursor()`) as their cursor revision.
-    pub fn raw_counter(&self) -> u64 {
-        self.counter
     }
     fn permute_bits(value: u64, bits: u32, seed: u64) -> u64 {
         if bits == 0 {
@@ -584,56 +564,6 @@ mod tests {
         }
         assert!(seen.iter().all(|idx| *idx < 3));
         assert!(perm.cursor() < 3);
-    }
-
-    #[test]
-    fn index_permutation_raw_counter_preserves_exact_stream_position() {
-        // total=5 resolves to a power-of-two domain of 8, so some counter
-        // positions are rejected as out of range and `cursor()` (which folds
-        // the counter into `[0, total)`) loses stream state.
-        let mut perm = IndexPermutation::new(5, 99, 0);
-        let first_four: Vec<usize> = (0..4).map(|_| perm.next()).collect();
-        assert!(
-            first_four.iter().all(|&idx| idx < 5),
-            "walk must stay within total"
-        );
-        let mut distinct = first_four.clone();
-        distinct.sort_unstable();
-        distinct.dedup();
-        assert_eq!(distinct.len(), 4, "one domain cycle yields no repeats");
-        let raw = perm.raw_counter();
-        assert!(
-            raw > 4,
-            "expected at least one rejected position in the first four hits, raw={raw}"
-        );
-
-        // Resuming from the raw counter continues the exact walk.
-        let folded_start = perm.cursor();
-        let mut resumed = IndexPermutation::new(5, 99, raw);
-        let fifth = perm.next();
-        assert_eq!(
-            resumed.next(),
-            fifth,
-            "raw-counter resume must continue the exact walk"
-        );
-        // The fifth hit completes the full index set with zero duplicates.
-        let mut full = first_four.clone();
-        full.push(fifth);
-        full.sort_unstable();
-        assert_eq!(full, vec![0, 1, 2, 3, 4]);
-
-        // Resuming from the folded cursor() diverges: it replays an
-        // already-seen index instead of completing the set.
-        let mut folded = IndexPermutation::new(5, 99, folded_start as u64);
-        let folded_first = folded.next();
-        assert_ne!(
-            folded_first, fifth,
-            "folded-cursor resume must diverge from the true walk"
-        );
-        assert!(
-            first_four.contains(&folded_first),
-            "folded-cursor resume replays already-seen index {folded_first}"
-        );
     }
 
     #[test]

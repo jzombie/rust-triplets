@@ -28,8 +28,8 @@ use crate::srd_triplet::{self, SrdMode, SrdRecord};
 ///
 /// ## Sampling model: shuffled streaming windows, not file order
 ///
-/// `refresh` draws **uniform-over-corpus without replacement** through a
-/// deterministic permutation of the index domain `0..entry_count`, mirroring
+/// `refresh` draws a deterministic random window through a permutation of
+/// the index domain `0..entry_count`, mirroring
 /// [`triplets_core::source::IndexablePager`] / `ParquetRowSource`:
 ///
 /// - The permutation seed is
@@ -39,14 +39,13 @@ use crate::srd_triplet::{self, SrdMode, SrdRecord};
 ///   `(source_id, total, seed, cursor)` therefore always yields the same
 ///   indices; different seeds/epochs/steps draw from across the corpus rather
 ///   than adjacent file offsets.
-/// - The cursor `revision` is a position in *permutation-counter space*, not a
-///   file offset. Consecutive refreshes with the same seed advance the counter
-///   and return disjoint windows with no repeats until the counter completes
-///   a full domain cycle (counter space is infinite — `next()` folds it modulo
-///   the power-of-two domain — so the stream never stalls and cursors never
-///   need rewinding). When the seed changes between refreshes (epoch/step
-///   boundary) each window is an independent random subset, so a small chance
-///   overlap of ~`window^2/total` rows is expected — negligible for large
+/// - The cursor `revision` is a position in the permutation walk, folded into
+///   `[0, total)` exactly like every other pager in the crate — not a file
+///   offset. Out-of-range revisions wrap to 0 so the infinite forward stream
+///   never stalls. Like the other pagers, a refresh draws an independent
+///   seed-derived window: cross-refresh non-repetition is not a cursor
+///   contract (the corpus is modeled as an infinite stream), and overlapping
+///   windows of ~`window^2/total` rows are expected — negligible for large
 ///   stores, and never a coherent file-ordered block.
 /// - Within one refresh the returned order is the permutation order (random),
 ///   not sorted file order.
@@ -58,11 +57,7 @@ use crate::srd_triplet::{self, SrdMode, SrdRecord};
 /// row SRD stores behind issue #192 that is hundreds of MB per refresh plus
 /// one store read per row. Driving `IndexPermutation` directly lets `refresh`
 /// draw only `max` indices and serve them with a single `batch_read_entries`
-/// call. It also persists
-/// [`triplets_core::source::IndexPermutation::raw_counter`] rather than the
-/// folded [`triplets_core::source::IndexPermutation::cursor`], which is what
-/// preserves without-replacement tiling when the row count is not a power of
-/// two.
+/// call.
 pub struct SrdSource {
     store: DataStore,
     source_id: String,
@@ -163,12 +158,14 @@ impl DataSource for SrdSource {
                 "SRD store entry count {total_u64} exceeds index range: {e}"
             ))
         })?;
-        // The cursor revision is a raw permutation-counter position, not a
-        // file offset: counter space is infinite (`next()` folds it modulo
-        // the power-of-two domain), so no wrap/clamp is needed for the
-        // infinite forward stream — arbitrarily large revisions just continue
-        // the periodic walk.
-        let start = cursor.map(|c| c.revision).unwrap_or(0);
+        // The cursor revision is a position in the permutation walk, folded
+        // into `[0, total)` like every other pager: out-of-range revisions
+        // wrap to 0 so the infinite forward stream never stalls on empty
+        // windows.
+        let mut start = cursor.map(|c| c.revision).unwrap_or(0);
+        if start >= total_u64 {
+            start = 0;
+        }
         let max = limit.unwrap_or(256).min(total);
         if max == 0 {
             return Ok(SourceSnapshot {
@@ -261,11 +258,10 @@ impl DataSource for SrdSource {
 
         let next_cursor = SourceCursor {
             last_seen: Utc::now(),
-            // Persist the raw permutation counter (not `cursor() % total`):
-            // only the raw counter preserves exact stream position across
-            // refreshes, giving disjoint without-replacement windows until a
-            // full domain cycle completes.
-            revision: permutation.raw_counter(),
+            // Persist the folded walk position, like every other pager:
+            // revision stays in `[0, total)` and the next refresh continues
+            // the walk from there.
+            revision: permutation.cursor() as u64,
         };
 
         Ok(SourceSnapshot {
@@ -748,15 +744,12 @@ mod tests {
     }
 
     #[test]
-    fn non_power_of_two_windows_cover_corpus_before_repeating() {
-        // total=5 resolves to a power-of-two domain of 8, so rejections occur
-        // and the cursor must carry the raw permutation counter: resuming
-        // from the folded `cursor() % total` replays already-seen indices
-        // before the corpus is covered (verified: seeds 0, 1, 5 replay under
-        // folded cursors). limit=2 neither tiles the corpus nor the domain,
-        // so the cycle boundary falls mid-window. The assertions below hold
-        // for every seed: from counter 0 the first five hits always land
-        // inside the first domain cycle, hence distinct and complete.
+    fn non_power_of_two_refresh_is_deterministic_per_cursor() {
+        // total=5 resolves to a power-of-two domain of 8, so domain rejections
+        // occur. The cursor contract is per-position determinism — the same
+        // (seed, cursor) always yields the same window — not cross-window
+        // tiling: the corpus is an infinite stream and each refresh draws an
+        // independent seed-derived window.
         for seed in [0u64, 1, 7, 42, 77] {
             let dir = TempDir::new().unwrap();
             make_pair_store(&dir, 5);
@@ -773,32 +766,13 @@ mod tests {
             let (p2, c2) = refresh_ids(&source, &config, Some(&c1), 2);
             let (p3, _) = refresh_ids(&source, &config, Some(&c2), 2);
 
-            // Pages 1-2 lie within the first domain cycle: strictly disjoint.
-            {
-                use std::collections::HashSet;
-                let mut seen = HashSet::new();
-                for id in p1.iter().chain(p2.iter()) {
-                    assert!(seen.insert(id), "seed {seed}: pages 1-2 replay index {id}");
-                }
-            }
-
-            // Across three pages the walk covers the whole corpus before any
-            // index repeats: the first five draws are exactly 0..5.
-            let flat: Vec<String> = p1.into_iter().chain(p2).chain(p3).collect();
-            assert_eq!(flat.len(), 6);
-            let mut first_five = flat[..5].to_vec();
-            first_five.sort_unstable();
-            let expected: Vec<String> = (0..5).map(|i| i.to_string()).collect();
-            assert_eq!(
-                first_five, expected,
-                "seed {seed}: walk must cover the corpus before repeating"
-            );
-            // The sixth draw wraps into the next domain cycle, so it must repeat
-            // an already-seen index (the cycle boundary fell mid-window).
-            assert!(
-                flat[..5].contains(&flat[5]),
-                "seed {seed}: post-cycle draw must repeat an already-seen index"
-            );
+            // Replaying from the same cursors reproduces every page exactly.
+            let (q1, d1) = refresh_ids(&source, &config, None, 2);
+            let (q2, d2) = refresh_ids(&source, &config, Some(&d1), 2);
+            let (q3, _) = refresh_ids(&source, &config, Some(&d2), 2);
+            assert_eq!((&p1, &p2, &p3), (&q1, &q2, &q3));
+            assert_eq!(c1.revision, d1.revision);
+            assert_eq!(c2.revision, d2.revision);
         }
     }
 
@@ -903,11 +877,11 @@ mod tests {
 
     #[test]
     fn consecutive_windows_with_same_seed_are_disjoint_at_scale() {
-        // Stream contract (see AGENTS.md): with a fixed seed, consecutive
-        // refreshes advance the permutation counter and return disjoint
-        // windows with no repeats until the counter wraps past the corpus.
-        // n=256 is a power of two so the permutation domain has no rejected
-        // positions and four 64-row windows tile the corpus exactly.
+        // n=256 is a power of two, so the permutation domain has no rejected
+        // positions: the folded cursor coincides with the walk position and
+        // four 64-row windows tile the corpus exactly. (For non-power-of-two
+        // totals the cursor only promises per-position determinism — see
+        // `non_power_of_two_refresh_is_deterministic_per_cursor`.)
         let dir = TempDir::new().unwrap();
         make_pair_store(&dir, 256);
         let source = SrdSource::open(
