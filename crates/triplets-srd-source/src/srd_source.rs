@@ -1033,7 +1033,10 @@ mod tests {
         // - mean overlap near w^2/n = 16 fails for replay (128) and for
         //   fixed partitions (0);
         // - joint coverage near n fails for regional bias (half the corpus
-        //   dropped caps coverage at ~512).
+        //   dropped caps coverage at ~512);
+        // - decile floor fails file-ordered reads (9 empty deciles) and
+        //   half-corpus bias (5 empty); only the minimum is pinned since
+        //   small-step walks legitimately concentrate draws (no ceiling).
         // Note: one walk is an arithmetic progression mod the domain, and a
         // walk is fully determined by seed bits 1..k (2^k distinct walks
         // for a 2^k domain), so among 64 seeds ~2 full-walk collisions are
@@ -1073,13 +1076,43 @@ mod tests {
             distinct.len()
         );
 
-        // Spread: max-min file index spanned by one 128-row window.
+        // Spread: max-min entry index spanned by one 128-row window.
         // A file-ordered window always spans exactly w-1 = 127, so the 512
         // bar (half the corpus) cleanly separates shuffled windows from
         // sequential ones; a few small-step progressions legitimately fall
         // short, hence 56/64 instead of 64/64 (observed: 64/64).
+        // Decile floor: aggregate share per tenth of this test's 1024 entry
+        // indices, aggregated over all 64 windows (8192 draws, ~819
+        // expected per decile). Only the
+        // minimum is pinned, deliberately: small-step walks legitimately
+        // concentrate draws, so a ceiling would punish healthy clustering,
+        // while any gross bias empties deciles outright (file-ordered
+        // reads leave 9 deciles near-empty, half-corpus bias 5). The 400
+        // floor (~half of expected) is far below any healthy minimum and
+        // far above any biased one; the 1.25M-row production store measured
+        // 10.0% in every decile.
+        let mut deciles = [0usize; 10];
+        for w in &windows {
+            for id in w {
+                let idx: usize = id.parse().unwrap();
+                deciles[idx * 10 / 1024] += 1;
+            }
+        }
+        let min_decile = *deciles.iter().min().unwrap();
+        assert!(
+            min_decile >= 400,
+            "emptiest decile holds only {min_decile}/8192 draws (expected ~819)"
+        );
         let mut wide = 0usize;
         for w in &windows {
+            // One walk segment can never repeat an index (each domain
+            // position is visited once per cycle), so every window is
+            // internally duplicate-free regardless of seed.
+            assert_eq!(
+                w.iter().collect::<std::collections::HashSet<_>>().len(),
+                w.len(),
+                "window repeats an index within itself"
+            );
             let idx: Vec<usize> = w.iter().map(|id| id.parse().unwrap()).collect();
             if idx.iter().max().unwrap() - idx.iter().min().unwrap() >= 512 {
                 wide += 1;
