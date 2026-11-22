@@ -971,6 +971,21 @@ mod tests {
             assert_eq!(triplet.positive.record_id, triplet.anchor.record_id);
             assert_ne!(triplet.anchor.record_id, triplet.negative.record_id);
         }
+
+        // A second draw keeps working through the same pipeline (pool
+        // advance, re-selection) with the same invariants.
+        let batch2 = sampler
+            .next_triplet_batch_with_weights_for_split(SplitLabel::Train, &weights)
+            .expect("second triplet batch must succeed");
+        assert_eq!(batch2.triplets.len(), 8);
+        for triplet in &batch2.triplets {
+            assert_eq!(triplet.recipe, "srd_pair");
+            for chunk in [&triplet.anchor, &triplet.positive, &triplet.negative] {
+                assert_eq!(chunk.source, "srd_e2e");
+                let idx: usize = chunk.record_id.parse().expect("entry index id");
+                assert!(idx < 32, "chunk references unknown entry {idx}");
+            }
+        }
     }
 
     #[test]
@@ -1007,11 +1022,26 @@ mod tests {
     }
 
     #[test]
-    fn independent_seed_windows_overlap_partially_at_scale() {
-        // Two windows drawn with different seeds from the head are
-        // independent random subsets: overlap concentrates near w^2/n
-        // (here 256^2/1024 = 64, sd ~6), far from both 0 (disjoint) and
-        // 256 (replay). Deterministic for fixed seeds.
+    fn seeded_windows_behave_as_independent_subsets_at_scale() {
+        // Ensemble regression test over 64 fixed seeds (n=1024, w=128).
+        // Each assertion fails loudly for a concrete known-bad
+        // implementation while holding with wide margin for the real walk
+        // (verified by running; bands below are theory-derived, not fitted):
+        // - distinct-window count fails if seeds are ignored (all 64
+        //   windows identical);
+        // - spread fails if windows are file-ordered (spread would be w-1);
+        // - mean overlap near w^2/n = 16 fails for replay (128) and for
+        //   fixed partitions (0);
+        // - joint coverage near n fails for regional bias (half the corpus
+        //   dropped caps coverage at ~512).
+        // Note: one walk is an arithmetic progression mod the domain, and a
+        // walk is fully determined by seed bits 1..k (2^k distinct walks
+        // for a 2^k domain), so among 64 seeds ~2 full-walk collisions are
+        // EXPECTED by the birthday bound (observed: seeds 20 and 32) — that
+        // is the design's key space, not a bug. Distinct-count (not
+        // pairwise-distinctness) is therefore the correct assertion, and
+        // the spread assertion tolerates small-step clustered windows by
+        // design instead of demanding every window span the corpus.
         let dir = TempDir::new().unwrap();
         make_pair_store(&dir, 1024);
         let source = SrdSource::open(
@@ -1022,23 +1052,63 @@ mod tests {
         )
         .unwrap();
 
-        let (a, _) = refresh_ids(&source, &config_with_seed(11), None, 256);
-        let (b, _) = refresh_ids(&source, &config_with_seed(12), None, 256);
-        assert_ne!(a, b, "different seeds must permute differently");
-        let set_a: std::collections::HashSet<&str> = a.iter().map(String::as_str).collect();
-        let overlap = b.iter().filter(|id| set_a.contains(id.as_str())).count();
-        assert!(
-            (32..=128).contains(&overlap),
-            "overlap {overlap} outside the 32..=128 band around expected 64"
-        );
-        for (name, ids) in [("a", &a), ("b", &b)] {
-            let idx: Vec<usize> = ids.iter().map(|id| id.parse().unwrap()).collect();
-            let spread = idx.iter().max().unwrap() - idx.iter().min().unwrap();
-            assert!(
-                spread >= 512,
-                "window {name} spans only {spread} of 1024 file positions"
-            );
+        let seeds: Vec<u64> = (1..=64).collect();
+        let windows: Vec<Vec<String>> = seeds
+            .iter()
+            .map(|&s| refresh_ids(&source, &config_with_seed(s), None, 128).0)
+            .collect();
+
+        let mut distinct = std::collections::HashSet::new();
+        for w in &windows {
+            distinct.insert(w);
         }
+        assert!(
+            distinct.len() >= 58,
+            "only {}/64 distinct windows (seed threading broken gives 1)",
+            distinct.len()
+        );
+
+        let mut wide = 0usize;
+        for w in &windows {
+            let idx: Vec<usize> = w.iter().map(|id| id.parse().unwrap()).collect();
+            if idx.iter().max().unwrap() - idx.iter().min().unwrap() >= 512 {
+                wide += 1;
+            }
+        }
+        assert!(
+            wide >= 56,
+            "only {wide}/64 windows span the corpus (sequential would give 0)"
+        );
+
+        let sets: Vec<std::collections::HashSet<&str>> = windows
+            .iter()
+            .map(|w| w.iter().map(String::as_str).collect())
+            .collect();
+        let mut total_overlap = 0usize;
+        let mut pairs = 0usize;
+        for (i, a) in sets.iter().enumerate() {
+            for b in sets.iter().skip(i + 1) {
+                total_overlap += b.iter().filter(|id| a.contains(*id)).count();
+                pairs += 1;
+            }
+        }
+        let mean = total_overlap as f64 / pairs as f64;
+        assert!(
+            (10.0..=22.0).contains(&mean),
+            "mean pairwise overlap {mean:.2} outside [10, 22] around expected 16"
+        );
+
+        let mut covered = std::collections::HashSet::new();
+        for w in &windows {
+            for id in w {
+                covered.insert(id);
+            }
+        }
+        assert!(
+            covered.len() >= 1010,
+            "joint coverage only {}/1024 of the corpus",
+            covered.len()
+        );
     }
 
     #[test]
