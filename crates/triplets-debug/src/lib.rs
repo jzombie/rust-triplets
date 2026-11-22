@@ -1434,7 +1434,7 @@ fn extract_source(record_id: &str) -> SourceId {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{TimeZone, Utc};
+    use jiff::Timestamp;
     use tempfile::tempdir;
     use triplets_core::DataRecord;
     use triplets_core::DeterministicSplitStore;
@@ -1505,7 +1505,7 @@ mod tests {
             Ok(SourceSnapshot {
                 records: Vec::new(),
                 cursor: SourceCursor {
-                    last_seen: Utc::now(),
+                    last_seen: Timestamp::now(),
                     revision: 0,
                 },
             })
@@ -1542,7 +1542,7 @@ mod tests {
             Ok(SourceSnapshot {
                 records: Vec::new(),
                 cursor: SourceCursor {
-                    last_seen: Utc::now(),
+                    last_seen: Timestamp::now(),
                     revision: 0,
                 },
             })
@@ -1587,7 +1587,7 @@ mod tests {
             Ok(SourceSnapshot {
                 records: self.records.clone(),
                 cursor: SourceCursor {
-                    last_seen: Utc::now(),
+                    last_seen: Timestamp::now(),
                     revision: 0,
                 },
             })
@@ -1630,7 +1630,7 @@ mod tests {
             Ok(SourceSnapshot {
                 records: self.records.clone(),
                 cursor: SourceCursor {
-                    last_seen: Utc::now(),
+                    last_seen: Timestamp::now(),
                     revision: 0,
                 },
             })
@@ -1652,7 +1652,9 @@ mod tests {
         title: &str,
         body: &str,
     ) -> DataRecord {
-        let now = Utc.with_ymd_and_hms(2025, 1, day, 12, 0, 0).unwrap();
+        let now = format!("2025-01-{day:02}T12:00:00Z")
+            .parse::<Timestamp>()
+            .unwrap();
         DataRecord {
             id: format!("{source}::{id_suffix}"),
             source: source.to_string(),
@@ -1881,7 +1883,7 @@ mod tests {
                 _cursor: Option<&SourceCursor>,
                 _limit: Option<usize>,
             ) -> Result<SourceSnapshot, SamplerError> {
-                let now = Utc::now();
+                let now = Timestamp::now();
                 Ok(SourceSnapshot {
                     records: vec![DataRecord {
                         id: "one_record::r1".to_string(),

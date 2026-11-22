@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use chrono::Utc;
+use jiff::Timestamp;
 use simd_r_drive::storage_engine::DataStore;
 use simd_r_drive::storage_engine::traits::DataStoreReader;
 use triplets::SamplerError;
@@ -145,7 +145,7 @@ impl DataSource for SrdSource {
             return Ok(SourceSnapshot {
                 records: Vec::new(),
                 cursor: SourceCursor {
-                    last_seen: Utc::now(),
+                    last_seen: Timestamp::now(),
                     revision: 0,
                 },
             });
@@ -168,7 +168,7 @@ impl DataSource for SrdSource {
             return Ok(SourceSnapshot {
                 records: Vec::new(),
                 cursor: SourceCursor {
-                    last_seen: Utc::now(),
+                    last_seen: Timestamp::now(),
                     revision: start,
                 },
             });
@@ -184,7 +184,7 @@ impl DataSource for SrdSource {
         let entries = srd_triplet::batch_read_entries(&self.store, &indices, self.emb_dim)
             .map_err(|e| SamplerError::Configuration(e.to_string()))?;
 
-        let now = Utc::now();
+        let now = Timestamp::now();
         let mut records = Vec::with_capacity(entries.len());
         for (offset, record) in indices.iter().zip(entries.iter()) {
             let id: RecordId = (*offset as u64).to_string();
@@ -254,7 +254,7 @@ impl DataSource for SrdSource {
         }
 
         let next_cursor = SourceCursor {
-            last_seen: Utc::now(),
+            last_seen: Timestamp::now(),
             // Persist the folded walk position, like every other pager:
             // revision stays in `[0, total)` and the next refresh continues
             // the walk from there.
@@ -680,7 +680,7 @@ mod tests {
 
         let config = SamplerConfig::default();
         let cursor = SourceCursor {
-            last_seen: chrono::Utc::now(),
+            last_seen: jiff::Timestamp::now(),
             revision: 100, // far past the end: counter space is periodic, so
                            // the walk just continues instead of stalling
         };
@@ -1183,7 +1183,7 @@ mod tests {
         assert_eq!(snap.cursor.revision, 0);
 
         let cursor = SourceCursor {
-            last_seen: chrono::Utc::now(),
+            last_seen: jiff::Timestamp::now(),
             revision: 3,
         };
         let snap2 = source.refresh(&config, Some(&cursor), Some(0)).unwrap();

@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{BufRead, BufReader};
 
-use chrono::{DateTime, Utc};
 use flate2::read::GzDecoder;
+use jiff::Timestamp;
 use rayon::prelude::*;
 use serde::de::{Deserializer as _, SeqAccess, Visitor};
 use serde_json::{Value, json};
@@ -162,7 +162,7 @@ pub fn row_to_record(
         ));
     }
 
-    let timestamp = row.timestamp.unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
+    let timestamp = row.timestamp.unwrap_or(Timestamp::UNIX_EPOCH);
     Ok(Some(DataRecord {
         id,
         source: source.config.source_id.clone(),

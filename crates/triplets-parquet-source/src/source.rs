@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use chrono::Utc;
+use jiff::Timestamp;
 use tracing::info;
 use triplets_core::SamplerError;
 use triplets_core::config::{NegativeStrategy, SamplerConfig, Selector, TripletRecipe};
@@ -375,7 +375,7 @@ impl DataSource for ParquetRowSource {
             return Ok(SourceSnapshot {
                 records: Vec::new(),
                 cursor: SourceCursor {
-                    last_seen: Utc::now(),
+                    last_seen: Timestamp::now(),
                     revision: 0,
                 },
             });
@@ -469,7 +469,7 @@ impl DataSource for ParquetRowSource {
             .iter()
             .map(|record| record.updated_at)
             .max()
-            .unwrap_or_else(Utc::now);
+            .unwrap_or_else(Timestamp::now);
 
         Ok(SourceSnapshot {
             records,

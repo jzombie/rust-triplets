@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use chrono::Utc;
+use jiff::Timestamp;
 use triplets_core::data::{DataRecord, QualityScore, RecordSection, SectionRole};
 use triplets_core::source::InMemorySource;
 use triplets_core::{
@@ -12,8 +12,8 @@ fn rec(id: &str, title: &str, body: &str) -> DataRecord {
     DataRecord {
         id: id.to_string(),
         source: "demo".to_string(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         quality: QualityScore { trust: 1.0 },
         taxonomy: vec![],
         sections: vec![

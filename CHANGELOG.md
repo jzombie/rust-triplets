@@ -28,6 +28,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - Bumped `line-ending` from 1.5.1 to 1.6.0 (#188)
 - Bumped `parquet` (and `arrow-*`) from 60.0.0 to 60.1.0 (#189)
 - Bumped `flate2` from 1.1.10 to 1.1.11 (#190)
+- **BREAKING: Replaced `chrono` 0.4.45 with `jiff` 1.0.2.** `chrono` is unmaintained
+  (RUSTSEC-2026-0543, no patched versions), which failed `cargo deny
+  check`; `jiff` is the advisory's recommended replacement. The following
+  public types change crates: `DataRecord::created_at/updated_at`,
+  `SourceCursor::last_seen`, `RowView::timestamp`, `file_mtime`, and
+  `file_times` move from `chrono::DateTime<Utc>` to `jiff::Timestamp`,
+  and the date helpers (`build_date_meta_values`,
+  `parse_publication_date_from_*`) move from `chrono::NaiveDate` to
+  `jiff::civil::Date`. Every use migrates one-to-one, and serialized
+  formats are unchanged (`Timestamp` keeps the RFC 3339 `Z` wire format;
+  `Date` keeps ISO `YYYY-MM-DD`), so persisted stores still load. `chrono`
+  remains in the lockfile only as a non-optional transitive dependency of
+  `arrow`/`parquet`/`reqwest-drive` pending upstream migration; no
+  workspace code depends on it, and `cargo deny check` is green.
 
 ### Fixed
 

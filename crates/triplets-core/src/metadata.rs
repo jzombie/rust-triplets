@@ -1,4 +1,4 @@
-use chrono::NaiveDate;
+use jiff::civil::Date;
 use std::fmt::Display;
 
 pub use crate::constants::metadata::{META_FIELD_DATE, METADATA_DELIMITER};
@@ -35,14 +35,38 @@ impl MetadataKey {
 
 // TODO: This could be more extensible for non-U.S formats; it's a bit too hardcoded
 /// Build common date string variants for metadata prefixes.
-pub fn build_date_meta_values(date: &NaiveDate) -> Vec<crate::types::MetaValue> {
+pub fn build_date_meta_values(date: &Date) -> Vec<crate::types::MetaValue> {
+    // Month names are fixed English tables: civil dates expose only numeric
+    // components, and these display variants are stable by contract.
+    const MONTH_SHORT: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    const MONTH_FULL: [&str; 12] = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+    let year = date.year();
+    let month = date.month() as usize; // 1..=12, guaranteed by construction
+    let day = date.day();
+    let short = MONTH_SHORT[month - 1];
+    let full = MONTH_FULL[month - 1];
     let mut vals = vec![
-        date.format("%Y-%m-%d").to_string(),    // 2024-10-15 (ISO)
-        date.format("%b. %-d, %Y").to_string(), // Oct. 15, 2024
-        date.format("%B %-d, %Y").to_string(),  // October 15, 2024
-        date.format("%d.%m.%Y").to_string(),    // 15.10.2024
-        date.format("%m/%d/%Y").to_string(),    // 02/25/2025
-        date.format("%b %-d, %Y").to_string(),  // Oct 15, 2024 (no dot)
+        date.to_string(),                      // 2024-10-15 (ISO)
+        format!("{short}. {day}, {year}"),     // Oct. 15, 2024
+        format!("{full} {day}, {year}"),       // October 15, 2024
+        format!("{day:02}.{month:02}.{year}"), // 15.10.2024
+        format!("{month:02}/{day:02}/{year}"), // 02/25/2025
+        format!("{short} {day}, {year}"),      // Oct 15, 2024 (no dot)
     ];
     vals.sort();
     vals.dedup();
@@ -63,7 +87,7 @@ mod tests {
 
     #[test]
     fn date_meta_values_are_deduped_and_include_expected_formats() {
-        let date = NaiveDate::from_ymd_opt(2025, 2, 25).unwrap();
+        let date = Date::new(2025, 2, 25).unwrap();
         let values = build_date_meta_values(&date);
 
         assert!(values.contains(&"2025-02-25".to_string()));

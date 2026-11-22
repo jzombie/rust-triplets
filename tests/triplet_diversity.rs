@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use chrono::{Duration, TimeZone, Utc};
+use jiff::{SignedDuration, Timestamp};
 
 use triplets::source::InMemorySource;
 use triplets::utils::make_section;
@@ -56,8 +56,8 @@ fn build_record(source: &str, idx: usize) -> DataRecord {
         ),
     ];
     let (heading_keywords, body_keywords) = TOPICS[idx % TOPICS.len()];
-    let created_at =
-        Utc.with_ymd_and_hms(2025, 1, 1, 12, 0, 0).unwrap() + Duration::days(idx as i64);
+    let created_at = "2025-01-01T12:00:00Z".parse::<Timestamp>().unwrap()
+        + SignedDuration::from_secs(idx as i64 * 86_400);
     DataRecord {
         id: format!("{source}::record_{idx}"),
         source: source.to_string(),

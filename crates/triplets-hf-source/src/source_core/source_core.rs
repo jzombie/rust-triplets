@@ -14,7 +14,7 @@ use triplets_parquet_source::shard_index::{
     index_single_shard, is_store_shard_path, shard_store_path_for,
 };
 
-use chrono::Utc;
+use jiff::Timestamp;
 use reqwest_drive::ClientWithMiddleware;
 use simd_r_drive::storage_engine::traits::{DataStoreReader, DataStoreWriter};
 use std::collections::HashMap;
@@ -900,7 +900,7 @@ impl DataSource for HuggingFaceRowSource {
                     return Ok(SourceSnapshot {
                         records: Vec::new(),
                         cursor: SourceCursor {
-                            last_seen: Utc::now(),
+                            last_seen: Timestamp::now(),
                             revision: 0,
                         },
                     });
@@ -910,7 +910,7 @@ impl DataSource for HuggingFaceRowSource {
                 return Ok(SourceSnapshot {
                     records: Vec::new(),
                     cursor: SourceCursor {
-                        last_seen: Utc::now(),
+                        last_seen: Timestamp::now(),
                         revision: 0,
                     },
                 });

@@ -30,7 +30,7 @@ fn build_qa_record(
 ) -> Result<Option<DataRecord>, triplets::SamplerError> {
     let body = fs::read_to_string(path)?;
     let title = FileCorpusIndex::normalized_title_from_stem(path, source_id, true)?;
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     Ok(Some(DataRecord {
         id: FileCorpusIndex::source_scoped_record_id(source_id, root, path),
         source: source_id.clone(),
@@ -62,7 +62,7 @@ fn ids_from_root(root: &Path, source_id: &SourceId, index_dir: &Path) -> Vec<Rec
 }
 
 fn build_record(source: &str, idx: usize) -> DataRecord {
-    let created_at = chrono::Utc::now();
+    let created_at = jiff::Timestamp::now();
     DataRecord {
         id: format!("{source}::{idx}"),
         source: source.to_string(),

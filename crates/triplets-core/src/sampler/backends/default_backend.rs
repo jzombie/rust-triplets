@@ -83,7 +83,7 @@ mod tests {
     use super::*;
     use crate::config::RetrievalSamplingConfig;
     use crate::data::{QualityScore, RecordSection, SectionRole};
-    use chrono::Utc;
+    use jiff::Timestamp;
     use rand::SeedableRng;
     use rand::rngs::StdRng;
 
@@ -91,8 +91,8 @@ mod tests {
         DataRecord {
             id: id.to_string(),
             source: "test_source".to_string(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
             quality: QualityScore { trust: 1.0 },
             taxonomy: Vec::new(),
             sections: vec![RecordSection {

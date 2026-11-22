@@ -576,7 +576,7 @@ fn huggingface_refresh_cursor_wraps_and_limit_none_reads_all() {
         .refresh(
             &seed,
             Some(&triplets_core::SourceCursor {
-                last_seen: chrono::Utc::now(),
+                last_seen: jiff::Timestamp::now(),
                 revision: 99,
             }),
             Some(1),

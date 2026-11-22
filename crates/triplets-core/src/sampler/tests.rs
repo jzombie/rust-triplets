@@ -89,7 +89,7 @@ use crate::kvp::{KvpField, KvpPrefixSampler};
 use crate::metadata::META_FIELD_DATE;
 use crate::source::{DataSource, InMemorySource, SourceCursor, SourceSnapshot};
 use crate::splits::{DeterministicSplitStore, FileSplitStore, SplitLabel, SplitRatios, SplitStore};
-use chrono::Utc;
+use jiff::{SignedDuration, Timestamp};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration as StdDuration;
@@ -228,8 +228,8 @@ fn select_chunk_random_handles_empty_and_non_empty_sections() {
     let empty_record = DataRecord {
         id: "empty_random".into(),
         source: "unit".into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         quality: QualityScore::default(),
         taxonomy: vec![],
         sections: vec![],
@@ -245,8 +245,8 @@ fn select_chunk_random_handles_empty_and_non_empty_sections() {
     let non_empty_record = DataRecord {
         id: "non_empty_random".into(),
         source: "unit".into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         quality: QualityScore::default(),
         taxonomy: vec![],
         sections: vec![RecordSection {
@@ -277,8 +277,8 @@ fn record_has_long_section_returns_false_when_window_tokens_are_disabled() {
     let long_record = DataRecord {
         id: "long_record".into(),
         source: "unit".into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         quality: QualityScore::default(),
         taxonomy: vec![],
         sections: vec![RecordSection {
@@ -554,8 +554,8 @@ fn insert_id_into_source_index_maintains_sorted_order() {
         let record = DataRecord {
             id: id.into(),
             source: "src_ins".into(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
             quality: QualityScore::default(),
             taxonomy: vec![],
             sections: vec![RecordSection {
@@ -618,8 +618,8 @@ fn insert_id_into_source_index_skips_disallowed_split() {
     let record = DataRecord {
         id: "disallowed".into(),
         source: "src_dis".into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         quality: QualityScore::default(),
         taxonomy: vec![],
         sections: vec![RecordSection {
@@ -919,7 +919,7 @@ fn sync_records_from_cache_delta_path_with_additions_and_evictions() {
     config.batch_size = 4;
     let mut inner = TripletSamplerInner::new(config, store);
 
-    let now = Utc::now();
+    let now = Timestamp::now();
     let records = vec![
         DataRecord {
             id: "d1".into(),
@@ -994,8 +994,8 @@ fn record_has_long_section_increments_count_on_add() {
     let long_record = DataRecord {
         id: "long_r".into(),
         source: "long_src".into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         quality: QualityScore::default(),
         taxonomy: vec![],
         sections: vec![RecordSection {
@@ -1117,7 +1117,7 @@ impl DataSource for CountingSource {
         Ok(SourceSnapshot {
             records,
             cursor: SourceCursor {
-                last_seen: Utc::now(),
+                last_seen: Timestamp::now(),
                 revision: 0,
             },
         })
@@ -1183,7 +1183,7 @@ impl DataSource for FlakySource {
         Ok(SourceSnapshot {
             records,
             cursor: SourceCursor {
-                last_seen: Utc::now(),
+                last_seen: Timestamp::now(),
                 revision: call as u64,
             },
         })
@@ -1220,7 +1220,7 @@ impl DataSource for FailingSource {
 }
 
 fn sample_record() -> DataRecord {
-    let now = Utc::now();
+    let now = Timestamp::now();
     DataRecord {
         id: "record_1".into(),
         source: "unit".into(),
@@ -1255,8 +1255,8 @@ fn sample_record() -> DataRecord {
     }
 }
 
-fn record_with_offset(id: &str, base: chrono::DateTime<Utc>, offset_seconds: i64) -> DataRecord {
-    let timestamp = base + Duration::seconds(offset_seconds);
+fn record_with_offset(id: &str, base: jiff::Timestamp, offset_seconds: i64) -> DataRecord {
+    let timestamp = base + SignedDuration::from_secs(offset_seconds);
     let mut record = sample_record();
     record.id = id.into();
     record.created_at = timestamp;
@@ -1265,7 +1265,7 @@ fn record_with_offset(id: &str, base: chrono::DateTime<Utc>, offset_seconds: i64
 }
 
 fn trader_record(id: &str, date: &str, title: &str, body: &str) -> DataRecord {
-    let now = Utc::now();
+    let now = Timestamp::now();
     DataRecord {
         id: id.into(),
         source: PRIMARY_SOURCE_ID.into(),
@@ -1299,7 +1299,7 @@ fn trader_record(id: &str, date: &str, title: &str, body: &str) -> DataRecord {
 /// Create a record where Anchor and Context sections have identical text,
 /// simulating the text-columns mode that Hugging Face sources use.
 fn text_columns_record(id: &str, common_text: &str) -> DataRecord {
-    let now = Utc::now();
+    let now = Timestamp::now();
     DataRecord {
         id: id.into(),
         source: "unit".into(),
@@ -1902,7 +1902,7 @@ fn failed_source_is_retried_on_next_batch_call() {
 }
 
 fn qa_pair_record(id: &str, question: &str, answer: &str) -> DataRecord {
-    let now = Utc::now();
+    let now = Timestamp::now();
     DataRecord {
         id: id.into(),
         source: SECONDARY_SOURCE_ID.into(),
@@ -1963,7 +1963,7 @@ impl DataSource for RecipeDecoratedSource {
         Ok(SourceSnapshot {
             records,
             cursor: SourceCursor {
-                last_seen: Utc::now(),
+                last_seen: Timestamp::now(),
                 revision: cursor.map(|c| c.revision + 1).unwrap_or_default(),
             },
         })
@@ -2000,8 +2000,8 @@ fn chunk_view_carries_window_index() {
     let record = DataRecord {
         id: "ratio_record".into(),
         source: "unit".into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         quality: QualityScore { trust: 1.0 },
         taxonomy: vec![],
         sections: vec![RecordSection {
@@ -2054,8 +2054,8 @@ fn chunk_windows_follow_stride_for_large_sections() {
     let record = DataRecord {
         id: "stride_record".into(),
         source: "unit".into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         quality: QualityScore { trust: 1.0 },
         taxonomy: vec![],
         sections: vec![RecordSection {
@@ -2126,8 +2126,8 @@ fn chunk_windows_materialize_all_configured_overlaps() {
     let record = DataRecord {
         id: "overlap_record".into(),
         source: "unit".into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         quality: QualityScore { trust: 1.0 },
         taxonomy: vec![],
         sections: vec![RecordSection {
@@ -2249,8 +2249,8 @@ fn sampler_uses_custom_chunking_algorithm_when_provided() {
     let record = DataRecord {
         id: "custom_chunk_record".into(),
         source: "unit".into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         quality: QualityScore { trust: 1.0 },
         taxonomy: vec![],
         sections: vec![RecordSection {
@@ -2310,8 +2310,8 @@ fn runtime_batches_do_not_bypass_custom_chunker() {
     let mk = |id: &str| DataRecord {
         id: id.into(),
         source: "unit".into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         quality: QualityScore { trust: 1.0 },
         taxonomy: vec![],
         sections: vec![RecordSection {
@@ -2911,8 +2911,8 @@ fn non_adjacent_auto_window_pair_proximity_is_not_half() {
     let record = DataRecord {
         id: "non_adjacent_proximity".into(),
         source: "unit".into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         quality: QualityScore::default(),
         taxonomy: vec![],
         sections: vec![RecordSection {
@@ -3028,8 +3028,8 @@ fn text_pair_and_triplet_chunks_all_come_from_materialize_pool() {
     let make_record = |id: &str| DataRecord {
         id: id.into(),
         source: "unit".into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         quality: QualityScore { trust: 1.0 },
         taxonomy: vec![],
         sections: vec![RecordSection {
@@ -3160,8 +3160,8 @@ fn end_to_end_text_weighting_uses_chunk_offsets() {
     let record = DataRecord {
         id: weighted_id,
         source: "unit".into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         quality: QualityScore::default(),
         taxonomy: vec![],
         sections: vec![RecordSection {
@@ -4136,8 +4136,8 @@ fn cross_batch_text_dedup_survives_window_advance() {
         .map(|id| DataRecord {
             id: id.clone(),
             source: "shared_source".into(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
             quality: QualityScore { trust: 1.0 },
             taxonomy: vec!["shared_source".into()],
             sections: vec![RecordSection {
@@ -4348,8 +4348,8 @@ fn cycles_through_section_windows_before_repeating() {
     let record = DataRecord {
         id: "window_record".into(),
         source: "unit".into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         quality: QualityScore::default(),
         taxonomy: vec![],
         sections: vec![RecordSection {
@@ -4422,8 +4422,8 @@ fn first_chunk_offset_is_deterministic_and_nonzero_when_hash_demands_it() {
         let record = DataRecord {
             id: "window_record".into(),
             source: "unit".into(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
             quality: QualityScore::default(),
             taxonomy: vec![],
             sections: vec![RecordSection {
@@ -4513,8 +4513,8 @@ fn first_role_section_offset_is_deterministic_and_nonzero_when_hash_demands_it()
         let record = DataRecord {
             id: "role_offset_record".into(),
             source: "unit".into(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
             quality: QualityScore::default(),
             taxonomy: vec![],
             sections: vec![
@@ -5239,8 +5239,8 @@ fn role_reentry_same_epoch_restarts_from_same_section_offset() {
     let record = DataRecord {
         id: "role_reentry_record".into(),
         source: "unit".into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         quality: QualityScore::default(),
         taxonomy: vec![],
         sections: vec![
@@ -5320,8 +5320,8 @@ fn role_reentry_after_epoch_change_can_restart_from_different_section_offset() {
     let record = DataRecord {
         id: "role_reentry_record".into(),
         source: "unit".into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         quality: QualityScore::default(),
         taxonomy: vec![],
         sections: vec![
@@ -6144,7 +6144,7 @@ fn selector_edge_cases_cover_internal_branches() {
     };
     let mut inner = TripletSamplerInner::new(config, Arc::clone(&store));
 
-    let now = Utc::now();
+    let now = Timestamp::now();
     let record = DataRecord {
         id: "selector_record".into(),
         source: "unit".into(),
@@ -6234,7 +6234,7 @@ fn selector_edge_cases_cover_internal_branches() {
 
     let mut neighbor = record.clone();
     neighbor.id = "selector_neighbor".into();
-    neighbor.created_at = now + Duration::days(1);
+    neighbor.created_at = now + SignedDuration::from_secs(86_400);
     neighbor.updated_at = neighbor.created_at;
     neighbor.sections = vec![RecordSection {
         role: SectionRole::Context,
@@ -6709,7 +6709,7 @@ fn temporal_neighbor_auto_pair_and_weighted_retry_paths_are_covered() {
     config.batch_size = 1;
     let mut inner = TripletSamplerInner::new(config, Arc::clone(&store));
 
-    let mut anchor = record_with_offset("anchor_record", Utc::now(), 0);
+    let mut anchor = record_with_offset("anchor_record", Timestamp::now(), 0);
     anchor.source = "source_a".into();
     anchor.taxonomy = vec!["shared_taxonomy".into()];
     let mut neighbor = record_with_offset("neighbor_record", anchor.created_at, 86_400);
@@ -8744,7 +8744,7 @@ fn refresh_limit_caps_records_per_source() {
     config.batch_size = 3;
     config.per_source_max_pool = 3;
     let store = Arc::new(DeterministicSplitStore::new(split, 37).unwrap());
-    let base = Utc::now() - Duration::seconds(60);
+    let base = Timestamp::now() - SignedDuration::from_secs(60);
     // Generate enough record IDs that at least 3 hash to Train; take the first 10.
     let ids: Vec<String> = (0u32..)
         .filter_map(|i| {
@@ -10085,8 +10085,8 @@ fn oversampling_advances_cursors_on_large_records() {
     let multi_chunk_record = DataRecord {
         id: "long_record".into(),
         source: "small".into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         quality: QualityScore::default(),
         taxonomy: vec![],
         sections: vec![RecordSection {
@@ -10107,8 +10107,8 @@ fn oversampling_advances_cursors_on_large_records() {
         large_source_records.push(DataRecord {
             id: format!("short_{}", char),
             source: "large".into(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
             quality: QualityScore::default(),
             taxonomy: vec![],
             sections: vec![RecordSection {
@@ -10369,7 +10369,7 @@ fn adds_dynamic_chunk_pair_recipe_for_long_section_sources() {
         retrieval_sampling: None,
     }];
 
-    let now = Utc::now();
+    let now = Timestamp::now();
     // Two records are provided so `WrongArticle` negatives can be formed.
     // Context sections are intentionally longer than `max_window_tokens`.
     let records = vec![
@@ -10488,7 +10488,7 @@ fn does_not_add_dynamic_chunk_pair_recipe_when_all_sections_fit_window() {
         retrieval_sampling: None,
     }];
 
-    let now = Utc::now();
+    let now = Timestamp::now();
     // All context sections are short and should not be classified as
     // chunk-window eligible for dynamic augmentation.
     let store = Arc::new(DeterministicSplitStore::new(split, 118).unwrap());
@@ -10613,7 +10613,7 @@ fn adds_dynamic_chunk_pair_recipe_even_with_global_config_recipes() {
         retrieval_sampling: None,
     }];
 
-    let now = Utc::now();
+    let now = Timestamp::now();
     let records = vec![
         DataRecord {
             id: "cfg1".into(),
@@ -10721,7 +10721,7 @@ fn auto_injected_recipe_uses_distinct_context_chunks_for_anchor_and_positive() {
         ..ChunkingStrategy::default()
     };
 
-    let now = Utc::now();
+    let now = Timestamp::now();
     // The multi-window record is the anchor; the single-window record exists
     // only to satisfy WrongArticle negative selection.
     // This makes the expected anchor/positive chunk texts deterministic.
@@ -10842,7 +10842,7 @@ fn auto_injected_recipe_never_uses_identical_anchor_and_positive_chunks() {
         ..ChunkingStrategy::default()
     };
 
-    let now = Utc::now();
+    let now = Timestamp::now();
     let store = Arc::new(DeterministicSplitStore::new(split, 120).unwrap());
     let find_train_id = |prefix: &str| -> String {
         (0u32..)
@@ -10942,7 +10942,7 @@ fn auto_injected_recipe_uses_window_chunks_for_anchor_and_positive() {
         ..ChunkingStrategy::default()
     };
 
-    let now = Utc::now();
+    let now = Timestamp::now();
     let records = vec![
         DataRecord {
             id: "long_w1".into(),
@@ -11052,7 +11052,7 @@ fn auto_injected_recipe_keeps_all_components_in_requested_split() {
         panic!("unable to find id for {:?}", label);
     };
 
-    let now = Utc::now();
+    let now = Timestamp::now();
     let mut records = Vec::new();
     for split_label in [SplitLabel::Train, SplitLabel::Validation, SplitLabel::Test] {
         for idx in 0..2 {
@@ -11152,7 +11152,7 @@ fn same_selector_triplet_returns_none_when_only_one_chunk_exists() {
     let store = Arc::new(DeterministicSplitStore::new(split, 122).unwrap());
     let mut inner = TripletSamplerInner::new(config, store);
 
-    let now = Utc::now();
+    let now = Timestamp::now();
     let anchor = DataRecord {
         id: "single_chunk_anchor".into(),
         source: "unit".into(),
@@ -12097,7 +12097,7 @@ fn temporal_offset_selector_finds_nearest_chronological_neighbor() {
         ..SamplerConfig::default()
     };
 
-    let base = Utc::now();
+    let base = Timestamp::now();
     // base_id: base time; id_7d: exactly +7 days; id_30d: +30 days.
     let r0 = record_with_offset(&base_id, base, 0);
     let r7d = record_with_offset(&id_7d, base, 7 * 86400);
@@ -12162,7 +12162,7 @@ fn temporal_offset_selector_never_crosses_split_boundaries() {
     let val_id = find_id_for_split(SplitLabel::Validation, "temporal_val");
 
     // All records use the same source so the source filter passes for all candidates.
-    let base = Utc::now();
+    let base = Timestamp::now();
     let anchor_rec = record_with_offset(&anchor_id, base, 0);
     // Validation candidate: exactly on target (offset 1 day). Closest without split guard.
     let val_rec = record_with_offset(&val_id, base, 86_400);
@@ -12238,7 +12238,7 @@ fn instruction_propagates_from_recipe_to_sample_triplet() {
         retrieval_sampling: None,
     }];
 
-    let now = Utc::now();
+    let now = Timestamp::now();
     let make_record = |id: &str, anchor: &str, context: &str| DataRecord {
         id: id.into(),
         source: "unit".into(),
@@ -12306,7 +12306,7 @@ fn allow_same_anchor_positive_permits_identical_text_triplet() {
     config.allowed_splits = vec![SplitLabel::Train];
     config.split = split;
 
-    let now = Utc::now();
+    let now = Timestamp::now();
     // Both anchor= and context= sections carry the exact same text per record.
     // This simulates the text-columns mode where a single text field is duplicated
     // into both roles by row_to_record.
@@ -13102,8 +13102,8 @@ fn select_chunk_parallel_paragraph_selector_returns_chunk_or_none() {
     let record = DataRecord {
         id: "para_test".into(),
         source: "unit".into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         quality: QualityScore::default(),
         taxonomy: vec![],
         sections: vec![RecordSection {
@@ -13151,8 +13151,8 @@ fn select_chunk_parallel_random_selector_handles_empty_and_non_empty() {
     let empty_record = DataRecord {
         id: "rand_empty".into(),
         source: "unit".into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         quality: QualityScore::default(),
         taxonomy: vec![],
         sections: vec![],
@@ -13163,8 +13163,8 @@ fn select_chunk_parallel_random_selector_handles_empty_and_non_empty() {
     let record_with_sections = DataRecord {
         id: "rand_nonempty".into(),
         source: "unit".into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         quality: QualityScore::default(),
         taxonomy: vec![],
         sections: vec![RecordSection {
@@ -13226,7 +13226,7 @@ fn select_chunk_parallel_temporal_offset_returns_chunk_from_neighbor() {
     config.text_recipes = Vec::new();
     let sampler = TripletSampler::new(config, Arc::clone(&store));
 
-    let base = Utc::now();
+    let base = Timestamp::now();
     let anchor_rec = record_with_offset(&anchor_id, base, 0);
     let neighbor_rec = {
         let mut r = record_with_offset(&neighbor_id, base, 86400); // +1 day
@@ -13285,8 +13285,8 @@ fn select_role_parallel_returns_none_when_no_matching_role() {
     let anchor_only_record = DataRecord {
         id: "anchor_only".into(),
         source: "unit".into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         quality: QualityScore::default(),
         taxonomy: vec![],
         sections: vec![RecordSection {
@@ -13353,8 +13353,8 @@ fn select_role_parallel_returns_none_when_all_pools_are_empty() {
     let empty_section_record = DataRecord {
         id: "empty_pool_rec".into(),
         source: "unit".into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         quality: QualityScore::default(),
         taxonomy: vec![],
         sections: vec![RecordSection {
@@ -13398,8 +13398,8 @@ fn decorate_chunk_parallel_truncation_paths() {
     let mut record_a = DataRecord {
         id: "pfx_fill".into(),
         source: "unit".into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         quality: QualityScore::default(),
         taxonomy: vec![],
         sections: vec![RecordSection {
@@ -13451,8 +13451,8 @@ fn decorate_chunk_parallel_truncation_paths() {
     let mut record_b = DataRecord {
         id: "pfx_body_trunc".into(),
         source: "unit".into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         quality: QualityScore::default(),
         taxonomy: vec![],
         sections: vec![RecordSection {
@@ -13511,8 +13511,8 @@ fn decorate_chunk_no_truncation_when_window_is_zero() {
     let mut record = DataRecord {
         id: "no_trunc_rec".into(),
         source: "unit".into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         quality: QualityScore::default(),
         taxonomy: vec![],
         sections: vec![RecordSection {
@@ -13586,8 +13586,8 @@ fn select_anchor_positive_parallel_returns_none_when_retries_exhausted() {
     let single_chunk_record = DataRecord {
         id: "single_chunk".into(),
         source: "unit".into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         quality: QualityScore::default(),
         taxonomy: vec![],
         sections: vec![RecordSection {
@@ -13779,8 +13779,8 @@ fn record_bm25_text_with_zero_max_tokens_returns_full_text() {
     let record = DataRecord {
         id: "bm25_text_zero".into(),
         source: "unit".into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         quality: QualityScore::default(),
         taxonomy: vec![],
         sections: vec![
@@ -13891,8 +13891,8 @@ fn for_split_non_exhausted_error_propagates_immediately() {
     let record = DataRecord {
         id: record_id.clone(),
         source: "unit".into(),
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         quality: QualityScore::default(),
         taxonomy: vec![],
         sections: vec![section],
@@ -14910,7 +14910,7 @@ fn same_record_negative_selector_picks_from_context() {
     // Build a record with distinct Anchor and Context sections.
     // Use long enough text so that the default sliding-window chunker produces
     // at least two window chunks for the Anchor selector.
-    let now = Utc::now();
+    let now = Timestamp::now();
     let anchor = DataRecord {
         id: "ctx_anchor".into(),
         source: "unit".into(),
@@ -15067,7 +15067,7 @@ fn same_record_and_wrong_article_recipes_coexist() {
     // This mirrors the HF dict-dataset layout where negative_columns are stored
     // as additional Context sections.
     let make_record = |id: &str| -> DataRecord {
-        let now = Utc::now();
+        let now = Timestamp::now();
         DataRecord {
             id: id.into(),
             source: PRIMARY_SOURCE_ID.into(),
@@ -15178,7 +15178,7 @@ fn text_batch_samples_from_positive_and_negative_pair_label_records() {
         body: &str,
         label: PairLabel,
     ) -> DataRecord {
-        let now = Utc::now();
+        let now = Timestamp::now();
         DataRecord {
             id: id.into(),
             source: PRIMARY_SOURCE_ID.into(),
@@ -15343,8 +15343,8 @@ fn select_chunk_returns_none_for_empty_sections() {
     let empty_record = DataRecord {
         id: "empty_sel".into(),
         source: "unit".into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         quality: QualityScore::default(),
         taxonomy: vec![],
         sections: vec![],
@@ -15383,8 +15383,8 @@ fn select_chunk_returns_none_when_pool_is_empty_for_paragraph() {
     let record = DataRecord {
         id: "para_empty".into(),
         source: "unit".into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         quality: QualityScore::default(),
         taxonomy: vec![],
         sections: vec![RecordSection {
@@ -15796,8 +15796,8 @@ fn select_role_parallel_returns_none_when_no_matching_sections() {
     let record = DataRecord {
         id: "role_none".into(),
         source: "unit".into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         quality: QualityScore::default(),
         taxonomy: vec![],
         sections: vec![RecordSection {
@@ -15829,8 +15829,8 @@ fn select_chunk_paragraph_returns_none_for_out_of_bounds_index() {
     let record = DataRecord {
         id: "para_oob".into(),
         source: "unit".into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         quality: QualityScore::default(),
         taxonomy: vec![],
         sections: vec![RecordSection {
@@ -15863,8 +15863,8 @@ fn record_has_at_least_two_window_chunks_returns_false_for_small_sections() {
     let record = DataRecord {
         id: "small_sec".into(),
         source: "unit".into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         quality: QualityScore::default(),
         taxonomy: vec![],
         sections: vec![RecordSection {
@@ -15895,8 +15895,8 @@ fn record_has_at_least_two_window_chunks_returns_false_for_no_section_match() {
     let record = DataRecord {
         id: "no_match".into(),
         source: "unit".into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         quality: QualityScore::default(),
         taxonomy: vec![],
         sections: vec![RecordSection {

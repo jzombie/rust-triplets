@@ -1,8 +1,8 @@
 mod backends;
 
 use crate::chunking::{ChunkingAlgorithm, SlidingWindowChunker};
-use chrono::Duration;
 use indexmap::IndexMap;
+use jiff::SignedDuration;
 use nohash_hasher::IntSet;
 use rand::prelude::*;
 use rayon::prelude::*;
@@ -1238,7 +1238,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
         record: &DataRecord,
         offset_days: i32,
     ) -> Option<Arc<DataRecord>> {
-        let target = record.created_at + Duration::days(offset_days.into());
+        let target = record.created_at + SignedDuration::from_secs(i64::from(offset_days) * 86_400);
         let key = record.taxonomy.first().cloned();
         let record_split = self.split_store.label_for(&RecordKey::from(record))?;
         self.records
@@ -1257,7 +1257,7 @@ impl<S: SplitStore + EpochStateStore + SamplerStateStore + 'static> TripletSampl
                             .map(|(a, b)| a == b)
                             .unwrap_or(false))
             })
-            .min_by_key(|candidate| (candidate.created_at - target).num_seconds().abs())
+            .min_by_key(|candidate| (candidate.created_at - target).as_secs().abs())
             .cloned()
     }
 

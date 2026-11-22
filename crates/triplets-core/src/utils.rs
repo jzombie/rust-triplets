@@ -1,6 +1,6 @@
 //! Text normalization helpers shared by source implementations.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use line_ending::LineEnding;
 use std::fs;
 use std::path::Path;
@@ -136,20 +136,20 @@ pub fn is_text_file(path: &Path) -> bool {
 }
 
 /// Best-effort file modified time.
-pub fn file_mtime(path: &Path) -> Option<DateTime<Utc>> {
+pub fn file_mtime(path: &Path) -> Option<Timestamp> {
     let metadata = fs::metadata(path).ok()?;
     let modified = metadata.modified().ok()?;
     Some(system_time_to_utc(modified))
 }
 
 /// Best-effort (created_at, updated_at) pair for a file.
-pub fn file_times(path: &Path) -> (DateTime<Utc>, DateTime<Utc>) {
+pub fn file_times(path: &Path) -> (Timestamp, Timestamp) {
     let metadata = fs::metadata(path).ok();
     let updated_at = metadata
         .as_ref()
         .and_then(|meta| meta.modified().ok())
         .map(system_time_to_utc)
-        .unwrap_or_else(Utc::now);
+        .unwrap_or_else(Timestamp::now);
     let created_at = metadata
         .and_then(|meta| meta.created().ok())
         .map(system_time_to_utc)
@@ -157,8 +157,8 @@ pub fn file_times(path: &Path) -> (DateTime<Utc>, DateTime<Utc>) {
     (created_at, updated_at)
 }
 
-fn system_time_to_utc(time: std::time::SystemTime) -> DateTime<Utc> {
-    DateTime::<Utc>::from(time)
+fn system_time_to_utc(time: std::time::SystemTime) -> Timestamp {
+    Timestamp::try_from(time).unwrap_or_else(|_| Timestamp::now())
 }
 
 #[cfg(test)]

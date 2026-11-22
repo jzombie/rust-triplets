@@ -11,8 +11,8 @@ keywords = ["train-test-split", "parquet", "dataset-sampling", "preprocessing"]
 
 [dependencies]
 cache-manager = { workspace = true }
-chrono = { workspace = true }
 flate2 = { workspace = true }
+jiff = { workspace = true }
 parquet = { workspace = true }
 rayon = { workspace = true }
 serde = { workspace = true }

@@ -17,7 +17,7 @@ keywords = [
 
 [dependencies]
 cache-manager = { workspace = true }
-chrono = { workspace = true }
+jiff = { workspace = true }
 reqwest = { workspace = true }
 reqwest-drive = { workspace = true }
 serde = { workspace = true }
