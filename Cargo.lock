@@ -1376,9 +1376,9 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "line-ending"
-version = "1.5.1"
+version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "834e592123b39b7b3ba3fdc4b7e4822fad3ced449010f8229f843fe6dd1a33f1"
+checksum = "50e572a8fe95c6867d8d321edf82ca9cf3547ecc1361e344838eb4153c32b327"
 
 [[package]]
 name = "linux-raw-sys"
