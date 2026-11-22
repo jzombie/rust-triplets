@@ -915,4 +915,206 @@ mod tests {
         let (w4, _) = refresh_ids(&source, &config, Some(&last_cursor), 64);
         assert_eq!(w4, w0, "post-cycle window must restart the permutation");
     }
+
+    #[test]
+    fn sampler_draws_triplet_batches_from_srd_source_end_to_end() {
+        // The permuted windows must survive the full ingestion → split →
+        // sampling pipeline, not just direct `refresh()`. Uses the source's
+        // default recipes (empty config recipes) to prove the
+        // default-recipe wiring too.
+        use std::collections::HashMap;
+        use triplets_core::{DeterministicSplitStore, SplitLabel, SplitRatios, TripletSampler};
+
+        let dir = TempDir::new().unwrap();
+        make_pair_store(&dir, 32);
+        let source = SrdSource::open(
+            &dir.path().join("data.srd"),
+            "srd_e2e",
+            TEST_EMB_DIM,
+            Some(SrdMode::Pair),
+        )
+        .unwrap();
+
+        let split = SplitRatios {
+            train: 1.0,
+            validation: 0.0,
+            test: 0.0,
+        };
+        let store = std::sync::Arc::new(DeterministicSplitStore::new(split, 77).unwrap());
+        let config = SamplerConfig {
+            seed: 77,
+            batch_size: 8,
+            ..SamplerConfig::default()
+        };
+        let sampler = TripletSampler::new(config, store);
+        sampler.register_source(Box::new(source)).unwrap();
+        sampler.set_epoch(0).unwrap();
+
+        let mut weights = HashMap::new();
+        weights.insert("srd_e2e".to_string(), 1.0);
+        let batch = sampler
+            .next_triplet_batch_with_weights_for_split(SplitLabel::Train, &weights)
+            .expect("triplet batch from SRD source must succeed");
+        assert_eq!(batch.triplets.len(), 8);
+
+        for triplet in &batch.triplets {
+            assert_eq!(triplet.recipe, "srd_pair");
+            for chunk in [&triplet.anchor, &triplet.positive, &triplet.negative] {
+                assert_eq!(chunk.source, "srd_e2e");
+                let idx: usize = chunk.record_id.parse().expect("entry index id");
+                assert!(idx < 32, "chunk references unknown entry {idx}");
+                let emb = chunk.embedding.as_ref().expect("section embedding");
+                assert_eq!(emb.len(), TEST_EMB_DIM);
+            }
+            // Pair mode: positive is the candidate of the same entry,
+            // WrongArticle negatives come from a different record.
+            assert_eq!(triplet.positive.record_id, triplet.anchor.record_id);
+            assert_ne!(triplet.anchor.record_id, triplet.negative.record_id);
+        }
+    }
+
+    #[test]
+    fn epoch_derived_seeds_repermute_srd_windows() {
+        // Pins the exact seed derivation `IngestionManager` performs per
+        // refresh (`derive_epoch_seed(base, epoch) ^ step`): epoch/step
+        // changes must move SRD windows, not replay them.
+        use triplets_core::hash::derive_epoch_seed;
+
+        let dir = TempDir::new().unwrap();
+        make_pair_store(&dir, 64);
+        let source = SrdSource::open(
+            &dir.path().join("data.srd"),
+            "test",
+            TEST_EMB_DIM,
+            Some(SrdMode::Pair),
+        )
+        .unwrap();
+
+        let base = 99u64;
+        let window = |epoch: u64, step: u64| {
+            let seed = derive_epoch_seed(base, epoch) ^ step;
+            refresh_ids(&source, &config_with_seed(seed), None, 16).0
+        };
+        // Note: seeds are `base ^ epoch ^ step`, so (epoch, step) pairs with
+        // equal `epoch ^ step` share a seed by XOR construction (e.g. (0, 1)
+        // and (1, 0)). The triples below use distinct combined values.
+        let e0s0 = window(0, 0);
+        let e0s1 = window(0, 1);
+        let e1s2 = window(1, 2);
+        assert_ne!(e0s0, e0s1, "step must repermute the window");
+        assert_ne!(e0s0, e1s2, "epoch must repermute the window");
+        assert_ne!(e0s1, e1s2, "epoch and step must combine");
+    }
+
+    #[test]
+    fn independent_seed_windows_overlap_partially_at_scale() {
+        // Two windows drawn with different seeds from the head are
+        // independent random subsets: overlap concentrates near w^2/n
+        // (here 256^2/1024 = 64, sd ~6), far from both 0 (disjoint) and
+        // 256 (replay). Deterministic for fixed seeds.
+        let dir = TempDir::new().unwrap();
+        make_pair_store(&dir, 1024);
+        let source = SrdSource::open(
+            &dir.path().join("data.srd"),
+            "test",
+            TEST_EMB_DIM,
+            Some(SrdMode::Pair),
+        )
+        .unwrap();
+
+        let (a, _) = refresh_ids(&source, &config_with_seed(11), None, 256);
+        let (b, _) = refresh_ids(&source, &config_with_seed(12), None, 256);
+        assert_ne!(a, b, "different seeds must permute differently");
+        let set_a: std::collections::HashSet<&str> = a.iter().map(String::as_str).collect();
+        let overlap = b.iter().filter(|id| set_a.contains(id.as_str())).count();
+        assert!(
+            (32..=128).contains(&overlap),
+            "overlap {overlap} outside the 32..=128 band around expected 64"
+        );
+        for (name, ids) in [("a", &a), ("b", &b)] {
+            let idx: Vec<usize> = ids.iter().map(|id| id.parse().unwrap()).collect();
+            let spread = idx.iter().max().unwrap() - idx.iter().min().unwrap();
+            assert!(
+                spread >= 512,
+                "window {name} spans only {spread} of 1024 file positions"
+            );
+        }
+    }
+
+    #[test]
+    fn refresh_with_zero_limit_returns_empty_and_holds_position() {
+        let dir = TempDir::new().unwrap();
+        make_pair_store(&dir, 10);
+        let source = SrdSource::open(
+            &dir.path().join("data.srd"),
+            "test",
+            TEST_EMB_DIM,
+            Some(SrdMode::Pair),
+        )
+        .unwrap();
+
+        let config = SamplerConfig::default();
+        let snap = source.refresh(&config, None, Some(0)).unwrap();
+        assert!(snap.records.is_empty());
+        assert_eq!(snap.cursor.revision, 0);
+
+        let cursor = SourceCursor {
+            last_seen: chrono::Utc::now(),
+            revision: 3,
+        };
+        let snap2 = source.refresh(&config, Some(&cursor), Some(0)).unwrap();
+        assert!(snap2.records.is_empty());
+        assert_eq!(snap2.cursor.revision, 3);
+    }
+
+    #[test]
+    fn refresh_defaults_to_256_rows_on_large_stores() {
+        let dir = TempDir::new().unwrap();
+        make_pair_store(&dir, 300);
+        let source = SrdSource::open(
+            &dir.path().join("data.srd"),
+            "test",
+            TEST_EMB_DIM,
+            Some(SrdMode::Pair),
+        )
+        .unwrap();
+
+        let snapshot = source
+            .refresh(&SamplerConfig::default(), None, None)
+            .unwrap();
+        assert_eq!(snapshot.records.len(), 256);
+    }
+
+    #[test]
+    fn concurrent_refreshes_agree() {
+        // The ingestion fan-out calls `refresh` from scoped threads sharing
+        // one source: same inputs must yield identical outputs.
+        let dir = TempDir::new().unwrap();
+        make_pair_store(&dir, 64);
+        let source = SrdSource::open(
+            &dir.path().join("data.srd"),
+            "test",
+            TEST_EMB_DIM,
+            Some(SrdMode::Pair),
+        )
+        .unwrap();
+        let config = config_with_seed(5);
+
+        std::thread::scope(|s| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| s.spawn(|| refresh_ids(&source, &config, None, 64)))
+                .collect();
+            let mut results = Vec::with_capacity(handles.len());
+            for h in handles {
+                results.push(h.join().expect("worker must not panic"));
+            }
+            for (i, (ids, cursor)) in results.iter().enumerate() {
+                assert_eq!(ids, &results[0].0, "worker {i} diverged");
+                assert_eq!(
+                    cursor.revision, results[0].1.revision,
+                    "worker {i} cursor diverged"
+                );
+            }
+        });
+    }
 }

@@ -38,9 +38,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
   `IndexablePager::seed_for_sampler(source_id, total, config.seed)` (the
   ingestion manager already mixes `derive_epoch_seed(base, epoch) ^ step`
   into `config.seed`). Same `(source_id, total, seed, cursor)` always yields
-  the same window; different seeds/epochs/steps draw independent random
-  subsets from across the corpus (expected overlap ~`window^2/total`,
-  negligible at 10M+ rows) instead of adjacent file slices. Like the other
+  the same window; new seeds — the usual effect of epoch/step changes —
+  draw independent random subsets from across the corpus (expected overlap
+  ~`window^2/total`, negligible at 10M+ rows) instead of adjacent file
+  slices. (Seeds are `base ^ epoch ^ step`, so epoch/step pairs with equal
+  `epoch ^ step` share a seed and instead continue the same permutation
+  walk from the advanced cursor — still advancing, never a file-ordered
+  block.) Like the other
   pagers, no cross-window non-repetition is promised — the corpus is an
   infinite stream; what kills the regime-shift pathology is that no window
   is ever a coherent file-ordered block. The permutation is driven manually
