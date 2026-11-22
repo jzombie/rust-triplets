@@ -52,12 +52,9 @@ use crate::srd_triplet::{self, SrdMode, SrdRecord};
 ///
 /// ## Why the permutation is driven manually instead of via `IndexablePager`
 ///
-/// `IndexablePager::refresh_with` materializes one `(index, cursor)` pair per
-/// corpus row and fetches through per-index `record_at` calls. For the 10M+-
-/// row SRD stores behind issue #192 that is hundreds of MB per refresh plus
-/// one store read per row. Driving `IndexPermutation` directly lets `refresh`
-/// draw only `max` indices and serve them with a single `batch_read_entries`
-/// call.
+/// `IndexablePager::refresh_with` materializes one `(index, cursor)` pair
+/// per corpus row. Driving `IndexPermutation` directly draws only `max`
+/// indices and serves them with a single `batch_read_entries` call.
 pub struct SrdSource {
     store: DataStore,
     source_id: String,
@@ -1089,8 +1086,7 @@ mod tests {
         // while any gross bias empties deciles outright (file-ordered
         // reads leave 9 deciles near-empty, half-corpus bias 5). The 400
         // floor (~half of expected) is far below any healthy minimum and
-        // far above any biased one; the 1.25M-row production store measured
-        // 10.0% in every decile.
+        // far above any biased one.
         let mut deciles = [0usize; 10];
         for w in &windows {
             for id in w {

@@ -33,26 +33,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 - **`SrdSource::refresh` ignores RNG — now deterministic random sampling
   (#192).** Refresh used the cursor as a plain file offset and marched
-  through `data.srd` in file order epoch after epoch, presenting coherent
-  domain blocks as regime shifts (see #192 for the observed training
-  impact). Refresh now draws a
-  deterministic seed-derived window through a permutation of the index
+  through `data.srd` in file order epoch after epoch (see #192). Refresh
+  now draws a deterministic seed-derived window through a permutation of the index
   domain, seeded by
   `IndexablePager::seed_for_sampler(source_id, total, config.seed)` (the
   ingestion manager already mixes `derive_epoch_seed(base, epoch) ^ step`
   into `config.seed`). Same `(source_id, total, seed, cursor)` always yields
   the same window; new seeds — the usual effect of epoch/step changes —
   draw independent random subsets from across the corpus (expected overlap
-  ~`window^2/total`, negligible at 10M+ rows) instead of adjacent file
+  ~`window^2/total`) instead of adjacent file
   slices. (Seeds are `base ^ epoch ^ step`, so epoch/step pairs with equal
   `epoch ^ step` share a seed and instead continue the same permutation
   walk from the advanced cursor — still advancing, never a file-ordered
   block.) Like the other
   pagers, no cross-window non-repetition is promised — the corpus is an
-  infinite stream; what kills the regime-shift pathology is that no window
-  is ever a coherent file-ordered block. The permutation is driven manually
+  infinite stream; no window is ever a coherent file-ordered block. The
+  permutation is driven manually
   rather than via `IndexablePager` (single `batch_read_entries` call, no
-  per-row materialization for 10M+-row stores). The stream contract holds:
+  per-row materialization). The stream contract holds:
   `set_epoch` never rewinds cursors, and
   `consecutive_epochs_draw_disjoint_windows_without_replay` still passes.
 - **Removed unused `triplets-offline-embedder` workspace dependency entry.**

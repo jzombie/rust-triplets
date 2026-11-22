@@ -36,11 +36,10 @@ Ingestion is an **infinite forward stream**, not an epoch-sized dataset:
 
 ## History you **must not ever** repeat
 
-- `reset_stream_cursors` (rewound the stream every epoch: ~82k-row windows
-  replayed over 10M-row stores) was **deleted entirely** after costing a
-  week of GPU training. Do not reintroduce any rewind primitive under any
-  name. The regression test below fails the moment an epoch replays a
-  prior window.
+- `reset_stream_cursors` (rewound the stream every epoch, replaying
+  already-ingested windows) was **deleted entirely**. Do not reintroduce
+  any rewind primitive under any name. The regression test below fails
+  the moment an epoch replays a prior window.
 - The old test `sampler_resalt_per_epoch...` certified the bug on a
   240-row toy where a rewind is invisible. Scale is the point: regression
   tests must run at multi-window scale.

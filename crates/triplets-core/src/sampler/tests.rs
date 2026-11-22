@@ -11585,9 +11585,9 @@ fn consecutive_epochs_draw_disjoint_windows_without_replay() {
     // seed reproduces an epoch's rows.
     //
     // Regression: set_epoch used to reset_stream_cursors, replaying the
-    // leading slice on every boundary. In training that meant every epoch
-    // re-drew the same leading window (reshuffled, so order-based tests
-    // stayed green while the corpus never advanced).
+    // leading slice on every boundary, so every epoch re-drew the same
+    // leading window (reshuffled, so order-based tests stayed green while
+    // the corpus never advanced).
     //
     // Store (6000 records) >> ingestion window (2048 default pool):
     // 16 batches x 128 rows per epoch. Disjoint windows => Jaccard ~0;
