@@ -25,6 +25,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
   cursors (file offsets) will be reinterpreted as walk positions on upgrade —
   a one-time stream repositioning. The old sequential file-offset pagination
   was the bug being fixed, so no compatibility shim is kept.
+- Bumped `line-ending` from 1.5.1 to 1.6.0 (#188)
+- Bumped `parquet` (and `arrow-*`) from 60.0.0 to 60.1.0 (#189)
+- Bumped `flate2` from 1.1.10 to 1.1.11 (#190)
 
 ### Fixed
 
