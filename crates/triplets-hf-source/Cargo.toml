@@ -37,3 +37,6 @@ serial_test = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 triplets-hf-source = { path = "." }
+
+[lints]
+workspace = true
