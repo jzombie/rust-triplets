@@ -17,6 +17,23 @@ Ingestion is an **infinite forward stream**, not an epoch-sized dataset:
   the stream position is global and split-agnostic. There is no per-split
   cursor to persist or rewind.
 
+## The cursor contract (read before touching any source)
+
+- `SourceCursor.revision` is opaque and source-interpreted BY DESIGN.
+  There is no workspace-wide revision dialect; do not "unify" cursor
+  semantics across sources; a second dialect is not split-brain.
+- A cursor promises per-position determinism only: same (dataset,
+  cursor, seed) → same output. It does NOT promise tiling, coverage,
+  non-repetition across refreshes, or distinct outputs per seed.
+- Seeds are `base ^ epoch ^ step`, so epoch/step pairs with equal XOR
+  share a seed; a 2^k domain has exactly 2^k distinct walks. Collisions
+  are expected, not a bug — never assert pairwise-distinct windows.
+- Cursors advance every refresh (replaying a prior window fails the
+  regression test below), but exact without-replacement tiling is NOT
+  promised: with a changing seed per refresh, cross-window overlap
+  (~w^2/T) is inherent. Fixed-seed tiling holds only within one seed's
+  walk, which production refreshes never share.
+
 ## History you **must not ever** repeat
 
 - `reset_stream_cursors` (rewound the stream every epoch: ~82k-row windows

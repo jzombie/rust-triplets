@@ -62,6 +62,10 @@ pub trait DataSource: Send + Sync {
     /// Fetch up to `limit` records starting from `cursor` state.
     ///
     /// Return the next cursor position in `SourceSnapshot.cursor`.
+    ///
+    /// Determinism is per (dataset, cursor, config seed). Refreshes make
+    /// no cross-call promises: windows may overlap, repeat, or share seeds
+    /// across epoch/step boundaries.
     fn refresh(
         &self,
         config: &SamplerConfig,

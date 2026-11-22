@@ -1058,6 +1058,11 @@ mod tests {
             .map(|&s| refresh_ids(&source, &config_with_seed(s), None, 128).0)
             .collect();
 
+        // Distinct windows: with 64 seeds sharing a 2^10 effective
+        // permutation-key space, ~2 full-walk collisions are expected by the
+        // birthday bound (observed: seeds 20 and 32), so expect ~62 distinct
+        // windows, not 64. The floor only needs to catch a broken seed
+        // thread, which collapses all 64 windows to 1.
         let mut distinct = std::collections::HashSet::new();
         for w in &windows {
             distinct.insert(w);
@@ -1068,6 +1073,11 @@ mod tests {
             distinct.len()
         );
 
+        // Spread: max-min file index spanned by one 128-row window.
+        // A file-ordered window always spans exactly w-1 = 127, so the 512
+        // bar (half the corpus) cleanly separates shuffled windows from
+        // sequential ones; a few small-step progressions legitimately fall
+        // short, hence 56/64 instead of 64/64 (observed: 64/64).
         let mut wide = 0usize;
         for w in &windows {
             let idx: Vec<usize> = w.iter().map(|id| id.parse().unwrap()).collect();
@@ -1080,6 +1090,16 @@ mod tests {
             "only {wide}/64 windows span the corpus (sequential would give 0)"
         );
 
+        // Pairwise overlap = number of row ids shared by one pair of
+        // windows, averaged over all 2016 pairs. Each window holds w/n =
+        // 1/8 of the corpus, so for two INDEPENDENT windows a given row
+        // lands in both with probability 1/8 * 1/8 = 1/64; over n = 1024
+        // rows that is 1024/64 = 16 shared rows on average
+        // (hypergeometric mean w^2/n). Averaging over all pairs squeezes
+        // sampling noise to ~0.1, so [10, 22] is enormously wide for a
+        // healthy shuffle (observed mean: 16.02) and only fails on
+        // systematic breakage: ~128 means every window is identical (seed
+        // ignored / replay), ~0 means rigid disjoint partitions.
         let sets: Vec<std::collections::HashSet<&str>> = windows
             .iter()
             .map(|w| w.iter().map(String::as_str).collect())
@@ -1098,6 +1118,11 @@ mod tests {
             "mean pairwise overlap {mean:.2} outside [10, 22] around expected 16"
         );
 
+        // Joint coverage = distinct rows seen across all 64 windows. Each
+        // window covers 1/8 of the corpus, so P(a given row is never drawn)
+        // = (7/8)^64 ≈ 0.0002 and expect ~1023.8 of 1024 rows seen
+        // (observed: 1023). The 1010 floor only needs to catch gross bias:
+        // seed-ignored caps at 128, half-the-corpus bias at ~512.
         let mut covered = std::collections::HashSet::new();
         for w in &windows {
             for id in w {
