@@ -42,6 +42,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
   remains in the lockfile only as a non-optional transitive dependency of
   `arrow`/`parquet`/`reqwest-drive` pending upstream migration; no
   workspace code depends on it, and `cargo deny check` is green.
+- Bumped `url` from 2.5.8 to 2.5.9 (RUSTSEC-2026-0592)
+- Bumped `quinn-udp` from 0.5.14 to 0.5.16 (RUSTSEC-2026-0538)
+- Bumped `rustix` from 1.1.4 to 1.1.6 (RUSTSEC-2026-0486)
+- Bumped `form_urlencoded` from 1.2.2 to 1.2.3 (knock-on from the `url` bump)
 
 ### Fixed
 
