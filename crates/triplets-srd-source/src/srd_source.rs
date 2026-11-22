@@ -25,6 +25,44 @@ use crate::srd_triplet::{self, SrdMode, SrdRecord};
 /// stores is the sampler's job (composite keys), not the id string's — so
 /// nothing parses or decorates these ids. Entry vectors ride the
 /// [`RecordSection`] embedding channel.
+///
+/// ## Sampling model: shuffled streaming windows, not file order
+///
+/// `refresh` draws **uniform-over-corpus without replacement** through a
+/// deterministic permutation of the index domain `0..entry_count`, mirroring
+/// [`triplets_core::source::IndexablePager`] / `ParquetRowSource`:
+///
+/// - The permutation seed is
+///   `IndexablePager::seed_for_sampler(source_id, total, config.seed)`, where
+///   `config.seed` is the epoch/step-mixed seed the ingestion manager already
+///   threads through (`derive_epoch_seed(base, epoch) ^ step`). A fixed
+///   `(source_id, total, seed, cursor)` therefore always yields the same
+///   indices; different seeds/epochs/steps draw from across the corpus rather
+///   than adjacent file offsets.
+/// - The cursor `revision` is a position in *permutation-counter space*, not a
+///   file offset. Consecutive refreshes with the same seed advance the counter
+///   and return disjoint windows with no repeats until the counter completes
+///   a full domain cycle (counter space is infinite — `next()` folds it modulo
+///   the power-of-two domain — so the stream never stalls and cursors never
+///   need rewinding). When the seed changes between refreshes (epoch/step
+///   boundary) each window is an independent random subset, so a small chance
+///   overlap of ~`window^2/total` rows is expected — negligible for large
+///   stores, and never a coherent file-ordered block.
+/// - Within one refresh the returned order is the permutation order (random),
+///   not sorted file order.
+///
+/// ## Why the permutation is driven manually instead of via `IndexablePager`
+///
+/// `IndexablePager::refresh_with` materializes one `(index, cursor)` pair per
+/// corpus row and fetches through per-index `record_at` calls. For the 10M+-
+/// row SRD stores behind issue #192 that is hundreds of MB per refresh plus
+/// one store read per row. Driving `IndexPermutation` directly lets `refresh`
+/// draw only `max` indices and serve them with a single `batch_read_entries`
+/// call. It also persists
+/// [`triplets_core::source::IndexPermutation::raw_counter`] rather than the
+/// folded [`triplets_core::source::IndexPermutation::cursor`], which is what
+/// preserves without-replacement tiling when the row count is not a power of
+/// two.
 pub struct SrdSource {
     store: DataStore,
     source_id: String,
@@ -104,21 +142,51 @@ impl DataSource for SrdSource {
 
     fn refresh(
         &self,
-        _config: &SamplerConfig,
+        config: &SamplerConfig,
         cursor: Option<&SourceCursor>,
         limit: Option<usize>,
     ) -> Result<SourceSnapshot, SamplerError> {
-        let total = self.entry_count.load(Ordering::Relaxed);
-        let start = cursor.map(|c| c.revision).unwrap_or(0);
-        let batch_size = limit
-            .unwrap_or(256)
-            .min(total.saturating_sub(start) as usize);
+        use triplets_core::source::{IndexPermutation, IndexablePager};
 
-        // Batch-read all entries in one call.
-        let indices: Vec<usize> = (start..start + batch_size as u64)
-            .filter(|&i| i < total)
-            .map(|i| i as usize)
-            .collect();
+        let total_u64 = self.entry_count.load(Ordering::Relaxed);
+        if total_u64 == 0 {
+            return Ok(SourceSnapshot {
+                records: Vec::new(),
+                cursor: SourceCursor {
+                    last_seen: Utc::now(),
+                    revision: 0,
+                },
+            });
+        }
+        let total: usize = usize::try_from(total_u64).map_err(|e| {
+            SamplerError::Configuration(format!(
+                "SRD store entry count {total_u64} exceeds index range: {e}"
+            ))
+        })?;
+        // The cursor revision is a raw permutation-counter position, not a
+        // file offset: counter space is infinite (`next()` folds it modulo
+        // the power-of-two domain), so no wrap/clamp is needed for the
+        // infinite forward stream — arbitrarily large revisions just continue
+        // the periodic walk.
+        let start = cursor.map(|c| c.revision).unwrap_or(0);
+        let max = limit.unwrap_or(256).min(total);
+        if max == 0 {
+            return Ok(SourceSnapshot {
+                records: Vec::new(),
+                cursor: SourceCursor {
+                    last_seen: Utc::now(),
+                    revision: start,
+                },
+            });
+        }
+
+        // Deterministic random sampling: the ingestion manager already mixes
+        // `derive_epoch_seed(base_seed, epoch) ^ step` into `config.seed`, so
+        // seeding the permutation from it honors (seed, epoch, step) without
+        // the source tracking epochs itself.
+        let seed = IndexablePager::seed_for_sampler(&self.source_id, total, config.seed);
+        let mut permutation = IndexPermutation::new(total, seed, start);
+        let indices: Vec<usize> = (0..max).map(|_| permutation.next()).collect();
         let entries = srd_triplet::batch_read_entries(&self.store, &indices, self.emb_dim)
             .map_err(|e| SamplerError::Configuration(e.to_string()))?;
 
@@ -193,7 +261,11 @@ impl DataSource for SrdSource {
 
         let next_cursor = SourceCursor {
             last_seen: Utc::now(),
-            revision: start + batch_size as u64,
+            // Persist the raw permutation counter (not `cursor() % total`):
+            // only the raw counter preserves exact stream position across
+            // refreshes, giving disjoint without-replacement windows until a
+            // full domain cycle completes.
+            revision: permutation.raw_counter(),
         };
 
         Ok(SourceSnapshot {
@@ -378,9 +450,12 @@ mod tests {
         let config = SamplerConfig::default();
         let snapshot = source.refresh(&config, None, None).unwrap();
 
-        for (i, record) in snapshot.records.iter().enumerate() {
-            assert_eq!(record.id, i.to_string());
-        }
+        // Sampling is permuted (see issue #192): ids cover the index domain
+        // exactly once per cycle, in random order rather than file order.
+        let mut ids: Vec<String> = snapshot.records.iter().map(|r| r.id.clone()).collect();
+        ids.sort_unstable();
+        let expected: Vec<String> = (0..5).map(|i| i.to_string()).collect();
+        assert_eq!(ids, expected);
     }
 
     #[test]
@@ -433,7 +508,9 @@ mod tests {
     #[test]
     fn pagination_with_limit() {
         let dir = TempDir::new().unwrap();
-        make_pair_store(&dir, 5);
+        // n=4 is a power of two, so the permutation domain has no rejected
+        // positions and two 2-row pages tile the corpus exactly.
+        make_pair_store(&dir, 4);
         let source = SrdSource::open(
             &dir.path().join("data.srd"),
             "test",
@@ -444,26 +521,40 @@ mod tests {
 
         let config = SamplerConfig::default();
 
-        // First page: limit=2
+        // Windows stream forward through permutation-counter space: with a
+        // fixed seed, consecutive pages are disjoint and tile the corpus
+        // (order within/between pages is permuted, not file order).
         let snapshot1 = source.refresh(&config, None, Some(2)).unwrap();
         assert_eq!(snapshot1.records.len(), 2);
-        assert_eq!(snapshot1.records[0].id, "0");
-        assert_eq!(snapshot1.records[1].id, "1");
 
-        // Second page: use cursor from first page
         let snapshot2 = source
             .refresh(&config, Some(&snapshot1.cursor), Some(2))
             .unwrap();
         assert_eq!(snapshot2.records.len(), 2);
-        assert_eq!(snapshot2.records[0].id, "2");
-        assert_eq!(snapshot2.records[1].id, "3");
 
-        // Third page: remaining entry
+        let mut all: Vec<String> = snapshot1
+            .records
+            .iter()
+            .chain(snapshot2.records.iter())
+            .map(|r| r.id.clone())
+            .collect();
+        all.sort_unstable();
+        let expected: Vec<String> = (0..4).map(|i| i.to_string()).collect();
+        assert_eq!(all, expected, "pages must tile the corpus without repeats");
+
+        // Full cycle consumed: the next page wraps and restarts.
         let snapshot3 = source
             .refresh(&config, Some(&snapshot2.cursor), Some(2))
             .unwrap();
-        assert_eq!(snapshot3.records.len(), 1);
-        assert_eq!(snapshot3.records[0].id, "4");
+        let first_ids: Vec<&str> = snapshot1.records.iter().map(|r| r.id.as_str()).collect();
+        let third_ids: Vec<&str> = snapshot3.records.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(third_ids, first_ids, "post-cycle page must restart");
+
+        // Deterministic: replaying from the head with the same seed reproduces
+        // the same first page.
+        let replay = source.refresh(&config, None, Some(2)).unwrap();
+        let replay_ids: Vec<&str> = replay.records.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(first_ids, replay_ids);
     }
 
     #[test]
@@ -519,9 +610,12 @@ mod tests {
         let config = SamplerConfig::default();
         let snapshot = source.refresh(&config, None, None).unwrap();
 
-        for (i, record) in snapshot.records.iter().enumerate() {
-            assert_eq!(record.sections[0].text, format!("anchor_{i}"));
-            assert_eq!(record.sections[1].text, format!("positive_{i}"));
+        // Each record's text must match its own entry index, wherever the
+        // permutation placed it.
+        for record in &snapshot.records {
+            let idx: usize = record.id.parse().unwrap();
+            assert_eq!(record.sections[0].text, format!("anchor_{idx}"));
+            assert_eq!(record.sections[1].text, format!("positive_{idx}"));
         }
     }
 
@@ -540,10 +634,11 @@ mod tests {
         let config = SamplerConfig::default();
         let snapshot = source.refresh(&config, None, None).unwrap();
 
-        for (i, record) in snapshot.records.iter().enumerate() {
-            assert_eq!(record.sections[0].text, format!("anchor_{i}"));
-            assert_eq!(record.sections[1].text, format!("positive_{i}"));
-            assert_eq!(record.sections[2].text, format!("negative_{i}"));
+        for record in &snapshot.records {
+            let idx: usize = record.id.parse().unwrap();
+            assert_eq!(record.sections[0].text, format!("anchor_{idx}"));
+            assert_eq!(record.sections[1].text, format!("positive_{idx}"));
+            assert_eq!(record.sections[2].text, format!("negative_{idx}"));
         }
     }
 
@@ -579,7 +674,7 @@ mod tests {
     }
 
     #[test]
-    fn refresh_cursor_past_end_returns_empty() {
+    fn refresh_cursor_past_end_wraps_to_head() {
         let dir = TempDir::new().unwrap();
         make_pair_store(&dir, 3);
         let source = SrdSource::open(
@@ -593,10 +688,16 @@ mod tests {
         let config = SamplerConfig::default();
         let cursor = SourceCursor {
             last_seen: chrono::Utc::now(),
-            revision: 100, // past the end
+            revision: 100, // far past the end: counter space is periodic, so
+                           // the walk just continues instead of stalling
         };
+        // Infinite forward stream: large revisions keep drawing disjoint
+        // windows instead of stalling on empty ones.
         let snapshot = source.refresh(&config, Some(&cursor), None).unwrap();
-        assert!(snapshot.records.is_empty());
+        assert_eq!(snapshot.records.len(), 3);
+        let mut ids: Vec<String> = snapshot.records.iter().map(|r| r.id.clone()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec!["0".to_string(), "1".to_string(), "2".to_string()]);
     }
 
     #[test]
@@ -647,6 +748,61 @@ mod tests {
     }
 
     #[test]
+    fn non_power_of_two_windows_cover_corpus_before_repeating() {
+        // total=5 resolves to a power-of-two domain of 8, so rejections occur
+        // and the cursor must carry the raw permutation counter: resuming
+        // from the folded `cursor() % total` replays already-seen indices
+        // before the corpus is covered (verified: seeds 0, 1, 5 replay under
+        // folded cursors). limit=2 neither tiles the corpus nor the domain,
+        // so the cycle boundary falls mid-window. The assertions below hold
+        // for every seed: from counter 0 the first five hits always land
+        // inside the first domain cycle, hence distinct and complete.
+        for seed in [0u64, 1, 7, 42, 77] {
+            let dir = TempDir::new().unwrap();
+            make_pair_store(&dir, 5);
+            let source = SrdSource::open(
+                &dir.path().join("data.srd"),
+                "test",
+                TEST_EMB_DIM,
+                Some(SrdMode::Pair),
+            )
+            .unwrap();
+            let config = config_with_seed(seed);
+
+            let (p1, c1) = refresh_ids(&source, &config, None, 2);
+            let (p2, c2) = refresh_ids(&source, &config, Some(&c1), 2);
+            let (p3, _) = refresh_ids(&source, &config, Some(&c2), 2);
+
+            // Pages 1-2 lie within the first domain cycle: strictly disjoint.
+            {
+                use std::collections::HashSet;
+                let mut seen = HashSet::new();
+                for id in p1.iter().chain(p2.iter()) {
+                    assert!(seen.insert(id), "seed {seed}: pages 1-2 replay index {id}");
+                }
+            }
+
+            // Across three pages the walk covers the whole corpus before any
+            // index repeats: the first five draws are exactly 0..5.
+            let flat: Vec<String> = p1.into_iter().chain(p2).chain(p3).collect();
+            assert_eq!(flat.len(), 6);
+            let mut first_five = flat[..5].to_vec();
+            first_five.sort_unstable();
+            let expected: Vec<String> = (0..5).map(|i| i.to_string()).collect();
+            assert_eq!(
+                first_five, expected,
+                "seed {seed}: walk must cover the corpus before repeating"
+            );
+            // The sixth draw wraps into the next domain cycle, so it must repeat
+            // an already-seen index (the cycle boundary fell mid-window).
+            assert!(
+                flat[..5].contains(&flat[5]),
+                "seed {seed}: post-cycle draw must repeat an already-seen index"
+            );
+        }
+    }
+
+    #[test]
     fn open_rejects_empty_store_without_explicit_mode() {
         let dir = TempDir::new().unwrap();
         let store = DataStore::open(&dir.path().join("data.srd")).unwrap();
@@ -659,5 +815,130 @@ mod tests {
             matches!(err, SrdError::EmptyStore),
             "empty store must fail loudly, got: {err:?}"
         );
+    }
+
+    fn config_with_seed(seed: u64) -> SamplerConfig {
+        SamplerConfig {
+            seed,
+            ..SamplerConfig::default()
+        }
+    }
+
+    fn refresh_ids(
+        source: &SrdSource,
+        config: &SamplerConfig,
+        cursor: Option<&SourceCursor>,
+        limit: usize,
+    ) -> (Vec<String>, SourceCursor) {
+        let snapshot = source
+            .refresh(config, cursor, Some(limit))
+            .expect("refresh must succeed");
+        (
+            snapshot.records.iter().map(|r| r.id.clone()).collect(),
+            snapshot.cursor,
+        )
+    }
+
+    #[test]
+    fn refresh_is_deterministic_for_same_seed_and_cursor() {
+        // Issue #192 acceptance: two refreshes with the same seed produce
+        // identical order.
+        let dir = TempDir::new().unwrap();
+        make_pair_store(&dir, 20);
+        let source = SrdSource::open(
+            &dir.path().join("data.srd"),
+            "test",
+            TEST_EMB_DIM,
+            Some(SrdMode::Pair),
+        )
+        .unwrap();
+
+        let config = config_with_seed(0xC0FFEE);
+        let (first, cursor) = refresh_ids(&source, &config, None, 8);
+        let (replay, replay_cursor) = refresh_ids(&source, &config, None, 8);
+        assert_eq!(first, replay, "same seed+cursor must yield identical order");
+        assert_eq!(cursor.revision, replay_cursor.revision);
+
+        // Continuation from the same cursor is deterministic too.
+        let (second, _) = refresh_ids(&source, &config, Some(&cursor), 8);
+        let (second_replay, _) = refresh_ids(&source, &config, Some(&cursor), 8);
+        assert_eq!(second, second_replay);
+    }
+
+    #[test]
+    fn different_seeds_draw_from_across_corpus() {
+        // Issue #192 acceptance: different seeds/epochs draw from across the
+        // corpus rather than adjacent file offsets.
+        let dir = TempDir::new().unwrap();
+        make_pair_store(&dir, 64);
+        let source = SrdSource::open(
+            &dir.path().join("data.srd"),
+            "test",
+            TEST_EMB_DIM,
+            Some(SrdMode::Pair),
+        )
+        .unwrap();
+
+        let (ids_a, _) = refresh_ids(&source, &config_with_seed(11), None, 16);
+        let (ids_b, _) = refresh_ids(&source, &config_with_seed(12), None, 16);
+        assert_ne!(
+            ids_a, ids_b,
+            "different seeds must permute differently (seed is ignored)"
+        );
+
+        for (seed, ids) in [(11u64, &ids_a), (12u64, &ids_b)] {
+            let file_order: Vec<String> = (0..16).map(|i| i.to_string()).collect();
+            assert_ne!(
+                ids, &file_order,
+                "seed {seed}: window must not be the leading file-ordered slice"
+            );
+            let idx: Vec<usize> = ids.iter().map(|id| id.parse().unwrap()).collect();
+            let spread = idx.iter().max().unwrap() - idx.iter().min().unwrap();
+            assert!(
+                spread >= 32,
+                "seed {seed}: window spans only {spread} file positions, expected spread across the corpus"
+            );
+        }
+    }
+
+    #[test]
+    fn consecutive_windows_with_same_seed_are_disjoint_at_scale() {
+        // Stream contract (see AGENTS.md): with a fixed seed, consecutive
+        // refreshes advance the permutation counter and return disjoint
+        // windows with no repeats until the counter wraps past the corpus.
+        // n=256 is a power of two so the permutation domain has no rejected
+        // positions and four 64-row windows tile the corpus exactly.
+        let dir = TempDir::new().unwrap();
+        make_pair_store(&dir, 256);
+        let source = SrdSource::open(
+            &dir.path().join("data.srd"),
+            "test",
+            TEST_EMB_DIM,
+            Some(SrdMode::Pair),
+        )
+        .unwrap();
+        let config = config_with_seed(77);
+
+        let (w0, c0) = refresh_ids(&source, &config, None, 64);
+        let (w1, c1) = refresh_ids(&source, &config, Some(&c0), 64);
+        let (w2, c2) = refresh_ids(&source, &config, Some(&c1), 64);
+        let (w3, _) = refresh_ids(&source, &config, Some(&c2), 64);
+
+        let mut seen = std::collections::HashSet::new();
+        for (n, window) in [&w0, &w1, &w2, &w3].into_iter().enumerate() {
+            assert_eq!(window.len(), 64, "window {n} must be full");
+            for id in window {
+                assert!(
+                    seen.insert(id.clone()),
+                    "window {n} replays id {id} from an earlier window"
+                );
+            }
+        }
+        assert_eq!(seen.len(), 256, "four windows must tile the corpus exactly");
+
+        // Wrap-around: the next window restarts the cycle.
+        let last_cursor = source.refresh(&config, Some(&c2), Some(64)).unwrap().cursor;
+        let (w4, _) = refresh_ids(&source, &config, Some(&last_cursor), 64);
+        assert_eq!(w4, w0, "post-cycle window must restart the permutation");
     }
 }
