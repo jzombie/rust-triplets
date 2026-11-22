@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -31,9 +31,9 @@ pub struct DataRecord {
     /// Source identifier that produced this record.
     pub source: SourceId,
     /// Canonical creation time for the record (used for ordering/metadata).
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
     /// Last update time for the record (used for refresh decisions).
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: Timestamp,
     /// Trust/quality score used to weight sampling.
     pub quality: QualityScore,
     /// Free-form tags (e.g., source id, year, date) used for filtering/recipes.
@@ -93,7 +93,7 @@ impl DataRecord {
         role: SectionRole,
     ) -> Self {
         use crate::tokenizer::{Tokenizer, WhitespaceTokenizer};
-        let now = chrono::Utc::now();
+        let now = Timestamp::now();
         let text_str = text.into();
         let token_count = WhitespaceTokenizer.token_count(&text_str);
         Self {
@@ -328,7 +328,7 @@ impl TextBatch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{TimeZone, Utc};
+    use jiff::Timestamp;
 
     fn sample_chunk(id: &str) -> RecordChunk {
         RecordChunk {
@@ -406,7 +406,7 @@ mod tests {
 
     #[test]
     fn data_record_roundtrip_basics_are_constructible() {
-        let now = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let now = "2025-01-01T00:00:00Z".parse::<Timestamp>().unwrap();
         let record = DataRecord {
             id: "source_a::1".to_string(),
             source: "source_a".to_string(),
@@ -454,8 +454,8 @@ mod tests {
         let record = DataRecord {
             id: "id".into(),
             source: "src".into(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
             quality: QualityScore::default(),
             taxonomy: vec![],
             sections: vec![],
@@ -470,8 +470,8 @@ mod tests {
         let record = DataRecord {
             id: "id".into(),
             source: "src".into(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
             quality: QualityScore::default(),
             taxonomy: vec!["year:2025".into(), "topic:ai".into()],
             sections: vec![],

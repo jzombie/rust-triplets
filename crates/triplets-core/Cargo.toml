@@ -24,9 +24,9 @@ extended-metrics = []
 bitcode = { workspace = true }
 bm25 = { workspace = true, optional = true }
 cache-manager = { workspace = true }
-chrono = { workspace = true }
 csv = { workspace = true }
 indexmap = { workspace = true }
+jiff = { workspace = true }
 line-ending = { workspace = true }
 nohash-hasher = { workspace = true }
 rand = { workspace = true }
@@ -43,3 +43,6 @@ walkdir = { workspace = true }
 [dev-dependencies]
 indoc = { workspace = true }
 serde_json = { workspace = true }
+
+[lints]
+workspace = true

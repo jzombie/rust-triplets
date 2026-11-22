@@ -126,7 +126,7 @@ impl ChunkingAlgorithm for SlidingWindowChunker {
 mod tests {
     use super::*;
     use crate::data::{QualityScore, RecordSection, SectionRole};
-    use chrono::Utc;
+    use jiff::Timestamp;
 
     fn strategy() -> ChunkingStrategy {
         ChunkingStrategy {
@@ -143,8 +143,8 @@ mod tests {
         DataRecord {
             id: "r1".into(),
             source: "unit".into(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
             quality: QualityScore { trust: 1.0 },
             taxonomy: vec![],
             sections: vec![RecordSection {

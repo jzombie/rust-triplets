@@ -560,7 +560,7 @@ Implement the `IndexableSource` trait to integrate any backend that can fetch re
 ```rust
 use std::sync::Arc;
 use triplets::{SamplerConfig, TripletSampler, SplitRatios, DeterministicSplitStore};
-use chrono::Utc;
+use jiff::Timestamp;
 use triplets::{DataRecord, SamplerError};
 use triplets::data::{RecordSection, SectionRole};
 use triplets::source::{IndexableSource, IndexableAdapter};
@@ -576,8 +576,8 @@ impl IndexableSource for MyApiSource {
         Ok(Some(DataRecord {
             id: format!("api_{idx}"),
             source: self.id().into(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
             quality: Default::default(),
             // Optional free-form tags for filtering or recipe targeting.
             // Examples: domain labels, year strings, content-type markers.
@@ -648,7 +648,7 @@ use triplets::{
 };
 
 fn record(source: &str, id: &str, anchor: &str, context: &str) -> DataRecord {
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     DataRecord {
         id: id.into(),
         source: source.into(),

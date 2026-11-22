@@ -17,7 +17,7 @@ keywords = [
 
 [dependencies]
 cache-manager = { workspace = true }
-chrono = { workspace = true }
+jiff = { workspace = true }
 reqwest = { workspace = true }
 reqwest-drive = { workspace = true }
 serde = { workspace = true }
@@ -37,3 +37,6 @@ serial_test = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 triplets-hf-source = { path = "." }
+
+[lints]
+workspace = true

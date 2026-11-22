@@ -23,3 +23,6 @@ triplets-srd-source = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 triplets-offline-embedder = { path = "." }
+
+[lints]
+workspace = true

@@ -25,7 +25,7 @@
 
 use std::sync::Arc;
 
-use chrono::{TimeZone, Utc};
+use jiff::Timestamp;
 
 use triplets::source::InMemorySource;
 use triplets::utils::make_section;
@@ -42,8 +42,8 @@ use triplets::{
 /// section (section_idx 1). The texts are deliberately different lengths so a positional
 /// shortcut (e.g. "slot 0 is always shorter") would be visible to a model.
 fn swap_record(source: &str, idx: usize) -> DataRecord {
-    let created_at = Utc
-        .with_ymd_and_hms(2025, 1, 1 + (idx as u32 % 28), 12, 0, 0)
+    let created_at = format!("2025-01-{:02}T12:00:00Z", 1 + (idx as u32 % 28))
+        .parse::<Timestamp>()
         .unwrap();
     DataRecord {
         id: format!("{source}::rec_{idx}"),

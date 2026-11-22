@@ -31,7 +31,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.31.0-alpha"
+version = "0.32.0-alpha"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 authors = ["Jeremy Harris <jeremy.harris@zenosmosis.com>"]
@@ -41,13 +41,13 @@ repository = "https://github.com/jzombie/rust-triplets"
 bitcode = "0.6.9"
 bm25 = { version = "2.3.2", features = ["parallelism"] }
 cache-manager = "0.6.0"
-chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.1", features = ["derive"] }
 csv = "1.4.0"
 filetime = "0.2.29"
 flate2 = "1.1.9"
 indexmap = "2.14.0"
 indoc = "2.0.7"
+jiff = { version = "1.0.2", features = ["serde"] }
 line-ending = "1.5.1"
 nohash-hasher = "0.2.0"
 parquet = { version = "60.0.0", features = ["json"] }
@@ -65,14 +65,17 @@ thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["rt", "rt-multi-thread", "fs", "io-util"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-triplets = { path = ".", version = "0.31.0-alpha" }
-triplets-core = { path = "crates/triplets-core", version = "0.31.0-alpha" }
-triplets-debug = { path = "crates/triplets-debug", version = "0.31.0-alpha" }
-triplets-hf-source = { path = "crates/triplets-hf-source", version = "0.31.0-alpha" }
-triplets-offline-embedder = { path = "crates/triplets-offline-embedder", version = "0.31.0-alpha" }
-triplets-parquet-source = { path = "crates/triplets-parquet-source", version = "0.31.0-alpha" }
-triplets-srd-source = { path = "crates/triplets-srd-source", version = "0.31.0-alpha" }
+triplets = { path = ".", version = "0.32.0-alpha" }
+triplets-core = { path = "crates/triplets-core", version = "0.32.0-alpha" }
+triplets-debug = { path = "crates/triplets-debug", version = "0.32.0-alpha" }
+triplets-hf-source = { path = "crates/triplets-hf-source", version = "0.32.0-alpha" }
+triplets-parquet-source = { path = "crates/triplets-parquet-source", version = "0.32.0-alpha" }
+triplets-srd-source = { path = "crates/triplets-srd-source", version = "0.32.0-alpha" }
 walkdir = "2.5.0"
+
+[workspace.lints.cargo]
+# Fail the build on unused workspace dependencies instead of just warning.
+unused_workspace_dependencies = "deny"
 
 [workspace.metadata.cargo-udeps.ignore]
 development = ["triplets-srd-source"]
@@ -87,10 +90,10 @@ extended-metrics = ["triplets-core/extended-metrics"]
 bitcode = { workspace = true }
 bm25 = { workspace = true, optional = true }
 cache-manager = { workspace = true }
-chrono = { workspace = true }
 clap = { workspace = true }
 csv = { workspace = true }
 indexmap = { workspace = true }
+jiff = { workspace = true }
   line-ending = { workspace = true }
   nohash-hasher = { workspace = true }
   parquet = { workspace = true, optional = true }
@@ -115,3 +118,6 @@ walkdir = { workspace = true }
 indoc = { workspace = true }
 serde_json = { workspace = true }
 siphasher = { workspace = true }
+
+[lints]
+workspace = true

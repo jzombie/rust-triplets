@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use std::path::PathBuf;
 
 use crate::config::{NegativeStrategy, SamplerConfig, Selector, TripletRecipe};
@@ -269,8 +269,8 @@ fn build_record(
     row: &csv::StringRecord,
     row_idx: usize,
     cols: &ColumnIndices,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
+    created_at: Timestamp,
+    updated_at: Timestamp,
 ) -> Option<DataRecord> {
     let id = format!("{}::row_{}", config.source_id, row_idx);
 

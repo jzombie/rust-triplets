@@ -16,7 +16,7 @@ keywords = [
 ]
 
 [dependencies]
-chrono = { workspace = true }
+jiff = { workspace = true }
 simd-r-drive = { workspace = true }
 thiserror = { workspace = true }
 triplets = { workspace = true }
@@ -25,3 +25,6 @@ triplets-core = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 triplets-srd-source = { path = "." }
+
+[lints]
+workspace = true

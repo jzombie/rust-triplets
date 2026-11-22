@@ -5,6 +5,77 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [0.32.0-alpha] - 2026-11-22
+
+### Added
+
+- **Workspace lint gate for unused dependencies.** New
+  `[workspace.lints.cargo] unused_workspace_dependencies = "deny"` in the
+  root manifest, inherited via `[lints] workspace = true` in all seven
+  member manifests. An unused workspace dependency is now a hard manifest
+  error (`could not parse workspace`) instead of a warning, so the repo
+  cannot build with dead dependency entries.
+
+### Changed
+
+- **BREAKING: `SrdSource` cursor semantics (#192).** Cursor `revision` is now
+  a position in the seed-derived permutation walk, folded into `[0, total)`
+  exactly like every other pager (`IndexablePager`, `ParquetRowSource`,
+  file-corpus pager) — no longer a file offset. Previously persisted SRD
+  cursors (file offsets) will be reinterpreted as walk positions on upgrade —
+  a one-time stream repositioning. The old sequential file-offset pagination
+  was the bug being fixed, so no compatibility shim is kept.
+- Bumped `line-ending` from 1.5.1 to 1.6.0 (#188)
+- Bumped `parquet` (and `arrow-*`) from 60.0.0 to 60.1.0 (#189)
+- Bumped `flate2` from 1.1.10 to 1.1.11 (#190)
+- **BREAKING: Replaced `chrono` 0.4.45 with `jiff` 1.0.2.** `chrono` is unmaintained
+  (RUSTSEC-2026-0543, no patched versions), which failed `cargo deny
+  check`; `jiff` is the advisory's recommended replacement. The following
+  public types change crates: `DataRecord::created_at/updated_at`,
+  `SourceCursor::last_seen`, `RowView::timestamp`, `file_mtime`, and
+  `file_times` move from `chrono::DateTime<Utc>` to `jiff::Timestamp`,
+  and the date helpers (`build_date_meta_values`,
+  `parse_publication_date_from_*`) move from `chrono::NaiveDate` to
+  `jiff::civil::Date`. Every use migrates one-to-one, and serialized
+  formats are unchanged (`Timestamp` keeps the RFC 3339 `Z` wire format;
+  `Date` keeps ISO `YYYY-MM-DD`), so persisted stores still load. `chrono`
+  remains in the lockfile only as a non-optional transitive dependency of
+  `arrow`/`parquet`/`reqwest-drive` pending upstream migration; no
+  workspace code depends on it, and `cargo deny check` is green.
+- Bumped `url` from 2.5.8 to 2.5.9 (RUSTSEC-2026-0592)
+- Bumped `quinn-udp` from 0.5.14 to 0.5.16 (RUSTSEC-2026-0538)
+- Bumped `rustix` from 1.1.4 to 1.1.6 (RUSTSEC-2026-0486)
+- Bumped `form_urlencoded` from 1.2.2 to 1.2.3 (knock-on from the `url` bump)
+
+### Fixed
+
+- **`SrdSource::refresh` ignores RNG — now deterministic random sampling
+  (#192).** Refresh used the cursor as a plain file offset and marched
+  through `data.srd` in file order epoch after epoch (see #192). Refresh
+  now draws a deterministic seed-derived window through a permutation of the index
+  domain, seeded by
+  `IndexablePager::seed_for_sampler(source_id, total, config.seed)` (the
+  ingestion manager already mixes `derive_epoch_seed(base, epoch) ^ step`
+  into `config.seed`). Same `(source_id, total, seed, cursor)` always yields
+  the same window; new seeds — the usual effect of epoch/step changes —
+  draw independent random subsets from across the corpus (expected overlap
+  ~`window^2/total`) instead of adjacent file
+  slices. (Seeds are `base ^ epoch ^ step`, so epoch/step pairs with equal
+  `epoch ^ step` share a seed and instead continue the same permutation
+  walk from the advanced cursor — still advancing, never a file-ordered
+  block.) Like the other
+  pagers, no cross-window non-repetition is promised — the corpus is an
+  infinite stream; no window is ever a coherent file-ordered block. The
+  permutation is driven manually
+  rather than via `IndexablePager` (single `batch_read_entries` call, no
+  per-row materialization). The stream contract holds:
+  `set_epoch` never rewinds cursors, and
+  `consecutive_epochs_draw_disjoint_windows_without_replay` still passes.
+- **Removed unused `triplets-offline-embedder` workspace dependency entry.**
+  No manifest referenced it via `workspace = true`; the crate remains a
+  workspace member and still builds. The new deny lint would now catch any
+  recurrence at manifest-parse time.
+
 ## [0.31.0-alpha] - 2026-11-01
 
 ### Added

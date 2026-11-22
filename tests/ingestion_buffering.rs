@@ -1,4 +1,4 @@
-use chrono::Utc;
+use jiff::Timestamp;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -14,8 +14,8 @@ fn create_dummy_record(id: &str) -> DataRecord {
     DataRecord {
         id: id.to_string(),
         source: "dummy".to_string(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
         quality: QualityScore::default(),
         taxonomy: vec![],
         sections: vec![RecordSection {
@@ -75,7 +75,7 @@ impl DataSource for PagedSource {
         Ok(SourceSnapshot {
             records,
             cursor: SourceCursor {
-                last_seen: Utc::now(),
+                last_seen: Timestamp::now(),
                 revision: next_idx as u64,
             },
         })
@@ -153,7 +153,7 @@ impl DataSource for ThreadIdSource {
         Ok(SourceSnapshot {
             records: Vec::new(),
             cursor: SourceCursor {
-                last_seen: Utc::now(),
+                last_seen: Timestamp::now(),
                 revision: 0,
             },
         })

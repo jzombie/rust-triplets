@@ -1,14 +1,14 @@
-use chrono::NaiveDate;
+use jiff::civil::Date;
 
 /// Parse a date from a folder name formatted as `MM-DD-YYYY` or `YYYY-MM-DD`.
 ///
 /// Accepts either `-` or `_` separators. Returns `None` when parsing fails.
-pub fn parse_publication_date_from_folder(folder: &str) -> Option<NaiveDate> {
+pub fn parse_publication_date_from_folder(folder: &str) -> Option<Date> {
     let normalized = folder.replace('_', "-");
-    if let Ok(date) = NaiveDate::parse_from_str(&normalized, "%m-%d-%Y") {
+    if let Ok(date) = Date::strptime("%m-%d-%Y", &normalized) {
         return Some(date);
     }
-    if let Ok(date) = NaiveDate::parse_from_str(&normalized, "%Y-%m-%d") {
+    if let Ok(date) = Date::strptime("%Y-%m-%d", &normalized) {
         return Some(date);
     }
     None
@@ -19,18 +19,19 @@ pub fn parse_publication_date_from_folder(folder: &str) -> Option<NaiveDate> {
 /// Examples: `2026/02-14-2026`, `2026/02-14`, or `2026/02_14_2026`. The folder
 /// may include suffixes after `--` (e.g. `04-14-2025--INCOMPLETE`). Returns `None`
 /// when no valid date is found.
-pub fn parse_publication_date_from_year_folder(year_str: &str, folder: &str) -> Option<NaiveDate> {
+pub fn parse_publication_date_from_year_folder(year_str: &str, folder: &str) -> Option<Date> {
     let year = year_str.parse::<i32>().ok()?;
     let core = folder.split("--").next().unwrap_or(folder).trim();
     let normalized = core.replace('_', "-");
-    if let Ok(date) = NaiveDate::parse_from_str(&normalized, "%m-%d-%Y") {
+    if let Ok(date) = Date::strptime("%m-%d-%Y", &normalized) {
         return Some(date);
     }
-    if let Ok(date) = NaiveDate::parse_from_str(&normalized, "%Y-%m-%d") {
+    if let Ok(date) = Date::strptime("%Y-%m-%d", &normalized) {
         return Some(date);
     }
     if let Some((month, day)) = parse_month_day(&normalized) {
-        return NaiveDate::from_ymd_opt(year, month, day);
+        let year = i16::try_from(year).ok()?;
+        return Date::new(year, month as i8, day as i8).ok();
     }
     None
 }
@@ -43,10 +44,11 @@ pub fn parse_publication_date_from_year_folder(year_str: &str, folder: &str) -> 
 pub fn parse_publication_date_from_month_range_folder(
     year_str: &str,
     folder: &str,
-) -> Option<NaiveDate> {
+) -> Option<Date> {
     let year = year_str.parse::<i32>().ok()?;
     let month = parse_month_from_range_folder(folder, year)?;
-    NaiveDate::from_ymd_opt(year, month, 1)
+    let year = i16::try_from(year).ok()?;
+    Date::new(year, month as i8, 1).ok()
 }
 
 /// Parse a `MM-DD` string into (month, day) with basic bounds checks.
@@ -102,15 +104,15 @@ mod tests {
     fn parses_publication_date_from_folder_formats() {
         assert_eq!(
             parse_publication_date_from_folder("02-14-2026"),
-            NaiveDate::from_ymd_opt(2026, 2, 14)
+            Date::new(2026, 2, 14).ok()
         );
         assert_eq!(
             parse_publication_date_from_folder("2026-02-14"),
-            NaiveDate::from_ymd_opt(2026, 2, 14)
+            Date::new(2026, 2, 14).ok()
         );
         assert_eq!(
             parse_publication_date_from_folder("02_14_2026"),
-            NaiveDate::from_ymd_opt(2026, 2, 14)
+            Date::new(2026, 2, 14).ok()
         );
         assert_eq!(parse_publication_date_from_folder(" 02-14-2026 "), None);
         assert_eq!(parse_publication_date_from_folder("13-01-2026"), None);
@@ -123,27 +125,27 @@ mod tests {
     fn parses_publication_date_from_year_folder_formats() {
         assert_eq!(
             parse_publication_date_from_year_folder("2026", "02-14-2026"),
-            NaiveDate::from_ymd_opt(2026, 2, 14)
+            Date::new(2026, 2, 14).ok()
         );
         assert_eq!(
             parse_publication_date_from_year_folder("2026", "02-14"),
-            NaiveDate::from_ymd_opt(2026, 2, 14)
+            Date::new(2026, 2, 14).ok()
         );
         assert_eq!(
             parse_publication_date_from_year_folder("2026", "02_14_2026"),
-            NaiveDate::from_ymd_opt(2026, 2, 14)
+            Date::new(2026, 2, 14).ok()
         );
         assert_eq!(
             parse_publication_date_from_year_folder("2026", "04-14-2025--INCOMPLETE"),
-            NaiveDate::from_ymd_opt(2025, 4, 14)
+            Date::new(2025, 4, 14).ok()
         );
         assert_eq!(
             parse_publication_date_from_year_folder("2026", "2025-04-14"),
-            NaiveDate::from_ymd_opt(2025, 4, 14)
+            Date::new(2025, 4, 14).ok()
         );
         assert_eq!(
             parse_publication_date_from_year_folder("2026", " 02-14 "),
-            NaiveDate::from_ymd_opt(2026, 2, 14)
+            Date::new(2026, 2, 14).ok()
         );
         assert_eq!(
             parse_publication_date_from_year_folder("2026", "13-14"),
@@ -158,49 +160,54 @@ mod tests {
             None
         );
         assert_eq!(parse_publication_date_from_year_folder("2026", "bad"), None);
+        // Years outside the civil-date i16 range are rejected, not wrapped.
+        assert_eq!(
+            parse_publication_date_from_year_folder("99999", "02-14"),
+            None
+        );
     }
 
     #[test]
     fn parses_publication_date_from_month_range_folder() {
         assert_eq!(
             parse_publication_date_from_month_range_folder("2026", "Jan + Feb 2026"),
-            NaiveDate::from_ymd_opt(2026, 2, 1)
+            Date::new(2026, 2, 1).ok()
         );
         assert_eq!(
             parse_publication_date_from_month_range_folder("2026", "Feb 2026"),
-            NaiveDate::from_ymd_opt(2026, 2, 1)
+            Date::new(2026, 2, 1).ok()
         );
         assert_eq!(
             parse_publication_date_from_month_range_folder("2026", "March + April"),
-            NaiveDate::from_ymd_opt(2026, 4, 1)
+            Date::new(2026, 4, 1).ok()
         );
         assert_eq!(
             parse_publication_date_from_month_range_folder("2026", "SEPT 2026"),
-            NaiveDate::from_ymd_opt(2026, 9, 1)
+            Date::new(2026, 9, 1).ok()
         );
         assert_eq!(
             parse_publication_date_from_month_range_folder("2026", "(Oct) 2026"),
-            NaiveDate::from_ymd_opt(2026, 10, 1)
+            Date::new(2026, 10, 1).ok()
         );
         assert_eq!(
             parse_publication_date_from_month_range_folder("2026", "Nov 2026"),
-            NaiveDate::from_ymd_opt(2026, 11, 1)
+            Date::new(2026, 11, 1).ok()
         );
         assert_eq!(
             parse_publication_date_from_month_range_folder("2026", "Nov. 2026"),
-            NaiveDate::from_ymd_opt(2026, 11, 1)
+            Date::new(2026, 11, 1).ok()
         );
         assert_eq!(
             parse_publication_date_from_month_range_folder("2025", "Nov. + Dec. 2025"),
-            NaiveDate::from_ymd_opt(2025, 12, 1)
+            Date::new(2025, 12, 1).ok()
         );
         assert_eq!(
             parse_publication_date_from_month_range_folder("2026", "2026 Feb"),
-            NaiveDate::from_ymd_opt(2026, 2, 1)
+            Date::new(2026, 2, 1).ok()
         );
         assert_eq!(
             parse_publication_date_from_month_range_folder("2026", "Dec 2025 + Jan 2026"),
-            NaiveDate::from_ymd_opt(2026, 1, 1)
+            Date::new(2026, 1, 1).ok()
         );
         assert_eq!(
             parse_publication_date_from_month_range_folder("20xx", "Feb 2026"),
@@ -212,6 +219,11 @@ mod tests {
         );
         assert_eq!(
             parse_publication_date_from_month_range_folder("2026", "2026"),
+            None
+        );
+        // Years outside the civil-date i16 range are rejected, not wrapped.
+        assert_eq!(
+            parse_publication_date_from_month_range_folder("99999", "Jan + Feb"),
             None
         );
     }

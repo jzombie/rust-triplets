@@ -7,7 +7,7 @@ use crate::rows::*;
 use crate::shard_index::{index_single_shard, shard_store_path_for};
 use crate::source::ParquetRowSource;
 use crate::types::ShardIndex;
-use chrono::Utc;
+use jiff::Timestamp;
 use serde_json::json;
 use simd_r_drive::storage_engine::DataStore;
 use simd_r_drive::storage_engine::traits::DataStoreWriter;
@@ -640,7 +640,7 @@ fn row_to_record_preserves_explicit_timestamp() {
     let dir = tempdir().unwrap();
     let config = test_config(dir.path().to_path_buf());
     let source = test_source(config);
-    let ts = Utc::now();
+    let ts = Timestamp::now();
     let row = RowView {
         row_id: Some("r1".into()),
         timestamp: Some(ts),
@@ -662,7 +662,7 @@ fn row_to_record_builds_expected_sections() {
     let source = test_source(config);
     let row = RowView {
         row_id: Some("abc".into()),
-        timestamp: Some(Utc::now()),
+        timestamp: Some(Timestamp::now()),
         text_fields: vec![
             RowTextField {
                 name: "title".into(),
@@ -863,7 +863,7 @@ fn read_row_batch_uses_cached_rows_and_respects_limit() {
 
     let row0 = RowView {
         row_id: Some("r0".into()),
-        timestamp: Some(Utc::now()),
+        timestamp: Some(Timestamp::now()),
         text_fields: vec![RowTextField {
             name: "text".into(),
             text: "alpha".into(),
@@ -871,7 +871,7 @@ fn read_row_batch_uses_cached_rows_and_respects_limit() {
     };
     let row1 = RowView {
         row_id: Some("r1".into()),
-        timestamp: Some(Utc::now()),
+        timestamp: Some(Timestamp::now()),
         text_fields: vec![RowTextField {
             name: "text".into(),
             text: "beta".into(),

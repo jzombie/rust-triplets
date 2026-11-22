@@ -5,8 +5,8 @@ use crate::errors::SamplerError;
 use crate::hash::derive_epoch_seed;
 use crate::source::{DataSource, SourceCursor, SourceSnapshot};
 use crate::types::{RecordId, RecordKey, SourceId};
-use chrono::Utc;
 use indexmap::IndexMap;
+use jiff::Timestamp;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex, RwLock};
@@ -461,7 +461,7 @@ impl IngestionManager {
         for state in &mut self.sources {
             if let Some(revision) = map.get(state.source.id()) {
                 state.cursor = Some(SourceCursor {
-                    last_seen: Utc::now(),
+                    last_seen: Timestamp::now(),
                     revision: *revision,
                 });
             }
@@ -960,14 +960,14 @@ mod tests {
     use crate::data::{QualityScore, RecordSection, SectionRole};
     use crate::sampler::Sampler;
     use crate::splits::{DeterministicSplitStore, SamplerStateStore, SplitLabel, SplitRatios};
-    use chrono::Utc;
+    use jiff::Timestamp;
     use std::collections::HashMap;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     fn make_record(id: &str, source: &str) -> DataRecord {
-        let now = Utc::now();
+        let now = Timestamp::now();
         DataRecord {
             id: id.to_string(),
             source: source.to_string(),
@@ -1025,7 +1025,7 @@ mod tests {
                 Ok(SourceSnapshot {
                     records: Vec::new(),
                     cursor: SourceCursor {
-                        last_seen: Utc::now(),
+                        last_seen: Timestamp::now(),
                         revision: 0,
                     },
                 })
@@ -1117,7 +1117,7 @@ mod tests {
                 vec![Ok(SourceSnapshot {
                     records: vec![make_record("id_1", "original_source")],
                     cursor: SourceCursor {
-                        last_seen: Utc::now(),
+                        last_seen: Timestamp::now(),
                         revision: 33,
                     },
                 })],
@@ -1154,7 +1154,7 @@ mod tests {
                         make_record("c", "x"),
                     ],
                     cursor: SourceCursor {
-                        last_seen: Utc::now(),
+                        last_seen: Timestamp::now(),
                         revision: 1,
                     },
                 })],
@@ -1186,14 +1186,14 @@ mod tests {
                             make_record("r3", "x"),
                         ],
                         cursor: SourceCursor {
-                            last_seen: Utc::now(),
+                            last_seen: Timestamp::now(),
                             revision: 10,
                         },
                     }),
                     Ok(SourceSnapshot {
                         records: vec![make_record("r4", "x")],
                         cursor: SourceCursor {
-                            last_seen: Utc::now(),
+                            last_seen: Timestamp::now(),
                             revision: 11,
                         },
                     }),
@@ -1222,7 +1222,7 @@ mod tests {
                 vec![Ok(SourceSnapshot {
                     records: vec![make_record("a1", "a"), make_record("a2", "a")],
                     cursor: SourceCursor {
-                        last_seen: Utc::now(),
+                        last_seen: Timestamp::now(),
                         revision: 1,
                     },
                 })],
@@ -1235,7 +1235,7 @@ mod tests {
                 vec![Ok(SourceSnapshot {
                     records: vec![make_record("b1", "b"), make_record("b2", "b")],
                     cursor: SourceCursor {
-                        last_seen: Utc::now(),
+                        last_seen: Timestamp::now(),
                         revision: 1,
                     },
                 })],
@@ -1261,7 +1261,7 @@ mod tests {
                 vec![Ok(SourceSnapshot {
                     records: vec![make_record("a1", "a")],
                     cursor: SourceCursor {
-                        last_seen: Utc::now(),
+                        last_seen: Timestamp::now(),
                         revision: 2,
                     },
                 })],
@@ -1274,7 +1274,7 @@ mod tests {
                 vec![Ok(SourceSnapshot {
                     records: vec![make_record("b1", "b")],
                     cursor: SourceCursor {
-                        last_seen: Utc::now(),
+                        last_seen: Timestamp::now(),
                         revision: 2,
                     },
                 })],
@@ -1354,7 +1354,7 @@ mod tests {
                 vec![Ok(SourceSnapshot {
                     records: vec![make_record("w1", "w")],
                     cursor: SourceCursor {
-                        last_seen: Utc::now(),
+                        last_seen: Timestamp::now(),
                         revision: 3,
                     },
                 })],
@@ -1466,7 +1466,7 @@ mod tests {
             Ok(SourceSnapshot {
                 records: Vec::new(),
                 cursor: SourceCursor {
-                    last_seen: Utc::now(),
+                    last_seen: Timestamp::now(),
                     revision: 0,
                 },
             })
@@ -1612,7 +1612,7 @@ mod tests {
                 vec![Ok(SourceSnapshot {
                     records: vec![make_record("r1", "src")],
                     cursor: SourceCursor {
-                        last_seen: Utc::now(),
+                        last_seen: Timestamp::now(),
                         revision: 1,
                     },
                 })],
@@ -1644,7 +1644,7 @@ mod tests {
                 vec![Ok(SourceSnapshot {
                     records: vec![make_record("r2", "src")],
                     cursor: SourceCursor {
-                        last_seen: Utc::now(),
+                        last_seen: Timestamp::now(),
                         revision: 2,
                     },
                 })],
@@ -1724,7 +1724,7 @@ mod tests {
                 vec![Ok(SourceSnapshot {
                     records: vec![make_record("r1", "zero_capacity")],
                     cursor: SourceCursor {
-                        last_seen: Utc::now(),
+                        last_seen: Timestamp::now(),
                         revision: 1,
                     },
                 })],
@@ -1768,7 +1768,7 @@ mod tests {
                         .map(|i| make_record(&format!("r{i}"), &self.id))
                         .collect(),
                     cursor: SourceCursor {
-                        last_seen: Utc::now(),
+                        last_seen: Timestamp::now(),
                         revision: 1,
                     },
                 })
@@ -1858,7 +1858,7 @@ mod tests {
                 _: Option<usize>,
             ) -> Result<SourceSnapshot, SamplerError> {
                 self.refresh_count.fetch_add(1, Ordering::SeqCst);
-                let now = Utc::now();
+                let now = Timestamp::now();
                 let records: Vec<DataRecord> = (0..8)
                     .map(|i| DataRecord {
                         id: format!("{}_r{i}", self.id),
@@ -1936,7 +1936,7 @@ mod tests {
                 _: Option<usize>,
             ) -> Result<SourceSnapshot, SamplerError> {
                 self.refresh_count.fetch_add(1, Ordering::SeqCst);
-                let now = Utc::now();
+                let now = Timestamp::now();
                 let records: Vec<DataRecord> = (0..8)
                     .map(|i| DataRecord {
                         id: format!("{}_r{i}", self.id),
@@ -2305,7 +2305,7 @@ mod tests {
                 vec![Ok(SourceSnapshot {
                     records: vec![make_record("g1", "gen_src")],
                     cursor: SourceCursor {
-                        last_seen: Utc::now(),
+                        last_seen: Timestamp::now(),
                         revision: 1,
                     },
                 })],
@@ -2333,7 +2333,7 @@ mod tests {
                 vec![Ok(SourceSnapshot {
                     records: vec![make_record("a1", "agg_a")],
                     cursor: SourceCursor {
-                        last_seen: Utc::now(),
+                        last_seen: Timestamp::now(),
                         revision: 1,
                     },
                 })],
@@ -2346,7 +2346,7 @@ mod tests {
                 vec![Ok(SourceSnapshot {
                     records: vec![make_record("b1", "agg_b")],
                     cursor: SourceCursor {
-                        last_seen: Utc::now(),
+                        last_seen: Timestamp::now(),
                         revision: 1,
                     },
                 })],
@@ -2387,7 +2387,7 @@ mod tests {
                 vec![Ok(SourceSnapshot {
                     records: vec![make_record("s1", "stats_src")],
                     cursor: SourceCursor {
-                        last_seen: Utc::now(),
+                        last_seen: Timestamp::now(),
                         revision: 1,
                     },
                 })],

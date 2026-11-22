@@ -16,7 +16,7 @@ use crate::test_utils::{
     test_config, test_http_client, test_source, with_env_var, write_parquet_fixture,
     write_simdr_fixture,
 };
-use chrono::Utc;
+use jiff::Timestamp;
 use serde_json::json;
 use serial_test::serial;
 use simd_r_drive::storage_engine::DataStore;
@@ -2034,7 +2034,7 @@ fn refresh_handles_empty_total_and_cursor_wrap() {
         local.shards = vec![shard];
     }
     let cursor = SourceCursor {
-        last_seen: Utc::now(),
+        last_seen: Timestamp::now(),
         revision: 99,
     };
     let snapshot = source2.refresh(Some(&cursor), Some(1)).unwrap();

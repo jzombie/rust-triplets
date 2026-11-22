@@ -3,7 +3,7 @@ use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, NaiveDate, TimeZone, Utc};
+use jiff::{Timestamp, civil::Date, tz::TimeZone};
 use tracing::warn;
 use triplets::config::TripletRecipe;
 use triplets::data::{DataRecord, QualityScore, SectionRole};
@@ -224,7 +224,7 @@ fn build_record(source_id: &str, root: &Path, path: &Path) -> Option<DataRecord>
         .unwrap_or("Untitled sample");
 
     let date_text = extract_date_text(rel).unwrap_or_else(|| "2025-01-01".to_string());
-    let dt = parse_date_utc(&date_text).unwrap_or_else(Utc::now);
+    let dt = parse_date_utc(&date_text).unwrap_or_else(Timestamp::now);
     let record_id = format!("{}::{}", source_id, rel.to_string_lossy());
 
     Some(DataRecord {
@@ -243,16 +243,17 @@ fn build_record(source_id: &str, root: &Path, path: &Path) -> Option<DataRecord>
     })
 }
 
-fn parse_date_utc(raw: &str) -> Option<DateTime<Utc>> {
-    let date = NaiveDate::parse_from_str(raw, "%Y-%m-%d").ok()?;
-    let naive = date.and_hms_opt(0, 0, 0)?;
-    Some(Utc.from_utc_datetime(&naive))
+fn parse_date_utc(raw: &str) -> Option<Timestamp> {
+    let date = Date::strptime("%Y-%m-%d", raw).ok()?;
+    date.to_zoned_datetime(TimeZone::UTC)
+        .ok()
+        .map(|z| z.timestamp())
 }
 
 fn extract_date_text(rel: &Path) -> Option<String> {
     for component in rel.components() {
         let text = component.as_os_str().to_string_lossy();
-        if NaiveDate::parse_from_str(&text, "%Y-%m-%d").is_ok() {
+        if Date::strptime("%Y-%m-%d", text.as_bytes()).is_ok() {
             return Some(text.to_string());
         }
     }

@@ -6,7 +6,7 @@
 //! - `IndexablePager` owns the deterministic pseudo-random paging logic and
 //!   can page any indexable source without retaining per-record state.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use std::hash::Hash;
 use std::time::Instant;
 use tracing::info;
@@ -36,7 +36,7 @@ pub use backends::in_memory_source::InMemorySource;
 #[derive(Clone, Debug)]
 pub struct SourceCursor {
     /// Most recent observation timestamp produced by the source.
-    pub last_seen: DateTime<Utc>,
+    pub last_seen: Timestamp,
     /// Opaque paging position token used to continue incremental refresh.
     pub revision: u64,
 }
@@ -62,6 +62,10 @@ pub trait DataSource: Send + Sync {
     /// Fetch up to `limit` records starting from `cursor` state.
     ///
     /// Return the next cursor position in `SourceSnapshot.cursor`.
+    ///
+    /// Determinism is per (dataset, cursor, config seed). Refreshes make
+    /// no cross-call promises: windows may overlap, repeat, or share seeds
+    /// across epoch/step boundaries.
     fn refresh(
         &self,
         config: &SamplerConfig,
@@ -159,7 +163,7 @@ impl IndexablePager {
             return Ok(SourceSnapshot {
                 records: Vec::new(),
                 cursor: SourceCursor {
-                    last_seen: Utc::now(),
+                    last_seen: Timestamp::now(),
                     revision: 0,
                 },
             });
@@ -243,7 +247,7 @@ impl IndexablePager {
             .iter()
             .map(|record| record.updated_at)
             .max()
-            .unwrap_or_else(Utc::now);
+            .unwrap_or_else(Timestamp::now);
         Ok(SourceSnapshot {
             records,
             cursor: SourceCursor {
@@ -425,7 +429,7 @@ mod tests {
             if idx >= self.count {
                 return Ok(None);
             }
-            let now = Utc::now();
+            let now = Timestamp::now();
             Ok(Some(DataRecord {
                 id: format!("record_{idx}"),
                 source: self.id.clone(),
@@ -570,7 +574,7 @@ mod tests {
     fn indexable_pager_large_refresh_triggers_reporting_branch_and_wraps_cursor() {
         let pager = IndexablePager::new("reporting");
         let cursor = SourceCursor {
-            last_seen: Utc::now(),
+            last_seen: Timestamp::now(),
             revision: 20_000,
         };
         let snapshot = pager
@@ -578,8 +582,8 @@ mod tests {
                 Ok(Some(DataRecord {
                     id: format!("record_{idx}"),
                     source: "reporting".to_string(),
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
+                    created_at: Timestamp::now(),
+                    updated_at: Timestamp::now(),
                     quality: QualityScore { trust: 1.0 },
                     taxonomy: Vec::new(),
                     sections: vec![RecordSection {
@@ -647,8 +651,8 @@ mod tests {
                     Ok(Some(DataRecord {
                         id: format!("r_{idx}"),
                         source: "fallback_fill".to_string(),
-                        created_at: Utc::now(),
-                        updated_at: Utc::now(),
+                        created_at: Timestamp::now(),
+                        updated_at: Timestamp::now(),
                         quality: QualityScore { trust: 1.0 },
                         taxonomy: Vec::new(),
                         sections: vec![RecordSection {

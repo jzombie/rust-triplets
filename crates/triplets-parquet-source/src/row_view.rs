@@ -9,7 +9,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use triplets_core::SamplerError;
 
 /// One named text field extracted from a row (column name + text).
@@ -27,7 +27,7 @@ pub struct RowView {
     /// Stable row id (explicit column or synthetic fallback).
     pub row_id: Option<String>,
     /// Row timestamp when the source provides one.
-    pub timestamp: Option<DateTime<Utc>>,
+    pub timestamp: Option<Timestamp>,
     /// Extracted text fields in mapping order.
     pub text_fields: Vec<RowTextField>,
 }

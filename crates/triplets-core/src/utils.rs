@@ -1,6 +1,6 @@
 //! Text normalization helpers shared by source implementations.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use line_ending::LineEnding;
 use std::fs;
 use std::path::Path;
@@ -136,20 +136,20 @@ pub fn is_text_file(path: &Path) -> bool {
 }
 
 /// Best-effort file modified time.
-pub fn file_mtime(path: &Path) -> Option<DateTime<Utc>> {
+pub fn file_mtime(path: &Path) -> Option<Timestamp> {
     let metadata = fs::metadata(path).ok()?;
     let modified = metadata.modified().ok()?;
     Some(system_time_to_utc(modified))
 }
 
 /// Best-effort (created_at, updated_at) pair for a file.
-pub fn file_times(path: &Path) -> (DateTime<Utc>, DateTime<Utc>) {
+pub fn file_times(path: &Path) -> (Timestamp, Timestamp) {
     let metadata = fs::metadata(path).ok();
     let updated_at = metadata
         .as_ref()
         .and_then(|meta| meta.modified().ok())
         .map(system_time_to_utc)
-        .unwrap_or_else(Utc::now);
+        .unwrap_or_else(Timestamp::now);
     let created_at = metadata
         .and_then(|meta| meta.created().ok())
         .map(system_time_to_utc)
@@ -157,13 +157,33 @@ pub fn file_times(path: &Path) -> (DateTime<Utc>, DateTime<Utc>) {
     (created_at, updated_at)
 }
 
-fn system_time_to_utc(time: std::time::SystemTime) -> DateTime<Utc> {
-    DateTime::<Utc>::from(time)
+fn system_time_to_utc(time: std::time::SystemTime) -> Timestamp {
+    Timestamp::try_from(time).unwrap_or_else(|_| Timestamp::now())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_time_to_utc_falls_back_for_out_of_range_time() {
+        // jiff::Timestamp covers civil years -9999..=9999; a SystemTime past
+        // that (still representable as a platform timespec/FILETIME)
+        // exercises the saturation fallback instead of panicking. Probe
+        // upward so the test stays portable: Windows SystemTime tops out at
+        // year 30827, so one fixed giant offset is not representable there.
+        let far_future = [300_000_000_000u64, 500_000_000_000, 800_000_000_000]
+            .into_iter()
+            .filter_map(|secs| {
+                std::time::SystemTime::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(secs))
+            })
+            .find(|time| Timestamp::try_from(*time).is_err())
+            .expect("platform must represent a SystemTime past Timestamp::MAX");
+        let before = Timestamp::now();
+        let fallback = system_time_to_utc(far_future);
+        let after = Timestamp::now();
+        assert!(fallback >= before && fallback <= after);
+    }
 
     #[test]
     fn normalize_inline_whitespace_collapses_runs() {

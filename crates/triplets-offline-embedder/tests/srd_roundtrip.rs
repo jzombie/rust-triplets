@@ -478,12 +478,26 @@ fn pair_write_and_read_via_srd_source() {
         assert_eq!(rec.sections[1].role, SectionRole::Context);
     }
 
-    assert_eq!(snapshot.records[0].sections[0].text, "hello");
-    assert_eq!(snapshot.records[0].sections[1].text, "hi");
-    assert_eq!(snapshot.records[1].sections[0].text, "world");
-    assert_eq!(snapshot.records[1].sections[1].text, "earth");
-    assert_eq!(snapshot.records[2].sections[0].text, "foo");
-    assert_eq!(snapshot.records[2].sections[1].text, "bar");
+    // Refresh order is permuted, not file order: match each record to its
+    // written entry by record id (the entry index as a string), and prove
+    // the full set came back exactly once (no drops, no duplicates).
+    assert_eq!(snapshot.records.len(), 3);
+    let expected_anchors = ["hello", "world", "foo"];
+    let expected_pos = ["hi", "earth", "bar"];
+    let mut seen = Vec::new();
+    for rec in &snapshot.records {
+        let idx: usize = rec.id.parse().expect("entry index id");
+        assert!(idx < 3, "record id {idx} out of range for 3-entry store");
+        seen.push(idx);
+        assert_eq!(rec.sections[0].text, expected_anchors[idx]);
+        assert_eq!(rec.sections[1].text, expected_pos[idx]);
+    }
+    seen.sort_unstable();
+    assert_eq!(
+        seen,
+        vec![0, 1, 2],
+        "refresh must return each entry exactly once"
+    );
 }
 
 #[test]
@@ -519,22 +533,28 @@ fn pair_negative_label_roundtrip_via_srd_source() {
         .unwrap();
     assert_eq!(snapshot.records.len(), 2);
 
-    // Verify texts are correct
-    assert_eq!(snapshot.records[0].sections[0].text, "a1");
-    assert_eq!(snapshot.records[0].sections[1].text, "neg1");
-    assert_eq!(snapshot.records[1].sections[0].text, "a2");
-    assert_eq!(snapshot.records[1].sections[1].text, "neg2");
-
-    // Verify labels are preserved as Negative
+    // Verify texts and labels per record id (refresh order is permuted),
+    // and prove both entries came back exactly once.
+    let expected_anchors = ["a1", "a2"];
+    let expected_cands = ["neg1", "neg2"];
+    let mut seen = Vec::new();
+    for rec in &snapshot.records {
+        let idx: usize = rec.id.parse().expect("entry index id");
+        assert!(idx < 2, "record id {idx} out of range for 2-entry store");
+        seen.push(idx);
+        assert_eq!(rec.sections[0].text, expected_anchors[idx]);
+        assert_eq!(rec.sections[1].text, expected_cands[idx]);
+        assert_eq!(
+            rec.label,
+            Some(PairLabel::Negative),
+            "record {idx} should have Negative label"
+        );
+    }
+    seen.sort_unstable();
     assert_eq!(
-        snapshot.records[0].label,
-        Some(PairLabel::Negative),
-        "first record should have Negative label"
-    );
-    assert_eq!(
-        snapshot.records[1].label,
-        Some(PairLabel::Negative),
-        "second record should have Negative label"
+        seen,
+        vec![0, 1],
+        "refresh must return each entry exactly once"
     );
 }
 
@@ -578,24 +598,29 @@ fn triplet_write_and_read_via_srd_source() {
     assert_eq!(snapshot.records.len(), 2);
 
     // Each triplet record has 3 sections: Anchor + Context (positive) + Context (negative).
-    for (i, rec) in snapshot.records.iter().enumerate() {
-        assert_eq!(rec.sections.len(), 3, "record {i} should have 3 sections");
+    // Refresh order is permuted: match each record to its entry by id, and
+    // prove both entries came back exactly once.
+    let tags = ['a', 'b'];
+    let mut seen = Vec::new();
+    for rec in &snapshot.records {
+        assert_eq!(rec.sections.len(), 3, "record should have 3 sections");
+        let idx: usize = rec.id.parse().expect("entry index id");
+        assert!(idx < 2, "record id {idx} out of range for 2-entry store");
+        seen.push(idx);
+        let tag = tags[idx];
         assert_eq!(rec.sections[0].role, SectionRole::Anchor);
-        assert_eq!(
-            rec.sections[0].text,
-            format!("anchor_{}", if i == 0 { 'a' } else { 'b' })
-        );
+        assert_eq!(rec.sections[0].text, format!("anchor_{tag}"));
         assert_eq!(rec.sections[1].role, SectionRole::Context);
-        assert_eq!(
-            rec.sections[1].text,
-            format!("positive_{}", if i == 0 { 'a' } else { 'b' })
-        );
+        assert_eq!(rec.sections[1].text, format!("positive_{tag}"));
         assert_eq!(rec.sections[2].role, SectionRole::Context);
-        assert_eq!(
-            rec.sections[2].text,
-            format!("negative_{}", if i == 0 { 'a' } else { 'b' })
-        );
+        assert_eq!(rec.sections[2].text, format!("negative_{tag}"));
     }
+    seen.sort_unstable();
+    assert_eq!(
+        seen,
+        vec![0, 1],
+        "refresh must return each entry exactly once"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -630,9 +655,19 @@ fn resume_after_partial_write() {
     let snapshot = source
         .refresh(&SamplerConfig::default(), None, None)
         .unwrap();
+    // Both the pre-resume entry ("a") and the post-resume entry ("b")
+    // must survive the roundtrip exactly once: match by id, not position.
     assert_eq!(snapshot.records.len(), 2);
-    assert_eq!(snapshot.records[0].sections[0].text, "a");
-    assert_eq!(snapshot.records[1].sections[0].text, "b");
+    let expected = ["a", "b"];
+    let mut seen = Vec::new();
+    for rec in &snapshot.records {
+        let idx: usize = rec.id.parse().expect("entry index id");
+        assert!(idx < 2, "record id {idx} out of range for 2-entry store");
+        seen.push(idx);
+        assert_eq!(rec.sections[0].text, expected[idx]);
+    }
+    seen.sort_unstable();
+    assert_eq!(seen, vec![0, 1], "both entries must survive the roundtrip");
 }
 
 // ---------------------------------------------------------------------------
@@ -689,8 +724,14 @@ fn adapter_roundtrip_through_split_state() {
         .refresh(&SamplerConfig::default(), None, None)
         .unwrap();
     assert_eq!(snapshot.records.len(), 4);
-    assert_eq!(snapshot.records[0].sections[0].text, "alpha");
-    assert_eq!(snapshot.records[3].sections[0].text, "delta");
+    // Refresh order is permuted, not file order: compare as a set.
+    let mut anchors: Vec<&str> = snapshot
+        .records
+        .iter()
+        .map(|r| r.sections[0].text.as_str())
+        .collect();
+    anchors.sort_unstable();
+    assert_eq!(anchors, ["alpha", "beta", "delta", "gamma"]);
 }
 
 // ---------------------------------------------------------------------------

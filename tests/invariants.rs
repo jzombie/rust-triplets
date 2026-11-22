@@ -10,7 +10,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
-use chrono::{TimeZone, Utc};
+use jiff::Timestamp;
 
 use triplets::NegativeStrategy;
 use triplets::config::{SamplerConfig, Selector, TripletRecipe};
@@ -25,8 +25,8 @@ use triplets::utils::make_section;
 use triplets::{RecordId, RecordKey, SourceId};
 
 fn build_record(source: &str, suffix: &str, day_offset: u32) -> DataRecord {
-    let created_at = Utc
-        .with_ymd_and_hms(2025, 1, 1 + day_offset, 12, 0, 0)
+    let created_at = format!("2025-01-{:02}T12:00:00Z", 1 + day_offset)
+        .parse::<Timestamp>()
         .unwrap();
     DataRecord {
         id: format!("{source}::{suffix}"),

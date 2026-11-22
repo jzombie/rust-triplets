@@ -188,7 +188,7 @@ impl FileCorpusIndex {
             return Ok(SourceSnapshot {
                 records: Vec::new(),
                 cursor: SourceCursor {
-                    last_seen: chrono::Utc::now(),
+                    last_seen: jiff::Timestamp::now(),
                     revision: 0,
                 },
             });
@@ -234,7 +234,7 @@ impl FileCorpusIndex {
             .iter()
             .map(|record| record.updated_at)
             .max()
-            .unwrap_or_else(chrono::Utc::now);
+            .unwrap_or_else(jiff::Timestamp::now);
         let next_start = permutation.cursor();
         Ok(SourceSnapshot {
             records,
@@ -524,7 +524,7 @@ impl FileCorpusIndex {
             return Ok(SourceSnapshot {
                 records: Vec::new(),
                 cursor: SourceCursor {
-                    last_seen: chrono::Utc::now(),
+                    last_seen: jiff::Timestamp::now(),
                     revision: 0,
                 },
             });
@@ -534,7 +534,7 @@ impl FileCorpusIndex {
             return Ok(SourceSnapshot {
                 records: Vec::new(),
                 cursor: SourceCursor {
-                    last_seen: chrono::Utc::now(),
+                    last_seen: jiff::Timestamp::now(),
                     revision: 0,
                 },
             });
@@ -590,7 +590,7 @@ impl FileCorpusIndex {
             .iter()
             .map(|record| record.updated_at)
             .max()
-            .unwrap_or_else(chrono::Utc::now);
+            .unwrap_or_else(jiff::Timestamp::now);
         let next_start = (start + steps) % grouped_order.len();
         Ok(SourceSnapshot {
             records,
@@ -750,7 +750,7 @@ mod tests {
     use crate::errors::SamplerError;
     use crate::source::IndexablePager;
     use crate::types::{GroupKey, PathString, RecordId};
-    use chrono::Utc;
+    use jiff::Timestamp;
     use std::collections::HashMap;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -768,7 +768,7 @@ mod tests {
                 details: "empty normalized body".into(),
             });
         }
-        let now = Utc::now();
+        let now = Timestamp::now();
         Ok(Some(DataRecord {
             id: FileCorpusIndex::source_scoped_record_id(source_id, root, path),
             source: source_id.clone(),
@@ -817,7 +817,7 @@ mod tests {
             .with_text_files_only(true);
         let snapshot = index
             .refresh_indexable(None, Some(64), |path| {
-                let now = Utc::now();
+                let now = Timestamp::now();
                 Ok(Some(DataRecord {
                     id: FileCorpusIndex::source_scoped_record_id(&source_id, temp.path(), path),
                     source: source_id.clone(),
@@ -929,7 +929,7 @@ mod tests {
             .with_text_files_only(true);
         let _ = index
             .refresh_indexable(None, Some(3), |path| {
-                let now = Utc::now();
+                let now = Timestamp::now();
                 Ok(Some(DataRecord {
                     id: FileCorpusIndex::source_scoped_record_id(&source_id, root, path),
                     source: source_id.to_string(),
@@ -1046,7 +1046,7 @@ mod tests {
             .with_directory_grouping_window_divisor(3);
         let snapshot = index
             .refresh_indexable(None, Some(dir_count * 2), |path| {
-                let now = Utc::now();
+                let now = Timestamp::now();
                 Ok(Some(DataRecord {
                     id: FileCorpusIndex::source_scoped_record_id(&source_id, root, path),
                     source: source_id.to_string(),
@@ -1069,7 +1069,7 @@ mod tests {
             .unwrap();
         let grouped_snapshot_again = index
             .refresh_indexable(None, Some(dir_count * 2), |path| {
-                let now = Utc::now();
+                let now = Timestamp::now();
                 Ok(Some(DataRecord {
                     id: FileCorpusIndex::source_scoped_record_id(&source_id, root, path),
                     source: source_id.to_string(),
@@ -1108,7 +1108,7 @@ mod tests {
             .with_text_files_only(true);
         let ungrouped_snapshot = ungrouped_index
             .refresh_indexable(None, Some(dir_count * 2), |path| {
-                let now = Utc::now();
+                let now = Timestamp::now();
                 Ok(Some(DataRecord {
                     id: FileCorpusIndex::source_scoped_record_id(&source_id, root, path),
                     source: source_id.to_string(),
@@ -1261,7 +1261,7 @@ mod tests {
             .with_directory_grouping_window_divisor(2);
         let grouped_snapshot = grouped_index
             .refresh_indexable(None, Some(limit), |path| {
-                let now = Utc::now();
+                let now = Timestamp::now();
                 Ok(Some(DataRecord {
                     id: FileCorpusIndex::source_scoped_record_id(&source_id, root, path),
                     source: source_id.to_string(),
@@ -1289,7 +1289,7 @@ mod tests {
             .with_text_files_only(true);
         let ungrouped_snapshot = ungrouped_index
             .refresh_indexable(None, Some(limit), |path| {
-                let now = Utc::now();
+                let now = Timestamp::now();
                 Ok(Some(DataRecord {
                     id: FileCorpusIndex::source_scoped_record_id(&source_id, root, path),
                     source: source_id.to_string(),
@@ -1389,7 +1389,7 @@ mod tests {
 
         let snapshot = grouped_index
             .refresh_indexable(None, Some(limit), |path| {
-                let now = Utc::now();
+                let now = Timestamp::now();
                 Ok(Some(DataRecord {
                     id: FileCorpusIndex::source_scoped_record_id(&source_id, root, path),
                     source: source_id.to_string(),
@@ -1462,7 +1462,7 @@ mod tests {
 
         let snapshot_a = index
             .refresh_indexable(None, Some(limit), |path| {
-                let now = Utc::now();
+                let now = Timestamp::now();
                 Ok(Some(DataRecord {
                     id: FileCorpusIndex::source_scoped_record_id(&source_id, root, path),
                     source: source_id.to_string(),
@@ -1486,7 +1486,7 @@ mod tests {
 
         let snapshot_b = index
             .refresh_indexable(None, Some(limit), |path| {
-                let now = Utc::now();
+                let now = Timestamp::now();
                 Ok(Some(DataRecord {
                     id: FileCorpusIndex::source_scoped_record_id(&source_id, root, path),
                     source: source_id.to_string(),
@@ -1669,8 +1669,8 @@ mod tests {
                     Ok(Some(DataRecord {
                         id: "ok".to_string(),
                         source: "batch_read".to_string(),
-                        created_at: Utc::now(),
-                        updated_at: Utc::now(),
+                        created_at: Timestamp::now(),
+                        updated_at: Timestamp::now(),
                         quality: QualityScore { trust: 1.0 },
                         taxonomy: Vec::new(),
                         sections: vec![RecordSection {

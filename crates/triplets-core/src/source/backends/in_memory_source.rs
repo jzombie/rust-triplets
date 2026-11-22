@@ -1,4 +1,4 @@
-use chrono::Utc;
+use jiff::Timestamp;
 
 use crate::config::SamplerConfig;
 use crate::data::DataRecord;
@@ -15,7 +15,7 @@ use crate::types::SourceId;
 ///
 /// ```
 /// use std::sync::Arc;
-/// use chrono::Utc;
+/// use jiff::Timestamp;
 /// use triplets_core::{DataRecord, DeterministicSplitStore, InMemorySource, SamplerConfig, SplitRatios, TripletSampler};
 /// use triplets_core::data::{RecordSection, SectionRole};
 ///
@@ -23,8 +23,8 @@ use crate::types::SourceId;
 /// source.add_record(DataRecord {
 ///     id: "rec-0".into(),
 ///     source: "my_source".into(),
-///     created_at: Utc::now(),
-///     updated_at: Utc::now(),
+///     created_at: Timestamp::now(),
+///     updated_at: Timestamp::now(),
 ///     quality: Default::default(),
 ///     taxonomy: vec![],
 ///     sections: vec![RecordSection {
@@ -122,7 +122,7 @@ impl DataSource for InMemorySource {
             .iter()
             .map(|record| record.updated_at)
             .max()
-            .unwrap_or_else(Utc::now);
+            .unwrap_or_else(Timestamp::now);
         let next_start = if total == 0 {
             0
         } else {
@@ -146,9 +146,9 @@ impl DataSource for InMemorySource {
 mod tests {
     use super::*;
     use crate::data::{QualityScore, RecordSection, SectionRole};
-    use chrono::{Duration, Utc};
+    use jiff::{SignedDuration, Timestamp};
 
-    fn make_record(id: &str, ts: chrono::DateTime<Utc>) -> DataRecord {
+    fn make_record(id: &str, ts: Timestamp) -> DataRecord {
         DataRecord {
             id: id.to_string(),
             source: "mem".to_string(),
@@ -171,9 +171,9 @@ mod tests {
 
     #[test]
     fn in_memory_source_refresh_wraps_cursor_and_uses_latest_timestamp() {
-        let now = Utc::now();
-        let older = now - Duration::seconds(5);
-        let newer = now + Duration::seconds(5);
+        let now = Timestamp::now();
+        let older = now - SignedDuration::from_secs(5);
+        let newer = now + SignedDuration::from_secs(5);
 
         let mut source = InMemorySource::new("mem");
         source.add_records([make_record("a", older), make_record("b", newer)]);
@@ -209,7 +209,7 @@ mod tests {
         let mut source = InMemorySource::new("s");
         assert_eq!(source.len_hint(), Some(0));
 
-        let now = Utc::now();
+        let now = Timestamp::now();
         source.add_record(make_record("r0", now));
         assert_eq!(source.len_hint(), Some(1));
 
@@ -219,7 +219,7 @@ mod tests {
 
     #[test]
     fn record_at_returns_correct_record_and_none_out_of_bounds() {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let mut source = InMemorySource::new("s");
         source.add_record(make_record("only", now));
 

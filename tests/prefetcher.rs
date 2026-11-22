@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use chrono::{TimeZone, Utc};
+use jiff::Timestamp;
 
 use triplets::source::InMemorySource;
 use triplets::{
@@ -16,8 +16,8 @@ use triplets::{
 };
 
 fn build_record(source: &str, suffix: &str, day_offset: u32) -> DataRecord {
-    let created_at = Utc
-        .with_ymd_and_hms(2025, 1, 1 + day_offset, 12, 0, 0)
+    let created_at = format!("2025-01-{:02}T12:00:00Z", 1 + day_offset)
+        .parse::<Timestamp>()
         .unwrap();
     DataRecord {
         id: format!("{source}::{suffix}"),

@@ -1,4 +1,4 @@
-use chrono::Utc;
+use jiff::Timestamp;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -83,7 +83,7 @@ impl FileStream {
             .iter()
             .map(|record| record.updated_at)
             .max()
-            .unwrap_or_else(Utc::now);
+            .unwrap_or_else(Timestamp::now);
         let next_start = if total == 0 {
             0
         } else {
@@ -108,7 +108,7 @@ fn stable_path_shuffle_key(path: &Path) -> u64 {
 mod tests {
     use super::*;
     use crate::utils::is_text_file;
-    use chrono::{TimeZone, Utc};
+    use jiff::Timestamp;
     use std::collections::HashSet;
     use std::fs;
     use tempfile::tempdir;
@@ -119,7 +119,7 @@ mod tests {
             .and_then(|name| name.to_str())
             .unwrap_or("unknown")
             .to_string();
-        let created_at = Utc.with_ymd_and_hms(2025, 1, 1, 12, 0, 0).unwrap();
+        let created_at = "2025-01-01T12:00:00Z".parse::<Timestamp>().unwrap();
         DataRecord {
             id,
             source: "file_stream_test".to_string(),
@@ -243,7 +243,7 @@ mod tests {
         assert_eq!(first.records.len(), 2);
 
         let out_of_range_cursor = SourceCursor {
-            last_seen: Utc::now(),
+            last_seen: Timestamp::now(),
             revision: 999,
         };
         let reset = FileStream::new(root)
